@@ -5,6 +5,9 @@ version = 3
 [[package]]
 name = "nomt"
 version = "0.1.0"
+dependencies = [
+ "nomt-core",
+]
 
 [[package]]
 name = "nomt-backend-rocksdb"
