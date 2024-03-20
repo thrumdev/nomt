@@ -1,1 +1,15 @@
 [workspace]
+resolver = "2"
+members = [
+    "core",
+    "backend/ssd-map",
+    "backend/rocksdb",
+    "nomt",
+]
+
+[workspace.package]
+authors = ["thrum"]
+homepage = "https://thrum.dev"
+repository = "https://github.com/thrumdev/nomt"
+edition = "2021"
+license = "MIT/Apache-2.0"
