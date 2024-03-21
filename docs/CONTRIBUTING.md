@@ -6,7 +6,7 @@ We license all code under MIT / Apache2.0 licenses. The maintainers reserve the 
 
 We use spaces for indentation and adhere to the vanilla `rustfmt` style.
 
-Format your code using `rustfmt`: 
+Format your code using `rustfmt`:
   1. `cargo install cargo-fmt`
   2. `cargo fmt --all`
 
