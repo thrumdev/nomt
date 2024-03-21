@@ -3,7 +3,8 @@
 //! This crate defines the schema and basic operations over the merkle trie in a backend-agnostic
 //! manner.
 //!
-//! Nothing within this crate relies on the standard library.
+//! The core types and proof verification routines of this crate do not require the
+//! standard library. Generating proofs does require the standard library.
 //!
 //! ## Schema
 //!
@@ -22,7 +23,7 @@
 //!
 //! All node preimages are 512 bits.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 /// A node in the binary trie. In this schema, it is always 256 bits and is the hash of an
 /// underlying structure, represented as [`NodePreimage`].
