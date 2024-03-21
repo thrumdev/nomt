@@ -1,7 +1,7 @@
 //! Core operations and types within the Nearly Optimal Merkle Trie.
 //!
 //! This crate defines the schema and basic operations over the merkle trie in a backend-agnostic manner.
-//! 
+//!
 //! Nothing within this crate relies on the standard library.
 //!
 //! ## Schema
