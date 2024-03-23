@@ -25,12 +25,11 @@ pub trait Cursor {
 }
 
 /// Sibling nodes recorded while looking up some path, in ascending order by depth.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Siblings(pub Vec<Node>);
 
 /// A proof of some particular path through the trie.
-#[derive(Clone)]
-#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Debug, Clone)]
 pub struct PathProof {
     /// The terminal node encountered when looking up a key. This is always either a terminator or
     /// leaf.
@@ -54,6 +53,10 @@ impl PathProof {
             None => TERMINATOR,
             Some(leaf_data) => H::hash_leaf(&leaf_data),
         };
+
+        if self.siblings.0.len() > 256 {
+            return Err(());
+        }
 
         let relevant_path = &key_path.view_bits::<Msb0>()[..self.siblings.0.len()];
         for (bit, &sibling) in relevant_path.iter().by_vals().rev().zip(&self.siblings.0) {
