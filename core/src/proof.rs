@@ -85,6 +85,10 @@ impl PathProof {
     }
 }
 
+/// An error type indicating that a key is out of scope of a path proof.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyOutOfScope;
+
 /// A verified path through the trie.
 ///
 /// Each verified path can be used to check up to two kinds of statements:
@@ -101,6 +105,53 @@ pub struct VerifiedPathProof {
     key_path: KeyPath,
     depth: u8,
     terminal: Option<LeafData>,
+}
+
+impl VerifiedPathProof {
+    /// Get the terminal node. `None` signifies that this path concludes with a [`TERMINATOR`].
+    pub fn terminal(&self) -> Option<&LeafData> {
+        self.terminal.as_ref()
+    }
+
+    /// Get the proven path.
+    pub fn path(&self) -> &BitSlice<u8, Msb0> {
+        &self.key_path.view_bits()[..self.depth as usize]
+    }
+
+    /// Check whether this path resolves to the given leaf.
+    ///
+    /// A return value of `Ok(true)` confirms that the key indeed has this value in the trie.
+    /// `Ok(false)` confirms that this key has a different value.
+    ///
+    /// Fails if the key is out of the scope of this path.
+    pub fn confirm_value(&self, expected_leaf: &LeafData) -> Result<bool, KeyOutOfScope> {
+        self.in_scope(&expected_leaf.key_path)
+            .map(|_| self.terminal() == Some(expected_leaf))
+    }
+
+    /// Check whether this proves that a key has no value in the trie.
+    ///
+    /// A return value of `Ok(true)` confirms that the key indeed has no value in the trie.
+    /// A return value of `Ok(false)` means that the key definitely exists within the trie.
+    ///
+    /// Fails if the key is out of the scope of this path.
+    pub fn confirm_nonexistence(&self, key_path: &KeyPath) -> Result<bool, KeyOutOfScope> {
+        self.in_scope(key_path).map(|_| {
+            self.terminal()
+                .as_ref()
+                .map_or(true, |d| &d.key_path != key_path)
+        })
+    }
+
+    fn in_scope(&self, key_path: &KeyPath) -> Result<(), KeyOutOfScope> {
+        let this_path = self.path();
+        let other_path = &key_path.view_bits::<Msb0>()[..self.depth as usize];
+        if this_path == other_path {
+            Ok(())
+        } else {
+            Err(KeyOutOfScope)
+        }
+    }
 }
 
 /// Record a query path through the trie. This does no sanity-checking of the underlying
