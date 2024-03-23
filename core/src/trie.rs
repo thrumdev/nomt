@@ -54,7 +54,7 @@ pub fn is_terminator(hash: &Node) -> bool {
 }
 
 /// The data of an internal (branch) node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalData {
     /// The hash of the left child of this node.
     pub left: Node,
@@ -73,7 +73,7 @@ impl InternalData {
 }
 
 /// The data of a leaf node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeafData {
     /// The total path to this value within the trie.
     ///
