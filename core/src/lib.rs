@@ -4,8 +4,11 @@
 //! manner.
 //!
 //! The core types and proof verification routines of this crate do not require the
-//! standard library. Generating proofs does require the standard library.
+//! standard library, but do require Rust's alloc crate.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+extern crate alloc;
+
+pub mod proof;
 pub mod trie;
