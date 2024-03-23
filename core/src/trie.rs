@@ -54,6 +54,8 @@ pub fn is_terminator(hash: &Node) -> bool {
 }
 
 /// The data of an internal (branch) node.
+#[derive(Clone)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct InternalData {
     /// The hash of the left child of this node.
     pub left: Node,
@@ -72,6 +74,8 @@ impl InternalData {
 }
 
 /// The data of a leaf node.
+#[derive(Clone)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct LeafData {
     /// The total path to this value within the trie.
     ///
@@ -90,14 +94,6 @@ impl LeafData {
         node[32..64].copy_from_slice(&self.value_hash[..]);
         node
     }
-}
-
-/// Either kind of node.
-pub enum NodeData {
-    /// An internal node.
-    Internal(InternalData),
-    /// A leaf node.
-    Leaf(LeafData),
 }
 
 /// A trie node hash function specialized for 64 bytes of data.
@@ -128,3 +124,5 @@ pub trait NodeHasherExt: NodeHasher {
         hash
     }
 }
+
+impl<T: NodeHasher> NodeHasherExt for T {}
