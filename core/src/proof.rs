@@ -47,16 +47,15 @@ impl PathProof {
         &self,
         key_path: &KeyPath,
         root: Node,
-    ) -> Result<VerifiedPathProof, ()> {
-        // TODO, proper error
+    ) -> Result<VerifiedPathProof, PathProofVerificationError> {
+        if self.siblings.0.len() > 256 {
+            return Err(PathProofVerificationError::TooManySiblings)
+        }
+
         let mut cur_node = match &self.terminal {
             None => TERMINATOR,
             Some(leaf_data) => H::hash_leaf(&leaf_data),
         };
-
-        if self.siblings.0.len() > 256 {
-            return Err(());
-        }
 
         let relevant_path = &key_path.view_bits::<Msb0>()[..self.siblings.0.len()];
         for (bit, &sibling) in relevant_path.iter().by_vals().rev().zip(&self.siblings.0) {
@@ -80,7 +79,7 @@ impl PathProof {
                 terminal: self.terminal.clone(),
             })
         } else {
-            Err(())
+            Err(PathProofVerificationError::RootMismatch)
         }
     }
 }
@@ -88,6 +87,15 @@ impl PathProof {
 /// An error type indicating that a key is out of scope of a path proof.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyOutOfScope;
+
+
+/// Errors in path proof verification.
+pub enum PathProofVerificationError {
+    /// Amount of provided siblings is impossible for the expected trie depth.
+    TooManySiblings,
+    /// Root hash mismatched at the end of the verification.
+    RootMismatch,
+}
 
 /// A verified path through the trie.
 ///
