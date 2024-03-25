@@ -49,7 +49,7 @@ impl PathProof {
         root: Node,
     ) -> Result<VerifiedPathProof, PathProofVerificationError> {
         if self.siblings.0.len() > 256 {
-            return Err(PathProofVerificationError::TooManySiblings)
+            return Err(PathProofVerificationError::TooManySiblings);
         }
 
         let mut cur_node = match &self.terminal {
@@ -87,7 +87,6 @@ impl PathProof {
 /// An error type indicating that a key is out of scope of a path proof.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyOutOfScope;
-
 
 /// Errors in path proof verification.
 pub enum PathProofVerificationError {
