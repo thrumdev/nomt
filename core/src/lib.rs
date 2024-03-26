@@ -6,9 +6,11 @@
 //! The core types and proof verification routines of this crate do not require the
 //! standard library, but do require Rust's alloc crate.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 
 extern crate alloc;
 
+pub mod page;
+pub mod page_id;
 pub mod proof;
 pub mod trie;
