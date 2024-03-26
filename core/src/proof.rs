@@ -1,5 +1,6 @@
 //! Proving and verifying inclusion, non-inclusion, and updates to the trie.
 
+use crate::page::{MissingPage, PageSet, PageSetCursor};
 use crate::trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, TERMINATOR};
 
 use alloc::vec::Vec;
@@ -164,33 +165,31 @@ impl VerifiedPathProof {
 /// Record a query path through the trie. This does no sanity-checking of the underlying
 /// cursor's results, so a faulty cursor will lead to a faulty path.
 ///
-/// This returns the sibling nodes and the terminal node terminal node encountered when looking up
+/// This returns the sibling nodes and the terminal node encountered when looking up
 /// a key. This is always either a terminator or leaf.
-pub fn record_path(cursor: &mut impl Cursor, key: &KeyPath) -> (Node, Siblings) {
-    // reset to root
-    let (_, d) = cursor.position();
-    if d != 0 {
-        cursor.traverse_parents(d);
-    }
+pub fn record_path(
+    root: Node,
+    pages: &PageSet,
+    key: &KeyPath,
+) -> Result<(Node, Siblings), MissingPage> {
+    let mut cursor = PageSetCursor::new(root, pages);
 
     let mut siblings = Vec::new();
     let mut terminal = TERMINATOR;
 
     for bit in key.view_bits::<Msb0>().iter().by_vals() {
-        if let Some((left, right)) = cursor.peek_children() {
-            if !bit {
-                siblings.push(right.clone());
-                cursor.traverse_left_child();
-            } else {
-                siblings.push(left.clone());
-                cursor.traverse_right_child();
-            }
+        if crate::trie::is_internal(cursor.node()) {
+            let inspector = |left: &Node, right: &Node| {
+                siblings.push(if !bit { right.clone() } else { left.clone() });
+                bit
+            };
+            cursor.traverse_children(inspector)?;
         } else {
-            terminal = cursor.node();
+            terminal = *cursor.node();
             break;
         }
     }
 
     let siblings: Vec<_> = siblings.into_iter().rev().collect();
-    (terminal, Siblings(siblings))
+    Ok((terminal, Siblings(siblings)))
 }
