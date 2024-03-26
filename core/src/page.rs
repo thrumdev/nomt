@@ -144,12 +144,12 @@ impl<'a> PageSetCursor<'a> {
     }
 
     /// The current node.
-    pub fn node(&self) -> Node {
+    pub fn node(&self) -> &Node {
         match self.location {
-            CursorLocation::Root => self.root,
+            CursorLocation::Root => &self.root,
             CursorLocation::Page(p) => {
                 let path = last_page_path(&self.path, self.depth);
-                p.nodes()[node_index(path)]
+                &p.nodes()[node_index(path)]
             }
         }
     }
