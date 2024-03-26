@@ -3,8 +3,12 @@
 use crate::{page::DEPTH, trie::KeyPath};
 use bitvec::{prelude::*, slice::ChunksExact};
 
+/// A unique ID for a page.
 pub type PageId = [u8; 32];
 
+/// The root page is the one containing the sub-trie directly descending from the root node.
+///
+/// It has an ID consisting of all zeros.
 pub const ROOT_PAGE_ID: [u8; 32] = [0; 32];
 
 const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
