@@ -26,6 +26,7 @@ use crate::trie::{KeyPath, Node};
 
 use alloc::collections::BTreeMap;
 use bitvec::prelude::*;
+use core::borrow::Borrow;
 
 /// Depth of the rootless sub-binary tree stored in a page
 pub const DEPTH: usize = 6;
@@ -35,24 +36,27 @@ pub const DEPTH: usize = 6;
 // (2^DEPTH) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
-/// A read-only, borrowed page.
+/// A raw, unsized page data slice.
+pub type RawPage = [[u8; 32]];
+
+/// A read-only view over borrowed page data.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Page<'a> {
+pub struct PageView<'a> {
     /// The underlying slice of nodes in memory.
     /// This is expected to have a length equal to a power of two.
     ///
     /// The first `len - 2` slots are reserved for nodes. The last slot is the page ID.
     /// The second-to-last slot data does not matter.
-    data: &'a [[u8; 32]],
+    data: &'a RawPage,
 }
 
-impl<'a> Page<'a> {
+impl<'a> PageView<'a> {
     /// Create a new view over a page.
-    pub fn new(data: &'a [[u8; 32]]) -> Result<Self, InvalidPageLength> {
+    pub fn new(data: &'a RawPage) -> Result<Self, InvalidPageLength> {
         if data.len() != NODES_PER_PAGE + 2 {
             Err(InvalidPageLength)
         } else {
-            Ok(Page { data })
+            Ok(PageView { data })
         }
     }
 
@@ -71,29 +75,33 @@ impl<'a> Page<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InvalidPageLength;
 
-/// A read-only set of borrowed pages.
+/// A set of pages.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PageSet<'a> {
-    page_map: BTreeMap<PageId, Page<'a>>,
+pub struct PageSet<Page> {
+    page_map: BTreeMap<PageId, Page>,
 }
 
-impl<'a> PageSet<'a> {
+impl<Page> PageSet<Page> {
     /// Create a new page set.
     pub fn new() -> Self {
         PageSet {
             page_map: BTreeMap::new(),
         }
     }
+}
 
+impl<Page: Borrow<RawPage>> PageSet<Page> {
     /// Insert a page. Returns the previous page stored under that ID.
-    pub fn insert(&mut self, page: Page<'a>) -> Option<Page<'a>> {
-        let id = page.id().clone();
-        self.page_map.insert(id, page)
+    pub fn insert(&mut self, page: Page) -> Result<Option<Page>, InvalidPageLength> {
+        let id = PageView::new(page.borrow())?.id().clone();
+        Ok(self.page_map.insert(id, page))
     }
 
     /// Get a page by ID.
-    pub fn get(&self, id: &PageId) -> Option<Page<'a>> {
-        self.page_map.get(id).map(|p| *p)
+    pub fn get(&self, id: &PageId) -> Option<PageView> {
+        self.page_map
+            .get(id)
+            .map(|p| PageView::new(p.borrow()).expect("checked on insertion"))
     }
 }
 
@@ -104,7 +112,7 @@ pub struct MissingPage;
 #[derive(Debug, Clone, PartialEq)]
 enum CursorLocation<'a> {
     Root,
-    Page(Page<'a>),
+    Page(PageView<'a>),
 }
 
 /// A cursor used to inspect the binary trie nodes expected to be stored within pages while
@@ -116,18 +124,18 @@ enum CursorLocation<'a> {
 /// a valid binary trie. It also does not prevent the user from traversing beyond the end of the
 /// trie. It provides enough information for higher level logic to avoid those mistakes.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PageSetCursor<'a> {
+pub struct PageSetCursor<'a, Page: 'a> {
     root: Node,
     path: KeyPath,
     depth: u8,
-    pages: &'a PageSet<'a>,
+    pages: &'a PageSet<Page>,
     location: CursorLocation<'a>,
 }
 
-impl<'a> PageSetCursor<'a> {
+impl<'a, Page: 'a + Borrow<RawPage>> PageSetCursor<'a, Page> {
     /// Create a new cursor at the given trie root, reading out of the
     /// provided pages.
-    pub fn new(root: Node, pages: &'a PageSet<'a>) -> Self {
+    pub fn new(root: Node, pages: &'a PageSet<Page>) -> Self {
         PageSetCursor {
             root,
             path: [0u8; 32],
@@ -355,6 +363,4 @@ mod tests {
             expected.push(i % 2 == 1);
         }
     }
-
-    // TODO: after path id functions, test cursor
 }
