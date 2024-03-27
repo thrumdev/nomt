@@ -1,9 +1,9 @@
 
 # Nearly Optimal Merkle Trie - Specification
 
-## Tree Structure 
+## Tree Structure
 
-NOMT is a Binary Merkle Patricia Trie implementing a key-value mapping from 32 byte keys to 
+NOMT is a Binary Merkle Patricia Trie implementing a key-value mapping from 32 byte keys to
 arbitrarily-sized values.
 
 All values within the trie can be committed to with a single small unique identifier.
@@ -12,41 +12,41 @@ NOMT is a kind of **Merkle Tree**, where each node's value is computed based on 
 nodes and values beneath it. This means that the root node accumulates all the information
 contained within the tree and serves as a cryptographic commitment to that information.
 
-NOMT is an **Addressable Merkle Trie**, where the path from the root node to the location where a 
-key's value is stored is based solely upon the key. The trie has 256 levels, each corresponding to 
+NOMT is an **Addressable Merkle Trie**, where the path from the root node to the location where a
+key's value is stored is based solely upon the key. The trie has 256 levels, each corresponding to
 one of the 256 bits of key material, and 2^256 possible nodes at the lowest level.
 At the i'th level, whether the value is on the left or right branch is determined by the i'th bit
 of the key.
 
-NOMT gives **efficient proofs of inclusion and non-inclusion** and has a schema that is 
+NOMT gives **efficient proofs of inclusion and non-inclusion** and has a schema that is
 **optimized for SSDs**.
 
 ### Nodes
- 
+
 Each node is exactly 256 bits long. NOMT is general over hash function, and can be used with any
 hash function that produces 256 bit hashes.
 
 The Most-Significant Bit (MSB) of each node is used to differentiate the type of node.
 
 There are 3 kinds of nodes.
-  1. Internal Nodes. An internal node has 2 child nodes. Its value is given by `hash(left ++ right)` 
+  1. Internal Nodes. An internal node has 2 child nodes. Its value is given by `hash(left ++ right)`
      with the MSB set to 1. An internal node must either have two leaves as children or at least one
      internal node.
   2. Leaf Nodes. A leaf node encodes a value. Its value is given by `hash(key ++ hash(value))` with
      the MSB set to 0. A leaf node is a stand-in for a sub-trie with a single value.
   3. Terminator Node. A terminator node has the value `0x00....00` and can appear at any level of
-     the trie. Terminator nodes are used to stand-in for empty sub-tries: no key whose lookup path 
+     the trie. Terminator nodes are used to stand-in for empty sub-tries: no key whose lookup path
      would reach a terminator has a value within the trie.
 
 Leaf and terminator nodes can be referred to as Terminal nodes, because encountering them terminates
 a path lookup.
 
-To avoid ambiguity in representation, sub-tries which have no values or which have a single value 
+To avoid ambiguity in representation, sub-tries which have no values or which have a single value
 must be represented by a leaf or terminator as close to the root as possible. This rule ensures that
 there is only a single valid representation for any key-value set. It also ensures that the trie
 is maximally compressed.
 
-#### Basic Operations 
+#### Basic Operations
 
 Given keys of length 5 bits and 4 key-value pairs with keys as follows:
 
@@ -65,7 +65,7 @@ The structure of the tree will be:
 
 ###### Observations
 
-- Bits that are shared between pairs are represented as internal nodes. If there is nothing shared, the node becomes a leaf. 
+- Bits that are shared between pairs are represented as internal nodes. If there is nothing shared, the node becomes a leaf.
 - There are no valid nodes under a leaf (it will be explained later why this is so important).
 - There can't be internal nodes with one child as a leaf and one termianl. The only two valid possibilities are two leaf children or one internal node and one terminal.
 - Terminal nodes can only appear when the sibling is an internal node that has greater than one Leaf below it
@@ -78,14 +78,14 @@ When we want to retrieve a value given a key, what needs to be done is the follo
     key_pos = 0 // the key path starts from the lsb in the key
     current_node = root
     loop {
-       if current_node.is_leaf() 
-           return current_node.value 
-       else if current_node.is_terminator() 
+       if current_node.is_leaf()
+           return current_node.value
+       else if current_node.is_terminator()
            return current_node // The terminator node is returned to simplify the put method
-       else 
-           if key.at(key_pos) == 0 
+       else
+           if key.at(key_pos) == 0
                current_node = current_node.left
-           else 
+           else
                current_node = current_node.right
            key_pos += 1;
     }
@@ -106,13 +106,13 @@ No need to check if the node returned by 'get' is internal since 'get' either re
 
 When a leaf is found, two possibilities arise based on the shared bits between the extracted key (let's call it 'key1') and the key we want to insert (let's call it 'key2') from the stopped key_pos during traversal. If 'get' method returns a leaf for 'key1' and 'key2', there is a shared prefix. 'Key1' is already in the tree, so a section of the shared prefix with 'key2' is also in the tree (internal nodes representing a portion of that prefix).
 
-For example, with keys of 10 bits: 
+For example, with keys of 10 bits:
 
 |      | x      | n  | l  |
 |:-----|:-------|:---|:---|
 | key1 | 001011 | 11 | 01 |
 | key2 | 001011 | 11 | 11 |
-    
+
 The keys are divided into three sections - 'x' represents bits already in the tree as internal nodes, 'n' are shared bits that are not in tree, and 'l' are all the bits after a single bit difference.
 
 This division is necessary as, for each 'n' bits, an internal node with an terminator child must be created, and one internal node with two leaves for all `l` bits, implicitly showing the difference in 'l' bits.
@@ -121,7 +121,7 @@ A special scenario occurs when there are no 'n' bits, and only one new internal 
 
 ![nomt put](./images/nomt_put.png)
 
-#### Remove 
+#### Remove
 
 To start the removal process, we first use a `get` method. If the retrieved node is a terminator, no action is required. If the node is a leaf, there are two scenarios:
 
@@ -131,7 +131,7 @@ To start the removal process, we first use a `get` method. If the retrieved node
    - Invalidate the leaf (which contains the value to be removed) and `sib_leaf` making them terminator nodes.
    - Traverse all ancestors, invalidating them if their sibling is a terminator node.
    - Once an ancestor with a valid sibling is found, replace it with `sib_leaf`.
-   
+
 ##  How is this stored on disk?
 
 ### Pages
@@ -161,13 +161,13 @@ Given a Node Key, we can treat it as an array of bits and split it into `256/d` 
 Let's call `dtets` the array containing all d\_tets and `page_ids` the array of all needed page_ids we want to fill. All PageId will be constructed like this:
 
 ```pseudo
-    for i in dtets.len() 
+    for i in dtets.len()
 
-        if i > 0 
+        if i > 0
              prev_page_id = page_ids[i - 1]
-         else 
+         else
             prev_page_id = 0
-            
+
         page_ids[i] = (prev_page_id << d) + int(dtets[i]) + 1
 ```
 
@@ -176,10 +176,10 @@ where `int(dtets[i])` just mean to treat as an integer the sequence of `d` bits 
 And here's how we can deterministically get the value and all the parent nodes in Merkle from the pages identified by the PageIds extracted from the KeyPath.
 
 ### Rootless sub-binary tree in Page
- 
+
 A Page is just an array of bytes that will contain a rootless sub-binary tree, thus an array of Nodes.
 
-#### Node Layout Within Pages 
+#### Node Layout Within Pages
 
 Each node in the rootless sub-binary tree is assigned a position. The root is assigned position 1, and at each subsequent level, the identifiers increase from left to right. For example:
 
