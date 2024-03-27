@@ -75,25 +75,32 @@ impl<'a> PageView<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InvalidPageLength;
 
-/// A set of pages.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PageSet<Page> {
-    page_map: BTreeMap<PageId, Page>,
+/// Any in-memory page-set where pages can be queried by their ID.
+pub trait PageSet {
+    /// Query a page by its ID. Fail if the requested page is not in memory.
+    fn get(&self, id: &PageId) -> Option<PageView>;
 }
 
-impl<Page> PageSet<Page> {
+/// A simple and inefficient [`PageSet`] implementation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimplePageSet {
+    page_map: BTreeMap<PageId, Vec<[u8; 32]>>,
+}
+
+impl SimplePageSet {
     /// Create a new page set.
     pub fn new() -> Self {
-        PageSet {
+        SimplePageSet {
             page_map: BTreeMap::new(),
         }
     }
-}
 
-impl<Page: Borrow<RawPage>> PageSet<Page> {
     /// Insert a page. Returns the previous page stored under that ID.
-    pub fn insert(&mut self, page: Page) -> Result<Option<Page>, InvalidPageLength> {
-        let id = PageView::new(page.borrow())?.id().clone();
+    pub fn insert(
+        &mut self,
+        page: Vec<[u8; 32]>,
+    ) -> Result<Option<Vec<[u8; 32]>>, InvalidPageLength> {
+        let id = PageView::new(&page[..])?.id().clone();
         Ok(self.page_map.insert(id, page))
     }
 
@@ -102,6 +109,12 @@ impl<Page: Borrow<RawPage>> PageSet<Page> {
         self.page_map
             .get(id)
             .map(|p| PageView::new(p.borrow()).expect("checked on insertion"))
+    }
+}
+
+impl PageSet for SimplePageSet {
+    fn get(&self, id: &PageId) -> Option<PageView> {
+        SimplePageSet::get(self, id)
     }
 }
 
@@ -124,18 +137,18 @@ enum CursorLocation<'a> {
 /// a valid binary trie. It also does not prevent the user from traversing beyond the end of the
 /// trie. It provides enough information for higher level logic to avoid those mistakes.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PageSetCursor<'a, Page: 'a> {
+pub struct PageSetCursor<'a, P> {
     root: Node,
     path: KeyPath,
     depth: u8,
-    pages: &'a PageSet<Page>,
+    pages: &'a P,
     location: CursorLocation<'a>,
 }
 
-impl<'a, Page: 'a + Borrow<RawPage>> PageSetCursor<'a, Page> {
+impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
     /// Create a new cursor at the given trie root, reading out of the
     /// provided pages.
-    pub fn new(root: Node, pages: &'a PageSet<Page>) -> Self {
+    pub fn new(root: Node, pages: &'a P) -> Self {
         PageSetCursor {
             root,
             path: [0u8; 32],
