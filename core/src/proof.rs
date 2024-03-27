@@ -1,6 +1,6 @@
 //! Proving and verifying inclusion, non-inclusion, and updates to the trie.
 
-use crate::page::{MissingPage, PageSet, PageSetCursor, RawPage};
+use crate::page::{MissingPage, PageSet, PageSetCursor};
 use crate::trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, TERMINATOR};
 
 use alloc::vec::Vec;
@@ -167,9 +167,9 @@ impl VerifiedPathProof {
 ///
 /// This returns the sibling nodes and the terminal node encountered when looking up
 /// a key. This is always either a terminator or leaf.
-pub fn record_path<P: core::borrow::Borrow<RawPage>>(
+pub fn record_path(
     root: Node,
-    pages: &PageSet<P>,
+    pages: &impl PageSet,
     key: &KeyPath,
 ) -> Result<(Node, Siblings), MissingPage> {
     let mut cursor = PageSetCursor::new(root, pages);
