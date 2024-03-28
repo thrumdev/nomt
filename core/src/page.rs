@@ -223,7 +223,9 @@ impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
                 CursorLocation::Root => ROOT_PAGE_ID,
                 CursorLocation::Page(p) => {
                     let child_page_idx = last_page_path(&self.path, self.depth).load_be::<u8>();
-                    child_page_id(*p.id(), child_page_idx)
+                    child_page_id(*p.id(), child_page_idx).expect(
+                        "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
+                    )
                 }
             };
 
