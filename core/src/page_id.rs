@@ -1,4 +1,21 @@
-//! TODO: add docs
+//! This module contains all the relevant methods to work with PageIds.
+//!
+//! A PageId is an unique identifier for a Page,
+//! Root Page has id 0, its leftmost child 1 and so on.
+//!
+//! There are 2^250 possible pages, so 250 bits are needed to represent all of them.
+//!
+//! An array of bytes will be used as a container for the PageId,
+//! bytes will be treated as a 256-bit big-endian integer.
+//!
+//! Given a KeyPath, it will be divided into chunks of 6 bits (sextet), forming
+//! an array of sextets. Each sextet will act as a child_index for the next page.
+//! Each PageId will be constructed in the following manner:
+//!
+//! page_id[i] = prev_page_id * 2^6 + sextet[i] + 1
+//!
+//! Only the first 42 sextets represent valid child indexes in a KeyPath,
+//! and the last four bits are discarded.
 
 use crate::{page::DEPTH, trie::KeyPath};
 use bitvec::{prelude::*, slice::ChunksExact};
@@ -13,13 +30,16 @@ pub const ROOT_PAGE_ID: [u8; 32] = [0; 32];
 
 const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
 
+/// Construct the Child PageId given the previous PageId and the child index.
+///
+/// Child index must be a 6 bit integer, two most significant bits must be zero.
 pub fn child_page_id(mut page_id: PageId, child_index: u8) -> PageId {
     // TODO: proper error handling
-    assert!(child_index & 0b11000000 == 0);
+    assert!(child_index <= MAX_CHILD_INDEX);
 
     let page_id_bits = page_id.view_bits_mut::<Msb0>();
 
-    if child_index ^ MAX_CHILD_INDEX == 0 {
+    if child_index == MAX_CHILD_INDEX {
         // if the child_index is the maximum then adding one would overlow
         // becoming 2^6
         //
@@ -46,7 +66,15 @@ pub fn child_page_id(mut page_id: PageId, child_index: u8) -> PageId {
     page_id
 }
 
+/// Extract the Parent PageId given a PageId.
+///
+/// If the provided PageId is the one pointing to the root,
+/// then itself is returned.
 pub fn parent_page_id(mut page_id: PageId) -> PageId {
+    if page_id == ROOT_PAGE_ID {
+        return ROOT_PAGE_ID;
+    }
+
     let page_id_bits = page_id.view_bits_mut::<Msb0>();
 
     // sub 1
@@ -58,28 +86,16 @@ pub fn parent_page_id(mut page_id: PageId) -> PageId {
     page_id
 }
 
-/// Each Page is identified by a unique PageId,
-/// Root Page has id 0, its leftmost child 1 and so on.
-///
-/// There are 2^250 possible pages, so 250 bits are needed to represent all of them.
-///
-/// An array of bytes will be used as a container for the PageId,
-/// bytes will be treated as a 256-bit big-endian integer.
-///
-/// Given a KeyPath, it will be divided into chunks of 6 bits (sextet), forming
-/// an array of sextets. Each PageId will be constructed in the following manner:
-///
-/// page_ids[i] = (prev_page_id << d) + int(sextets[i]) + 1
-///
-/// The following struct implements an Iterator of PageIds over a KeyPath
-/// to lazily construct them as needed
-struct PageIdsIterator<'a> {
+/// Iterator of PageIds over a KeyPath,
+/// PageIds will be lazily constructed as needed
+pub struct PageIdsIterator<'a> {
     sextets: ChunksExact<'a, u8, Msb0>,
     page_id: Option<PageId>,
 }
 
 impl<'a> PageIdsIterator<'a> {
-    fn new(key_path: &'a KeyPath) -> Self {
+    /// Create a PageIds Iterator over a KeyPath
+    pub fn new(key_path: &'a KeyPath) -> Self {
         Self {
             // Last bits will not be used as a sextet to identify a page
             sextets: key_path.view_bits::<Msb0>().chunks_exact(DEPTH),
@@ -97,8 +113,6 @@ impl<'a> Iterator for PageIdsIterator<'a> {
             Some(prev_page_id) => {
                 // If sextets are finished, then there are no more pages to load
                 let child_index = self.sextets.next()?.load_be::<u8>();
-                // TODO: could be nice to modify prev_page_id in place
-                // to avoid cloning twice
                 Some(child_page_id(prev_page_id, child_index))
             }
         };
