@@ -2,8 +2,6 @@
 resolver = "2"
 members = [
     "core",
-    "backend/ssd-map",
-    "backend/rocksdb",
     "nomt",
 ]
 
