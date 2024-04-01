@@ -28,14 +28,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nomt-backend-rocksdb"
-version = "0.1.0"
-
-[[package]]
-name = "nomt-backend-ssd-map"
-version = "0.1.0"
-
-[[package]]
 name = "nomt-core"
 version = "0.1.0"
 dependencies = [
