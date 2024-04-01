@@ -46,15 +46,22 @@ pub struct Witness {
 /// session. The write set is necessary to update the key-value store and to provide the witness
 /// with the data necessary to update the trie.
 pub struct CommitSpec {
+    /// All keys read during any non-discarded execution paths, along with their value. A single
+    /// key may appear only once.
     pub read_set: Vec<(KeyPath, Option<Value>)>,
+    /// All values written during any non-discarded execution paths. A single key may appear
+    /// only once - even if a key has intermediate values during execution, only the final change
+    /// should be submitted.
     pub write_set: Vec<(KeyPath, Option<Value>)>,
 }
 
+/// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt {
     shared: Arc<Shared>,
 }
 
 impl Nomt {
+    /// Open the database with the given options.
     pub fn open(o: Options) -> anyhow::Result<Self> {
         let store = Store::open(&o)?;
         let page_cache = PageCache::new(store.clone(), &o);
@@ -79,6 +86,7 @@ impl Nomt {
         self.shared.root == TERMINATOR
     }
 
+    /// Synchronously read the value stored at the given key. Fails only if I/O fails.
     pub fn read_slot(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         self.warmup(path);
         self.shared.store.load_value(path)
@@ -86,7 +94,7 @@ impl Nomt {
 
     /// Signals to the backend that the given slot is going to be written to.
     ///
-    /// It's not obligatory to call this function, but it is essential to do call this function as
+    /// It's not obligatory to call this function, but it is essential to call this function as
     /// early as possible to achieve the best performance.
     pub fn hint_write_slot(&self, path: KeyPath) {
         self.warmup(path);

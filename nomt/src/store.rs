@@ -26,6 +26,7 @@ struct Shared {
 }
 
 impl Store {
+    /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options) -> anyhow::Result<Self> {
         let mut open_opts = rocksdb::Options::default();
         open_opts.set_error_if_exists(false);
@@ -47,6 +48,8 @@ impl Store {
         })
     }
 
+    /// Load the root node from the database. Fails only on I/O.
+    /// Returns [`nomt_core::trie::TERMINATOR`] on an empty trie.
     pub fn load_root(&self) -> anyhow::Result<Node> {
         let cf = self.shared.db.cf_handle(METADATA_CF).unwrap();
         let value = self.shared.db.get_cf(&cf, b"root")?;
@@ -75,6 +78,7 @@ impl Store {
         Ok(value.unwrap())
     }
 
+    /// Create a new transaction to be applied against this database.
     pub fn new_tx(&self) -> Transaction {
         Transaction {
             shared: self.shared.clone(),
@@ -92,12 +96,15 @@ impl Store {
     }
 }
 
+/// An atomic transaction to be applied against th estore with [`Store::commit`].
 pub struct Transaction {
     shared: Arc<Shared>,
     batch: WriteBatch,
 }
 
 impl Transaction {
+    /// Write a value to flat storage as part of the atomic batch.
+    /// Any previous value is overwritten. `None` means delete.
     pub fn write_value(&mut self, path: KeyPath, value: Option<Vec<u8>>) {
         let cf = self.shared.db.cf_handle(FLAT_KV_CF).unwrap();
         match value {
@@ -106,6 +113,8 @@ impl Transaction {
         }
     }
 
+    /// Write a page to flat storage as part of the atomic batch.
+    /// Any previous page is overwritten. This does not sanity check page-length.
     pub fn write_page<V: AsRef<[u8]>>(&mut self, page_id: PageId, value: Option<V>) {
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
         match value {
