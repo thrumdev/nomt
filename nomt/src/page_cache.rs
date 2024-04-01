@@ -95,6 +95,8 @@ impl InflightFetch {
     }
 }
 
+/// The page-cache provides an in-memory layer between the user and the underlying DB.
+/// It stores full pages and can be shared between threads.
 #[derive(Clone)]
 pub struct PageCache {
     shared: Arc<Mutex<Shared>>,
@@ -110,7 +112,7 @@ struct Shared {
     ///
     /// This cache must be always coherent with the underlying store. That implies that the updates
     /// performed to the store must be reflected in the cache.
-    prestine: HashMap<PageId, Page>,
+    pristine: HashMap<PageId, Page>,
     /// The pages that were modified, but not yet committed.
     dirty: HashMap<PageId, Page>,
     /// Pages that are currently being fetched from the store.
@@ -118,9 +120,10 @@ struct Shared {
 }
 
 impl PageCache {
+    /// Create a new `PageCache` atop the provided [`Store`].
     pub fn new(store: Store, o: &Options) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
-            prestine: HashMap::new(),
+            pristine: HashMap::new(),
             dirty: HashMap::new(),
             inflight: HashMap::new(),
         }));
@@ -140,11 +143,11 @@ impl PageCache {
         let mut shared = self.shared.lock().unwrap();
 
         // We first check in the dirty pages, since that's where we would find the most recent
-        // version of the page. If the page is not present there, we check in the prestine cache.
+        // version of the page. If the page is not present there, we check in the pristine cache.
         if let Some(page) = shared.dirty.get(&page_id) {
             return PagePromise::Now(page.clone());
         }
-        if let Some(page) = shared.prestine.get(&page_id) {
+        if let Some(page) = shared.pristine.get(&page_id) {
             return PagePromise::Now(page.clone());
         }
         // In case none of those are present, we check if there is an inflight fetch for the page.
@@ -167,7 +170,7 @@ impl PageCache {
                 // Unwrap: the operation was inserted above. It is scheduled for execution only
                 // once. It may removed only in the line below. Therefore, `None` is impossible.
                 let inflight = shared.inflight.remove(&page_id).unwrap();
-                shared.prestine.insert(page_id, entry.clone());
+                shared.pristine.insert(page_id, entry.clone());
                 inflight.complete_and_notify(entry);
                 drop(shared);
             }
@@ -182,7 +185,7 @@ impl PageCache {
     pub fn commit(&self, tx: &mut Transaction) {
         let mut shared = self.shared.lock().unwrap();
         for (page_id, page) in mem::take(&mut shared.dirty) {
-            shared.prestine.insert(page_id, page.clone());
+            shared.pristine.insert(page_id, page.clone());
             let page_data = match page {
                 Page::Nil => None,
                 Page::Exists(data) => Some(data),
