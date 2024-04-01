@@ -11,4 +11,8 @@ license.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.81"
+crossbeam-channel = "0.5.12"
 nomt-core = { path = "../core" }
+rocksdb = "0.22.0"
+threadpool = "1.8.1"
