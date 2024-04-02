@@ -4,7 +4,7 @@ use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node, TERMINATOR},
 };
-use rocksdb::{ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, WriteBatch};
+use rocksdb::{ColumnFamilyDescriptor, WriteBatch, DB};
 use std::sync::Arc;
 
 static FLAT_KV_CF: &str = "flat_kv";
@@ -18,11 +18,7 @@ pub struct Store {
 }
 
 struct Shared {
-    // TODO: investigate if we actually need the `Multithreaded`. According to docs and source code,
-    //       it seems that it's only needed in the case of changing the cf set during the lifetime.
-    //
-    //       We don't do that, so we might be able to use `SingleThreaded` instead.
-    db: DBWithThreadMode<MultiThreaded>,
+    db: DB,
 }
 
 impl Store {
@@ -38,11 +34,7 @@ impl Store {
             ColumnFamilyDescriptor::new(PAGES_CF, open_opts.clone()),
             ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
         ];
-        let db = DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(
-            &open_opts,
-            &o.path,
-            cf_descriptors,
-        )?;
+        let db = DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
         Ok(Self {
             shared: Arc::new(Shared { db }),
         })
