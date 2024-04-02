@@ -16,9 +16,28 @@
 //!
 //! Only the first 42 sextets represent valid child indexes in a KeyPath,
 //! and the last four bits are discarded.
+//!
+//! Root PageId is at layer zero of the page tree,
+//! the second layer has index one and so on. There are 43 layers.
+//!
+//! For each layer between 1 and 42 the lowest id for layer I is:
+//!
+//! L(I) = sum_i(2^(6 * i)) where i goes from 0 to I - 1
+//!
+//! while the highest id for each layer is:
+//!
+//! H(I) = L(I) + 2^(6 * I) - 1 = sum_i(2^(6 * i)) where i goes from 1 to I
+//!
+//! So for each layer bigger than 0 the range of PageIds are:
+//!
+//! [L(I)..=H(I)]
+//!
+//! And L(I) = H(I - 1) + 1
 
 use crate::{page::DEPTH, trie::KeyPath};
 use bitvec::{prelude::*, slice::ChunksExact};
+use core::ops::{AddAssign, ShlAssign, ShrAssign, SubAssign};
+use ruint::Uint;
 
 /// A unique ID for a page.
 pub type PageId = [u8; 32];
@@ -31,10 +50,10 @@ pub const ROOT_PAGE_ID: [u8; 32] = [0; 32];
 /// The PageId of the leftmost page of the last layer of the page tree.
 /// It is the lowest PageId beyond which all pages with a PageId equal to
 /// or higher overflow if a child is attempted to be accessed
-pub const LOWEST_42: [u8; 32] = [
+pub const LOWEST_42: Uint<256, 4> = Uint::from_be_bytes([
     0, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65,
     4, 16, 65, 4, 16, 65,
-];
+]);
 
 const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
 
@@ -43,100 +62,42 @@ const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
 /// Child index must be a 6 bit integer, two most significant bits must be zero.
 /// Passed PageId must be a valid PageId and be located in a layer below 42 otherwise
 /// `PageIdOverflow` will be returned.
-pub fn child_page_id(mut page_id: PageId, child_index: u8) -> Result<PageId, ChildPageIdError> {
+pub fn child_page_id(page_id: PageId, child_index: u8) -> Result<PageId, ChildPageIdError> {
     if child_index > MAX_CHILD_INDEX {
         return Err(ChildPageIdError::InvalidChildIndex);
     }
 
-    // RootPageId is at layer zero, the second layer has index one
-    // and so on. There are 43 layers.
-    //
-    // For each layer between 1 and 42 the lowest id for layer I is:
-    //
-    // L(I) = sum_i(2^(6 * i)) where i goes from 0 to I - 1
-    //
-    // while the highest id for each layer is:
-    //
-    // H(I) = L(I) + 2^(6 * I) - 1 = sum_i(2^(6 * i)) where i goes from 1 to I
-    //
-    // So for each layer bigger than 0 the range of PageIds are:
-    //
-    // [L(I)..=H(I)]
-    //
-    // And L(I) = H(I - 1) + 1
-    //
-    // Any PageId larger than or equal to L(42) will overflow.
-    // L(42) and H(41) have the same most significant bit
-    // set to one at position 246, resulting in 9 leading zeros.
-    // If the PageId passed as an argument has fewer than 9 leading zeros,
-    // it will definitely overflow. If it has exactly 9 leading zeros,
-    // it needs to be compared to L(42). If it is higher than L(42),
-    // it will overflow.
-    let leading_zeros = page_id.view_bits::<Msb0>().leading_zeros();
-    if leading_zeros < 9 {
+    let mut page_id = Uint::<256, 4>::from_be_bytes(page_id);
+
+    // Any PageId larger than or equal to LOWEST_42 will overflow.
+    if page_id >= LOWEST_42 {
         return Err(ChildPageIdError::PageIdOverflow);
-    } else if leading_zeros == 9 {
-        let mut lower = false;
-
-        for (byte, byte_lowest) in page_id.iter().zip(LOWEST_42.iter()) {
-            if byte < byte_lowest {
-                lower = true;
-                break;
-            }
-        }
-
-        if !lower {
-            return Err(ChildPageIdError::PageIdOverflow);
-        }
     }
 
-    let page_id_bits = page_id.view_bits_mut::<Msb0>();
+    // next_page_id = (prev_page_id << d) + (child_index + 1)
+    // there is no need to do any check on the following operations
+    // because the previous checks make them impossible to overflow
+    page_id.shl_assign(DEPTH);
+    page_id.add_assign(Uint::<256, 4>::from(child_index + 1));
 
-    if child_index == MAX_CHILD_INDEX {
-        // if the child_index is the maximum then adding one would overlow
-        // becoming 2^6
-        //
-        // The formula then becomes: next_page_id = (prev_page_id + 1) << d
-        //
-        // Adding one to prev_page_id meas starting from the lsb changing all 1 to 0
-        // and as soon as a zero is found making it 1 and stop
-
-        // add 1
-        let trailing_ones = page_id_bits.trailing_ones();
-        page_id_bits[256 - trailing_ones..256].fill(false);
-        page_id_bits.set(256 - trailing_ones - 1, true);
-
-        page_id_bits.shift_left(DEPTH);
-    } else {
-        // If the child_index is less than MAX_CHILD_INDEX,
-        // after shifting the previous page id, it can be ORed with child_index + 1
-
-        // next_page_id = (prev_page_id << d) | (child_index + 1)
-        page_id_bits.shift_left(DEPTH);
-        page_id_bits[256 - DEPTH..256]
-            .copy_from_bitslice(&(child_index + 1).view_bits::<Msb0>()[2..]);
-    };
-    Ok(page_id)
+    Ok(page_id.to_be_bytes())
 }
 
 /// Extract the Parent PageId given a PageId.
 ///
 /// If the provided PageId is the one pointing to the root,
 /// then itself is returned.
-pub fn parent_page_id(mut page_id: PageId) -> PageId {
+pub fn parent_page_id(page_id: PageId) -> PageId {
     if page_id == ROOT_PAGE_ID {
         return ROOT_PAGE_ID;
     }
 
-    let page_id_bits = page_id.view_bits_mut::<Msb0>();
+    // prev_page_id = (next_page_id - 1) >> d
+    let mut page_id = Uint::<256, 4>::from_be_bytes(page_id);
+    page_id.sub_assign(Uint::<256, 4>::from(1));
+    page_id.shr_assign(DEPTH);
 
-    // sub 1
-    let trailing_zeros = page_id_bits.trailing_zeros();
-    page_id_bits[256 - trailing_zeros..256].fill(true);
-    page_id_bits.set(256 - trailing_zeros - 1, false);
-
-    page_id_bits.shift_right(DEPTH);
-    page_id
+    page_id.to_be_bytes()
 }
 
 /// Errors related to the construction of a Child PageId
@@ -292,7 +253,7 @@ mod tests {
         );
 
         // any PageId bigger than LOWEST_42 must overflow
-        page_id = LOWEST_42;
+        page_id = LOWEST_42.to_be_bytes();
         page_id[31] = 255;
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
