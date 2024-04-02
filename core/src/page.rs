@@ -22,7 +22,7 @@
 //! [`PageSetCursor`] for traversing the nodes stored within pages.
 
 use crate::page_id::{PageId, ROOT_PAGE_ID};
-use crate::trie::{KeyPath, Node};
+use crate::trie::{KeyPath, Node, TERMINATOR};
 
 use alloc::collections::BTreeMap;
 use bitvec::prelude::*;
@@ -84,12 +84,6 @@ pub enum InvalidPage {
     Id,
 }
 
-/// Any in-memory page-set where pages can be queried by their ID.
-pub trait PageSet {
-    /// Query a page by its ID. Fail if the requested page is not in memory.
-    fn get(&self, id: &PageId) -> Option<PageView>;
-}
-
 /// A simple and inefficient [`PageSet`] implementation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimplePageSet {
@@ -118,43 +112,45 @@ impl SimplePageSet {
     }
 }
 
-impl PageSet for SimplePageSet {
-    fn get(&self, id: &PageId) -> Option<PageView> {
-        SimplePageSet::get(self, id)
-    }
-}
-
-/// Error indicating a page missing.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MissingPage;
-
 #[derive(Debug, Clone, PartialEq)]
 enum CursorLocation<'a> {
     Root,
     Page(PageView<'a>),
+    Missing(PageId),
 }
 
-/// A cursor used to inspect the binary trie nodes expected to be stored within pages while
-/// abstracting over the underlying page structure itself.
+impl<'a> CursorLocation<'a> {
+    fn page_id(&self) -> Option<PageId> {
+        match *self {
+            CursorLocation::Root => None,
+            CursorLocation::Page(p) => Some(p.id()),
+            CursorLocation::Missing(ref p) => Some(p.clone()),
+        }
+    }
+}
+
+/// A cursor used to inspect the binary trie nodes expected to be stored.
 ///
-/// This cursor operates over a provided root node and [`PageSet`].
+/// This cursor operates over a provided root node and a [`SimplePageSet`].
 ///
 /// The [`PageSetCursor`] simply reads what is stored in the underlying pages, even if they are not
 /// a valid binary trie. It also does not prevent the user from traversing beyond the end of the
 /// trie. It provides enough information for higher level logic to avoid those mistakes.
+///
+/// If a page is missing, this cursor interprets its data as all-zero.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PageSetCursor<'a, P> {
+pub struct PageSetCursor<'a> {
     root: Node,
     path: KeyPath,
     depth: u8,
-    pages: &'a P,
+    pages: &'a SimplePageSet,
     location: CursorLocation<'a>,
 }
 
-impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
+impl<'a> PageSetCursor<'a> {
     /// Create a new cursor at the given trie root, reading out of the
     /// provided pages.
-    pub fn new(root: Node, pages: &'a P) -> Self {
+    pub fn new(root: Node, pages: &'a SimplePageSet) -> Self {
         PageSetCursor {
             root,
             path: [0u8; 32],
@@ -163,17 +159,20 @@ impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
             location: CursorLocation::Root,
         }
     }
+}
 
+impl<'a> crate::cursor::Cursor for PageSetCursor<'a> {
     /// The current position of the cursor, expressed as a bit-path and length. Bits after the
     /// length are irrelevant.
-    pub fn position(&self) -> (KeyPath, u8) {
+    fn position(&self) -> (KeyPath, u8) {
         (self.path, self.depth)
     }
 
     /// The current node.
-    pub fn node(&self) -> &Node {
+    fn node(&self) -> &Node {
         match self.location {
             CursorLocation::Root => &self.root,
+            CursorLocation::Missing(_) => &TERMINATOR,
             CursorLocation::Page(p) => {
                 let path = last_page_path(&self.path, self.depth);
                 &p.nodes()[node_index(path)]
@@ -183,7 +182,7 @@ impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
 
     /// Traverse upwards by `d` bits. If d is greater than or equal to the current position length,
     /// move to the root.
-    pub fn traverse_parents(&mut self, d: u8) {
+    fn up(&mut self, d: u8) {
         let d = core::cmp::min(self.depth, d);
         let prev_depth = self.depth;
         self.depth -= d;
@@ -196,67 +195,105 @@ impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
         let prev_page_depth = (prev_depth as usize + DEPTH - 1) / DEPTH;
         let new_page_depth = (self.depth as usize + DEPTH - 1) / DEPTH;
 
-        for _ in new_page_depth..prev_page_depth {
-            // sanity: always `Page` unless depth is zero, checked above.
-            if let CursorLocation::Page(p) = self.location {
-                let parent_id = p.id().parent_page_id();
-                let parent_page = self.pages.get(&parent_id).expect(
-                    "parent pages must have been traversed through, therefore are stored; qed",
-                );
+        // sanity: always not root unless depth is zero, checked above.
+        let mut cur_page_id = self.location.page_id().expect("not root; qed");
 
-                self.location = CursorLocation::Page(parent_page);
-            }
+        for _ in new_page_depth..prev_page_depth {
+            cur_page_id = cur_page_id.parent_page_id();
         }
+
+        self.location = match self.pages.get(&cur_page_id) {
+            Some(p) => CursorLocation::Page(p),
+            None => CursorLocation::Missing(cur_page_id),
+        };
     }
 
-    /// Traverse into the two locations below the current node.
-    ///
-    /// Provide a closure which peeks at both values and informs the node which path to take:
-    /// `false` is left and `true` is right.
-    ///
-    /// It is the caller's responsibility to ensure that the current node is an internal node. If
-    /// it is not, then the cursor will traverse into the empty locations below without complaining.
-    ///
-    /// This may attempt to load a page and fail, if the current location is at the end of the
-    /// current page.
-    pub fn traverse_children(
-        &mut self,
-        f: impl FnOnce(&Node, &Node) -> bool,
-    ) -> Result<(), MissingPage> {
-        let (left_idx, right_idx) = if self.depth as usize % DEPTH == 0 {
+    fn jump(&mut self, path: KeyPath, depth: u8) {
+        self.path = path;
+        self.depth = depth;
+
+        if depth == 0 {
+            self.rewind();
+            return;
+        }
+
+        let n_pages = self.depth as usize / DEPTH;
+        let page_id = crate::page_id::PageIdsIterator::new(&self.path)
+            .nth(n_pages)
+            .expect("all keys with <= 256 bits have pages; qed");
+
+        self.location = match self.pages.get(&page_id) {
+            None => CursorLocation::Missing(page_id),
+            Some(p) => CursorLocation::Page(p),
+        };
+    }
+
+    fn down(&mut self, bit: bool) {
+        if self.depth as usize % DEPTH == 0 {
             // attempt to load next page if we are at the end of our previous page or the root.
-            let page_id = match self.location {
-                CursorLocation::Root => ROOT_PAGE_ID,
-                CursorLocation::Page(p) => {
+            let page_id = match self.location.page_id() {
+                None => ROOT_PAGE_ID,
+                Some(p) => {
                     let child_page_idx = last_page_path(&self.path, self.depth).load_be::<u8>();
-                    p.id().child_page_id(child_page_idx).expect(
+                    p.child_page_id(child_page_idx).expect(
                         "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
                     )
                 }
             };
 
-            let page = self.pages.get(&page_id).ok_or(MissingPage)?;
-            self.location = CursorLocation::Page(page);
-
-            child_node_indices(BitSlice::empty())
-        } else {
-            let path = last_page_path(&self.path, self.depth);
-            child_node_indices(path)
-        };
-
-        // invariant: cursor location is always `Page` at this point onwards.
-        let bit = match self.location {
-            CursorLocation::Root => panic!("Root means depth = 0, we loaded next page; qed"),
-            CursorLocation::Page(p) => f(&p.nodes()[left_idx], &p.nodes()[right_idx]),
-        };
+            self.location = match self.pages.get(&page_id) {
+                None => CursorLocation::Missing(page_id),
+                Some(p) => CursorLocation::Page(p),
+            };
+        }
 
         // Update the cursor's lookup path.
         self.path
             .view_bits_mut::<Msb0>()
             .set(self.depth as usize, bit);
         self.depth += 1;
+    }
 
-        Ok(())
+    fn peek_sibling(&self) -> &Node {
+        match self.location {
+            CursorLocation::Root => &TERMINATOR,
+            CursorLocation::Missing(_) => &TERMINATOR,
+            CursorLocation::Page(p) => {
+                let path = last_page_path(&self.path, self.depth);
+                &p.nodes()[sibling_index(path)]
+            }
+        }
+    }
+
+    fn sibling(&mut self) {
+        if self.depth == 0 {
+            return;
+        }
+
+        let bits = self.path.view_bits_mut::<Msb0>();
+        let i = self.depth as usize - 1;
+        bits.set(i, !bits[i]);
+    }
+
+    fn seek(&mut self, path: KeyPath) -> Option<(Node, u8)> {
+        let mut res = None;
+
+        for (i, bit) in path.view_bits::<Msb0>().iter().by_vals().enumerate() {
+            if crate::trie::is_internal(self.node()) {
+                self.down(bit);
+            } else {
+                res = Some((*self.node(), i as u8));
+                break;
+            }
+        }
+
+        res
+    }
+
+    /// Rewind the cursor to the root.
+    fn rewind(&mut self) {
+        self.location = CursorLocation::Root;
+        self.depth = 0;
     }
 }
 
@@ -281,20 +318,19 @@ fn node_index(page_path: &BitSlice<u8, Msb0>) -> usize {
     }
 }
 
-// Transform a bit-path to the indices of the two child positions in a page.
+// Transform a bit-path to the index in a page corresponding to the sibling node.
 //
-// The expected length of the page path is between 0 and `DEPTH - 1`, inclusive. All bits beyond
-// `DEPTH - 1` are ignored.
-fn child_node_indices(page_path: &BitSlice<u8, Msb0>) -> (usize, usize) {
+// The expected length of the page path is between 1 and `DEPTH`, inclusive. A length of 0 returns
+// 0 and all bits beyond `DEPTH` are ignored.
+fn sibling_index(page_path: &BitSlice<u8, Msb0>) -> usize {
+    let index = node_index(page_path);
     if page_path.is_empty() {
-        return (0, 1);
+        0
+    } else if index % 2 == 0 {
+        index + 1
+    } else {
+        index - 1
     }
-    let depth = core::cmp::min(DEPTH - 1, page_path.len());
-
-    // parent is at (2^depth - 2) + as_uint(parent)
-    // children are at (2^(depth+1) - 2) + as_uint(parent)*2 + (0 or 1)
-    let base = (1 << depth + 1) - 2 + 2 * page_path[..depth].load_be::<usize>();
-    (base, base + 1)
 }
 
 #[cfg(test)]
@@ -330,23 +366,19 @@ mod tests {
     }
 
     #[test]
-    fn child_node_index_mapping_is_complete() {
+    fn sibling_node_index_mapping_is_complete() {
         let mut positions = vec![None; NODES_PER_PAGE];
 
         check_recursive(BitVec::<u8, Msb0>::new(), &mut positions);
         fn check_recursive(b: BitVec<u8, Msb0>, positions: &mut [Option<BitVec<u8, Msb0>>]) {
-            let (left_pos, right_pos) = child_node_indices(&b[..]);
-
-            if let Some(other) = &positions[left_pos] {
-                panic!("{} and {} both map to {}", other, b, left_pos);
+            let pos = sibling_index(&b[..]);
+            if !b.is_empty() {
+                if let Some(other) = &positions[pos] {
+                    panic!("{} and {} both map to {}", other, b, pos);
+                }
+                positions[pos] = Some(b.clone());
             }
-            if let Some(other) = &positions[right_pos] {
-                panic!("{} and {} both map to {}", other, b, right_pos);
-            }
-            positions[left_pos] = Some(b.clone());
-            positions[right_pos] = Some(b.clone());
-
-            if b.len() == DEPTH - 1 {
+            if b.len() == DEPTH {
                 return;
             }
 
@@ -354,11 +386,6 @@ mod tests {
             let mut right = b;
             left.push(false);
             right.push(true);
-
-            // check consistency.
-            assert_eq!(left_pos, node_index(&left));
-            assert_eq!(right_pos, node_index(&right));
-
             check_recursive(left, positions);
             check_recursive(right, positions);
         }

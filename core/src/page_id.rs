@@ -38,7 +38,7 @@ use core::ops::{AddAssign, ShlAssign, ShrAssign, SubAssign};
 use ruint::Uint;
 
 /// A unique ID for a page.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageId(Uint<256, 4>);
 
 /// The root page is the one containing the sub-trie directly descending from the root node.

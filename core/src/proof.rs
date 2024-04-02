@@ -1,29 +1,10 @@
 //! Proving and verifying inclusion, non-inclusion, and updates to the trie.
 
-use crate::page::{MissingPage, PageSet, PageSetCursor};
+use crate::cursor::Cursor;
 use crate::trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, TERMINATOR};
 
 use alloc::vec::Vec;
 use bitvec::prelude::*;
-
-/// Generic cursor over binary trie storage.
-pub trait Cursor {
-    /// The current position of the cursor, expressed as a bit-path and length. Bits after the
-    /// length are irrelevant.
-    fn position(&self) -> (KeyPath, u8);
-    /// The current node.
-    fn node(&self) -> Node;
-
-    /// Peek at the children of this node, if it is an internal node.
-    fn peek_children(&self) -> Option<(&Node, &Node)>;
-
-    /// Traverse to the left child of this node, if it is an internal node. No-op otherwise.
-    fn traverse_left_child(&mut self);
-    /// Traverse to the right child of this node, if it is an internal node. No-op otherwise.
-    fn traverse_right_child(&mut self);
-    /// Traverse upwards by d bits. No-op if d is greater than the current position length.
-    fn traverse_parents(&mut self, d: u8);
-}
 
 /// Sibling nodes recorded while looking up some path, in ascending order by depth.
 #[derive(Debug, Clone)]
@@ -167,23 +148,16 @@ impl VerifiedPathProof {
 ///
 /// This returns the sibling nodes and the terminal node encountered when looking up
 /// a key. This is always either a terminator or leaf.
-pub fn record_path(
-    root: Node,
-    pages: &impl PageSet,
-    key: &KeyPath,
-) -> Result<(Node, Siblings), MissingPage> {
-    let mut cursor = PageSetCursor::new(root, pages);
-
+pub fn record_path(cursor: &mut impl Cursor, key: &KeyPath) -> (Node, Siblings) {
     let mut siblings = Vec::new();
     let mut terminal = TERMINATOR;
 
+    cursor.rewind();
+
     for bit in key.view_bits::<Msb0>().iter().by_vals() {
         if crate::trie::is_internal(cursor.node()) {
-            let inspector = |left: &Node, right: &Node| {
-                siblings.push(if !bit { right.clone() } else { left.clone() });
-                bit
-            };
-            cursor.traverse_children(inspector)?;
+            cursor.down(bit);
+            siblings.push(cursor.peek_sibling().clone());
         } else {
             terminal = *cursor.node();
             break;
@@ -191,5 +165,5 @@ pub fn record_path(
     }
 
     let siblings: Vec<_> = siblings.into_iter().rev().collect();
-    Ok((terminal, Siblings(siblings)))
+    (terminal, Siblings(siblings))
 }
