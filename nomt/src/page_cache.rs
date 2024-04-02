@@ -9,10 +9,11 @@ use nomt_core::{
 use std::{
     collections::HashMap,
     mem,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Instant,
 };
 use threadpool::ThreadPool;
+use parking_lot::Mutex;
 
 /// A handle to the page.
 ///
@@ -140,7 +141,7 @@ impl PageCache {
     /// If the page is in the cache, it is returned immediately. If the page is not in the cache, it
     /// is fetched from the underlying store and returned.
     fn retrieve(&self, page_id: PageId) -> PagePromise {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
 
         // We first check in the dirty pages, since that's where we would find the most recent
         // version of the page. If the page is not present there, we check in the pristine cache.
@@ -166,7 +167,7 @@ impl PageCache {
                     .load_page(page_id)
                     .map(Arc::new)
                     .map_or(Page::Nil, Page::Exists);
-                let mut shared = shared.lock().unwrap();
+                let mut shared = shared.lock();
                 // Unwrap: the operation was inserted above. It is scheduled for execution only
                 // once. It may removed only in the line below. Therefore, `None` is impossible.
                 let inflight = shared.inflight.remove(&page_id).unwrap();
@@ -183,7 +184,7 @@ impl PageCache {
     ///
     /// After the commit, all the dirty pages are cleared.
     pub fn commit(&self, tx: &mut Transaction) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
         for (page_id, page) in mem::take(&mut shared.dirty) {
             shared.pristine.insert(page_id, page.clone());
             let page_data = match page {
@@ -213,7 +214,7 @@ impl PageCache {
     ///
     /// The inflight fetch for the given page if any is resolved with the given page.
     pub fn supplant(&self, page_id: PageId, page: Page) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
         if let Some(inflight) = shared.inflight.get_mut(&page_id) {
             inflight.supplant_and_notify(page);
         }

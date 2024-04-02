@@ -14,5 +14,6 @@ license.workspace = true
 anyhow = "1.0.81"
 crossbeam-channel = "0.5.12"
 nomt-core = { path = "../core" }
+parking_lot = "0.12.1"
 rocksdb = "0.22.0"
 threadpool = "1.8.1"
