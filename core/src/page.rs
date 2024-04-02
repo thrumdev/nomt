@@ -21,7 +21,7 @@
 //! A [`PageSet`] is a simple index of pages which are loaded in memory. It can be used to build a
 //! [`PageSetCursor`] for traversing the nodes stored within pages.
 
-use crate::page_id::{child_page_id, parent_page_id, PageId, ROOT_PAGE_ID};
+use crate::page_id::{PageId, ROOT_PAGE_ID};
 use crate::trie::{KeyPath, Node};
 
 use alloc::collections::BTreeMap;
@@ -52,12 +52,15 @@ pub struct PageView<'a> {
 
 impl<'a> PageView<'a> {
     /// Create a new view over a page.
-    pub fn new(data: &'a RawPage) -> Result<Self, InvalidPageLength> {
+    /// Fails if RawPage has an incorrect length or if the contained PageId is invalid.
+    pub fn new(data: &'a RawPage) -> Result<Self, InvalidPage> {
         if data.len() != NODES_PER_PAGE + 2 {
-            Err(InvalidPageLength)
-        } else {
-            Ok(PageView { data })
+            return Err(InvalidPage::Length);
         }
+
+        PageId::from_bytes(data[NODES_PER_PAGE + 1]).map_err(|_| InvalidPage::Id)?;
+
+        Ok(PageView { data })
     }
 
     /// Get the node storage section of the page.
@@ -66,14 +69,20 @@ impl<'a> PageView<'a> {
     }
 
     /// Get the page ID of the page.
-    pub fn id(&self) -> &PageId {
-        &self.data[NODES_PER_PAGE + 1]
+    pub fn id(&self) -> PageId {
+        PageId::from_bytes(self.data[NODES_PER_PAGE + 1])
+            .expect("PageView is being created checking the validity of its PageId")
     }
 }
 
-/// Error indicating that a page has an invalid length.
+/// Error related to the creation of a PageView over a RawPage
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InvalidPageLength;
+pub enum InvalidPage {
+    /// Error indicating that a page has an invalid length.
+    Length,
+    /// Error indicating that a page has an invalid PageId.
+    Id,
+}
 
 /// Any in-memory page-set where pages can be queried by their ID.
 pub trait PageSet {
@@ -96,10 +105,7 @@ impl SimplePageSet {
     }
 
     /// Insert a page. Returns the previous page stored under that ID.
-    pub fn insert(
-        &mut self,
-        page: Vec<[u8; 32]>,
-    ) -> Result<Option<Vec<[u8; 32]>>, InvalidPageLength> {
+    pub fn insert(&mut self, page: Vec<[u8; 32]>) -> Result<Option<Vec<[u8; 32]>>, InvalidPage> {
         let id = PageView::new(&page[..])?.id().clone();
         Ok(self.page_map.insert(id, page))
     }
@@ -193,7 +199,7 @@ impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
         for _ in new_page_depth..prev_page_depth {
             // sanity: always `Page` unless depth is zero, checked above.
             if let CursorLocation::Page(p) = self.location {
-                let parent_id = parent_page_id(*p.id());
+                let parent_id = p.id().parent_page_id();
                 let parent_page = self.pages.get(&parent_id).expect(
                     "parent pages must have been traversed through, therefore are stored; qed",
                 );
@@ -223,7 +229,7 @@ impl<'a, P: PageSet + 'a> PageSetCursor<'a, P> {
                 CursorLocation::Root => ROOT_PAGE_ID,
                 CursorLocation::Page(p) => {
                     let child_page_idx = last_page_path(&self.path, self.depth).load_be::<u8>();
-                    child_page_id(*p.id(), child_page_idx).expect(
+                    p.id().child_page_id(child_page_idx).expect(
                         "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
                     )
                 }

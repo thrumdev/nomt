@@ -66,7 +66,7 @@ impl Store {
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Vec<u8>> {
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
-        let value = self.shared.db.get_cf(&cf, page_id.as_ref())?;
+        let value = self.shared.db.get_cf(&cf, page_id.to_bytes().as_ref())?;
         Ok(value.unwrap())
     }
 
@@ -110,8 +110,8 @@ impl Transaction {
     pub fn write_page<V: AsRef<[u8]>>(&mut self, page_id: PageId, value: Option<V>) {
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
         match value {
-            None => self.batch.delete_cf(&cf, page_id.as_ref()),
-            Some(value) => self.batch.put_cf(&cf, page_id.as_ref(), value),
+            None => self.batch.delete_cf(&cf, page_id.to_bytes().as_ref()),
+            Some(value) => self.batch.put_cf(&cf, page_id.to_bytes().as_ref(), value),
         }
     }
 }
