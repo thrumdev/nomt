@@ -2,18 +2,15 @@ use crate::{
     store::{Store, Transaction},
     Options,
 };
-use nomt_core::{
-    page_id::PageId,
-    trie::{KeyPath, Node},
-};
-use std::{
-    collections::HashMap,
-    mem,
-    sync::Arc,
-    time::Instant,
-};
-use threadpool::ThreadPool;
+use nomt_core::{page::DEPTH, page_id::PageId, trie::Node};
 use parking_lot::Mutex;
+use std::{collections::HashMap, fmt, mem, sync::Arc};
+use threadpool::ThreadPool;
+
+// Total number of nodes stored in one Page. It depends on the `DEPTH`
+// of the rootless sub-binary tree stored in a page following this formula:
+// (2^(DEPTH + 1)) - 2
+pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
 /// A handle to the page.
 ///
@@ -26,7 +23,33 @@ pub enum Page {
     Exists(Arc<Vec<u8>>),
 }
 
-enum PagePromise {
+impl Page {
+    /// Read out the node at the given index.
+    pub fn node(&self, index: usize) -> Node {
+        assert!(index < NODES_PER_PAGE, "index out of bounds");
+        match self {
+            Page::Nil => [0; 32],
+            Page::Exists(data) => {
+                let start = index * 32;
+                let end = start + 32;
+                let mut node = [0; 32];
+                node.copy_from_slice(&data[start..end]);
+                node
+            }
+        }
+    }
+}
+
+impl fmt::Debug for Page {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Page::Nil => write!(f, "Page::Nil"),
+            Page::Exists(_) => write!(f, "Page::Exists"),
+        }
+    }
+}
+
+pub enum PagePromise {
     Now(Page),
     Later(crossbeam_channel::Receiver<Page>),
 }
@@ -140,7 +163,7 @@ impl PageCache {
     ///
     /// If the page is in the cache, it is returned immediately. If the page is not in the cache, it
     /// is fetched from the underlying store and returned.
-    fn retrieve(&self, page_id: PageId) -> PagePromise {
+    pub fn retrieve(&self, page_id: PageId) -> PagePromise {
         let mut shared = self.shared.lock();
 
         // We first check in the dirty pages, since that's where we would find the most recent
@@ -202,14 +225,6 @@ impl PageCache {
         }
     }
 
-    /// Creates a new cursor assuming the given root node.
-    pub fn create_cursor(&self, root: Node) -> PageCacheCursor {
-        PageCacheCursor {
-            root,
-            page_cache: self.clone(),
-        }
-    }
-
     /// Replaces the page in the cache with the given page.
     ///
     /// The inflight fetch for the given page if any is resolved with the given page.
@@ -220,37 +235,4 @@ impl PageCache {
             inflight.supplant_and_notify(page);
         }
     }
-}
-
-pub struct PageCacheCursor {
-    root: Node,
-    page_cache: PageCache,
-    // TODO: position
-}
-
-impl PageCacheCursor {
-    /// Moves the cursor to the given [`KeyPath`].
-    ///
-    /// Moving the cursor using this function would be more efficient than using the navigation
-    /// functions such as [`Self::down_left`] and [`Self::down_right`] due to leveraging warmup
-    /// hints.
-    ///
-    /// After returning of this function, the cursor is positioned either at the given key path or
-    /// at the closest key path that is on the way to the given key path.
-    pub fn seek(&mut self, dest: KeyPath) {
-        const PREFETCH_N: usize = 7;
-        // TODO: destruct the key path, extract the first `PREFETCH_N` page IDs and initiate
-        // the fetches. Then, traverse only the first `PREFETCH_N` pages and if we haven't
-        // encountered the terminal, fetch another batch of `PREFETCH_N` pages and repeat.
-
-        // TODO: self.page_cache.retrieve(page_id)
-        todo!()
-    }
-
-    // TODO: actually, I am ok with the existing terminology of `traverse`.
-    pub fn up(&self, d: u8) {}
-
-    pub fn down_left(&self) {}
-
-    pub fn down_right(&self) {}
 }

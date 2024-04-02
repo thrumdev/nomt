@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
     trie::{Node, TERMINATOR},
@@ -10,6 +11,7 @@ use threadpool::ThreadPool;
 
 pub use nomt_core::trie::KeyPath;
 
+mod cursor;
 mod page_cache;
 mod store;
 
@@ -104,7 +106,7 @@ impl Nomt {
         let page_cache = self.shared.page_cache.clone();
         let root = self.shared.root;
         let f = move || {
-            page_cache.create_cursor(root).seek(path);
+            PageCacheCursor::at_root(root).seek(path, &page_cache);
         };
         self.shared.warmup_tp.execute(f);
     }
