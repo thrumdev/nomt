@@ -169,13 +169,13 @@ impl<'a> crate::cursor::Cursor for PageSetCursor<'a> {
     }
 
     /// The current node.
-    fn node(&self) -> &Node {
+    fn node(&self) -> Node {
         match self.location {
-            CursorLocation::Root => &self.root,
-            CursorLocation::Missing(_) => &TERMINATOR,
+            CursorLocation::Root => self.root,
+            CursorLocation::Missing(_) => TERMINATOR,
             CursorLocation::Page(p) => {
                 let path = last_page_path(&self.path, self.depth);
-                &p.nodes()[node_index(path)]
+                p.nodes()[node_index(path)]
             }
         }
     }
@@ -254,13 +254,13 @@ impl<'a> crate::cursor::Cursor for PageSetCursor<'a> {
         self.depth += 1;
     }
 
-    fn peek_sibling(&self) -> &Node {
+    fn peek_sibling(&self) -> Node {
         match self.location {
-            CursorLocation::Root => &TERMINATOR,
-            CursorLocation::Missing(_) => &TERMINATOR,
+            CursorLocation::Root => TERMINATOR,
+            CursorLocation::Missing(_) => TERMINATOR,
             CursorLocation::Page(p) => {
                 let path = last_page_path(&self.path, self.depth);
-                &p.nodes()[sibling_index(path)]
+                p.nodes()[sibling_index(path)]
             }
         }
     }
@@ -275,19 +275,16 @@ impl<'a> crate::cursor::Cursor for PageSetCursor<'a> {
         bits.set(i, !bits[i]);
     }
 
-    fn seek(&mut self, path: KeyPath) -> Option<(Node, u8)> {
-        let mut res = None;
+    fn seek(&mut self, path: KeyPath) {
+        self.path = path;
 
-        for (i, bit) in path.view_bits::<Msb0>().iter().by_vals().enumerate() {
-            if crate::trie::is_internal(self.node()) {
+        for bit in path.view_bits::<Msb0>().iter().by_vals() {
+            if crate::trie::is_internal(&self.node()) {
                 self.down(bit);
             } else {
-                res = Some((*self.node(), i as u8));
                 break;
             }
         }
-
-        res
     }
 
     /// Rewind the cursor to the root.

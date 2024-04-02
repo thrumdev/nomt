@@ -155,11 +155,11 @@ pub fn record_path(cursor: &mut impl Cursor, key: &KeyPath) -> (Node, Siblings) 
     cursor.rewind();
 
     for bit in key.view_bits::<Msb0>().iter().by_vals() {
-        if crate::trie::is_internal(cursor.node()) {
+        if crate::trie::is_internal(&cursor.node()) {
             cursor.down(bit);
-            siblings.push(cursor.peek_sibling().clone());
+            siblings.push(cursor.peek_sibling());
         } else {
-            terminal = *cursor.node();
+            terminal = cursor.node();
             break;
         }
     }

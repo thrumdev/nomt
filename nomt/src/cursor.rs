@@ -1,10 +1,11 @@
-use std::{cell::RefCell, cmp};
+use std::cmp;
 
 use crate::page_cache::{Page, PageCache, PagePromise};
 use bitvec::prelude::*;
 use nomt_core::{
+    cursor::Cursor as CursorApi,
     page::DEPTH,
-    page_id::{PageId, PageIdsIterator},
+    page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node},
 };
 
@@ -13,31 +14,60 @@ use nomt_core::{
 /// The number of items we want to request in a single batch.
 const PREFETCH_N: usize = 7;
 
+/// A cursor wrapping a [`PageCache`].
+///
+/// This performs I/O internally.
 pub struct PageCacheCursor {
+    pages: PageCache,
     root: Node,
     path: KeyPath,
     depth: u8,
-    /// The cached page and it's ID.
-    ///
-    /// Justification for the interior mutability is to use &self in [`Self::node`].
-    cached_page: RefCell<Option<(PageId, Page)>>,
+    // Invariant: this is always set when not at the root and never
+    // set at the root.
+    cached_page: Option<(PageId, Page)>,
 }
 
 impl PageCacheCursor {
     /// Creates the cursor pointing at the given root of the trie.
-    pub fn at_root(root: Node) -> Self {
+    pub fn at_root(root: Node, pages: PageCache) -> Self {
         Self {
             root,
             path: KeyPath::default(),
             depth: 0,
-            cached_page: RefCell::new(None),
+            pages,
+            cached_page: None,
         }
     }
 
     /// Moves the cursor back to the root.
-    pub fn reset(&mut self) {
+    pub fn rewind(&mut self) {
         self.depth = 0;
-        self.path = KeyPath::default();
+        self.cached_page = None;
+    }
+
+    /// Get the current position of the cursor expressed as a bit-path and length. Bits after the
+    /// length are irrelevant.
+    pub fn position(&self) -> (KeyPath, u8) {
+        (self.path, self.depth)
+    }
+
+    /// Jump to the node at the given path. Only the first `depth` bits are relevant.
+    /// It is possible to jump out of bounds, that is, to a node whose parent is a terminal.
+    pub fn jump(&mut self, path: KeyPath, depth: u8) {
+        self.path = path;
+        self.depth = depth;
+
+        if depth == 0 {
+            self.rewind();
+            return;
+        }
+
+        let n_pages = self.depth as usize / DEPTH;
+        let page_id = PageIdsIterator::new(&self.path)
+            .nth(n_pages)
+            .expect("all keys with <= 256 bits have pages; qed");
+
+        self.cached_page = Some((page_id.clone(), self.pages.retrieve(page_id).wait()));
     }
 
     /// Moves the cursor to the given [`KeyPath`].
@@ -48,44 +78,29 @@ impl PageCacheCursor {
     ///
     /// After returning of this function, the cursor is positioned either at the given key path or
     /// at the closest key path that is on the way to the given key path.
-    pub fn seek(&mut self, dest: KeyPath, page_cache: &PageCache) {
-        self.reset();
+    pub fn seek(&mut self, dest: KeyPath) {
+        self.rewind();
         if !trie::is_internal(&self.root) {
             // The root either a leaf or the terminator. In either case, we can't navigate anywhere.
             return;
         }
         let mut ppf = PagePrefetcher::new(dest);
-        let mut page = Page::Nil;
+
         for bit in dest.view_bits::<Msb0>().iter().by_vals() {
-            let node_index = if self.depth as usize % DEPTH == 0 {
-                page = match ppf.next(page_cache) {
-                    Some(p) => p.wait(),
+            if !trie::is_internal(&self.node()) {
+                break;
+            }
+            if self.depth as usize % DEPTH == 0 {
+                // attempt to load next page if we are at the end of our previous page or the root.
+                match ppf.next(&self.pages) {
                     None => {
                         panic!("reached the end of the prefetcher without finding the terminal")
                     }
+                    Some(p) => p.wait(),
                 };
-                pick(bit, child_node_indices(BitSlice::empty()))
-            } else {
-                let path = last_page_path(&self.path, self.depth);
-                pick(bit, child_node_indices(path))
-            };
-            let node = page.node(node_index);
-            if trie::is_internal(&node) {
-                self.path
-                    .view_bits_mut::<Msb0>()
-                    .set(self.depth as usize, bit);
-                self.depth += 1;
-            } else {
-                break;
             }
-        }
-
-        fn pick(bit: bool, (lhs, rhs): (usize, usize)) -> usize {
-            if !bit {
-                lhs
-            } else {
-                rhs
-            }
+            // page is loaded, so this won't block.
+            self.down(bit);
         }
     }
 
@@ -95,72 +110,125 @@ impl PageCacheCursor {
     /// it will be sound after the call.
     pub fn up(&mut self, d: u8) {
         let d = cmp::min(self.depth, d);
+        let prev_depth = self.depth;
         self.depth -= d;
+
+        if self.depth == 0 {
+            self.cached_page = None;
+            return;
+        }
+
+        let prev_page_depth = (prev_depth as usize + DEPTH - 1) / DEPTH;
+        let new_page_depth = (self.depth as usize + DEPTH - 1) / DEPTH;
+
+        // sanity: always not root unless depth is zero, checked above.
+        let mut cur_page_id = self.cached_page.as_ref().expect("not root; qed").0.clone();
+
+        for _ in new_page_depth..prev_page_depth {
+            cur_page_id = cur_page_id.parent_page_id();
+        }
+
+        self.cached_page = Some((cur_page_id.clone(), self.pages.retrieve(cur_page_id).wait()));
     }
 
-    /// Traverse to the left child of this node.
+    /// Traverse to the child of this node indicated by the given bit.
     ///
     /// The assumption is that the cursor is pointing to the internal node and it's the
     /// responsibility of the caller to ensure that. If violated,the cursor's location will be
     /// invalid.
-    pub fn down_left(&mut self) {
+    pub fn down(&mut self, bit: bool) {
+        if self.depth as usize % DEPTH == 0 {
+            // attempt to load next page if we are at the end of our previous page or the root.
+            let page_id = match self.cached_page {
+                None => ROOT_PAGE_ID,
+                Some((ref id, _)) => {
+                    let child_page_idx = last_page_path(&self.path, self.depth).load_be::<u8>();
+                    id.child_page_id(child_page_idx).expect(
+                        "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
+                    )
+                }
+            };
+
+            self.cached_page = Some((page_id.clone(), self.pages.retrieve(page_id).wait()));
+        }
+
+        // Update the cursor's lookup path.
         self.path
             .view_bits_mut::<Msb0>()
-            .set(self.depth as usize, false);
+            .set(self.depth as usize, bit);
         self.depth += 1;
     }
 
-    /// Traverse to the right child of this node.
-    ///
-    /// The assumption is that the cursor is pointing to the internal node and it's the
-    /// responsibility of the caller to ensure that. If violated,the cursor's location will be
-    /// invalid.
-    pub fn down_right(&mut self) {
-        self.path
-            .view_bits_mut::<Msb0>()
-            .set(self.depth as usize, true);
-        self.depth += 1;
-    }
+    /// Traverse to the sibling node of the current position. No-op at the root.
+    pub fn sibling(&mut self) {
+        if self.depth == 0 {
+            return;
+        }
 
-    /// Returns the current location of the cursor, represented as a tuple of the key path and the
-    /// depth.
-    pub fn location(&self) -> (KeyPath, u8) {
-        (self.path, self.depth)
+        let bits = self.path.view_bits_mut::<Msb0>();
+        let i = self.depth as usize - 1;
+        bits.set(i, !bits[i]);
     }
 
     /// Returns the node at the current location of the cursor.
-    pub fn node(&self, page_cache: &PageCache) -> Node {
-        if self.depth == 0 {
-            self.root
-        } else {
-            // Calculate the page ID of the current page.
-            let cur_page_id = PageIdsIterator::new(&self.path)
-                .last()
-                .expect("the cursor is not at the root");
-            // Check if the page is already cached locally by checking it's page ID. If it's not,
-            // retrieve the page from the cache and update the cache.
-            let mut cached_page_guard = self.cached_page.borrow_mut();
-            let page = match &*cached_page_guard {
-                Some((cached_page_id, cached_page)) => {
-                    if *cached_page_id == cur_page_id {
-                        cached_page.clone()
-                    } else {
-                        let page = page_cache.retrieve(cur_page_id).wait();
-                        *cached_page_guard = Some((cur_page_id, page.clone()));
-                        page
-                    }
-                }
-                _ => {
-                    let page = page_cache.retrieve(cur_page_id).wait();
-                    *cached_page_guard = Some((cur_page_id, page.clone()));
-                    page
-                }
-            };
-            // Now having the page, we can extract the node from it.
-            let page_path = last_page_path(&self.path, self.depth);
-            let node_index = node_index(page_path);
-            page.node(node_index)
+    pub fn node(&self) -> Node {
+        match self.cached_page {
+            None => self.root,
+            Some((_, ref page)) => {
+                let path = last_page_path(&self.path, self.depth);
+                page.node(node_index(path))
+            }
         }
+    }
+
+    /// Peek at the sibling node of the current position without moving the cursor. At the root,
+    /// gives the terminator.
+    pub fn peek_sibling(&self) -> Node {
+        match self.cached_page {
+            None => trie::TERMINATOR,
+            Some((_, ref page)) => {
+                let path = last_page_path(&self.path, self.depth);
+                page.node(sibling_index(path))
+            }
+        }
+    }
+}
+
+impl CursorApi for PageCacheCursor {
+    fn position(&self) -> (KeyPath, u8) {
+        PageCacheCursor::position(self)
+    }
+
+    fn node(&self) -> Node {
+        PageCacheCursor::node(self)
+    }
+
+    fn peek_sibling(&self) -> Node {
+        PageCacheCursor::peek_sibling(self)
+    }
+
+    fn rewind(&mut self) {
+        PageCacheCursor::rewind(self)
+    }
+
+    fn jump(&mut self, path: KeyPath, depth: u8) {
+        PageCacheCursor::jump(self, path, depth)
+    }
+
+    fn seek(&mut self, path: KeyPath) {
+        PageCacheCursor::seek(self, path)
+    }
+
+    fn sibling(&mut self) {
+        PageCacheCursor::sibling(self)
+    }
+
+    fn down(&mut self, bit: bool) {
+        PageCacheCursor::down(self, bit)
+    }
+
+    fn up(&mut self, d: u8) {
+        PageCacheCursor::up(self, d)
     }
 }
 
@@ -170,20 +238,19 @@ fn last_page_path(total_path: &KeyPath, total_depth: u8) -> &BitSlice<u8, Msb0> 
     &total_path.view_bits::<Msb0>()[prev_page_end..total_depth as usize]
 }
 
-// Transform a bit-path to the indices of the two child positions in a page.
+// Transform a bit-path to the index in a page corresponding to the sibling node.
 //
-// The expected length of the page path is between 0 and `DEPTH - 1`, inclusive. All bits beyond
-// `DEPTH - 1` are ignored.
-fn child_node_indices(page_path: &BitSlice<u8, Msb0>) -> (usize, usize) {
+// The expected length of the page path is between 1 and `DEPTH`, inclusive. A length of 0 returns
+// 0 and all bits beyond `DEPTH` are ignored.
+fn sibling_index(page_path: &BitSlice<u8, Msb0>) -> usize {
+    let index = node_index(page_path);
     if page_path.is_empty() {
-        return (0, 1);
+        0
+    } else if index % 2 == 0 {
+        index + 1
+    } else {
+        index - 1
     }
-    let depth = core::cmp::min(DEPTH - 1, page_path.len());
-
-    // parent is at (2^depth - 2) + as_uint(parent)
-    // children are at (2^(depth+1) - 2) + as_uint(parent)*2 + (0 or 1)
-    let base = (1 << depth + 1) - 2 + 2 * page_path[..depth].load_be::<usize>();
-    (base, base + 1)
 }
 
 // Transform a bit-path to an index in a page.
