@@ -17,9 +17,9 @@ pub trait Cursor {
     /// length are irrelevant.
     fn position(&self) -> (KeyPath, u8);
     /// The current node.
-    fn node(&self) -> &Node;
+    fn node(&self) -> Node;
     /// Peek at the sibling node of the current position. At the root, gives the terminator.
-    fn peek_sibling(&self) -> &Node;
+    fn peek_sibling(&self) -> Node;
 
     /// Rewind to the root.
     fn rewind(&mut self);
@@ -27,7 +27,10 @@ pub trait Cursor {
     /// It is possible to jump out of bounds, that is, to a node whose parent is a terminal.
     fn jump(&mut self, path: KeyPath, depth: u8);
     /// Seek to the terminal of the given path. Returns the terminal node and its depth.
-    fn seek(&mut self, path: KeyPath) -> Option<(Node, u8)>;
+    ///
+    /// This can be more efficient than using repeated calls to `down` in the case that I/O may
+    /// be predicted based on the key-path.
+    fn seek(&mut self, path: KeyPath);
 
     /// Traverse to the sibling node of the current position. No-op at the root.
     fn sibling(&mut self);

@@ -106,7 +106,7 @@ impl Nomt {
         let page_cache = self.shared.page_cache.clone();
         let root = self.shared.root;
         let f = move || {
-            PageCacheCursor::at_root(root).seek(path, &page_cache);
+            PageCacheCursor::at_root(root, page_cache).seek(path);
         };
         self.shared.warmup_tp.execute(f);
     }
