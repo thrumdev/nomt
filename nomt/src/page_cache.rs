@@ -158,13 +158,13 @@ impl PageCache {
         // Nope, then we need to fetch the page from the store.
         let inflight = InflightFetch::new();
         let promise = inflight.promise();
-        shared.inflight.insert(page_id, inflight);
+        shared.inflight.insert(page_id.clone(), inflight);
         let task = {
             let store = self.store.clone();
             let shared = self.shared.clone();
             move || {
                 let entry = store
-                    .load_page(page_id)
+                    .load_page(page_id.clone())
                     .map(Arc::new)
                     .map_or(Page::Nil, Page::Exists);
                 let mut shared = shared.lock();
@@ -186,7 +186,7 @@ impl PageCache {
     pub fn commit(&self, tx: &mut Transaction) {
         let mut shared = self.shared.lock();
         for (page_id, page) in mem::take(&mut shared.dirty) {
-            shared.pristine.insert(page_id, page.clone());
+            shared.pristine.insert(page_id.clone(), page.clone());
             let page_data = match page {
                 Page::Nil => None,
                 Page::Exists(data) => Some(data),
