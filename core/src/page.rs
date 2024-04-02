@@ -292,6 +292,10 @@ impl<'a> crate::cursor::Cursor for PageSetCursor<'a> {
         self.location = CursorLocation::Root;
         self.depth = 0;
     }
+
+    fn modify(&mut self, node: Node) {
+        // TODO
+    }
 }
 
 // extract the relevant portion of the key path to the last page. panics on empty path.

@@ -53,6 +53,30 @@ pub fn is_terminator(hash: &Node) -> bool {
     hash == &TERMINATOR
 }
 
+/// The kind of a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    /// A terminator node indicates an empty sub-trie.
+    Terminator,
+    /// A leaf node indicates a sub-trie with a single leaf.
+    Leaf,
+    /// An internal node indicates at least two values.
+    Internal,
+}
+
+impl NodeKind {
+    /// Get the kind of the provided node.
+    pub fn of(node: &Node) -> Self {
+        if is_leaf(node) {
+            NodeKind::Leaf
+        } else if is_terminator(node) {
+            NodeKind::Terminator
+        } else {
+            NodeKind::Internal
+        }
+    }
+}
+
 /// The data of an internal (branch) node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalData {

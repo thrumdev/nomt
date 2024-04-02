@@ -230,6 +230,10 @@ impl CursorApi for PageCacheCursor {
     fn up(&mut self, d: u8) {
         PageCacheCursor::up(self, d)
     }
+
+    fn modify(&mut self, node: Node) {
+        // TODO
+    }
 }
 
 // extract the relevant portion of the key path to the last page. panics on empty path.

@@ -15,3 +15,4 @@ pub mod page;
 pub mod page_id;
 pub mod proof;
 pub mod trie;
+pub mod update;

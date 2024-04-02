@@ -11,7 +11,6 @@ use crate::trie::{KeyPath, Node};
 /// that the nodes actually hash up to a common root.
 ///
 /// The API here allows moving out-of-bounds, that is, to a node whose parent is a terminal node.
-/// The behavior is implementation-defined in such cases.
 pub trait Cursor {
     /// The current position of the cursor, expressed as a bit-path and length. Bits after the
     /// length are irrelevant.
@@ -39,4 +38,7 @@ pub trait Cursor {
     fn down(&mut self, bit: bool);
     /// Traverse upwards by d bits. No-op if d is greater than the current position length.
     fn up(&mut self, d: u8);
+
+    /// Modify the node at the given position.
+    fn modify(&mut self, node: Node);
 }
