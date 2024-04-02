@@ -215,6 +215,7 @@ impl PageCache {
     /// The inflight fetch for the given page if any is resolved with the given page.
     pub fn supplant(&self, page_id: PageId, page: Page) {
         let mut shared = self.shared.lock();
+        shared.dirty.insert(page_id, page.clone());
         if let Some(inflight) = shared.inflight.get_mut(&page_id) {
             inflight.supplant_and_notify(page);
         }
