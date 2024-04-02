@@ -273,6 +273,7 @@ name = "nomt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitvec",
  "crossbeam-channel",
  "nomt-core",
  "parking_lot",

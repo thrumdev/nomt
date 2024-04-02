@@ -17,3 +17,4 @@ nomt-core = { path = "../core" }
 parking_lot = "0.12.1"
 rocksdb = "0.22.0"
 threadpool = "1.8.1"
+bitvec = { version = "1" }
