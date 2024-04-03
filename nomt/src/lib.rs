@@ -73,7 +73,10 @@ impl Nomt {
                 root,
                 page_cache,
                 store,
-                warmup_tp: ThreadPool::new(o.traversal_concurrency),
+                warmup_tp: threadpool::Builder::new()
+                    .num_threads(o.fetch_concurrency)
+                    .thread_name("nomt-warmup".to_string())
+                    .build(),
             }),
         })
     }

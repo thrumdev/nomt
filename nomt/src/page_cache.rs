@@ -151,7 +151,10 @@ impl PageCache {
             dirty: HashMap::new(),
             inflight: HashMap::new(),
         }));
-        let fetch_tp = ThreadPool::new(o.fetch_concurrency);
+        let fetch_tp = threadpool::Builder::new()
+            .num_threads(o.fetch_concurrency)
+            .thread_name("nomt-page-fetch".to_string())
+            .build();
         Self {
             shared,
             store,
