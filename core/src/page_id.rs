@@ -33,7 +33,7 @@
 //! And L(I) = H(I - 1) + 1
 
 use crate::{page::DEPTH, trie::KeyPath};
-use bitvec::{prelude::*, slice::ChunksExact};
+use bitvec::prelude::*;
 use core::ops::{AddAssign, ShlAssign, ShrAssign, SubAssign};
 use ruint::Uint;
 
