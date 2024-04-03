@@ -1,17 +1,17 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use bitvec::prelude::*;
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
-    trie::{LeafData, NodeHasher, ValueHash, TERMINATOR},
+    trie::{NodeHasher, ValueHash, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
 use store::Store;
 use threadpool::ThreadPool;
 
-pub use nomt_core::trie::KeyPath;
-pub use nomt_core::trie::Node;
+pub use nomt_core::trie::{KeyPath, LeafData, Node};
 
 mod cursor;
 mod page_cache;
@@ -41,7 +41,45 @@ struct Shared {
 ///
 /// Expected to be serializable.
 pub struct Witness {
-    _proofs: Vec<(KeyPath, Vec<u8>, PathProof)>,
+    /// Various paths down the trie used as part of this witness.
+    pub path_proofs: Vec<WitnessedPath>,
+}
+
+/// Operations provable by a corresponding witness.
+// TODO: the format of this structure depends heavily on how it'd be used with the path proofs.
+pub struct WitnessedOperations {
+    /// Read operations.
+    pub reads: Vec<WitnessedRead>,
+    /// Write operations.
+    pub writes: Vec<WitnessedWrite>,
+}
+
+/// A path observed in the witness.
+pub struct WitnessedPath {
+    /// Proof of a query path along the trie.
+    pub inner: PathProof,
+    /// The query path itself.
+    pub path: BitVec<u8, Msb0>,
+}
+
+/// A witness of a read value.
+pub struct WitnessedRead {
+    /// The key of the read value.
+    pub key: KeyPath,
+    /// The value itself.
+    pub value: Option<Value>,
+    /// The index of the path in the corresponding witness.
+    pub path_index: usize,
+}
+
+/// A witness of a write operation.
+pub struct WitnessedWrite {
+    /// The key of the written value.
+    pub key: KeyPath,
+    /// The value itelf. `None` means "delete".
+    pub value: Option<Value>,
+    /// The index of the path in the corresponding witness.
+    pub path_index: usize,
 }
 
 /// Specifies the final set of the keys that are read and written during the session.
@@ -49,23 +87,38 @@ pub struct Witness {
 /// The read set is necessary to create the witness, i.e. the set of all the values read during the
 /// session. The write set is necessary to update the key-value store and to provide the witness
 /// with the data necessary to update the trie.
+///
+/// The `LeafData` provided is the preimage of the terminal leaf node encountered when seeking the
+/// given key in the  current revision of the trie. This may be `Some` even when the key in
+/// question does not have a prior value, but will always be `Some` when the key in question
+/// has a prior value.
+///
+/// For example, when seeking key `01011`, there are three possibilities: finding a terminal,
+/// finding a leaf for `01011`, or finding a leaf for another key, such as `01010`. This is
+/// what should be provided.
 pub struct CommitSpec {
-    /// All keys read during any non-discarded execution paths, along with their value. A single
-    /// key may appear only once.
-    pub read_set: Vec<(KeyPath, Option<Value>)>,
-    /// All values written during any non-discarded execution paths. A single key may appear
-    /// only once - even if a key has intermediate values during execution, only the final change
-    /// should be submitted.
-    ///
-    /// The `LeafData` is the preimage of the terminal leaf node encountered when seeking the
-    /// given key in the  current revision of the trie. This may be `Some` even when the key in
-    /// question does not have a prior value, but will always be `Some` when the key in question
-    /// has a prior value.
-    ///
-    /// For example, when seeking key `01011`, there are three possibilities: finding a terminal,
-    /// finding a leaf for `01011`, or finding a leaf for another key, such as `01010`. This is
-    /// what should be provided.
-    pub write_set: Vec<(KeyPath, Option<LeafData>, Option<Value>)>,
+    /// All keys read, written, or both during any non-discarded execution paths.
+    /// A single key may appear only once.
+    pub updates: Vec<(KeyPath, TerminalInfo, KeyReadWrite)>,
+}
+
+/// Information about an encountered terminal during the lookup of some key.
+#[derive(Clone)]
+pub struct TerminalInfo {
+    /// A leaf, if this is a leaf. `None` indicates this is a terminator node.
+    pub leaf: Option<LeafData>,
+    /// The depth
+    pub depth: u8,
+}
+
+/// Whether a key was read, written, or both, along with old and new values.
+pub enum KeyReadWrite {
+    /// The key was read. Contains the read value.
+    Read(Option<Value>),
+    /// The key was written. Contains the written value.
+    Write(Option<Value>),
+    /// The key was both read and written. Contains the previous value and the new value.
+    Both(Option<Value>, Option<Value>),
 }
 
 struct Blake3Hasher;
@@ -140,33 +193,23 @@ impl Nomt {
         let mut cursor = PageCacheCursor::at_root(prev_root, self.shared.page_cache.clone());
 
         let mut ops = vec![];
-        let mut leaf_ops = HashMap::<KeyPath, Option<ValueHash>>::new();
-        for (path, leaf_preimage, value) in proof_spec.write_set {
-            let value_hash = value.as_ref().map(|v| *blake3::hash(v).as_bytes());
-            let prev_value = match leaf_preimage.as_ref() {
-                None => {
-                    // overwriting terminator: straight to ops.
-                    ops.push((path, value_hash));
-                    None
-                }
-                Some(l) if l.key_path == path => {
-                    // overwriting / deleting same leaf: definitively set this as the op.
-                    // will be added at the end.
-                    leaf_ops.insert(l.key_path, value_hash);
-                    Some(l.value_hash)
-                }
-                Some(l) => {
-                    // overwriting other leaf: preserve but don't clobber an explicit op from
-                    // a previous loop iteration.
-                    ops.push((path, value_hash));
-                    leaf_ops.entry(l.key_path).or_insert(Some(l.value_hash));
-                    None
-                }
-            };
+        let mut witness_builder = WitnessBuilder::default();
+        for (path, terminal_info, read_write) in proof_spec.updates {
+            witness_builder.insert(path, terminal_info.clone(), &read_write);
 
-            tx.write_value::<Blake3Hasher>(path, prev_value, value_hash.zip(value));
+            if let KeyReadWrite::Write(value) | KeyReadWrite::Both(_, value) = read_write {
+                let value_hash = value.as_ref().map(|v| *blake3::hash(v).as_bytes());
+                let prev_value = match terminal_info.leaf.as_ref() {
+                    None => None,
+                    Some(l) if l.key_path == path => Some(l.value_hash),
+                    Some(_) => None,
+                };
+                ops.push((path, value_hash));
+                tx.write_value::<Blake3Hasher>(path, prev_value, value_hash.zip(value));
+            }
         }
-        ops.extend(leaf_ops);
+        let (witness, _witnessed, preserved_leaves) = witness_builder.build(&mut cursor);
+        ops.extend(preserved_leaves);
         ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops);
@@ -175,6 +218,104 @@ impl Nomt {
 
         self.shared.page_cache.commit(&mut tx);
         self.shared.store.commit(tx)?;
-        Ok(Witness { _proofs: vec![] })
+        Ok(witness)
     }
+}
+
+#[derive(Default)]
+struct WitnessBuilder {
+    terminals: BTreeMap<BitVec<u8, Msb0>, TerminalOps>,
+}
+
+impl WitnessBuilder {
+    fn insert(&mut self, key_path: KeyPath, terminal: TerminalInfo, read_write: &KeyReadWrite) {
+        let slice = key_path.view_bits::<Msb0>()[..terminal.depth as usize].into();
+        let entry = self.terminals.entry(slice).or_insert_with(|| TerminalOps {
+            leaf: terminal.leaf.clone(),
+            reads: Vec::new(),
+            writes: Vec::new(),
+            preserve: true,
+        });
+
+        if let KeyReadWrite::Read(v) | KeyReadWrite::Both(v, _) = read_write {
+            entry.reads.push((key_path, v.clone()));
+        }
+
+        if let KeyReadWrite::Write(v) | KeyReadWrite::Both(_, v) = read_write {
+            entry.writes.push((key_path, v.clone()));
+            if entry
+                .leaf
+                .as_ref()
+                .map_or(false, |leaf| leaf.key_path == key_path)
+            {
+                entry.preserve = false;
+            }
+        }
+    }
+
+    // builds the witness, the witnessed operations, and returns additional write operations
+    // for leaves which are updated but where the existing value should be preserved.
+    fn build(
+        self,
+        cursor: &mut PageCacheCursor,
+    ) -> (
+        Witness,
+        WitnessedOperations,
+        Vec<(KeyPath, Option<ValueHash>)>,
+    ) {
+        let mut paths = Vec::with_capacity(self.terminals.len());
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+        let mut preserved = Vec::new();
+
+        for (i, (path, terminal)) in self.terminals.into_iter().enumerate() {
+            let (_, siblings) = nomt_core::proof::record_path(cursor, &path[..]);
+
+            let path_proof = PathProof {
+                terminal: terminal.leaf.clone(),
+                siblings,
+            };
+            paths.push(WitnessedPath {
+                inner: path_proof,
+                path,
+            });
+            reads.extend(
+                terminal
+                    .reads
+                    .into_iter()
+                    .map(|(key, value)| WitnessedRead {
+                        key,
+                        value,
+                        path_index: i,
+                    }),
+            );
+            writes.extend(
+                terminal
+                    .writes
+                    .iter()
+                    .cloned()
+                    .map(|(key, value)| WitnessedWrite {
+                        key,
+                        value,
+                        path_index: i,
+                    }),
+            );
+            if let (true, Some(leaf)) = (terminal.preserve, terminal.leaf) {
+                preserved.push((leaf.key_path, Some(leaf.value_hash)));
+            }
+        }
+
+        (
+            Witness { path_proofs: paths },
+            WitnessedOperations { reads, writes },
+            preserved,
+        )
+    }
+}
+
+struct TerminalOps {
+    leaf: Option<LeafData>,
+    reads: Vec<(KeyPath, Option<Value>)>,
+    writes: Vec<(KeyPath, Option<Value>)>,
+    preserve: bool,
 }

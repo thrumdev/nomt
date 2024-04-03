@@ -6,10 +6,6 @@ use crate::trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherE
 use alloc::vec::Vec;
 use bitvec::prelude::*;
 
-/// Sibling nodes recorded while looking up some path, in ascending order by depth.
-#[derive(Debug, Clone)]
-pub struct Siblings(pub Vec<Node>);
-
 /// A proof of some particular path through the trie.
 #[derive(Debug, Clone)]
 pub struct PathProof {
@@ -17,20 +13,20 @@ pub struct PathProof {
     /// leaf.
     pub terminal: Option<LeafData>,
     /// Sibling nodes encountered during lookup, in ascending order by depth.
-    pub siblings: Siblings,
+    pub siblings: Vec<Node>,
 }
 
 impl PathProof {
     /// Verify this path proof.
     ///
     /// Provide the root node and a key path. The key path can be any key that results in the
-    /// lookup of the terminal node.
+    /// lookup of the terminal node and must be at least as long as the siblings vector.
     pub fn verify<H: NodeHasher>(
         &self,
-        key_path: &KeyPath,
+        key_path: &BitSlice<u8, Msb0>,
         root: Node,
     ) -> Result<VerifiedPathProof, PathProofVerificationError> {
-        if self.siblings.0.len() > 256 {
+        if self.siblings.len() > 256 {
             return Err(PathProofVerificationError::TooManySiblings);
         }
 
@@ -39,8 +35,8 @@ impl PathProof {
             Some(leaf_data) => H::hash_leaf(&leaf_data),
         };
 
-        let relevant_path = &key_path.view_bits::<Msb0>()[..self.siblings.0.len()];
-        for (bit, &sibling) in relevant_path.iter().by_vals().rev().zip(&self.siblings.0) {
+        let relevant_path = &key_path[..self.siblings.len()];
+        for (bit, &sibling) in relevant_path.iter().by_vals().rev().zip(&self.siblings) {
             let (left, right) = if bit {
                 (sibling, cur_node)
             } else {
@@ -56,8 +52,7 @@ impl PathProof {
 
         if cur_node == root {
             Ok(VerifiedPathProof {
-                key_path: key_path.clone(),
-                depth: self.siblings.0.len() as _,
+                key_path: relevant_path.into(),
                 terminal: self.terminal.clone(),
             })
         } else {
@@ -91,8 +86,7 @@ pub enum PathProofVerificationError {
 /// either not a leaf or contains a value for a different key.
 #[derive(Clone)]
 pub struct VerifiedPathProof {
-    key_path: KeyPath,
-    depth: u8,
+    key_path: BitVec<u8, Msb0>,
     terminal: Option<LeafData>,
 }
 
@@ -104,7 +98,7 @@ impl VerifiedPathProof {
 
     /// Get the proven path.
     pub fn path(&self) -> &BitSlice<u8, Msb0> {
-        &self.key_path.view_bits()[..self.depth as usize]
+        &self.key_path[..]
     }
 
     /// Check whether this path resolves to the given leaf.
@@ -134,7 +128,7 @@ impl VerifiedPathProof {
 
     fn in_scope(&self, key_path: &KeyPath) -> Result<(), KeyOutOfScope> {
         let this_path = self.path();
-        let other_path = &key_path.view_bits::<Msb0>()[..self.depth as usize];
+        let other_path = &key_path.view_bits::<Msb0>()[..self.key_path.len()];
         if this_path == other_path {
             Ok(())
         } else {
@@ -147,23 +141,24 @@ impl VerifiedPathProof {
 /// cursor's results, so a faulty cursor will lead to a faulty path.
 ///
 /// This returns the sibling nodes and the terminal node encountered when looking up
-/// a key. This is always either a terminator or leaf.
-pub fn record_path(cursor: &mut impl Cursor, key: &KeyPath) -> (Node, Siblings) {
+/// a key.
+pub fn record_path(cursor: &mut impl Cursor, key: &BitSlice<u8, Msb0>) -> (Node, Vec<Node>) {
     let mut siblings = Vec::new();
     let mut terminal = TERMINATOR;
 
     cursor.rewind();
 
-    for bit in key.view_bits::<Msb0>().iter().by_vals() {
+    for bit in key.iter().by_vals() {
+        terminal = cursor.node();
+
         if crate::trie::is_internal(&cursor.node()) {
             cursor.down(bit);
             siblings.push(cursor.peek_sibling());
         } else {
-            terminal = cursor.node();
             break;
         }
     }
 
     let siblings: Vec<_> = siblings.into_iter().rev().collect();
-    (terminal, Siblings(siblings))
+    (terminal, siblings)
 }
