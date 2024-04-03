@@ -142,31 +142,41 @@ pub enum ChildPageIdError {
 
 /// Iterator of PageIds over a KeyPath,
 /// PageIds will be lazily constructed as needed
-pub struct PageIdsIterator<'a> {
-    sextets: ChunksExact<'a, u8, Msb0>,
+pub struct PageIdsIterator {
+    key_path: KeyPath,
+    at: usize,
     page_id: Option<PageId>,
 }
 
-impl<'a> PageIdsIterator<'a> {
+impl PageIdsIterator {
     /// Create a PageIds Iterator over a KeyPath
-    pub fn new(key_path: &'a KeyPath) -> Self {
+    pub fn new(key_path: KeyPath) -> Self {
         Self {
-            // Last bits will not be used as a sextet to identify a page
-            sextets: key_path.view_bits::<Msb0>().chunks_exact(DEPTH),
+            key_path,
+            at: 0,
             page_id: None,
         }
     }
 }
 
-impl<'a> Iterator for PageIdsIterator<'a> {
+impl Iterator for PageIdsIterator {
     type Item = PageId;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // There are 42 sextet in a KeyPath (42 * 6 = 252),
+        // the last bits will not be used as a sextet to identify a page.
+        if self.at >= 42 {
+            // If sextets are finished, then there are no more pages to load
+            return None;
+        }
+
         let new_page_id = match &self.page_id {
             None => Some(ROOT_PAGE_ID),
             Some(prev_page_id) => {
-                // If sextets are finished, then there are no more pages to load
-                let child_index = self.sextets.next()?.load_be::<u8>();
+                let start = self.at * DEPTH;
+                let child_index =
+                    self.key_path.view_bits::<Msb0>()[start..start + DEPTH].load_be::<u8>();
+                self.at += 1;
                 Some(prev_page_id.child_page_id(child_index).expect(
                     "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42",
                 ))
@@ -228,7 +238,7 @@ mod tests {
         page_id_2[31] = 0b10000011; // (0b000001 + 1 << 6) + 0b000010 + 1
         let page_id_2 = PageId::from_bytes(page_id_2).unwrap();
 
-        let mut page_ids = PageIdsIterator::new(&key_path);
+        let mut page_ids = PageIdsIterator::new(key_path);
         assert_eq!(page_ids.next(), Some(page_id_0));
         assert_eq!(page_ids.next(), Some(page_id_1));
         assert_eq!(page_ids.next(), Some(page_id_2));
@@ -247,7 +257,7 @@ mod tests {
         page_id_2[30] = 0b0000001; // (0b00000011 << 6) + 0b111111 + 1 = (0b00000011 + 1) << 6
         let page_id_2 = PageId::from_bytes(page_id_2).unwrap();
 
-        let mut page_ids = PageIdsIterator::new(&key_path);
+        let mut page_ids = PageIdsIterator::new(key_path);
         assert_eq!(page_ids.next(), Some(page_id_0));
         assert_eq!(page_ids.next(), Some(page_id_1));
         assert_eq!(page_ids.next(), Some(page_id_2));
@@ -286,8 +296,8 @@ mod tests {
 
     #[test]
     fn test_page_id_overflow() {
-        let first_page_last_layer = PageIdsIterator::new(&[0u8; 32]).last().unwrap();
-        let last_page_last_layer = PageIdsIterator::new(&[255; 32]).last().unwrap();
+        let first_page_last_layer = PageIdsIterator::new([0u8; 32]).last().unwrap();
+        let last_page_last_layer = PageIdsIterator::new([255; 32]).last().unwrap();
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
             first_page_last_layer.child_page_id(0)

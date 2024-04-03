@@ -62,7 +62,7 @@ impl PageCacheCursor {
         }
 
         let n_pages = self.depth as usize / DEPTH;
-        let page_id = PageIdsIterator::new(&self.path)
+        let page_id = PageIdsIterator::new(self.path)
             .nth(n_pages)
             .expect("all keys with <= 256 bits have pages; qed");
 
@@ -301,7 +301,7 @@ impl PagePrefetcher {
         let rev_page_ids = {
             // Chop the destination key path into the corresponding page IDs and reverse them so
             // that we can `pop`.
-            let mut x = PageIdsIterator::new(&dest).collect::<Vec<_>>();
+            let mut x = PageIdsIterator::new(dest).collect::<Vec<_>>();
             x.reverse();
             x
         };

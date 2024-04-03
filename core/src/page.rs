@@ -218,7 +218,7 @@ impl<'a> crate::cursor::Cursor for PageSetCursor<'a> {
         }
 
         let n_pages = self.depth as usize / DEPTH;
-        let page_id = crate::page_id::PageIdsIterator::new(&self.path)
+        let page_id = crate::page_id::PageIdsIterator::new(self.path)
             .nth(n_pages)
             .expect("all keys with <= 256 bits have pages; qed");
 
