@@ -4,7 +4,11 @@ use crate::{
 };
 use nomt_core::{page::DEPTH, page_id::PageId, trie::Node};
 use parking_lot::Mutex;
-use std::{collections::HashMap, fmt, mem, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt, mem,
+    sync::Arc,
+};
 use threadpool::ThreadPool;
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
@@ -12,40 +16,80 @@ use threadpool::ThreadPool;
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
+struct PageData {
+    data: Option<Vec<u8>>,
+    dirty: bool,
+}
+
+impl PageData {
+    /// Creates a page with the given data.
+    fn pristine_with_data(data: Vec<u8>) -> Self {
+        Self {
+            data: Some(data),
+            dirty: false,
+        }
+    }
+
+    /// Creates an empty page.
+    fn pristine_empty() -> Self {
+        Self {
+            data: None,
+            dirty: false,
+        }
+    }
+
+    /// Read out the node at the given index.
+    fn node(&self, index: usize) -> Node {
+        assert!(index < NODES_PER_PAGE, "index out of bounds");
+
+        if let Some(data) = &self.data {
+            let start = index * 32;
+            let end = start + 32;
+            let mut node = [0; 32];
+            node.copy_from_slice(&data[start..end]);
+            node
+        } else {
+            Node::default()
+        }
+    }
+
+    /// Write the node at the given index.
+    fn set_node(&mut self, index: usize, node: Node) {
+        assert!(index < NODES_PER_PAGE, "index out of bounds");
+        if self.data.is_none() {
+            self.data = Some(vec![0; 4096]);
+        }
+        let start = index * 32;
+        let end = start + 32;
+        // Unwrap: self.data is Some, we just ensured it above.
+        self.data.as_mut().unwrap()[start..end].copy_from_slice(&node);
+        self.dirty = true;
+    }
+}
+
 /// A handle to the page.
 ///
 /// Can be cloned cheaply.
 #[derive(Clone)]
-pub enum Page {
-    /// Represents a page that does not exist in the underlying store.
-    Nil,
-    /// Represents a page that exists in the underlying store.
-    Exists(Arc<Vec<u8>>),
+pub struct Page {
+    inner: Arc<Mutex<PageData>>,
 }
 
 impl Page {
     /// Read out the node at the given index.
     pub fn node(&self, index: usize) -> Node {
-        assert!(index < NODES_PER_PAGE, "index out of bounds");
-        match self {
-            Page::Nil => [0; 32],
-            Page::Exists(data) => {
-                let start = index * 32;
-                let end = start + 32;
-                let mut node = [0; 32];
-                node.copy_from_slice(&data[start..end]);
-                node
-            }
-        }
+        self.inner.lock().node(index)
+    }
+
+    /// Write the node at the given index.
+    pub fn set_node(&self, index: usize, node: Node) {
+        self.inner.lock().set_node(index, node);
     }
 }
 
 impl fmt::Debug for Page {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Page::Nil => write!(f, "Page::Nil"),
-            Page::Exists(_) => write!(f, "Page::Exists"),
-        }
+        f.debug_struct("Page").finish()
     }
 }
 
@@ -73,34 +117,16 @@ impl PagePromise {
 /// A fetch can be in one of the following states:
 /// - Scheduled. The fetch is scheduled for execution but has not started yet.
 /// - Started. The db request has been issued but still waiting for the response.
-/// - Supplanted. The page has been updated (supplanted) before the fetch has completed. The waiters
-///   are notified with the dirty page.
 /// - Completed. The page has been fetched and the waiters are notified with the fetched page.
 struct InflightFetch {
     tx: Option<crossbeam_channel::Sender<Page>>,
     rx: crossbeam_channel::Receiver<Page>,
-    supplanted: Option<Page>,
 }
 
 impl InflightFetch {
     fn new() -> Self {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        Self {
-            tx: Some(tx),
-            rx,
-            supplanted: None,
-        }
-    }
-
-    /// Called when the page is updated before the fetch is completed.
-    ///
-    /// Can be called once. Panics otherwise.
-    fn supplant_and_notify(&mut self, page: Page) {
-        assert!(self.supplanted.is_none());
-        self.supplanted = Some(page.clone());
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(page);
-        }
+        Self { tx: Some(tx), rx }
     }
 
     /// Notifies all the waiting parties that the page has been fetched and destroys this handle.
@@ -112,10 +138,7 @@ impl InflightFetch {
 
     /// Returns the promise that resolves when the page is fetched.
     fn promise(&self) -> PagePromise {
-        match &self.supplanted {
-            Some(page) => PagePromise::Now(page.clone()),
-            None => PagePromise::Later(self.rx.clone()),
-        }
+        PagePromise::Later(self.rx.clone())
     }
 }
 
@@ -132,13 +155,13 @@ pub struct PageCache {
 }
 
 struct Shared {
-    /// The unmodified pages loaded from the store.
+    /// The pages loaded from the store, possibly dirty.
+    cached: HashMap<PageId, Page>,
+    /// The pages that were modified and need to be flushed to the store.
     ///
-    /// This cache must be always coherent with the underlying store. That implies that the updates
-    /// performed to the store must be reflected in the cache.
-    pristine: HashMap<PageId, Page>,
-    /// The pages that were modified, but not yet committed.
-    dirty: HashMap<PageId, Page>,
+    /// The invariant is that the pages in the dirty set are always present in the `cached` map and
+    /// are marked as dirty there.
+    dirty: HashSet<PageId>,
     /// Pages that are currently being fetched from the store.
     inflight: HashMap<PageId, InflightFetch>,
 }
@@ -147,8 +170,8 @@ impl PageCache {
     /// Create a new `PageCache` atop the provided [`Store`].
     pub fn new(store: Store, o: &Options) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
-            pristine: HashMap::new(),
-            dirty: HashMap::new(),
+            cached: HashMap::new(),
+            dirty: HashSet::new(),
             inflight: HashMap::new(),
         }));
         let fetch_tp = threadpool::Builder::new()
@@ -169,12 +192,8 @@ impl PageCache {
     pub fn retrieve(&self, page_id: PageId) -> PagePromise {
         let mut shared = self.shared.lock();
 
-        // We first check in the dirty pages, since that's where we would find the most recent
-        // version of the page. If the page is not present there, we check in the pristine cache.
-        if let Some(page) = shared.dirty.get(&page_id) {
-            return PagePromise::Now(page.clone());
-        }
-        if let Some(page) = shared.pristine.get(&page_id) {
+        // If the page is not present there, we check in the pristine cache.
+        if let Some(page) = shared.cached.get(&page_id) {
             return PagePromise::Now(page.clone());
         }
         // In case none of those are present, we check if there is an inflight fetch for the page.
@@ -191,13 +210,17 @@ impl PageCache {
             move || {
                 let entry = store
                     .load_page(page_id.clone())
-                    .map(Arc::new)
-                    .map_or(Page::Nil, Page::Exists);
+                    .expect("db load failed") // TODO: handle the error
+                    .map_or_else(PageData::pristine_empty, PageData::pristine_with_data);
+                let entry = Page {
+                    inner: Arc::new(Mutex::new(entry)),
+                };
+
                 let mut shared = shared.lock();
                 // Unwrap: the operation was inserted above. It is scheduled for execution only
                 // once. It may removed only in the line below. Therefore, `None` is impossible.
                 let inflight = shared.inflight.remove(&page_id).unwrap();
-                shared.pristine.insert(page_id, entry.clone());
+                shared.cached.insert(page_id, entry.clone());
                 inflight.complete_and_notify(entry);
                 drop(shared);
             }
@@ -206,36 +229,27 @@ impl PageCache {
         promise
     }
 
+    /// Expected to be called when the page was modified.
+    pub fn mark_dirty(&self, page_id: PageId) {
+        self.shared.lock().dirty.insert(page_id);
+    }
+
     /// Flushes all the dirty pages into the underlying store.
     ///
     /// After the commit, all the dirty pages are cleared.
     pub fn commit(&self, tx: &mut Transaction) {
         let mut shared = self.shared.lock();
-        for (page_id, page) in mem::take(&mut shared.dirty) {
-            shared.pristine.insert(page_id.clone(), page.clone());
-            let page_data = match page {
-                Page::Nil => None,
-                Page::Exists(data) => Some(data),
-            };
-            tx.write_page(page_id, page_data.as_deref());
-            // It doesn't seem that the page can be in the inflight fetches at this point.
-            //
-            // If the page ended up in the dirty set, then it must have been supplanted in case
-            // there was an inflight fetch for that page. After it was supplanted, the `retrieve`
-            // function would not initiate another fetch for the same page.
-            //
-            // Therefore, we don't need to divert the inflight fetches here.
-        }
-    }
-
-    /// Replaces the page in the cache with the given page.
-    ///
-    /// The inflight fetch for the given page if any is resolved with the given page.
-    pub fn supplant(&self, page_id: PageId, page: Page) {
-        let mut shared = self.shared.lock();
-        shared.dirty.insert(page_id, page.clone());
-        if let Some(inflight) = shared.inflight.get_mut(&page_id) {
-            inflight.supplant_and_notify(page);
+        for page_id in mem::take(&mut shared.dirty) {
+            // Unwrap: the invariant is that all items from `dirty` are present in the `cached` and
+            // thus cannot be `None`.
+            let page = shared
+                .cached
+                .get_mut(&page_id)
+                .expect("a dirty page is not in the cache");
+            let mut page_data = page.inner.lock();
+            assert!(page_data.dirty, "dirty page is not marked as dirty");
+            page_data.dirty = false;
+            tx.write_page(page_id, page_data.data.as_ref());
         }
     }
 }

@@ -294,7 +294,7 @@ impl<'a> crate::cursor::Cursor for PageSetCursor<'a> {
     }
 
     fn modify(&mut self, node: Node) {
-        // TODO
+        let _ = node;
     }
 }
 
