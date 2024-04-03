@@ -287,8 +287,8 @@ fn node_index(page_path: &BitSlice<u8, Msb0>) -> usize {
 }
 
 struct PagePrefetcher {
-    /// The page IDs of the destination key path in reverse order.
-    rev_page_ids: Vec<PageId>,
+    /// Iterator over page IDs of the destination key path
+    page_ids_iter: PageIdsIterator,
     /// The promises of the pages that are currently being fetched. The promises are laid out in
     /// such a way, that [`Vec::pop`] would return the next page to be processed.
     ///
@@ -298,15 +298,8 @@ struct PagePrefetcher {
 
 impl PagePrefetcher {
     fn new(dest: KeyPath) -> Self {
-        let rev_page_ids = {
-            // Chop the destination key path into the corresponding page IDs and reverse them so
-            // that we can `pop`.
-            let mut x = PageIdsIterator::new(dest).collect::<Vec<_>>();
-            x.reverse();
-            x
-        };
         Self {
-            rev_page_ids,
+            page_ids_iter: PageIdsIterator::new(dest),
             page_promises: Vec::new(),
         }
     }
@@ -315,16 +308,19 @@ impl PagePrefetcher {
         if self.page_promises.is_empty() {
             // The prefetch hasn't started yet or we consumed all the promises. We need to initiate
             // a new prefetch.
-            if self.rev_page_ids.is_empty() {
-                // No pages left to prefetch.
-                return None;
-            }
-            let n = cmp::min(PREFETCH_N, self.rev_page_ids.len());
-            for _ in 0..n {
-                // Unwrap: pop must succeed since the n is clamped to the length of the vector.
-                let page_id = self.rev_page_ids.pop().unwrap();
+            for i in 0..PREFETCH_N {
+                let page_id = match self.page_ids_iter.next() {
+                    Some(page) => page,
+                    // if page_ids_iter returns none and we are looking for the
+                    // first PageId of the new batch of pages then there are no pages left to prefetch
+                    None if i == 0 => return None,
+                    // if it returns none but it is not the first one
+                    // then it means it is the last batch
+                    None => break,
+                };
                 self.page_promises.push(page_cache.retrieve(page_id));
             }
+
             self.page_promises.reverse();
         }
         self.page_promises.pop()
