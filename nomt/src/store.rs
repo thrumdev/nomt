@@ -64,10 +64,10 @@ impl Store {
     }
 
     /// Loads the given page.
-    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Vec<u8>> {
+    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
         let value = self.shared.db.get_cf(&cf, page_id.to_bytes().as_ref())?;
-        Ok(value.unwrap())
+        Ok(value)
     }
 
     /// Create a new transaction to be applied against this database.

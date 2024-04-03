@@ -180,6 +180,21 @@ impl PageCacheCursor {
         }
     }
 
+    /// Modify the node at the current location of the cursor.
+    pub fn modify(&mut self, node: Node) {
+        match self.cached_page {
+            None => {
+                self.root = node;
+            }
+            Some((page_id, ref mut page)) => {
+                let path = last_page_path(&self.path, self.depth);
+                let index = node_index(path);
+                page.set_node(index, node);
+                self.pages.mark_dirty(page_id);
+            }
+        }
+    }
+
     /// Peek at the sibling node of the current position without moving the cursor. At the root,
     /// gives the terminator.
     pub fn peek_sibling(&self) -> Node {
@@ -231,7 +246,7 @@ impl nomt_core::Cursor for PageCacheCursor {
     }
 
     fn modify(&mut self, node: Node) {
-        // TODO
+        PageCacheCursor::modify(self, node)
     }
 }
 
