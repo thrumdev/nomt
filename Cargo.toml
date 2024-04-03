@@ -11,3 +11,6 @@ homepage = "https://thrum.dev"
 repository = "https://github.com/thrumdev/nomt"
 edition = "2021"
 license = "MIT/Apache-2.0"
+
+[profile.release]
+debug = "full"
