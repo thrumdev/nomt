@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
-    trie::{Node, NodeHasher, TERMINATOR},
+    trie::{NodeHasher, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -11,6 +11,7 @@ use store::Store;
 use threadpool::ThreadPool;
 
 pub use nomt_core::trie::KeyPath;
+pub use nomt_core::trie::Node;
 
 mod cursor;
 mod page_cache;
