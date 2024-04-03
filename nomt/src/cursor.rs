@@ -300,7 +300,7 @@ impl PagePrefetcher {
     fn new(dest: KeyPath) -> Self {
         Self {
             page_ids_iter: PageIdsIterator::new(dest),
-            page_promises: Vec::new(),
+            page_promises: Vec::with_capacity(PREFETCH_N),
         }
     }
 
@@ -308,13 +308,13 @@ impl PagePrefetcher {
         if self.page_promises.is_empty() {
             // The prefetch hasn't started yet or we consumed all the promises. We need to initiate
             // a new prefetch.
-            for i in 0..PREFETCH_N {
+            for _ in 0..PREFETCH_N {
                 let page_id = match self.page_ids_iter.next() {
                     Some(page) => page,
-                    // if page_ids_iter returns none and we are looking for the
-                    // first PageId of the new batch of pages then there are no pages left to prefetch
-                    None if i == 0 => return None,
-                    // if it returns none but it is not the first one
+                    // If page_ids_iter returns None and no other PagePromise
+                    // was added before, then there are no pages left to prefetch
+                    None if self.page_promises.is_empty() => return None,
+                    // If it returns none but in page_promises there is something,
                     // then it means it is the last batch
                     None => break,
                 };
