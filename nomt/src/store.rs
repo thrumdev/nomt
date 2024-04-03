@@ -2,12 +2,13 @@
 
 use nomt_core::{
     page_id::PageId,
-    trie::{KeyPath, Node, TERMINATOR},
+    trie::{KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
 };
 use rocksdb::{ColumnFamilyDescriptor, WriteBatch, DB};
 use std::sync::Arc;
 
 static FLAT_KV_CF: &str = "flat_kv";
+static LEAF_CF: &str = "leaves";
 static PAGES_CF: &str = "pages";
 static METADATA_CF: &str = "metadata";
 
@@ -63,6 +64,17 @@ impl Store {
         Ok(value)
     }
 
+    /// Load the preimage of a leaf, given its hash.
+    pub fn load_leaf(&self, hash: Node) -> anyhow::Result<Option<LeafData>> {
+        let cf = self.shared.db.cf_handle(LEAF_CF).unwrap();
+        let value = self.shared.db.get_cf(&cf, hash.as_ref())?;
+        match value.map(|b| LeafData::decode(&b[..])) {
+            None => Ok(None),
+            Some(None) => Err(anyhow::anyhow!("invalid leaf preimage length")),
+            Some(Some(value)) => Ok(Some(value)),
+        }
+    }
+
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
@@ -95,13 +107,42 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Write a value to flat storage as part of the atomic batch.
-    /// Any previous value is overwritten. `None` means delete.
-    pub fn write_value(&mut self, path: KeyPath, value: Option<Vec<u8>>) {
-        let cf = self.shared.db.cf_handle(FLAT_KV_CF).unwrap();
+    /// Write a value to flat storage as well as its current leaf node representation
+    /// as part of the atomic batch. Provide the previous value's hash to clean up any previous leaf
+    /// node.
+    pub fn write_value<H: NodeHasher>(
+        &mut self,
+        path: KeyPath,
+        prev_value: Option<ValueHash>,
+        value: Option<(ValueHash, Vec<u8>)>,
+    ) {
+        if value.as_ref().map(|(v, _)| v) == prev_value.as_ref() {
+            return;
+        }
+
+        let flat_cf = self.shared.db.cf_handle(FLAT_KV_CF).unwrap();
+        let leaf_cf = self.shared.db.cf_handle(LEAF_CF).unwrap();
+
+        // Clears the previous leaf.
+        if let Some(prev_value) = prev_value {
+            let prev_hash = H::hash_leaf(&LeafData {
+                key_path: path,
+                value_hash: prev_value,
+            });
+            self.batch.delete_cf(&leaf_cf, prev_hash.as_ref());
+        }
+
         match value {
-            None => self.batch.delete_cf(&cf, path.as_ref()),
-            Some(value) => self.batch.put_cf(&cf, path.as_ref(), value),
+            None => self.batch.delete_cf(&flat_cf, path.as_ref()),
+            Some((value_hash, value)) => {
+                self.batch.put_cf(&flat_cf, path.as_ref(), value);
+                let leaf_data = LeafData {
+                    key_path: path,
+                    value_hash,
+                };
+                let new_hash = H::hash_leaf(&leaf_data);
+                self.batch.put_cf(&leaf_cf, new_hash, leaf_data.encode());
+            }
         }
     }
 

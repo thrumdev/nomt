@@ -116,6 +116,21 @@ impl LeafData {
         node[32..64].copy_from_slice(&self.value_hash[..]);
         node
     }
+
+    /// Decode the leaf node. Fails if the provided slice is not 64 bytes.
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() != 64 {
+            None
+        } else {
+            let mut leaf = LeafData {
+                key_path: Default::default(),
+                value_hash: Default::default(),
+            };
+            leaf.key_path.copy_from_slice(&buf[..32]);
+            leaf.value_hash.copy_from_slice(&buf[32..]);
+            Some(leaf)
+        }
+    }
 }
 
 /// A trie node hash function specialized for 64 bytes of data.
