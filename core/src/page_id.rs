@@ -175,6 +175,11 @@ impl<'a> Iterator for PageIdsIterator<'a> {
         self.page_id = new_page_id.clone();
         new_page_id
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining_sextets = self.sextets.len();
+        (remaining_sextets, Some(remaining_sextets))
+    }
 }
 
 #[cfg(test)]
