@@ -3,9 +3,10 @@ use std::{path::PathBuf, sync::Arc};
 use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
-    trie::{Node, TERMINATOR},
+    trie::{Node, NodeHasher, TERMINATOR},
 };
 use page_cache::PageCache;
+use parking_lot::Mutex;
 use store::Store;
 use threadpool::ThreadPool;
 
@@ -28,7 +29,7 @@ pub struct Options {
 
 struct Shared {
     /// The current root of the trie.
-    root: Node,
+    root: Mutex<Node>,
     /// The handle to the page cache.
     page_cache: PageCache,
     store: Store,
@@ -57,6 +58,14 @@ pub struct CommitSpec {
     pub write_set: Vec<(KeyPath, Option<Value>)>,
 }
 
+struct Blake3Hasher;
+
+impl NodeHasher for Blake3Hasher {
+    fn hash_node(data: &nomt_core::trie::NodePreimage) -> [u8; 32] {
+        blake3::hash(data).into()
+    }
+}
+
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt {
     shared: Arc<Shared>,
@@ -70,7 +79,7 @@ impl Nomt {
         let root = store.load_root()?;
         Ok(Self {
             shared: Arc::new(Shared {
-                root,
+                root: Mutex::new(root),
                 page_cache,
                 store,
                 warmup_tp: threadpool::Builder::new()
@@ -82,13 +91,13 @@ impl Nomt {
     }
 
     /// Returns the current root node of the trie.
-    pub fn root(&self) -> &Node {
-        &self.shared.root
+    pub fn root(&self) -> Node {
+        self.shared.root.lock().clone()
     }
 
     /// Returns true if the trie has not been modified after the creation.
     pub fn is_empty(&self) -> bool {
-        self.shared.root == TERMINATOR
+        self.root() == TERMINATOR
     }
 
     /// Synchronously read the value stored at the given key. Fails only if I/O fails.
@@ -107,7 +116,7 @@ impl Nomt {
 
     fn warmup(&self, path: KeyPath) {
         let page_cache = self.shared.page_cache.clone();
-        let root = self.shared.root;
+        let root = self.shared.root.lock().clone();
         let f = move || {
             PageCacheCursor::at_root(root, page_cache).seek(path);
         };
@@ -116,13 +125,25 @@ impl Nomt {
 
     /// Commit the transaction and create a proof for the given read and write sets.
     pub fn commit_and_prove(&self, proof_spec: CommitSpec) -> anyhow::Result<Witness> {
+        let prev_root = self.shared.root.lock().clone();
         let mut tx = self.shared.store.new_tx();
+        let mut cursor = PageCacheCursor::at_root(prev_root, self.shared.page_cache.clone());
+
+        let mut ops = vec![];
         for (path, value) in proof_spec.write_set {
-            tx.write_value(path, value)
+            let value_hash = value.as_ref().map(|v| *blake3::hash(v).as_bytes());
+            ops.push((path, value_hash));
+            tx.write_value(path, value);
         }
-        // TODO: update the root in self.
+        // TODO: ensure non-deletion.
+        ops.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops);
+        cursor.rewind();
+        *self.shared.root.lock() = cursor.node();
+
         self.shared.page_cache.commit(&mut tx);
         self.shared.store.commit(tx)?;
-        todo!()
+        Ok(Witness { _proofs: vec![] })
     }
 }
