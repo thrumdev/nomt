@@ -1,9 +1,9 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
-    trie::{NodeHasher, TERMINATOR},
+    trie::{LeafData, NodeHasher, ValueHash, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -56,7 +56,16 @@ pub struct CommitSpec {
     /// All values written during any non-discarded execution paths. A single key may appear
     /// only once - even if a key has intermediate values during execution, only the final change
     /// should be submitted.
-    pub write_set: Vec<(KeyPath, Option<Value>)>,
+    ///
+    /// The `LeafData` is the preimage of the terminal leaf node encountered when seeking the
+    /// given key in the  current revision of the trie. This may be `Some` even when the key in
+    /// question does not have a prior value, but will always be `Some` when the key in question
+    /// has a prior value.
+    ///
+    /// For example, when seeking key `01011`, there are three possibilities: finding a terminal,
+    /// finding a leaf for `01011`, or finding a leaf for another key, such as `01010`. This is
+    /// what should be provided.
+    pub write_set: Vec<(KeyPath, Option<LeafData>, Option<Value>)>,
 }
 
 struct Blake3Hasher;
@@ -131,12 +140,33 @@ impl Nomt {
         let mut cursor = PageCacheCursor::at_root(prev_root, self.shared.page_cache.clone());
 
         let mut ops = vec![];
-        for (path, value) in proof_spec.write_set {
+        let mut leaf_ops = HashMap::<KeyPath, Option<ValueHash>>::new();
+        for (path, leaf_preimage, value) in proof_spec.write_set {
             let value_hash = value.as_ref().map(|v| *blake3::hash(v).as_bytes());
-            ops.push((path, value_hash));
-            tx.write_value(path, value);
+            let prev_value = match leaf_preimage.as_ref() {
+                None => {
+                    // overwriting terminator: straight to ops.
+                    ops.push((path, value_hash));
+                    None
+                }
+                Some(l) if l.key_path == path => {
+                    // overwriting / deleting same leaf: definitively set this as the op.
+                    // will be added at the end.
+                    leaf_ops.insert(l.key_path, value_hash);
+                    Some(l.value_hash)
+                }
+                Some(l) => {
+                    // overwriting other leaf: preserve but don't clobber an explicit op from
+                    // a previous loop iteration.
+                    ops.push((path, value_hash));
+                    leaf_ops.entry(l.key_path).or_insert(Some(l.value_hash));
+                    None
+                }
+            };
+
+            tx.write_value::<Blake3Hasher>(path, prev_value, value_hash.zip(value));
         }
-        // TODO: ensure non-deletion.
+        ops.extend(leaf_ops);
         ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops);
