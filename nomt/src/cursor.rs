@@ -3,7 +3,6 @@ use std::cmp;
 use crate::page_cache::{Page, PageCache, PagePromise};
 use bitvec::prelude::*;
 use nomt_core::{
-    cursor::Cursor as CursorApi,
     page::DEPTH,
     page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node},
@@ -194,7 +193,7 @@ impl PageCacheCursor {
     }
 }
 
-impl CursorApi for PageCacheCursor {
+impl nomt_core::Cursor for PageCacheCursor {
     fn position(&self) -> (KeyPath, u8) {
         PageCacheCursor::position(self)
     }
