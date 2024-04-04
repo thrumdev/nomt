@@ -32,7 +32,7 @@
 //! result. The last terminal finishes hashing to the root. We refer to this as partial compaction.
 
 use crate::cursor::Cursor;
-use crate::trie::{self, KeyPath, LeafData, NodeHasher, NodeHasherExt, NodeKind, ValueHash};
+use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, NodeKind, ValueHash};
 
 use bitvec::prelude::*;
 
@@ -95,7 +95,7 @@ pub fn update<H: NodeHasher>(
 
         let batch = &ops[batch_start..next_batch_start];
 
-        replace_subtrie::<H>(cursor, batch, leaf_data);
+        replace_subtrie::<H>(cursor, leaf_data, batch);
         compact_and_hash::<H>(cursor, compact_layers);
 
         batch_start = next_batch_start;
@@ -116,13 +116,57 @@ fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
     a.iter().zip(b.iter()).take_while(|(a, b)| a == b).count()
 }
 
+/// Creates an iterator of all provided operations, with the leaf value spliced in if its key
+/// does not appear in the original ops list. Then filters out all `None`s.
+fn leaf_ops_spliced(
+    leaf: Option<LeafData>,
+    ops: &[(KeyPath, Option<ValueHash>)],
+) -> impl Iterator<Item = (KeyPath, ValueHash)> + '_ {
+    let splice_index = leaf
+        .as_ref()
+        .and_then(|leaf| ops.binary_search_by_key(&leaf.key_path, |x| x.0).err());
+    let preserve_value = splice_index
+        .zip(leaf)
+        .map(|(_, leaf)| (leaf.key_path, Some(leaf.value_hash)));
+    let splice_index = splice_index.unwrap_or(0);
+
+    // splice: before / item / after
+    // skip deleted.
+    ops[..splice_index]
+        .into_iter()
+        .cloned()
+        .chain(preserve_value)
+        .chain(ops[splice_index..].into_iter().cloned())
+        .filter_map(|(k, o)| o.map(move |value| (k, value)))
+}
+
 // replaces a terminal node with a new sub-trie in place. `None` keys are ignored.
 // cursor is returned at the same point it started at.
 fn replace_subtrie<H: NodeHasher>(
     cursor: &mut impl Cursor,
-    ops: &[(KeyPath, Option<ValueHash>)],
     leaf_data: Option<LeafData>,
+    ops: &[(KeyPath, Option<ValueHash>)],
 ) {
+    let start_pos = cursor.position();
+    let skip = start_pos.1 as usize;
+
+    build_sub_trie::<H>(skip, leaf_data, ops, |key, depth, node| {
+        cursor.jump(key, depth);
+        cursor.modify(node);
+    });
+}
+
+// Build a sub-trie out of the given prior terminal and operations. Operations should all start
+// with the same prefix of len `skip` and be ordered lexicographically.
+//
+// Provide a visitor which will be called for each computed node of the sub-trie.
+// The root is always visited at the end.
+pub fn build_sub_trie<H: NodeHasher>(
+    skip: usize,
+    leaf: Option<LeafData>,
+    ops: &[(KeyPath, Option<ValueHash>)],
+    mut visit: impl FnMut(KeyPath, u8, Node),
+) -> Node {
     // we build a compact addressable sub-trie in-place based on the given set of ordered keys,
     // ignoring deletions as they are implicit in a fresh sub-trie.
     //
@@ -151,33 +195,15 @@ fn replace_subtrie<H: NodeHasher>(
     // If the list has a single item, the sub-trie is a single leaf.
     // And if the list is empty, the sub-trie is a terminator.
 
-    // If there was previously a leaf at this terminal node, and the leaf was not explicitly
-    // overwritten or deleted, splice it in to the set of operations.
-    let mut leaf_ops = {
-        let splice_index = leaf_data
-            .as_ref()
-            .and_then(|leaf| ops.binary_search_by_key(&leaf.key_path, |x| x.0).err());
-        let preserve_value = splice_index
-            .zip(leaf_data)
-            .map(|(_, leaf)| (leaf.key_path, Some(leaf.value_hash)));
-        let splice_index = splice_index.unwrap_or(0);
+    // A left-frontier: all modified nodes are to the left of
+    // `b`, so this stores their layers.
+    let mut pending_siblings: Vec<(Node, usize)> = Vec::new();
 
-        // splice: before / item / after
-        // skip deleted.
-        ops[..splice_index]
-            .into_iter()
-            .cloned()
-            .chain(preserve_value)
-            .chain(ops[splice_index..].into_iter().cloned())
-            .filter_map(|(k, o)| o.map(move |value| (k, value)))
-    };
+    let mut leaf_ops = crate::update::leaf_ops_spliced(leaf.clone(), ops);
 
     let mut a = None;
     let mut b = leaf_ops.next();
     let mut c = leaf_ops.next();
-
-    let start_pos = cursor.position();
-    let skip = start_pos.1 as usize;
 
     let make_leaf = |(k, value)| {
         H::hash_leaf(&trie::LeafData {
@@ -190,10 +216,6 @@ fn replace_subtrie<H: NodeHasher>(
         let y = &k2.view_bits::<Msb0>()[skip..];
         shared_bits(x, y)
     };
-
-    // Start by writing the TERMINATOR node at the root of the subtrie, deleting whatever was
-    // there before.
-    cursor.modify(trie::TERMINATOR);
 
     while let Some((this_key, this_val)) = b {
         let n1 = a.as_ref().map(|(k, _)| common_after_prefix(k, &this_key));
@@ -219,23 +241,51 @@ fn replace_subtrie<H: NodeHasher>(
             }
         };
 
-        // TODO: in this context, any location below `this_key[..skip]` is provably empty.
-        // we'd want to avoid I/O in such cases and just create new nodes in memory.
-        // the current API doesn't allow that. we need a way to signal "trust me, there is nothing
-        // here".
-        cursor.jump(this_key, (skip + depth_after_skip) as u8);
+        let mut layer = depth_after_skip;
+        let mut last_node = leaf;
+        for bit in this_key.view_bits::<Msb0>()[..depth_after_skip]
+            .iter()
+            .by_vals()
+            .rev()
+            .take(hash_up_layers)
+        {
+            layer -= 1;
+            let sibling = if pending_siblings.last().map_or(false, |l| l.1 == layer) {
+                // unwrap: just checked
+                pending_siblings.pop().unwrap().0
+            } else {
+                trie::TERMINATOR
+            };
 
-        cursor.modify(leaf);
-        // note: compaction should never happen here.
-        compact_and_hash::<H>(cursor, hash_up_layers);
+            let node_data = if bit {
+                trie::InternalData {
+                    left: sibling,
+                    right: last_node,
+                }
+            } else {
+                trie::InternalData {
+                    left: last_node,
+                    right: sibling,
+                }
+            };
+            last_node = H::hash_internal(&node_data);
+            visit(this_key, layer as u8, last_node);
+        }
+        pending_siblings.push((last_node, layer));
 
         a = Some((this_key, this_val));
         b = c;
         c = leaf_ops.next();
     }
 
-    // jump the cursor back to the starting position.
-    cursor.jump(start_pos.0, start_pos.1);
+    let new_root = pending_siblings
+        .pop()
+        .map(|n| n.0)
+        .unwrap_or(trie::TERMINATOR);
+    if let Some(leaf) = leaf {
+        visit(leaf.key_path, skip as u8, new_root);
+    }
+    new_root
 }
 
 fn compact_and_hash<H: NodeHasher>(cursor: &mut impl Cursor, layers: usize) {
