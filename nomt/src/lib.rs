@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
-    trie::{NodeHasher, ValueHash, TERMINATOR},
+    trie::{NodeHasher, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -208,11 +208,10 @@ impl Nomt {
                 tx.write_value::<Blake3Hasher>(path, prev_value, value_hash.zip(value));
             }
         }
-        let (witness, _witnessed, preserved_leaves) = witness_builder.build(&mut cursor);
-        ops.extend(preserved_leaves);
+        let (witness, _witnessed, visited_leaves) = witness_builder.build(&mut cursor);
         ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-        nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops);
+        nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_leaves);
         cursor.rewind();
         *self.shared.root.lock() = cursor.node();
 
@@ -255,18 +254,11 @@ impl WitnessBuilder {
 
     // builds the witness, the witnessed operations, and returns additional write operations
     // for leaves which are updated but where the existing value should be preserved.
-    fn build(
-        self,
-        cursor: &mut PageCacheCursor,
-    ) -> (
-        Witness,
-        WitnessedOperations,
-        Vec<(KeyPath, Option<ValueHash>)>,
-    ) {
+    fn build(self, cursor: &mut PageCacheCursor) -> (Witness, WitnessedOperations, Vec<LeafData>) {
         let mut paths = Vec::with_capacity(self.terminals.len());
         let mut reads = Vec::new();
         let mut writes = Vec::new();
-        let mut preserved = Vec::new();
+        let mut visited_leaves = Vec::new();
 
         for (i, (path, terminal)) in self.terminals.into_iter().enumerate() {
             let (_, siblings) = nomt_core::proof::record_path(cursor, &path[..]);
@@ -300,15 +292,15 @@ impl WitnessBuilder {
                         path_index: i,
                     }),
             );
-            if let (true, Some(leaf)) = (terminal.preserve, terminal.leaf) {
-                preserved.push((leaf.key_path, Some(leaf.value_hash)));
+            if let Some(leaf) = terminal.leaf {
+                visited_leaves.push(leaf)
             }
         }
 
         (
             Witness { path_proofs: paths },
             WitnessedOperations { reads, writes },
-            preserved,
+            visited_leaves,
         )
     }
 }
