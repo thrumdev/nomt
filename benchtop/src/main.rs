@@ -84,7 +84,7 @@ impl Timer {
     fn new(name: &'static str) -> Self {
         Self {
             name,
-            h: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 1_000_000, 3).unwrap(),
+            h: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 1000000000, 3).unwrap(),
             ops: 0,
         }
     }
@@ -97,7 +97,7 @@ impl Timer {
         }
         impl Drop for Record<'_> {
             fn drop(&mut self) {
-                let elapsed = self.start.elapsed().as_micros() as u64;
+                let elapsed = self.start.elapsed().as_nanos() as u64;
                 self.h.record(elapsed).unwrap();
                 *self.ops += 1;
             }
