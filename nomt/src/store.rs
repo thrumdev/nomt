@@ -32,6 +32,7 @@ impl Store {
 
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(FLAT_KV_CF, open_opts.clone()),
+            ColumnFamilyDescriptor::new(LEAF_CF, open_opts.clone()),
             ColumnFamilyDescriptor::new(PAGES_CF, open_opts.clone()),
             ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
         ];
