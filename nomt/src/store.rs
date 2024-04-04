@@ -32,6 +32,7 @@ impl Store {
 
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(FLAT_KV_CF, open_opts.clone()),
+            ColumnFamilyDescriptor::new(LEAF_CF, open_opts.clone()),
             ColumnFamilyDescriptor::new(PAGES_CF, open_opts.clone()),
             ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
         ];
@@ -114,7 +115,7 @@ impl Transaction {
         &mut self,
         path: KeyPath,
         prev_value: Option<ValueHash>,
-        value: Option<(ValueHash, Vec<u8>)>,
+        value: Option<(ValueHash, &[u8])>,
     ) {
         if value.as_ref().map(|(v, _)| v) == prev_value.as_ref() {
             return;
