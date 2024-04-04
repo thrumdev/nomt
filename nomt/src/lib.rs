@@ -1,5 +1,12 @@
 use bitvec::prelude::*;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use fxhash::FxHashMap;
+use std::{
+    collections::{hash_map::Entry, BTreeMap},
+    mem,
+    path::PathBuf,
+    rc::Rc,
+    sync::{atomic::AtomicUsize, Arc},
+};
 
 use cursor::PageCacheCursor;
 use nomt_core::{
@@ -17,7 +24,7 @@ mod cursor;
 mod page_cache;
 mod store;
 
-pub type Value = Vec<u8>;
+pub type Value = Rc<Vec<u8>>;
 
 pub struct Options {
     /// The path to the directory where the trie is stored.
@@ -30,11 +37,7 @@ pub struct Options {
 
 struct Shared {
     /// The current root of the trie.
-    root: Mutex<Node>,
-    /// The handle to the page cache.
-    page_cache: PageCache,
-    store: Store,
-    warmup_tp: ThreadPool,
+    root: Node,
 }
 
 /// A witness that can be used to prove the correctness of state trie retrievals and updates.
@@ -82,29 +85,9 @@ pub struct WitnessedWrite {
     pub path_index: usize,
 }
 
-/// Specifies the final set of the keys that are read and written during the session.
-///
-/// The read set is necessary to create the witness, i.e. the set of all the values read during the
-/// session. The write set is necessary to update the key-value store and to provide the witness
-/// with the data necessary to update the trie.
-///
-/// The `LeafData` provided is the preimage of the terminal leaf node encountered when seeking the
-/// given key in the  current revision of the trie. This may be `Some` even when the key in
-/// question does not have a prior value, but will always be `Some` when the key in question
-/// has a prior value.
-///
-/// For example, when seeking key `01011`, there are three possibilities: finding a terminal,
-/// finding a leaf for `01011`, or finding a leaf for another key, such as `01010`. This is
-/// what should be provided.
-pub struct CommitSpec {
-    /// All keys read, written, or both during any non-discarded execution paths.
-    /// A single key may appear only once.
-    pub updates: Vec<(KeyPath, TerminalInfo, KeyReadWrite)>,
-}
-
 /// Information about an encountered terminal during the lookup of some key.
 #[derive(Clone)]
-pub struct TerminalInfo {
+struct TerminalInfo {
     /// A leaf, if this is a leaf. `None` indicates this is a terminator node.
     pub leaf: Option<LeafData>,
     /// The depth
@@ -112,13 +95,37 @@ pub struct TerminalInfo {
 }
 
 /// Whether a key was read, written, or both, along with old and new values.
-pub enum KeyReadWrite {
+enum KeyReadWrite {
     /// The key was read. Contains the read value.
     Read(Option<Value>),
     /// The key was written. Contains the written value.
     Write(Option<Value>),
     /// The key was both read and written. Contains the previous value and the new value.
-    Both(Option<Value>, Option<Value>),
+    ReadThenWrite(Option<Value>, Option<Value>),
+}
+
+impl KeyReadWrite {
+    fn last_value(&self) -> Option<&Value> {
+        match self {
+            KeyReadWrite::Read(v) | KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) => {
+                v.as_ref()
+            }
+        }
+    }
+
+    fn write(&mut self, new_value: Option<Value>) {
+        match *self {
+            KeyReadWrite::Read(ref mut value) => {
+                *self = KeyReadWrite::ReadThenWrite(mem::take(value), new_value);
+            }
+            KeyReadWrite::Write(ref mut value) => {
+                *value = new_value;
+            }
+            KeyReadWrite::ReadThenWrite(_, ref mut value) => {
+                *value = new_value;
+            }
+        }
+    }
 }
 
 struct Blake3Hasher;
@@ -131,7 +138,13 @@ impl NodeHasher for Blake3Hasher {
 
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt {
-    shared: Arc<Shared>,
+    /// The handle to the page cache.
+    page_cache: PageCache,
+    store: Store,
+    warmup_tp: ThreadPool,
+    shared: Arc<Mutex<Shared>>,
+    /// The number of active sessions. Expected to be either 0 or 1.
+    session_cnt: AtomicUsize,
 }
 
 impl Nomt {
@@ -141,21 +154,20 @@ impl Nomt {
         let page_cache = PageCache::new(store.clone(), &o);
         let root = store.load_root()?;
         Ok(Self {
-            shared: Arc::new(Shared {
-                root: Mutex::new(root),
-                page_cache,
-                store,
-                warmup_tp: threadpool::Builder::new()
-                    .num_threads(o.fetch_concurrency)
-                    .thread_name("nomt-warmup".to_string())
-                    .build(),
-            }),
+            page_cache,
+            store,
+            warmup_tp: threadpool::Builder::new()
+                .num_threads(o.fetch_concurrency)
+                .thread_name("nomt-warmup".to_string())
+                .build(),
+            shared: Arc::new(Mutex::new(Shared { root })),
+            session_cnt: AtomicUsize::new(0),
         })
     }
 
-    /// Returns the current root node of the trie.
+    /// Returns a recent root of the trie.
     pub fn root(&self) -> Node {
-        self.shared.root.lock().clone()
+        self.shared.lock().root.clone()
     }
 
     /// Returns true if the trie has not been modified after the creation.
@@ -163,41 +175,57 @@ impl Nomt {
         self.root() == TERMINATOR
     }
 
-    /// Synchronously read the value stored at the given key. Fails only if I/O fails.
-    pub fn read_slot(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
-        self.warmup(path);
-        self.shared.store.load_value(path)
+    /// Creates a new [`Session`] object, that serves a purpose of capturing the reads and writes
+    /// performed by the application, updating the trie and creating a [`Witness`], allowing to
+    /// re-execute the same operations without having access to the full trie.
+    /// 
+    /// Only a single session could be created at a time.
+    pub fn begin_session(&self) -> Session {
+        let prev = self.session_cnt.swap(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(prev, 0, "only one session could be active at a time");
+        Session {
+            prev_root: self.root(),
+            page_cache: self.page_cache.clone(),
+            store: self.store.clone(),
+            warmup_tp: self.warmup_tp.clone(),
+            access: FxHashMap::default(),
+            terminals: Arc::new(Mutex::new(FxHashMap::default())),
+        }
     }
 
-    /// Signals to the backend that the given slot is going to be written to.
-    ///
-    /// It's not obligatory to call this function, but it is essential to call this function as
-    /// early as possible to achieve the best performance.
-    pub fn hint_write_slot(&self, path: KeyPath) {
-        self.warmup(path);
-    }
+    /// Commit the transaction and create a proof for the given session.
+    pub fn commit_and_prove(&self, session: Session) -> anyhow::Result<Witness> {
+        let prev = self.session_cnt.swap(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(prev, 1, "expected one active session at commit time");
 
-    fn warmup(&self, path: KeyPath) {
-        let page_cache = self.shared.page_cache.clone();
-        let root = self.shared.root.lock().clone();
-        let f = move || {
-            PageCacheCursor::at_root(root, page_cache).seek(path);
-        };
-        self.shared.warmup_tp.execute(f);
-    }
+        let Session {
+            prev_root,
+            page_cache,
+            store: _,
+            warmup_tp,
+            access,
+            terminals,
+        } = session;
 
-    /// Commit the transaction and create a proof for the given read and write sets.
-    pub fn commit_and_prove(&self, proof_spec: CommitSpec) -> anyhow::Result<Witness> {
-        let prev_root = self.shared.root.lock().clone();
-        let mut tx = self.shared.store.new_tx();
-        let mut cursor = PageCacheCursor::at_root(prev_root, self.shared.page_cache.clone());
+        // Wait for all warmup tasks to finish. That way, we can be sure that all terminal
+        // information is available and that `terminals` would be the only reference.
+        warmup_tp.join();
+
+        // unwrap: since we waited for all warmup tasks to finish, there should be no other
+        // references to `terminals`.
+        let terminals = Arc::into_inner(terminals).unwrap();
+        let mut terminals = terminals.into_inner();
+
+        let mut tx = self.store.new_tx();
+        let mut cursor = PageCacheCursor::at_root(prev_root, page_cache);
 
         let mut ops = vec![];
         let mut witness_builder = WitnessBuilder::default();
-        for (path, terminal_info, read_write) in proof_spec.updates {
-            witness_builder.insert(path, terminal_info.clone(), &read_write);
-
-            if let KeyReadWrite::Write(value) | KeyReadWrite::Both(_, value) = read_write {
+        for (path, read_write) in access {
+            let terminal_info = terminals.remove(&path).expect("terminal info not found");
+            if let KeyReadWrite::Write(ref value) | KeyReadWrite::ReadThenWrite(_, ref value) =
+                read_write
+            {
                 let value_hash = value.as_ref().map(|v| *blake3::hash(v).as_bytes());
                 let prev_value = match terminal_info.leaf.as_ref() {
                     None => None,
@@ -205,19 +233,86 @@ impl Nomt {
                     Some(_) => None,
                 };
                 ops.push((path, value_hash));
-                tx.write_value::<Blake3Hasher>(path, prev_value, value_hash.zip(value));
+                tx.write_value::<Blake3Hasher>(
+                    path,
+                    prev_value,
+                    value_hash.zip(value.as_ref().map(|v| &v[..])),
+                );
             }
+            witness_builder.insert(path, terminal_info.clone(), &read_write);
         }
         let (witness, _witnessed, visited_leaves) = witness_builder.build(&mut cursor);
         ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_leaves);
         cursor.rewind();
-        *self.shared.root.lock() = cursor.node();
+        self.shared.lock().root = cursor.node();
 
-        self.shared.page_cache.commit(&mut tx);
-        self.shared.store.commit(tx)?;
+        self.page_cache.commit(&mut tx);
+        self.store.commit(tx)?;
         Ok(witness)
+    }
+}
+
+/// A session presents a way of interaction with the trie.
+/// 
+/// During a session the application is assumed to perform a zero or more reads and writes. When
+/// the session is finished, the application can [commit][`Nomt::commit_and_prove`] the changes 
+/// and create a [`Witness`] that can be used to prove the correctness of replaying the same 
+/// operations.
+pub struct Session {
+    prev_root: Node,
+    page_cache: PageCache,
+    store: Store,
+    warmup_tp: ThreadPool,
+    access: FxHashMap<KeyPath, KeyReadWrite>,
+    terminals: Arc<Mutex<FxHashMap<KeyPath, TerminalInfo>>>,
+}
+
+impl Session {
+    /// Synchronously read the value stored at the given key. Returns `None` if the value is not
+    /// stored under the given key. Fails only if I/O fails.
+    pub fn read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
+        if let Some(read_write) = self.access.get(&path) {
+            Ok(read_write.last_value().cloned())
+        } else {
+            self.warmup(path);
+            let value = self.store.load_value(path)?.map(Rc::new);
+            self.access.insert(path, KeyReadWrite::Read(value.clone()));
+            Ok(value)
+        }
+    }
+
+    /// Writes a value at the given key path. If `None` is passed, the key is deleted.
+    pub fn write_slot(&mut self, path: KeyPath, new_value: Option<Value>) {
+        match self.access.entry(path) {
+            Entry::Occupied(mut o) => o.get_mut().write(new_value),
+            Entry::Vacant(v) => {
+                v.insert(KeyReadWrite::Write(new_value));
+                self.warmup(path);
+            }
+        }
+    }
+
+    fn warmup(&self, path: KeyPath) {
+        let page_cache = self.page_cache.clone();
+        let store = self.store.clone();
+        let terminals = self.terminals.clone();
+        let root = self.prev_root;
+        let f = move || {
+            let mut cur = PageCacheCursor::at_root(root, page_cache);
+            cur.seek(path);
+            let (_, depth) = cur.position();
+            let node = cur.node();
+            let terminal_info = if nomt_core::trie::is_leaf(&node) {
+                let leaf = store.load_leaf(node).unwrap(); // TODO: handle error
+                TerminalInfo { leaf, depth }
+            } else {
+                TerminalInfo { leaf: None, depth }
+            };
+            terminals.lock().insert(path, terminal_info);
+        };
+        self.warmup_tp.execute(f);
     }
 }
 
@@ -236,11 +331,11 @@ impl WitnessBuilder {
             preserve: true,
         });
 
-        if let KeyReadWrite::Read(v) | KeyReadWrite::Both(v, _) = read_write {
+        if let KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) = read_write {
             entry.reads.push((key_path, v.clone()));
         }
 
-        if let KeyReadWrite::Write(v) | KeyReadWrite::Both(_, v) = read_write {
+        if let KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) = read_write {
             entry.writes.push((key_path, v.clone()));
             if entry
                 .leaf
