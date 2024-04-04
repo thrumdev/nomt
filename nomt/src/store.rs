@@ -115,7 +115,7 @@ impl Transaction {
         &mut self,
         path: KeyPath,
         prev_value: Option<ValueHash>,
-        value: Option<(ValueHash, Vec<u8>)>,
+        value: Option<(ValueHash, &[u8])>,
     ) {
         if value.as_ref().map(|(v, _)| v) == prev_value.as_ref() {
             return;
