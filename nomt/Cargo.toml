@@ -19,3 +19,4 @@ rocksdb = "0.22.0"
 threadpool = "1.8.1"
 bitvec = { version = "1" }
 blake3 = "1.5.1"
+fxhash = "0.2.1"
