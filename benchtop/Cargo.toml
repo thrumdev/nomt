@@ -1,0 +1,17 @@
+[package]
+name = "benchtop"
+version = "0.1.0"
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fxhash = "0.2.1"
+hdrhistogram = "7.5.4"
+nomt = { path = "../nomt" }
+rand = "0.8.5"
+rand_pcg = "0.3.1"
