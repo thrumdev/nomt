@@ -32,7 +32,7 @@
 //! result. The last terminal finishes hashing to the root. We refer to this as partial compaction.
 
 use crate::cursor::Cursor;
-use crate::trie::{self, KeyPath, NodeHasher, NodeHasherExt, NodeKind, ValueHash};
+use crate::trie::{self, KeyPath, LeafData, NodeHasher, NodeHasherExt, NodeKind, ValueHash};
 
 use bitvec::prelude::*;
 
@@ -40,12 +40,18 @@ use bitvec::prelude::*;
 /// navigated by the given cursor.
 ///
 /// The `ops` provided should be sorted ascending, lexicographically by key. This bails early when
-/// encountering unsorted keys.
+/// encountering unsorted keys. The `visited_leaves` consists of all of the preimages to leaf nodes
+/// encountered when looking up any of the keys in `ops` and should also be sorted
+/// lexicographically ascending by key.
 ///
-/// Any existing terminal node that a key looks up to is implicitly deleted, unless its key and
-/// value appear in the `ops` vec. It is the responsibility of the caller to ensure that leaves
-/// are preserved.
-pub fn update<H: NodeHasher>(cursor: &mut impl Cursor, ops: &[(KeyPath, Option<ValueHash>)]) {
+/// In short, the API accepts a sorted set of operations, which may be partitioned into contiguous
+/// slices by the terminal nodes that they look up to in the trie. When that node is a leaf, it
+/// should be present in the `visited_leaves` slice.
+pub fn update<H: NodeHasher>(
+    cursor: &mut impl Cursor,
+    ops: &[(KeyPath, Option<ValueHash>)],
+    visited_leaves: &[LeafData],
+) {
     if ops.is_empty() {
         return;
     }
@@ -53,8 +59,16 @@ pub fn update<H: NodeHasher>(cursor: &mut impl Cursor, ops: &[(KeyPath, Option<V
     cursor.rewind();
 
     let mut batch_start = 0;
+    let mut terminal_leaves = visited_leaves.iter().cloned();
     while batch_start < ops.len() {
         cursor.seek(ops[batch_start].0);
+        let leaf_data = if trie::is_leaf(&cursor.node()) {
+            // note: this should always be `Some` in correct
+            // API usage.
+            terminal_leaves.next()
+        } else {
+            None
+        };
 
         // note: cursor position does not move during these
         // comparisons.
@@ -81,7 +95,7 @@ pub fn update<H: NodeHasher>(cursor: &mut impl Cursor, ops: &[(KeyPath, Option<V
 
         let batch = &ops[batch_start..next_batch_start];
 
-        replace_subtrie::<H>(cursor, batch);
+        replace_subtrie::<H>(cursor, batch, leaf_data);
         compact_and_hash::<H>(cursor, compact_layers);
 
         batch_start = next_batch_start;
@@ -104,7 +118,11 @@ fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
 
 // replaces a terminal node with a new sub-trie in place. `None` keys are ignored.
 // cursor is returned at the same point it started at.
-fn replace_subtrie<H: NodeHasher>(cursor: &mut impl Cursor, ops: &[(KeyPath, Option<ValueHash>)]) {
+fn replace_subtrie<H: NodeHasher>(
+    cursor: &mut impl Cursor,
+    ops: &[(KeyPath, Option<ValueHash>)],
+    leaf_data: Option<LeafData>,
+) {
     // we build a compact addressable sub-trie in-place based on the given set of ordered keys,
     // ignoring deletions as they are implicit in a fresh sub-trie.
     //
@@ -133,9 +151,27 @@ fn replace_subtrie<H: NodeHasher>(cursor: &mut impl Cursor, ops: &[(KeyPath, Opt
     // If the list has a single item, the sub-trie is a single leaf.
     // And if the list is empty, the sub-trie is a terminator.
 
-    let mut leaf_ops = ops
-        .into_iter()
-        .filter_map(|(k, o)| o.map(move |value| (*k, value)));
+    // If there was previously a leaf at this terminal node, and the leaf was not explicitly
+    // overwritten or deleted, splice it in to the set of operations.
+    let mut leaf_ops = {
+        let splice_index = leaf_data
+            .as_ref()
+            .and_then(|leaf| ops.binary_search_by_key(&leaf.key_path, |x| x.0).err());
+        let preserve_value = splice_index
+            .zip(leaf_data)
+            .map(|(_, leaf)| (leaf.key_path, Some(leaf.value_hash)));
+        let splice_index = splice_index.unwrap_or(0);
+
+        // splice: before / item / after
+        // skip deleted.
+        ops[..splice_index]
+            .into_iter()
+            .cloned()
+            .chain(preserve_value)
+            .chain(ops[splice_index..].into_iter().cloned())
+            .filter_map(|(k, o)| o.map(move |value| (k, value)))
+    };
+
     let mut a = None;
     let mut b = leaf_ops.next();
     let mut c = leaf_ops.next();
