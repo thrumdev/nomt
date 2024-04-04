@@ -2,7 +2,7 @@ use bitvec::prelude::*;
 use dashmap::DashMap;
 use fxhash::FxHashMap;
 use std::{
-    collections::{hash_map::Entry, BTreeMap},
+    collections::hash_map::Entry,
     mem,
     path::PathBuf,
     rc::Rc,
@@ -12,7 +12,7 @@ use std::{
 use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
-    trie::{NodeHasher, TERMINATOR},
+    trie::{NodeHasher, ValueHash, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -52,6 +52,7 @@ pub struct Witness {
 
 /// Operations provable by a corresponding witness.
 // TODO: the format of this structure depends heavily on how it'd be used with the path proofs.
+#[derive(Default)]
 pub struct WitnessedOperations {
     /// Read operations.
     pub reads: Vec<WitnessedRead>,
@@ -88,7 +89,7 @@ pub struct WitnessedWrite {
 }
 
 /// Information about an encountered terminal during the lookup of some key.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct TerminalInfo {
     /// A leaf, if this is a leaf. `None` indicates this is a terminator node.
     pub leaf: Option<LeafData>,
@@ -224,10 +225,18 @@ impl Nomt {
         let mut tx = self.store.new_tx();
         let mut cursor = page_cache.new_write_cursor(prev_root);
 
-        let mut ops = vec![];
         let mut witness_builder = WitnessBuilder::default();
-        for (path, read_write) in access {
-            let terminal_info = terminals.remove(&path).expect("terminal info not found").1;
+
+        let (access, terminals) = {
+            let mut access = access.into_iter().collect::<Vec<_>>();
+            let mut terminals = terminals.into_iter().collect::<Vec<_>>();
+            access.sort_unstable_by_key(|(k, _)| *k);
+            terminals.sort_unstable_by_key(|(k, _)| *k);
+            (access, terminals)
+        };
+
+        for ((path, read_write), (t_path, terminal_info)) in access.into_iter().zip(terminals) {
+            assert_eq!(path, t_path, "unexpected terminal path");
             if let KeyReadWrite::Write(ref value) | KeyReadWrite::ReadThenWrite(_, ref value) =
                 read_write
             {
@@ -237,22 +246,20 @@ impl Nomt {
                     Some(l) if l.key_path == path => Some(l.value_hash),
                     Some(_) => None,
                 };
-                ops.push((path, value_hash));
                 tx.write_value::<Blake3Hasher>(
                     path,
                     prev_value,
                     value_hash.zip(value.as_ref().map(|v| &v[..])),
                 );
             }
-            witness_builder.insert(path, terminal_info.clone(), &read_write);
+            witness_builder.push(path, terminal_info.clone(), &read_write);
         }
-        let (witness, _witnessed, visited_leaves) = witness_builder.build(&mut cursor);
-        ops.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let (witness, _witnessed) = witness_builder.update_and_witness(&mut cursor);
 
-        nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_leaves);
         cursor.rewind();
+
         let new_root = cursor.node();
-        self.shared.lock().root = cursor.node();
+        self.shared.lock().root = new_root;
         tx.write_root(new_root);
 
         self.page_cache.commit(cursor, &mut tx);
@@ -325,91 +332,97 @@ impl Session {
 
 #[derive(Default)]
 struct WitnessBuilder {
-    terminals: BTreeMap<BitVec<u8, Msb0>, TerminalOps>,
+    terminal: Option<(BitVec<u8, Msb0>, TerminalOps)>,
+    write_leaves: Vec<LeafData>,
+    write_ops: Vec<(KeyPath, Option<ValueHash>)>,
+    witness_paths: Vec<(BitVec<u8, Msb0>, Option<LeafData>)>,
+    witnessed_ops: WitnessedOperations,
 }
 
 impl WitnessBuilder {
-    fn insert(&mut self, key_path: KeyPath, terminal: TerminalInfo, read_write: &KeyReadWrite) {
-        let slice = key_path.view_bits::<Msb0>()[..terminal.depth as usize].into();
-        let entry = self.terminals.entry(slice).or_insert_with(|| TerminalOps {
-            leaf: terminal.leaf.clone(),
-            reads: Vec::new(),
-            writes: Vec::new(),
-            preserve: true,
-        });
+    // push keys, terminal info, and read/write info in ascending order.
+    fn push(&mut self, key_path: KeyPath, terminal: TerminalInfo, read_write: &KeyReadWrite) {
+        let slice = &key_path.view_bits::<Msb0>()[..terminal.depth as usize];
+        let cur_terminal = if self
+            .terminal
+            .as_ref()
+            .map_or(true, |(k, _t)| &k[..] != slice)
+        {
+            // new terminal. end last one
+            self.consume_terminal();
+            &mut self
+                .terminal
+                .insert((
+                    slice.into(),
+                    TerminalOps {
+                        leaf: terminal.leaf.clone(),
+                        writes: 0,
+                    },
+                ))
+                .1
+        } else {
+            // unwrap: always exists in this branch
+            &mut self.terminal.as_mut().unwrap().1
+        };
 
         if let KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) = read_write {
-            entry.reads.push((key_path, v.clone()));
+            self.witnessed_ops.reads.push(WitnessedRead {
+                key: key_path,
+                value: v.clone(),
+                path_index: self.witness_paths.len(), // index of yet-to-be-consumed terminal
+            });
         }
 
         if let KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) = read_write {
-            entry.writes.push((key_path, v.clone()));
-            if entry
-                .leaf
-                .as_ref()
-                .map_or(false, |leaf| leaf.key_path == key_path)
-            {
-                entry.preserve = false;
+            let value_hash = v.as_ref().map(|v| *blake3::hash(v).as_bytes());
+
+            self.witnessed_ops.writes.push(WitnessedWrite {
+                key: key_path,
+                value: v.clone(),
+                path_index: self.witness_paths.len(), // index of yet-to-be-consumed terminal
+            });
+            cur_terminal.writes += 1;
+            self.write_ops.push((key_path, value_hash));
+        }
+    }
+
+    fn consume_terminal(&mut self) {
+        if let Some((prev_path, t)) = self.terminal.take() {
+            self.witness_paths.push((prev_path, t.leaf.clone()));
+            if let (true, Some(prev_leaf)) = (t.writes > 0, t.leaf) {
+                self.write_leaves.push(prev_leaf);
             }
         }
     }
 
-    // builds the witness, the witnessed operations, and returns additional write operations
-    // for leaves which are updated but where the existing value should be preserved.
-    fn build(self, cursor: &mut PageCacheCursor) -> (Witness, WitnessedOperations, Vec<LeafData>) {
-        let mut paths = Vec::with_capacity(self.terminals.len());
-        let mut reads = Vec::new();
-        let mut writes = Vec::new();
-        let mut visited_leaves = Vec::new();
+    // builds the witness, the witnessed operations, and updates the trie against the cursor.
+    fn update_and_witness(
+        mut self,
+        cursor: &mut PageCacheCursor,
+    ) -> (Witness, WitnessedOperations) {
+        self.consume_terminal();
 
-        for (i, (path, terminal)) in self.terminals.into_iter().enumerate() {
-            let (_, siblings) = nomt_core::proof::record_path(cursor, &path[..]);
+        let path_proofs = self
+            .witness_paths
+            .into_iter()
+            .map(|(path, l)| {
+                let (_, siblings) = nomt_core::proof::record_path(cursor, &path[..]);
+                WitnessedPath {
+                    path,
+                    inner: PathProof {
+                        terminal: l,
+                        siblings,
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
 
-            let path_proof = PathProof {
-                terminal: terminal.leaf.clone(),
-                siblings,
-            };
-            paths.push(WitnessedPath {
-                inner: path_proof,
-                path,
-            });
-            reads.extend(
-                terminal
-                    .reads
-                    .into_iter()
-                    .map(|(key, value)| WitnessedRead {
-                        key,
-                        value,
-                        path_index: i,
-                    }),
-            );
-            writes.extend(
-                terminal
-                    .writes
-                    .iter()
-                    .cloned()
-                    .map(|(key, value)| WitnessedWrite {
-                        key,
-                        value,
-                        path_index: i,
-                    }),
-            );
-            if let Some(leaf) = terminal.leaf {
-                visited_leaves.push(leaf)
-            }
-        }
-
-        (
-            Witness { path_proofs: paths },
-            WitnessedOperations { reads, writes },
-            visited_leaves,
-        )
+        nomt_core::update::update::<Blake3Hasher>(cursor, &self.write_ops, &self.write_leaves);
+        (Witness { path_proofs }, self.witnessed_ops)
     }
 }
 
 struct TerminalOps {
     leaf: Option<LeafData>,
-    reads: Vec<(KeyPath, Option<Value>)>,
-    writes: Vec<(KeyPath, Option<Value>)>,
-    preserve: bool,
+    writes: usize,
 }
