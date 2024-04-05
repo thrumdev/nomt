@@ -1,10 +1,10 @@
 use std::cmp;
 
-use crate::page_cache::{Page, PageCache, PagePromise};
+use crate::page_cache::{PageCache, PageCacheWriter, PagePromise, PageRef};
 use bitvec::prelude::*;
 use nomt_core::{
     page::DEPTH,
-    page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
+    page_id::{PageIdsIterator, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node},
 };
 
@@ -13,22 +13,27 @@ use nomt_core::{
 /// The number of items we want to request in a single batch.
 const PREFETCH_N: usize = 7;
 
+pub enum Backend<'a> {
+    Shared(PageCache),
+    Unique(PageCacheWriter<'a>),
+}
+
 /// A cursor wrapping a [`PageCache`].
 ///
 /// This performs I/O internally.
-pub struct PageCacheCursor {
-    pages: PageCache,
+pub struct PageCacheCursor<'a> {
+    pages: Backend<'a>,
     root: Node,
     path: KeyPath,
     depth: u8,
     // Invariant: this is always set when not at the root and never
     // set at the root.
-    cached_page: Option<(PageId, Page)>,
+    cached_page: Option<PageRef>,
 }
 
-impl PageCacheCursor {
+impl<'a> PageCacheCursor<'a> {
     /// Creates the cursor pointing at the given root of the trie.
-    pub fn at_root(root: Node, pages: PageCache) -> Self {
+    pub fn at_root(root: Node, pages: Backend<'a>) -> Self {
         Self {
             root,
             path: KeyPath::default(),
@@ -66,7 +71,18 @@ impl PageCacheCursor {
             .nth(n_pages)
             .expect("all keys with <= 256 bits have pages; qed");
 
-        self.cached_page = Some((page_id.clone(), self.pages.retrieve(page_id).wait()));
+        if self
+            .cached_page
+            .as_ref()
+            .map_or(false, |p| p.id() == page_id)
+        {
+            return;
+        }
+
+        self.cached_page = Some(match self.pages {
+            Backend::Shared(ref pages) => pages.retrieve(page_id).wait(),
+            Backend::Unique(ref mut pages) => pages.retrieve_blocking(page_id),
+        })
     }
 
     /// Moves the cursor to the given [`KeyPath`].
@@ -91,12 +107,14 @@ impl PageCacheCursor {
             }
             if self.depth as usize % DEPTH == 0 {
                 // attempt to load next page if we are at the end of our previous page or the root.
-                match ppf.next(&self.pages) {
-                    None => {
-                        panic!("reached the end of the prefetcher without finding the terminal")
-                    }
-                    Some(p) => p.wait(),
-                };
+                if let Backend::Shared(ref pages) = self.pages {
+                    match ppf.next(pages) {
+                        None => {
+                            panic!("reached the end of the prefetcher without finding the terminal")
+                        }
+                        Some(p) => p.wait(),
+                    };
+                }
             }
             // page is loaded, so this won't block.
             self.down(bit);
@@ -120,14 +138,21 @@ impl PageCacheCursor {
         let prev_page_depth = (prev_depth as usize + DEPTH - 1) / DEPTH;
         let new_page_depth = (self.depth as usize + DEPTH - 1) / DEPTH;
 
+        if new_page_depth == prev_page_depth {
+            return;
+        }
+
         // sanity: always not root unless depth is zero, checked above.
-        let mut cur_page_id = self.cached_page.as_ref().expect("not root; qed").0.clone();
+        let mut cur_page_id = self.cached_page.as_ref().expect("not root; qed").id();
 
         for _ in new_page_depth..prev_page_depth {
             cur_page_id = cur_page_id.parent_page_id();
         }
 
-        self.cached_page = Some((cur_page_id.clone(), self.pages.retrieve(cur_page_id).wait()));
+        self.cached_page = Some(match self.pages {
+            Backend::Shared(ref pages) => pages.retrieve(cur_page_id).wait(),
+            Backend::Unique(ref mut pages) => pages.retrieve_blocking(cur_page_id),
+        })
     }
 
     /// Traverse to the child of this node indicated by the given bit.
@@ -140,15 +165,18 @@ impl PageCacheCursor {
             // attempt to load next page if we are at the end of our previous page or the root.
             let page_id = match self.cached_page {
                 None => ROOT_PAGE_ID,
-                Some((ref id, _)) => {
+                Some(ref p) => {
                     let child_page_idx = last_page_path(&self.path, self.depth).load_be::<u8>();
-                    id.child_page_id(child_page_idx).expect(
+                    p.id().child_page_id(child_page_idx).expect(
                         "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
                     )
                 }
             };
 
-            self.cached_page = Some((page_id.clone(), self.pages.retrieve(page_id).wait()));
+            self.cached_page = Some(match self.pages {
+                Backend::Shared(ref pages) => pages.retrieve(page_id).wait(),
+                Backend::Unique(ref mut pages) => pages.retrieve_blocking(page_id),
+            })
         }
 
         // Update the cursor's lookup path.
@@ -173,9 +201,12 @@ impl PageCacheCursor {
     pub fn node(&self) -> Node {
         match self.cached_page {
             None => self.root,
-            Some((_, ref page)) => {
+            Some(ref page) => {
                 let path = last_page_path(&self.path, self.depth);
-                page.node(node_index(path))
+                match self.pages {
+                    Backend::Shared(ref pages) => pages.node(page, node_index(path)),
+                    Backend::Unique(ref pages) => pages.node(page, node_index(path)),
+                }
             }
         }
     }
@@ -186,11 +217,15 @@ impl PageCacheCursor {
             None => {
                 self.root = node;
             }
-            Some((page_id, ref mut page)) => {
+            Some(ref mut page) => {
                 let path = last_page_path(&self.path, self.depth);
                 let index = node_index(path);
-                page.set_node(index, node);
-                self.pages.mark_dirty(page_id);
+                match self.pages {
+                    Backend::Shared(ref pages) => {
+                        pages.acquire_writer().set_node(page, index, node)
+                    }
+                    Backend::Unique(ref mut pages) => pages.set_node(page, index, node),
+                }
             }
         }
     }
@@ -200,15 +235,18 @@ impl PageCacheCursor {
     pub fn peek_sibling(&self) -> Node {
         match self.cached_page {
             None => trie::TERMINATOR,
-            Some((_, ref page)) => {
+            Some(ref page) => {
                 let path = last_page_path(&self.path, self.depth);
-                page.node(sibling_index(path))
+                match self.pages {
+                    Backend::Shared(ref pages) => pages.node(page, sibling_index(path)),
+                    Backend::Unique(ref pages) => pages.node(page, sibling_index(path)),
+                }
             }
         }
     }
 }
 
-impl nomt_core::Cursor for PageCacheCursor {
+impl nomt_core::Cursor for PageCacheCursor<'_> {
     fn position(&self) -> (KeyPath, u8) {
         PageCacheCursor::position(self)
     }
