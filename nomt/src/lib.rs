@@ -222,7 +222,7 @@ impl Nomt {
         let mut terminals = terminals.into_inner();
 
         let mut tx = self.store.new_tx();
-        let mut cursor = PageCacheCursor::at_root(prev_root, page_cache);
+        let mut cursor = page_cache.new_write_cursor(prev_root);
 
         let mut ops = vec![];
         let mut witness_builder = WitnessBuilder::default();
@@ -253,7 +253,7 @@ impl Nomt {
         cursor.rewind();
         self.shared.lock().root = cursor.node();
 
-        self.page_cache.commit(&mut tx);
+        self.page_cache.commit(cursor, &mut tx);
         self.store.commit(tx)?;
         Ok(witness)
     }
@@ -305,7 +305,7 @@ impl Session {
         let terminals = self.terminals.clone();
         let root = self.prev_root;
         let f = move || {
-            let mut cur = PageCacheCursor::at_root(root, page_cache);
+            let mut cur = page_cache.new_read_cursor(root);
             cur.seek(path);
             let (_, depth) = cur.position();
             let node = cur.node();

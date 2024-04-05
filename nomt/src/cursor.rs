@@ -1,6 +1,9 @@
-use std::cmp;
+use std::{cell::RefCell, cmp, collections::HashSet};
 
-use crate::page_cache::{Page, PageCache, PagePromise};
+use crate::{
+    page_cache::{Page, PageCache, PagePromise},
+    rw_pass_cell::{ReadPass, WritePass},
+};
 use bitvec::prelude::*;
 use nomt_core::{
     page::DEPTH,
@@ -13,6 +16,42 @@ use nomt_core::{
 /// The number of items we want to request in a single batch.
 const PREFETCH_N: usize = 7;
 
+enum Mode {
+    Read(ReadPass),
+    Write {
+        write_pass: RefCell<WritePass>,
+        dirtied: HashSet<PageId>,
+    },
+}
+
+impl Mode {
+    fn with_read_pass<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&ReadPass) -> R,
+    {
+        match self {
+            Mode::Read(ref read_pass) => f(read_pass),
+            Mode::Write { write_pass, .. } => {
+                let mut write_pass = write_pass.borrow_mut();
+                f(write_pass.downgrade())
+            }
+        }
+    }
+
+    fn with_write_pass<R, F>(&mut self, f: F) -> R
+    where
+        F: FnOnce(Option<&mut WritePass>) -> R,
+    {
+        match self {
+            Mode::Read(_) => f(None),
+            Mode::Write { write_pass, .. } => {
+                let mut write_pass = write_pass.borrow_mut();
+                f(Some(&mut *write_pass))
+            }
+        }
+    }
+}
+
 /// A cursor wrapping a [`PageCache`].
 ///
 /// This performs I/O internally.
@@ -24,17 +63,34 @@ pub struct PageCacheCursor {
     // Invariant: this is always set when not at the root and never
     // set at the root.
     cached_page: Option<(PageId, Page)>,
+    mode: Mode,
 }
 
 impl PageCacheCursor {
+    pub fn new_read(root: Node, pages: PageCache, read_pass: ReadPass) -> Self {
+        Self::new(root, pages, Mode::Read(read_pass))
+    }
+
+    pub fn new_write(root: Node, pages: PageCache, write_pass: WritePass) -> Self {
+        Self::new(
+            root,
+            pages,
+            Mode::Write {
+                write_pass: RefCell::new(write_pass),
+                dirtied: HashSet::new(),
+            },
+        )
+    }
+
     /// Creates the cursor pointing at the given root of the trie.
-    pub fn at_root(root: Node, pages: PageCache) -> Self {
+    fn new(root: Node, pages: PageCache, mode: Mode) -> Self {
         Self {
             root,
             path: KeyPath::default(),
             depth: 0,
             pages,
             cached_page: None,
+            mode,
         }
     }
 
@@ -171,39 +227,56 @@ impl PageCacheCursor {
 
     /// Returns the node at the current location of the cursor.
     pub fn node(&self) -> Node {
-        match self.cached_page {
-            None => self.root,
-            Some((_, ref page)) => {
-                let path = last_page_path(&self.path, self.depth);
-                page.node(node_index(path))
-            }
-        }
+        self.mode
+            .with_read_pass(|read_pass| match self.cached_page {
+                None => self.root,
+                Some((_, ref page)) => {
+                    let path = last_page_path(&self.path, self.depth);
+                    page.node(&read_pass, node_index(path))
+                }
+            })
     }
 
     /// Modify the node at the current location of the cursor.
     pub fn modify(&mut self, node: Node) {
-        match self.cached_page {
-            None => {
-                self.root = node;
+        self.mode.with_write_pass(|write_pass| {
+            let Some(write_pass) = write_pass else {
+                panic!("attempted to call modify on a read-only cursor");
+            };
+            match self.cached_page {
+                None => {
+                    self.root = node;
+                }
+                Some((_, ref mut page)) => {
+                    let path = last_page_path(&self.path, self.depth);
+                    let index = node_index(path);
+                    page.set_node(write_pass, index, node);
+                }
             }
-            Some((page_id, ref mut page)) => {
-                let path = last_page_path(&self.path, self.depth);
-                let index = node_index(path);
-                page.set_node(index, node);
-                self.pages.mark_dirty(page_id);
-            }
-        }
+        });
     }
 
     /// Peek at the sibling node of the current position without moving the cursor. At the root,
     /// gives the terminator.
     pub fn peek_sibling(&self) -> Node {
-        match self.cached_page {
-            None => trie::TERMINATOR,
-            Some((_, ref page)) => {
-                let path = last_page_path(&self.path, self.depth);
-                page.node(sibling_index(path))
-            }
+        self.mode
+            .with_read_pass(|read_pass| match self.cached_page {
+                None => trie::TERMINATOR,
+                Some((_, ref page)) => {
+                    let path = last_page_path(&self.path, self.depth);
+                    page.node(&read_pass, sibling_index(path))
+                }
+            })
+    }
+
+    /// Called when the write is finished.
+    pub fn finish_write(self) -> (HashSet<PageId>, WritePass) {
+        match self.mode {
+            Mode::Read(_) => panic!("attempted to call dirtied_pages on a read-only cursor"),
+            Mode::Write {
+                dirtied,
+                write_pass,
+            } => (dirtied, write_pass.into_inner()),
         }
     }
 }
