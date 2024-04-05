@@ -1,4 +1,5 @@
 use bitvec::prelude::*;
+use dashmap::DashMap;
 use fxhash::FxHashMap;
 use std::{
     collections::{hash_map::Entry, BTreeMap},
@@ -192,7 +193,7 @@ impl Nomt {
             store: self.store.clone(),
             warmup_tp: self.warmup_tp.clone(),
             access: FxHashMap::default(),
-            terminals: Arc::new(Mutex::new(FxHashMap::default())),
+            terminals: Arc::new(DashMap::new()),
         }
     }
 
@@ -219,7 +220,6 @@ impl Nomt {
         // unwrap: since we waited for all warmup tasks to finish, there should be no other
         // references to `terminals`.
         let terminals = Arc::into_inner(terminals).unwrap();
-        let mut terminals = terminals.into_inner();
 
         let mut tx = self.store.new_tx();
         let mut cursor = page_cache.new_write_cursor(prev_root);
@@ -227,7 +227,7 @@ impl Nomt {
         let mut ops = vec![];
         let mut witness_builder = WitnessBuilder::default();
         for (path, read_write) in access {
-            let terminal_info = terminals.remove(&path).expect("terminal info not found");
+            let terminal_info = terminals.remove(&path).expect("terminal info not found").1;
             if let KeyReadWrite::Write(ref value) | KeyReadWrite::ReadThenWrite(_, ref value) =
                 read_write
             {
@@ -271,7 +271,7 @@ pub struct Session {
     store: Store,
     warmup_tp: ThreadPool,
     access: FxHashMap<KeyPath, KeyReadWrite>,
-    terminals: Arc<Mutex<FxHashMap<KeyPath, TerminalInfo>>>,
+    terminals: Arc<DashMap<KeyPath, TerminalInfo>>,
 }
 
 impl Session {
@@ -315,7 +315,7 @@ impl Session {
             } else {
                 TerminalInfo { leaf: None, depth }
             };
-            terminals.lock().insert(path, terminal_info);
+            terminals.insert(path, terminal_info);
         };
         self.warmup_tp.execute(f);
     }
