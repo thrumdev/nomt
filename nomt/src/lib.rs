@@ -251,7 +251,9 @@ impl Nomt {
 
         nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_leaves);
         cursor.rewind();
+        let new_root = cursor.node();
         self.shared.lock().root = cursor.node();
+        tx.write_root(new_root);
 
         self.page_cache.commit(cursor, &mut tx);
         self.store.commit(tx)?;
