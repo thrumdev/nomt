@@ -156,4 +156,10 @@ impl Transaction {
             Some(value) => self.batch.put_cf(&cf, page_id.to_bytes().as_ref(), value),
         }
     }
+
+    /// Write the root to metadata.
+    pub fn write_root(&mut self, root: Node) {
+        let cf = self.shared.db.cf_handle(METADATA_CF).unwrap();
+        self.batch.put_cf(&cf, b"root", &root[..]);
+    }
 }
