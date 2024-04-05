@@ -22,6 +22,7 @@ pub use nomt_core::trie::{KeyPath, LeafData, Node};
 
 mod cursor;
 mod page_cache;
+mod rw_pass_cell;
 mod store;
 
 pub type Value = Rc<Vec<u8>>;
