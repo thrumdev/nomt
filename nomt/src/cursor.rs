@@ -1,7 +1,7 @@
 use std::{cell::RefCell, cmp, collections::HashSet};
 
 use crate::{
-    page_cache::{Page, PageCache, PagePromise},
+    page_cache::{Page, PageCache},
     rw_pass_cell::{ReadPass, WritePass},
 };
 use bitvec::prelude::*;
@@ -143,20 +143,21 @@ impl PageCacheCursor {
             // The root either a leaf or the terminator. In either case, we can't navigate anywhere.
             return;
         }
-        let mut ppf = PagePrefetcher::new(dest);
 
+        let mut ppf = PageIdsIterator::new(dest);
         for bit in dest.view_bits::<Msb0>().iter().by_vals() {
             if !trie::is_internal(&self.node()) {
                 break;
             }
             if self.depth as usize % DEPTH == 0 {
                 // attempt to load next page if we are at the end of our previous page or the root.
-                match ppf.next(&self.pages) {
-                    None => {
-                        panic!("reached the end of the prefetcher without finding the terminal")
-                    }
-                    Some(p) => p.wait(),
-                };
+                for _ in 0..PREFETCH_N {
+                    let page_id = match ppf.next() {
+                        Some(page) => page,
+                        None => break,
+                    };
+                    let _ = self.pages.retrieve(page_id);
+                }
             }
             // page is loaded, so this won't block.
             self.down(bit);
@@ -364,46 +365,5 @@ fn node_index(page_path: &BitSlice<u8, Msb0>) -> usize {
     } else {
         // each node is stored at (2^depth - 2) + as_uint(path)
         (1 << depth) - 2 + page_path[..depth].load_be::<usize>()
-    }
-}
-
-struct PagePrefetcher {
-    /// Iterator over page IDs of the destination key path
-    page_ids_iter: PageIdsIterator,
-    /// The promises of the pages that are currently being fetched. The promises are laid out in
-    /// such a way, that [`Vec::pop`] would return the next page to be processed.
-    ///
-    /// This vector is at most of size [`PREFETCH_N`].
-    page_promises: Vec<PagePromise>,
-}
-
-impl PagePrefetcher {
-    fn new(dest: KeyPath) -> Self {
-        Self {
-            page_ids_iter: PageIdsIterator::new(dest),
-            page_promises: Vec::with_capacity(PREFETCH_N),
-        }
-    }
-
-    fn next(&mut self, page_cache: &PageCache) -> Option<PagePromise> {
-        if self.page_promises.is_empty() {
-            // The prefetch hasn't started yet or we consumed all the promises. We need to initiate
-            // a new prefetch.
-            for _ in 0..PREFETCH_N {
-                let page_id = match self.page_ids_iter.next() {
-                    Some(page) => page,
-                    // If page_ids_iter returns None and no other PagePromise
-                    // was added before, then there are no pages left to prefetch
-                    None if self.page_promises.is_empty() => return None,
-                    // If it returns none but in page_promises there is something,
-                    // then it means it is the last batch
-                    None => break,
-                };
-                self.page_promises.push(page_cache.retrieve(page_id));
-            }
-
-            self.page_promises.reverse();
-        }
-        self.page_promises.pop()
     }
 }
