@@ -1,14 +1,12 @@
 use crate::{
+    cursor::PageCacheCursor,
+    rw_pass_cell::{ReadPass, RwPassCell, RwPassDomain, WritePass},
     store::{Store, Transaction},
     Options,
 };
+use dashmap::DashMap;
 use nomt_core::{page::DEPTH, page_id::PageId, trie::Node};
-use parking_lot::Mutex;
-use std::{
-    collections::{HashMap, HashSet},
-    fmt, mem,
-    sync::Arc,
-};
+use std::{fmt, mem, sync::Arc};
 use threadpool::ThreadPool;
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
@@ -17,32 +15,29 @@ use threadpool::ThreadPool;
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
 struct PageData {
-    data: Option<Vec<u8>>,
-    dirty: bool,
+    data: RwPassCell<Option<Vec<u8>>>,
 }
 
 impl PageData {
     /// Creates a page with the given data.
-    fn pristine_with_data(data: Vec<u8>) -> Self {
+    fn pristine_with_data(domain: &RwPassDomain, data: Vec<u8>) -> Self {
         Self {
-            data: Some(data),
-            dirty: false,
+            data: domain.protect(Some(data)),
         }
     }
 
     /// Creates an empty page.
-    fn pristine_empty() -> Self {
+    fn pristine_empty(domain: &RwPassDomain) -> Self {
         Self {
-            data: None,
-            dirty: false,
+            data: domain.protect(None),
         }
     }
 
     /// Read out the node at the given index.
-    fn node(&self, index: usize) -> Node {
+    fn node(&self, read_pass: &ReadPass, index: usize) -> Node {
         assert!(index < NODES_PER_PAGE, "index out of bounds");
-
-        if let Some(data) = &self.data {
+        let data = self.data.read(read_pass);
+        if let Some(data) = &*data {
             let start = index * 32;
             let end = start + 32;
             let mut node = [0; 32];
@@ -54,17 +49,22 @@ impl PageData {
     }
 
     /// Write the node at the given index.
-    fn set_node(&mut self, index: usize, node: Node) {
+    fn set_node(&self, write_pass: &mut WritePass, index: usize, node: Node) {
         assert!(index < NODES_PER_PAGE, "index out of bounds");
-        if self.data.is_none() {
-            self.data = Some(vec![0; 4096]);
+        let mut data = self.data.write(write_pass);
+        if data.is_none() {
+            *data = Some(vec![0; 4096]);
         }
         let start = index * 32;
         let end = start + 32;
         // Unwrap: self.data is Some, we just ensured it above.
-        self.data.as_mut().unwrap()[start..end].copy_from_slice(&node);
-        self.dirty = true;
+        data.as_mut().unwrap()[start..end].copy_from_slice(&node);
     }
+}
+
+enum PageState {
+    Inflight(InflightFetch),
+    Cached(Arc<PageData>),
 }
 
 /// A handle to the page.
@@ -72,18 +72,18 @@ impl PageData {
 /// Can be cloned cheaply.
 #[derive(Clone)]
 pub struct Page {
-    inner: Arc<Mutex<PageData>>,
+    inner: Arc<PageData>,
 }
 
 impl Page {
     /// Read out the node at the given index.
-    pub fn node(&self, index: usize) -> Node {
-        self.inner.lock().node(index)
+    pub fn node(&self, read_pass: &ReadPass, index: usize) -> Node {
+        self.inner.node(read_pass, index)
     }
 
     /// Write the node at the given index.
-    pub fn set_node(&self, index: usize, node: Node) {
-        self.inner.lock().set_node(index, node);
+    pub fn set_node(&self, write_pass: &mut WritePass, index: usize, node: Node) {
+        self.inner.set_node(write_pass, index, node)
     }
 }
 
@@ -146,42 +146,34 @@ impl InflightFetch {
 /// It stores full pages and can be shared between threads.
 #[derive(Clone)]
 pub struct PageCache {
-    shared: Arc<Mutex<Shared>>,
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    page_rw_pass_domain: RwPassDomain,
     store: Store,
     /// The thread pool used for fetching pages from the store.
     ///
     /// Used for limiting the number of concurrent page fetches.
     fetch_tp: ThreadPool,
-}
-
-struct Shared {
     /// The pages loaded from the store, possibly dirty.
-    cached: HashMap<PageId, Page>,
-    /// The pages that were modified and need to be flushed to the store.
-    ///
-    /// The invariant is that the pages in the dirty set are always present in the `cached` map and
-    /// are marked as dirty there.
-    dirty: HashSet<PageId>,
-    /// Pages that are currently being fetched from the store.
-    inflight: HashMap<PageId, InflightFetch>,
+    cached: DashMap<PageId, PageState>,
 }
 
 impl PageCache {
     /// Create a new `PageCache` atop the provided [`Store`].
     pub fn new(store: Store, o: &Options) -> Self {
-        let shared = Arc::new(Mutex::new(Shared {
-            cached: HashMap::new(),
-            dirty: HashSet::new(),
-            inflight: HashMap::new(),
-        }));
         let fetch_tp = threadpool::Builder::new()
             .num_threads(o.fetch_concurrency)
             .thread_name("nomt-page-fetch".to_string())
             .build();
         Self {
-            shared,
-            store,
-            fetch_tp,
+            shared: Arc::new(Shared {
+                page_rw_pass_domain: RwPassDomain::new(),
+                cached: DashMap::new(),
+                store,
+                fetch_tp,
+            }),
         }
     }
 
@@ -190,66 +182,89 @@ impl PageCache {
     /// If the page is in the cache, it is returned immediately. If the page is not in the cache, it
     /// is fetched from the underlying store and returned.
     pub fn retrieve(&self, page_id: PageId) -> PagePromise {
-        let mut shared = self.shared.lock();
-
-        // If the page is not present there, we check in the pristine cache.
-        if let Some(page) = shared.cached.get(&page_id) {
-            return PagePromise::Now(page.clone());
-        }
-        // In case none of those are present, we check if there is an inflight fetch for the page.
-        if let Some(inflight) = shared.inflight.get(&page_id) {
-            return inflight.promise();
-        }
-        // Nope, then we need to fetch the page from the store.
-        let inflight = InflightFetch::new();
-        let promise = inflight.promise();
-        shared.inflight.insert(page_id.clone(), inflight);
-        let task = {
-            let store = self.store.clone();
-            let shared = self.shared.clone();
-            move || {
-                let entry = store
-                    .load_page(page_id.clone())
-                    .expect("db load failed") // TODO: handle the error
-                    .map_or_else(PageData::pristine_empty, PageData::pristine_with_data);
-                let entry = Page {
-                    inner: Arc::new(Mutex::new(entry)),
-                };
-
-                let mut shared = shared.lock();
-                // Unwrap: the operation was inserted above. It is scheduled for execution only
-                // once. It may removed only in the line below. Therefore, `None` is impossible.
-                let inflight = shared.inflight.remove(&page_id).unwrap();
-                shared.cached.insert(page_id, entry.clone());
-                inflight.complete_and_notify(entry);
-                drop(shared);
+        match self.shared.cached.entry(page_id) {
+            dashmap::mapref::entry::Entry::Occupied(o) => {
+                let page = o.get();
+                match page {
+                    PageState::Inflight(inflight) => {
+                        return inflight.promise();
+                    }
+                    PageState::Cached(page) => {
+                        return PagePromise::Now(Page {
+                            inner: page.clone(),
+                        });
+                    }
+                }
             }
-        };
-        self.fetch_tp.execute(task);
-        promise
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                // Nope, then we need to fetch the page from the store.
+                let inflight = InflightFetch::new();
+                let promise = inflight.promise();
+                v.insert(PageState::Inflight(inflight));
+                let task = {
+                    let shared = self.shared.clone();
+                    move || {
+                        let entry = shared
+                            .store
+                            .load_page(page_id.clone())
+                            .expect("db load failed") // TODO: handle the error
+                            .map_or_else(
+                                || PageData::pristine_empty(&shared.page_rw_pass_domain),
+                                |data| {
+                                    PageData::pristine_with_data(&shared.page_rw_pass_domain, data)
+                                },
+                            );
+                        let entry = Arc::new(entry);
+
+                        // Unwrap: the operation was inserted above. It is scheduled for execution only
+                        // once. It may removed only in the line below. Therefore, `None` is impossible.
+                        let mut page_state_guard = shared.cached.get_mut(&page_id).unwrap();
+                        let page_state = page_state_guard.value_mut();
+                        let PageState::Inflight(inflight) =
+                            mem::replace(page_state, PageState::Cached(entry.clone()))
+                        else {
+                            panic!("page was not inflight");
+                        };
+                        inflight.complete_and_notify(Page { inner: entry });
+                    }
+                };
+                self.shared.fetch_tp.execute(task);
+                promise
+            }
+        }
     }
 
-    /// Expected to be called when the page was modified.
-    pub fn mark_dirty(&self, page_id: PageId) {
-        self.shared.lock().dirty.insert(page_id);
+    pub fn new_read_cursor(&self, root: Node) -> PageCacheCursor {
+        let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
+        PageCacheCursor::new_read(root, self.clone(), read_pass)
+    }
+
+    pub fn new_write_cursor(&self, root: Node) -> PageCacheCursor {
+        let write_pass = self.shared.page_rw_pass_domain.new_write_pass();
+        PageCacheCursor::new_write(root, self.clone(), write_pass)
     }
 
     /// Flushes all the dirty pages into the underlying store.
     ///
     /// After the commit, all the dirty pages are cleared.
-    pub fn commit(&self, tx: &mut Transaction) {
-        let mut shared = self.shared.lock();
-        for page_id in mem::take(&mut shared.dirty) {
+    pub fn commit(&self, cursor: PageCacheCursor, tx: &mut Transaction) {
+        let (dirty_pages, mut write_pass) = cursor.finish_write();
+        for page_id in dirty_pages {
             // Unwrap: the invariant is that all items from `dirty` are present in the `cached` and
             // thus cannot be `None`.
-            let page = shared
+            let page_state = self
+                .shared
                 .cached
                 .get_mut(&page_id)
                 .expect("a dirty page is not in the cache");
-            let mut page_data = page.inner.lock();
-            assert!(page_data.dirty, "dirty page is not marked as dirty");
-            page_data.dirty = false;
-            tx.write_page(page_id, page_data.data.as_ref());
+            let page_state = page_state.value();
+            if let PageState::Cached(ref page) = *page_state {
+                let page_data = page.data.read(write_pass.downgrade());
+                let page_data = page_data.as_ref().map(|v| &v[..]);
+                tx.write_page(page_id, page_data);
+            } else {
+                panic!("dirty page is inflight");
+            }
         }
     }
 }
