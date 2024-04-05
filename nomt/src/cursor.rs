@@ -139,6 +139,7 @@ impl PageCacheCursor {
     /// at the closest key path that is on the way to the given key path.
     pub fn seek(&mut self, dest: KeyPath) {
         self.rewind();
+        self.path = dest;
         if !trie::is_internal(&self.root) {
             // The root either a leaf or the terminator. In either case, we can't navigate anywhere.
             return;
@@ -151,12 +152,15 @@ impl PageCacheCursor {
             }
             if self.depth as usize % DEPTH == 0 {
                 // attempt to load next page if we are at the end of our previous page or the root.
-                match ppf.next(&self.pages) {
+                let (page_id, page) = match ppf.next(&self.pages) {
                     None => {
                         panic!("reached the end of the prefetcher without finding the terminal")
                     }
-                    Some(p) => p.wait(),
+                    Some((id, p)) => (id, p.wait()),
                 };
+                self.cached_page = Some((page_id, page));
+                self.depth += 1;
+                continue;
             }
             // page is loaded, so this won't block.
             self.down(bit);
@@ -374,7 +378,7 @@ struct PagePrefetcher {
     /// such a way, that [`Vec::pop`] would return the next page to be processed.
     ///
     /// This vector is at most of size [`PREFETCH_N`].
-    page_promises: Vec<PagePromise>,
+    page_promises: Vec<(PageId, PagePromise)>,
 }
 
 impl PagePrefetcher {
@@ -385,7 +389,7 @@ impl PagePrefetcher {
         }
     }
 
-    fn next(&mut self, page_cache: &PageCache) -> Option<PagePromise> {
+    fn next(&mut self, page_cache: &PageCache) -> Option<(PageId, PagePromise)> {
         if self.page_promises.is_empty() {
             // The prefetch hasn't started yet or we consumed all the promises. We need to initiate
             // a new prefetch.
@@ -399,7 +403,9 @@ impl PagePrefetcher {
                     // then it means it is the last batch
                     None => break,
                 };
-                self.page_promises.push(page_cache.retrieve(page_id));
+
+                self.page_promises
+                    .push((page_id, page_cache.retrieve(page_id)));
             }
 
             self.page_promises.reverse();
