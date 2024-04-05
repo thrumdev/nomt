@@ -122,7 +122,7 @@ impl PageCacheCursor {
             .nth(n_pages)
             .expect("all keys with <= 256 bits have pages; qed");
 
-        self.cached_page = Some((page_id.clone(), self.pages.retrieve(page_id).wait()));
+        self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
     }
 
     /// Moves the cursor to the given [`KeyPath`].
@@ -183,7 +183,7 @@ impl PageCacheCursor {
             cur_page_id = cur_page_id.parent_page_id();
         }
 
-        self.cached_page = Some((cur_page_id.clone(), self.pages.retrieve(cur_page_id).wait()));
+        self.cached_page = Some((cur_page_id.clone(), self.retrieve(cur_page_id)));
     }
 
     /// Traverse to the child of this node indicated by the given bit.
@@ -204,7 +204,7 @@ impl PageCacheCursor {
                 }
             };
 
-            self.cached_page = Some((page_id.clone(), self.pages.retrieve(page_id).wait()));
+            self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
         }
 
         // Update the cursor's lookup path.
@@ -267,6 +267,10 @@ impl PageCacheCursor {
                     page.node(&read_pass, sibling_index(path))
                 }
             })
+    }
+
+    fn retrieve(&mut self, page_id: PageId) -> Page {
+        self.pages.retrieve_sync(page_id)
     }
 
     /// Called when the write is finished.

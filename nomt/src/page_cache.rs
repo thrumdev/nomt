@@ -234,6 +234,48 @@ impl PageCache {
         }
     }
 
+    /// Retrieves the page data at the given [`PageId`] synchronously.
+    ///
+    /// If the page is in the cache, it is returned immediately. If the page is not in the cache, it
+    /// is fetched from the underlying store and returned.
+    ///
+    /// This method is blocking, but doesn't suffer from the channel overhead.
+    pub fn retrieve_sync(&self, page_id: PageId) -> Page {
+        match self.shared.cached.entry(page_id) {
+            dashmap::mapref::entry::Entry::Occupied(o) => {
+                let page = o.get();
+                match page {
+                    PageState::Inflight(inflight) => {
+                        return inflight.promise().wait();
+                    }
+                    PageState::Cached(page) => {
+                        return Page {
+                            inner: page.clone(),
+                        };
+                    }
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(PageState::Inflight(InflightFetch::new()));
+            }
+        }
+
+        let entry = self
+            .shared
+            .store
+            .load_page(page_id.clone())
+            .expect("db load failed") // TODO: handle the error
+            .map_or_else(
+                || PageData::pristine_empty(&self.shared.page_rw_pass_domain),
+                |data| PageData::pristine_with_data(&self.shared.page_rw_pass_domain, data),
+            );
+        let entry = Arc::new(entry);
+        self.shared
+            .cached
+            .insert(page_id.clone(), PageState::Cached(entry.clone()));
+        return Page { inner: entry };
+    }
+
     pub fn new_read_cursor(&self, root: Node) -> PageCacheCursor {
         let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
         PageCacheCursor::new_read(root, self.clone(), read_pass)
