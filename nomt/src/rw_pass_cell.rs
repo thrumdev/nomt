@@ -42,6 +42,7 @@ pub struct RwPassDomain {
 }
 
 impl RwPassDomain {
+    /// Create a new [`RwPassDomain`]
     pub fn new() -> Self {
         Self {
             shared: Arc::new(RwLock::new(())),
@@ -108,6 +109,8 @@ impl WritePass {
     }
 }
 
+/// A cell corresponding with a [`RwPassDomain`]. This may be read and written only with a pass from
+/// the domain.
 pub struct RwPassCell<T> {
     // A weak reference to the creator of the cell.
     //
@@ -127,6 +130,8 @@ impl<T> RwPassCell<T> {
     }
 
     /// Returns a handle to read the value. Requires showing a read pass.
+    ///
+    /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell.
     pub fn read<'a, 'pass>(&'a self, read_pass: &'pass ReadPass) -> ReadGuard<'a, 'pass, T> {
         self.check_domain(&read_pass.domain);
         ReadGuard {
@@ -135,7 +140,9 @@ impl<T> RwPassCell<T> {
         }
     }
 
-    /// Reeturns a handle to write the value. Requires showing a write pass.
+    /// Returns a handle to write the value. Requires showing a write pass.
+    ///
+    /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell.
     pub fn write<'a, 'pass>(
         &'a self,
         write_pass: &'pass mut WritePass,
@@ -162,6 +169,9 @@ impl<T> RwPassCell<T> {
 unsafe impl<T: Send> Send for RwPassCell<T> {}
 unsafe impl<T: Sync> Sync for RwPassCell<T> {}
 
+/// A read guard for the value of an [`RwPassCell`]. This may exist concurrently with other
+/// readers.
+// SAFETY: this cannot be `Clone`.
 pub struct ReadGuard<'a, 'pass, T> {
     inner: &'a RwPassCell<T>,
     _read_pass: &'pass ReadPass,
@@ -171,6 +181,7 @@ impl<'a, 'pass, T> ReadGuard<'a, 'pass, T>
 where
     'pass: 'a,
 {
+    /// Get a reference to the underlying value.
     pub fn get(&self) -> &'pass T {
         // SAFETY: The existence of the guard ensures that there are only shared references
         //         to the inner value. The returned reference cannot outlive the guard.
@@ -186,6 +197,8 @@ impl<'a, 'pass, T> Deref for ReadGuard<'a, 'pass, T> {
     }
 }
 
+/// A read guard for the value of an [`RwPassCell`]. This may exist concurrently with other
+/// readers.
 pub struct WriteGuard<'a, 'pass: 'a, T> {
     inner: &'a RwPassCell<T>,
     _write_pass: &'pass mut WritePass,
@@ -195,15 +208,18 @@ impl<'a, 'pass, T> WriteGuard<'a, 'pass, T>
 where
     'pass: 'a,
 {
+    /// Get a reference to the underlying value.
     pub fn get(&self) -> &T {
         // SAFETY: The existence of the guard ensures that there is only one mutable reference
         //         to the inner value. The returned reference cannot outlive the guard.
         unsafe { &*self.inner.inner.get() }
     }
 
+    /// Get a mutable reference to the underlying value.
     pub fn get_mut(&mut self) -> &mut T {
-        // SAFETY: The existence of the guard ensures that there is only one mutable reference
-        //         to the inner value. The returned reference cannot outlive the guard.
+        // SAFETY: The existence of the mutable guard reference ensures that there is only one
+        //         mutable reference to the inner value. The returned reference cannot outlive the
+        //         guard.
         unsafe { &mut *self.inner.inner.get() }
     }
 }
