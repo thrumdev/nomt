@@ -67,10 +67,14 @@ pub struct PageCacheCursor {
 }
 
 impl PageCacheCursor {
+    /// Create a new [`PageCacheCursor`] configured for reading.
+    ///
+    /// Subsequent calls to `modify` or `finish_write` will panic.
     pub fn new_read(root: Node, pages: PageCache, read_pass: ReadPass) -> Self {
         Self::new(root, pages, Mode::Read(read_pass))
     }
 
+    /// Create a new [`PageCacheCursor`] configured for writing.
     pub fn new_write(root: Node, pages: PageCache, write_pass: WritePass) -> Self {
         Self::new(
             root,
