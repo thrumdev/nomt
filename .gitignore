@@ -5,3 +5,7 @@
 .envrc
 
 /target
+
+# samply / benchtop
+profile.json
+/test
