@@ -1,5 +1,6 @@
-use nomt::{KeyPath, Node, Nomt, Options, Session};
-use std::{mem, path::PathBuf, rc::Rc};
+use fxhash::FxHashMap;
+use nomt::{KeyPath, KeyReadWrite, Node, Nomt, Options, Session};
+use std::{collections::hash_map::Entry, mem, path::PathBuf, rc::Rc};
 
 fn path(id: u64) -> KeyPath {
     // KeyPaths must be uniformly distributed, but we don't want to spend time on a good hash. So
@@ -26,6 +27,7 @@ fn opts() -> Options {
 struct Test {
     nomt: Nomt,
     session: Option<Session>,
+    access: FxHashMap<KeyPath, KeyReadWrite>,
 }
 
 impl Test {
@@ -36,25 +38,48 @@ impl Test {
         Self {
             nomt,
             session: Some(session),
+            access: FxHashMap::default(),
         }
     }
 
     fn write(&mut self, id: u64, value: Option<u64>) {
         let path = path(id);
         let value = value.map(|v| Rc::new(v.to_le_bytes().to_vec()));
-        self.session.as_mut().unwrap().write_slot(path, value);
+        match self.access.entry(path) {
+            Entry::Occupied(mut o) => {
+                o.get_mut().write(value);
+            }
+            Entry::Vacant(v) => {
+                v.insert(KeyReadWrite::Write(value));
+            }
+        }
+        self.session.as_mut().unwrap().tentative_write_slot(path);
     }
 
     fn read(&mut self, id: u64) -> Option<u64> {
         let path = path(id);
         let to_u64 = |v: Option<&[u8]>| v.map(|v| u64::from_le_bytes(v.try_into().unwrap()));
-        let value = self.session.as_mut().unwrap().read_slot(path).unwrap();
+        let value = match self.access.entry(path) {
+            Entry::Occupied(o) => o.get().last_value().cloned(),
+            Entry::Vacant(v) => {
+                let value = self
+                    .session
+                    .as_mut()
+                    .unwrap()
+                    .tentative_read_slot(path)
+                    .unwrap();
+                v.insert(KeyReadWrite::Read(value.clone()));
+                value
+            }
+        };
         to_u64(value.as_ref().map(|v| &v[..]))
     }
 
     fn commit(&mut self) -> Node {
         let session = mem::take(&mut self.session).unwrap();
-        self.nomt.commit_and_prove(session).unwrap();
+        let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
+        actual_access.sort_by_key(|(k, _)| *k);
+        self.nomt.commit_and_prove(session, actual_access).unwrap();
         self.session = Some(self.nomt.begin_session());
         self.nomt.root()
     }
