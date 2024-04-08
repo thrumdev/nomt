@@ -37,19 +37,6 @@ impl Mode {
             }
         }
     }
-
-    fn with_write_pass<R, F>(&mut self, f: F) -> R
-    where
-        F: FnOnce(Option<&mut WritePass>) -> R,
-    {
-        match self {
-            Mode::Read(_) => f(None),
-            Mode::Write { write_pass, .. } => {
-                let mut write_pass = write_pass.borrow_mut();
-                f(Some(&mut *write_pass))
-            }
-        }
-    }
 }
 
 /// A cursor wrapping a [`PageCache`].
@@ -244,21 +231,24 @@ impl PageCacheCursor {
 
     /// Modify the node at the current location of the cursor.
     pub fn modify(&mut self, node: Node) {
-        self.mode.with_write_pass(|write_pass| {
-            let Some(write_pass) = write_pass else {
-                panic!("attempted to call modify on a read-only cursor");
-            };
-            match self.cached_page {
-                None => {
-                    self.root = node;
-                }
-                Some((_, ref mut page)) => {
-                    let path = last_page_path(&self.path, self.depth);
-                    let index = node_index(path);
-                    page.set_node(write_pass, index, node);
-                }
+        let (write_pass, dirtied) = match self.mode {
+            Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
+            Mode::Write {
+                ref mut write_pass,
+                ref mut dirtied,
+            } => (write_pass, dirtied),
+        };
+        match self.cached_page {
+            None => {
+                self.root = node;
             }
-        });
+            Some((page_id, ref mut page)) => {
+                let path = last_page_path(&self.path, self.depth);
+                let index = node_index(path);
+                page.set_node(&mut *write_pass.borrow_mut(), index, node);
+                dirtied.insert(page_id);
+            }
+        }
     }
 
     /// Peek at the sibling node of the current position without moving the cursor. At the root,
