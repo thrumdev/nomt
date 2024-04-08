@@ -197,8 +197,8 @@ impl Nomt {
         }
     }
 
-    /// Commit the transaction and create a proof for the given session.
-    pub fn commit_and_prove(&self, session: Session) -> anyhow::Result<Witness> {
+    /// Commit the transaction and create a proof for the given session. Also, returns the new root.
+    pub fn commit_and_prove(&self, session: Session) -> anyhow::Result<(Node, Witness)> {
         let prev = self
             .session_cnt
             .swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -257,7 +257,7 @@ impl Nomt {
 
         self.page_cache.commit(cursor, &mut tx);
         self.store.commit(tx)?;
-        Ok(witness)
+        Ok((new_root, witness))
     }
 }
 
