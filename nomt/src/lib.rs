@@ -1,8 +1,7 @@
 use bitvec::prelude::*;
 use dashmap::DashMap;
-use fxhash::FxHashMap;
 use std::{
-    collections::{hash_map::Entry, BTreeMap},
+    collections::BTreeMap,
     mem,
     path::PathBuf,
     rc::Rc,
@@ -97,7 +96,7 @@ struct TerminalInfo {
 }
 
 /// Whether a key was read, written, or both, along with old and new values.
-enum KeyReadWrite {
+pub enum KeyReadWrite {
     /// The key was read. Contains the read value.
     Read(Option<Value>),
     /// The key was written. Contains the written value.
@@ -107,7 +106,8 @@ enum KeyReadWrite {
 }
 
 impl KeyReadWrite {
-    fn last_value(&self) -> Option<&Value> {
+    /// Returns the last recorded value for the slot.
+    pub fn last_value(&self) -> Option<&Value> {
         match self {
             KeyReadWrite::Read(v) | KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) => {
                 v.as_ref()
@@ -115,7 +115,10 @@ impl KeyReadWrite {
         }
     }
 
-    fn write(&mut self, new_value: Option<Value>) {
+    /// Updates the state of the given slot.
+    ///
+    /// If the slot was read, it becomes read-then-write. If it was written, the value is updated.
+    pub fn write(&mut self, new_value: Option<Value>) {
         match *self {
             KeyReadWrite::Read(ref mut value) => {
                 *self = KeyReadWrite::ReadThenWrite(mem::take(value), new_value);
@@ -192,13 +195,21 @@ impl Nomt {
             page_cache: self.page_cache.clone(),
             store: self.store.clone(),
             warmup_tp: self.warmup_tp.clone(),
-            access: FxHashMap::default(),
             terminals: Arc::new(DashMap::new()),
         }
     }
 
     /// Commit the transaction and create a proof for the given session. Also, returns the new root.
-    pub fn commit_and_prove(&self, session: Session) -> anyhow::Result<(Node, Witness)> {
+    ///
+    /// The actuals are a list of key paths and the corresponding read/write operations. The list
+    /// must be sorted by the key paths in ascending order. The key paths must be unique. For every
+    /// key in the actuals, the function [`Session::tentative_read_slot`] or
+    /// [`Session::tentative_write_slot`] must be called before committing.
+    pub fn commit_and_prove(
+        &self,
+        session: Session,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
+    ) -> anyhow::Result<(Node, Witness)> {
         let prev = self
             .session_cnt
             .swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -209,7 +220,6 @@ impl Nomt {
             page_cache,
             store: _,
             warmup_tp,
-            access,
             terminals,
         } = session;
 
@@ -226,7 +236,7 @@ impl Nomt {
 
         let mut ops = vec![];
         let mut witness_builder = WitnessBuilder::default();
-        for (path, read_write) in access {
+        for (path, read_write) in actuals {
             let terminal_info = terminals.remove(&path).expect("terminal info not found").1;
             if let KeyReadWrite::Write(ref value) | KeyReadWrite::ReadThenWrite(_, ref value) =
                 read_write
@@ -272,33 +282,22 @@ pub struct Session {
     page_cache: PageCache,
     store: Store,
     warmup_tp: ThreadPool,
-    access: FxHashMap<KeyPath, KeyReadWrite>,
     terminals: Arc<DashMap<KeyPath, TerminalInfo>>,
 }
 
 impl Session {
-    /// Synchronously read the value stored at the given key. Returns `None` if the value is not
-    /// stored under the given key. Fails only if I/O fails.
-    pub fn read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
-        if let Some(read_write) = self.access.get(&path) {
-            Ok(read_write.last_value().cloned())
-        } else {
-            self.warmup(path);
-            let value = self.store.load_value(path)?.map(Rc::new);
-            self.access.insert(path, KeyReadWrite::Read(value.clone()));
-            Ok(value)
-        }
+    /// Synchronously read the value stored at the given key.
+    ///
+    /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
+    pub fn tentative_read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
+        self.warmup(path);
+        let value = self.store.load_value(path)?.map(Rc::new);
+        Ok(value)
     }
 
-    /// Writes a value at the given key path. If `None` is passed, the key is deleted.
-    pub fn write_slot(&mut self, path: KeyPath, new_value: Option<Value>) {
-        match self.access.entry(path) {
-            Entry::Occupied(mut o) => o.get_mut().write(new_value),
-            Entry::Vacant(v) => {
-                v.insert(KeyReadWrite::Write(new_value));
-                self.warmup(path);
-            }
-        }
+    /// Signals that the given key is going to be written to.
+    pub fn tentative_write_slot(&mut self, path: KeyPath) {
+        self.warmup(path);
     }
 
     fn warmup(&self, path: KeyPath) {
