@@ -35,7 +35,10 @@ pub trait Cursor {
     fn sibling(&mut self);
     /// Traverse to a child of the current position. Provide a bit that indicates whether
     /// the left or right child should be taken.
-    fn down(&mut self, bit: bool);
+    ///
+    /// The `hint_fresh` flag can be set to inform the cursor that the location being jumped to
+    /// is previously unallocated. Incorrect use of this flag can cause deletion of trie data.
+    fn down(&mut self, bit: bool, hint_fresh: bool);
     /// Traverse upwards by d bits. No-op if d is greater than the current position length.
     fn up(&mut self, d: u8);
 

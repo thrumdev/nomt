@@ -172,7 +172,7 @@ fn replace_subtrie<H: NodeHasher>(
     build_trie::<H>(skip, ops, |visit_control, node, leaf_data| {
         cursor.up(visit_control.up);
         for bit in visit_control.down.iter().by_vals() {
-            cursor.down(bit);
+            cursor.down(bit, true);
         }
 
         match leaf_data {
