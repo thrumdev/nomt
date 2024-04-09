@@ -62,6 +62,14 @@ impl PageData {
     }
 }
 
+fn page_is_empty(page: &[u8]) -> bool {
+    // 1. we assume the top layer of nodes are kept at index 0 and 1, respectively, and this
+    //    is packed as the first two 32-byte slots.
+    // 2. if both are empty, then the whole page is empty. this is because internal nodes
+    //    with both children as terminals are not allowed to exist.
+    &page[..64] == [0u8; 64].as_slice()
+}
+
 enum PageState {
     Inflight(InflightFetch),
     Cached(Arc<PageData>),
@@ -245,9 +253,7 @@ impl PageCache {
             dashmap::mapref::entry::Entry::Occupied(o) => {
                 let page = o.get();
                 match page {
-                    PageState::Inflight(inflight) => {
-                        Some(inflight.promise())
-                    }
+                    PageState::Inflight(inflight) => Some(inflight.promise()),
                     PageState::Cached(page) => {
                         return Page {
                             inner: page.clone(),
@@ -309,7 +315,7 @@ impl PageCache {
             if let PageState::Cached(ref page) = *page_state {
                 let page_data = page.data.read(write_pass.downgrade());
                 let page_data = page_data.as_ref().map(|v| &v[..]);
-                tx.write_page(page_id, page_data);
+                tx.write_page(page_id, page_data.filter(|p| !page_is_empty(p)));
             } else {
                 panic!("dirty page is inflight");
             }
