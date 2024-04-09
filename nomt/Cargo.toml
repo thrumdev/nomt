@@ -15,7 +15,7 @@ anyhow = "1.0.81"
 crossbeam-channel = "0.5.12"
 nomt-core = { path = "../core" }
 parking_lot = { version = "0.12.1", features = ["arc_lock"] }
-rocksdb = "0.22.0"
+rocksdb = "0.21.0"
 threadpool = "1.8.1"
 bitvec = { version = "1" }
 blake3 = "1.5.1"

@@ -1,0 +1,29 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+clap = { version = "4.4.8" , features = ["derive"] }
+anyhow = { version = "1.0.75" }
+
+# benchmarking
+hdrhistogram = "7.5.4"
+fxhash = "0.2.1"
+rand = "0.8.5"
+rand_pcg = "0.3.1"
+sha2 = { version = "0.10.6" }
+
+# sov-db
+sov-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }
+sov-schema-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }
+sov-prover-storage-manager = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }
+jmt = { git = "https://github.com/penumbra-zone/jmt.git", rev = "1d007e11cb68aa5ca13e9a5af4a12e6439d5f7b6" }
+
+# nomt
+nomt = { path = "../nomt" }
