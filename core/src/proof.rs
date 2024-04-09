@@ -250,7 +250,7 @@ pub fn verify_update<H: NodeHasher>(
                 let n = shared_bits(p.inner.path(), path.inner.path());
                 // n always < skip
                 // we want to end at layer n + 1
-                skip - n - 1
+                skip - (n + 1)
             }
         };
 
