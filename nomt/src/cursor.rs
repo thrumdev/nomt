@@ -108,7 +108,7 @@ impl PageCacheCursor {
             return;
         }
 
-        let n_pages = self.depth as usize / DEPTH;
+        let n_pages = (self.depth - 1) as usize / DEPTH;
         let page_id = PageIdsIterator::new(self.path)
             .nth(n_pages)
             .expect("all keys with <= 256 bits have pages; qed");
