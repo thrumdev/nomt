@@ -45,6 +45,7 @@ impl Test {
     fn write(&mut self, id: u64, value: Option<u64>) {
         let path = path(id);
         let value = value.map(|v| Rc::new(v.to_le_bytes().to_vec()));
+        let delete = value.is_none();
         match self.access.entry(path) {
             Entry::Occupied(mut o) => {
                 o.get_mut().write(value);
@@ -53,7 +54,10 @@ impl Test {
                 v.insert(KeyReadWrite::Write(value));
             }
         }
-        self.session.as_mut().unwrap().tentative_write_slot(path);
+        self.session
+            .as_mut()
+            .unwrap()
+            .tentative_write_slot(path, delete);
     }
 
     fn read(&mut self, id: u64) -> Option<u64> {

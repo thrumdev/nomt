@@ -23,8 +23,8 @@ fuzz_target!(|run: Run| {
                             let actual_value = session.tentative_read_slot(key_path).unwrap();
                             assert_eq!(actual_value, expected_value);
                         }
-                        SessionCall::TentativeWrite { key_path } => {
-                            session.tentative_write_slot(key_path);
+                        SessionCall::TentativeWrite { key_path, delete } => {
+                            session.tentative_write_slot(key_path, delete);
                         }
                         SessionCall::CommitAndProve { keys } => {
                             let _ = db.commit_and_prove(session, keys);
@@ -119,6 +119,7 @@ enum SessionCall {
     },
     TentativeWrite {
         key_path: KeyPath,
+        delete: bool,
     },
     /// Commit and prove the given keys.
     CommitAndProve {
@@ -204,9 +205,10 @@ impl<'a> Arbitrary<'a> for NomtCalls {
                             expected_value: v.clone(),
                         });
                     }
-                    KeyReadWrite::Write(_) => {
+                    KeyReadWrite::Write(v) => {
                         session_calls.push(SessionCall::TentativeWrite {
                             key_path: *key_path,
+                            delete: v.is_none(),
                         });
                     }
                 }

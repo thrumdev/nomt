@@ -97,7 +97,7 @@ impl InternalData {
 }
 
 /// The data of a leaf node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LeafData {
     /// The total path to this value within the trie.
     ///

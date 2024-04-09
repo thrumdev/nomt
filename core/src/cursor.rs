@@ -3,7 +3,7 @@
 //! This is not intended so much for abstraction as it is for dependency injection and testability
 //! and should not be considered stable.
 
-use crate::trie::{KeyPath, Node};
+use crate::trie::{InternalData, KeyPath, LeafData, Node};
 
 /// Generic cursor over binary trie storage.
 ///
@@ -39,6 +39,21 @@ pub trait Cursor {
     /// Traverse upwards by d bits. No-op if d is greater than the current position length.
     fn up(&mut self, d: u8);
 
-    /// Modify the node at the given position.
-    fn modify(&mut self, node: Node);
+    /// Place a non-leaf node at the current location.
+    fn place_non_leaf(&mut self, node: Node);
+
+    /// Place a leaf node at the current location.
+    fn place_leaf(&mut self, node: Node, leaf: LeafData);
+
+    /// Attempt to compact this node with its sibling. There are four possible outcomes.
+    ///
+    /// 1. If both this and the sibling are terminators, this moves the cursor up one position
+    ///    and replaces the parent with a terminator.
+    /// 2. If one of this and the sibling is a leaf, and the other is a terminator, this deletes
+    ///    the leaf, moves the cursor up one position, and replaces the parent with the deleted
+    ///    leaf.
+    /// 3. If either or both is an internal node, this moves the cursor up one position and
+    ///    return an internal node data structure comprised of this and this sibling.
+    /// 4. This is the root - return.
+    fn compact_up(&mut self) -> Option<InternalData>;
 }

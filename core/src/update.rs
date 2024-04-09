@@ -32,7 +32,7 @@
 //! result. The last terminal finishes hashing to the root. We refer to this as partial compaction.
 
 use crate::cursor::Cursor;
-use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, NodeKind, ValueHash};
+use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, ValueHash};
 
 use bitvec::prelude::*;
 
@@ -107,8 +107,16 @@ pub fn update<H: NodeHasher>(
 
         let batch = &ops[batch_start..next_batch_start];
 
+        // hack: we need to explicitly clear the leaf so the cursor can clear metadata stored below.
+        if leaf_data.is_some() {
+            cursor.place_non_leaf(trie::TERMINATOR);
+        }
         replace_subtrie::<H>(cursor, leaf_data, batch);
-        compact_and_hash::<H>(cursor, compact_layers);
+        for _ in 0..compact_layers {
+            if let Some(internal_data) = cursor.compact_up() {
+                cursor.place_non_leaf(H::hash_internal(&internal_data));
+            }
+        }
 
         batch_start = next_batch_start;
     }
@@ -162,9 +170,12 @@ fn replace_subtrie<H: NodeHasher>(
     let start_pos = cursor.position();
     let skip = start_pos.1 as usize;
 
-    build_sub_trie::<H>(skip, leaf_data, ops, |key, depth, node| {
+    build_sub_trie::<H>(skip, leaf_data, ops, |key, depth, node, leaf_data| {
         cursor.jump(key, depth);
-        cursor.modify(node);
+        match leaf_data {
+            None => cursor.place_non_leaf(node),
+            Some(leaf_data) => cursor.place_leaf(node, leaf_data),
+        }
     });
 }
 
@@ -177,7 +188,7 @@ pub fn build_sub_trie<H: NodeHasher>(
     skip: usize,
     leaf: Option<LeafData>,
     ops: &[(KeyPath, Option<ValueHash>)],
-    mut visit: impl FnMut(KeyPath, u8, Node),
+    mut visit: impl FnMut(KeyPath, u8, Node, Option<LeafData>),
 ) -> Node {
     // we build a compact addressable sub-trie in-place based on the given set of ordered keys,
     // ignoring deletions as they are implicit in a fresh sub-trie.
@@ -217,17 +228,10 @@ pub fn build_sub_trie<H: NodeHasher>(
     let mut b = leaf_ops.next();
     let mut c = leaf_ops.next();
 
-    if let (None, Some(leaf)) = (b, leaf) {
-        visit(leaf.key_path, skip as u8, trie::TERMINATOR);
+    if b.is_none() {
         return trie::TERMINATOR;
     }
 
-    let make_leaf = |(k, value)| {
-        H::hash_leaf(&trie::LeafData {
-            key_path: k,
-            value_hash: value,
-        })
-    };
     let common_after_prefix = |k1: &KeyPath, k2: &KeyPath| {
         let x = &k1.view_bits::<Msb0>()[skip..];
         let y = &k2.view_bits::<Msb0>()[skip..];
@@ -238,7 +242,11 @@ pub fn build_sub_trie<H: NodeHasher>(
         let n1 = a.as_ref().map(|(k, _)| common_after_prefix(k, &this_key));
         let n2 = c.as_ref().map(|(k, _)| common_after_prefix(k, &this_key));
 
-        let leaf = make_leaf((this_key, this_val));
+        let leaf_data = trie::LeafData {
+            key_path: this_key,
+            value_hash: this_val,
+        };
+        let leaf = H::hash_leaf(&leaf_data);
         let (depth_after_skip, hash_up_layers) = match (n1, n2) {
             (None, None) => {
                 // single value - no hashing required.
@@ -260,7 +268,8 @@ pub fn build_sub_trie<H: NodeHasher>(
 
         let mut layer = depth_after_skip;
         let mut last_node = leaf;
-        visit(this_key, (skip + depth_after_skip) as u8, leaf);
+
+        visit(this_key, (skip + layer) as u8, leaf, Some(leaf_data));
         for bit in this_key.view_bits::<Msb0>()[skip..skip + depth_after_skip]
             .iter()
             .by_vals()
@@ -287,7 +296,7 @@ pub fn build_sub_trie<H: NodeHasher>(
                 }
             };
             last_node = H::hash_internal(&node_data);
-            visit(this_key, (skip + layer) as u8, last_node);
+            visit(this_key, (skip + layer) as u8, last_node, None);
         }
         pending_siblings.push((last_node, layer));
 
@@ -301,57 +310,4 @@ pub fn build_sub_trie<H: NodeHasher>(
         .map(|n| n.0)
         .unwrap_or(trie::TERMINATOR);
     new_root
-}
-
-fn compact_and_hash<H: NodeHasher>(cursor: &mut impl Cursor, layers: usize) {
-    if layers == 0 {
-        return;
-    }
-
-    let (key, depth) = cursor.position();
-    for bit in key.view_bits::<Msb0>()[..depth as usize]
-        .iter()
-        .by_vals()
-        .rev()
-        .take(layers)
-    {
-        let sibling = cursor.peek_sibling();
-        let node = cursor.node();
-        match (NodeKind::of(&node), NodeKind::of(&sibling)) {
-            (NodeKind::Terminator, NodeKind::Terminator) => {
-                // compact terminators.
-                cursor.up(1);
-                cursor.modify(trie::TERMINATOR);
-            }
-            (NodeKind::Leaf, NodeKind::Terminator) => {
-                // compact: clear this node, move leaf up.
-                cursor.modify(trie::TERMINATOR);
-                cursor.up(1);
-                cursor.modify(node);
-            }
-            (NodeKind::Terminator, NodeKind::Leaf) => {
-                // compact: clear sibling node, move leaf up.
-                cursor.sibling();
-                cursor.modify(trie::TERMINATOR);
-                cursor.up(1);
-                cursor.modify(sibling);
-            }
-            _ => {
-                // otherwise, internal
-                let node_data = if bit {
-                    trie::InternalData {
-                        left: sibling,
-                        right: node,
-                    }
-                } else {
-                    trie::InternalData {
-                        left: node,
-                        right: sibling,
-                    }
-                };
-                cursor.up(1);
-                cursor.modify(H::hash_internal(&node_data));
-            }
-        }
-    }
 }
