@@ -334,10 +334,11 @@ impl PageCache {
     /// Retrieves the page data at the given [`PageId`] synchronously.
     ///
     /// If the page is in the cache, it is returned immediately. If the page is not in the cache, it
-    /// is fetched from the underlying store and returned.
+    /// is fetched from the underlying store and returned. If `hint_fresh` is true, this immediately
+    /// returns a blank page.
     ///
     /// This method is blocking, but doesn't suffer from the channel overhead.
-    pub fn retrieve_sync(&self, page_id: PageId) -> Page {
+    pub fn retrieve_sync(&self, page_id: PageId, hint_fresh: bool) -> Page {
         let maybe_inflight = match self.shared.cached.entry(page_id.clone()) {
             Entry::Occupied(o) => {
                 let page = o.get();
@@ -351,6 +352,15 @@ impl PageCache {
                 }
             }
             Entry::Vacant(v) => {
+                if hint_fresh {
+                    let page_data =
+                        Arc::new(PageData::pristine_empty(&self.shared.page_rw_pass_domain));
+                    let page = Page {
+                        inner: page_data.clone(),
+                    };
+                    v.insert(PageState::Cached(page_data));
+                    return page;
+                }
                 v.insert(PageState::Inflight(Arc::new(InflightFetch::new())));
                 None
             }
@@ -477,7 +487,7 @@ impl Seeker {
         current_page: Option<&(PageId, Page)>,
     ) -> trie::LeafData {
         let (page, _, children) = locate_leaf_data(trie_pos, current_page, |page_id| {
-            self.cache.retrieve_sync(page_id)
+            self.cache.retrieve_sync(page_id, false)
         });
         trie::LeafData {
             key_path: page.node(&self.read_pass, children.left()),
@@ -501,7 +511,7 @@ impl Seeker {
                     .expect("Pages do not go deeper than the maximum layer, 42"),
             };
 
-            *cur_page = Some((page_id.clone(), self.cache.retrieve_sync(page_id)));
+            *cur_page = Some((page_id.clone(), self.cache.retrieve_sync(page_id, false)));
         }
         pos.down(bit);
 

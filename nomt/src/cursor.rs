@@ -133,7 +133,10 @@ impl PageCacheCursor {
     /// The assumption is that the cursor is pointing to the internal node and it's the
     /// responsibility of the caller to ensure that. If violated,the cursor's location will be
     /// invalid.
-    pub fn down(&mut self, bit: bool) {
+    ///
+    /// hint_fresh indicates that any new page which needs to be fetched should be freshly
+    /// allocated. Improper use of this function will cause deletion of existing tree data.
+    pub fn down(&mut self, bit: bool, hint_fresh: bool) {
         if self.pos.depth() as usize % DEPTH == 0 {
             // attempt to load next page if we are at the end of our previous page or the root.
             // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
@@ -144,7 +147,10 @@ impl PageCacheCursor {
                     .expect("Pages do not go deeper than the maximum layer, 42"),
             };
 
-            self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
+            self.cached_page = Some((
+                page_id.clone(),
+                self.pages.retrieve_sync(page_id, hint_fresh),
+            ));
         }
         self.pos.down(bit);
     }
@@ -166,7 +172,7 @@ impl PageCacheCursor {
     fn read_leaf_children(&self) -> trie::LeafData {
         let (page, _page_id, children) =
             crate::page_cache::locate_leaf_data(&self.pos, self.cached_page.as_ref(), |page_id| {
-                self.pages.retrieve_sync(page_id)
+                self.pages.retrieve_sync(page_id, false)
             });
 
         self.mode.with_read_pass(|read_pass| trie::LeafData {
@@ -175,10 +181,10 @@ impl PageCacheCursor {
         })
     }
 
-    fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>) {
+    fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>, hint_fresh: bool) {
         let (page, page_id, children) =
             crate::page_cache::locate_leaf_data(&self.pos, self.cached_page.as_ref(), |page_id| {
-                self.pages.retrieve_sync(page_id)
+                self.pages.retrieve_sync(page_id, hint_fresh)
             });
 
         let (write_pass, dirtied) = match self.mode {
@@ -201,7 +207,7 @@ impl PageCacheCursor {
         assert!(!trie::is_leaf(&node));
 
         if trie::is_leaf(&self.node()) {
-            self.write_leaf_children(None);
+            self.write_leaf_children(None, false);
         }
 
         let (write_pass, dirtied) = match self.mode {
@@ -226,7 +232,7 @@ impl PageCacheCursor {
     pub fn place_leaf(&mut self, node: Node, leaf: trie::LeafData) {
         assert!(trie::is_leaf(&node));
 
-        self.write_leaf_children(Some(leaf));
+        self.write_leaf_children(Some(leaf), true);
 
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
@@ -277,7 +283,7 @@ impl PageCacheCursor {
                 // compact: clear this node, move leaf up.
 
                 let prev = self.read_leaf_children();
-                self.write_leaf_children(None);
+                self.write_leaf_children(None, false);
                 self.place_non_leaf(trie::TERMINATOR);
                 self.up(1);
                 self.place_leaf(node, prev);
@@ -289,7 +295,7 @@ impl PageCacheCursor {
                 self.sibling();
 
                 let prev = self.read_leaf_children();
-                self.write_leaf_children(None);
+                self.write_leaf_children(None, false);
                 self.place_non_leaf(trie::TERMINATOR);
                 self.up(1);
                 self.place_leaf(sibling, prev);
@@ -326,7 +332,7 @@ impl PageCacheCursor {
     }
 
     fn retrieve(&mut self, page_id: PageId) -> Page {
-        self.pages.retrieve_sync(page_id)
+        self.pages.retrieve_sync(page_id, false)
     }
 
     /// Called when the write is finished.
@@ -366,8 +372,8 @@ impl nomt_core::Cursor for PageCacheCursor {
         PageCacheCursor::sibling(self)
     }
 
-    fn down(&mut self, bit: bool) {
-        PageCacheCursor::down(self, bit)
+    fn down(&mut self, bit: bool, hint_fresh: bool) {
+        PageCacheCursor::down(self, bit, hint_fresh)
     }
 
     fn up(&mut self, d: u8) {
