@@ -35,6 +35,7 @@ impl DB for NomtDB {
                         // TODO: Should the hash of the key be included in the benchmarking?
                         let key_path = sha2::Sha256::digest(key).into();
                         let value = val.map(|v| std::rc::Rc::new(v));
+                        let is_delete = value.is_none();
 
                         match access.entry(key_path) {
                             Entry::Occupied(mut o) => {
@@ -45,7 +46,7 @@ impl DB for NomtDB {
                             }
                         }
 
-                        session.tentative_write_slot(key_path);
+                        session.tentative_write_slot(key_path, is_delete);
                     }
                 }
                 _ => todo!(),

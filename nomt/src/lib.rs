@@ -8,7 +8,7 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
-use cursor::PageCacheCursor;
+use cursor::{PageCacheCursor, SeekMode};
 use nomt_core::{
     proof::PathProof,
     trie::{NodeHasher, TERMINATOR},
@@ -282,32 +282,31 @@ impl Session {
     ///
     /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
     pub fn tentative_read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
-        self.warmup(path);
+        self.warmup(path, false);
         let value = self.store.load_value(path)?.map(Rc::new);
         Ok(value)
     }
 
-    /// Signals that the given key is going to be written to.
-    pub fn tentative_write_slot(&mut self, path: KeyPath) {
-        self.warmup(path);
+    /// Signals that the given key is going to be written to. Set `delete` to true when the
+    /// key is likely being deleted.
+    pub fn tentative_write_slot(&mut self, path: KeyPath, delete: bool) {
+        self.warmup(path, delete);
     }
 
-    fn warmup(&self, path: KeyPath) {
+    fn warmup(&self, path: KeyPath, delete: bool) {
         let page_cache = self.page_cache.clone();
-        let store = self.store.clone();
         let terminals = self.terminals.clone();
         let root = self.prev_root;
         let f = move || {
             let mut cur = page_cache.new_read_cursor(root);
-            cur.seek(path);
-            let (_, depth) = cur.position();
-            let node = cur.node();
-            let terminal_info = if nomt_core::trie::is_leaf(&node) {
-                let leaf = store.load_leaf(node).unwrap(); // TODO: handle error
-                TerminalInfo { leaf, depth }
+            let seek_mode = if delete {
+                SeekMode::RetrieveSiblingLeafChildren
             } else {
-                TerminalInfo { leaf: None, depth }
+                SeekMode::PathOnly
             };
+            let leaf = cur.seek(path, seek_mode);
+            let (_, depth) = cur.position();
+            let terminal_info = TerminalInfo { leaf, depth };
             terminals.insert(path, terminal_info);
         };
         self.warmup_tp.execute(f);
@@ -335,7 +334,6 @@ impl WitnessBuilder {
             leaf: terminal.leaf.clone(),
             reads: Vec::new(),
             writes: Vec::new(),
-            preserve: true,
         });
 
         if let KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) = read_write {
@@ -344,13 +342,6 @@ impl WitnessBuilder {
 
         if let KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) = read_write {
             entry.writes.push((key_path, v.clone()));
-            if entry
-                .leaf
-                .as_ref()
-                .map_or(false, |leaf| leaf.key_path == key_path)
-            {
-                entry.preserve = false;
-            }
         }
     }
 
@@ -369,15 +360,19 @@ impl WitnessBuilder {
                 terminal: terminal.leaf.clone(),
                 siblings,
             };
-            visited_terminals.push(VisitedTerminal {
-                path: {
-                    let mut full_path = KeyPath::default();
-                    full_path.view_bits_mut::<Msb0>()[..path.len()].copy_from_bitslice(&path);
-                    full_path
-                },
-                depth: path.len() as u8,
-                leaf: terminal.leaf,
-            });
+
+            if !terminal.writes.is_empty() {
+                visited_terminals.push(VisitedTerminal {
+                    path: {
+                        let mut full_path = KeyPath::default();
+                        full_path.view_bits_mut::<Msb0>()[..path.len()].copy_from_bitslice(&path);
+                        full_path
+                    },
+                    depth: path.len() as u8,
+                    leaf: terminal.leaf,
+                });
+            }
+
             paths.push(WitnessedPath {
                 inner: path_proof,
                 path,
@@ -417,5 +412,4 @@ struct TerminalOps {
     leaf: Option<LeafData>,
     reads: Vec<(KeyPath, Option<Value>)>,
     writes: Vec<(KeyPath, Option<Value>)>,
-    preserve: bool,
 }

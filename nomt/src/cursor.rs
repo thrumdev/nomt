@@ -8,7 +8,7 @@ use bitvec::prelude::*;
 use nomt_core::{
     page::DEPTH,
     page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
-    trie::{self, KeyPath, Node},
+    trie::{self, KeyPath, Node, NodeKind},
 };
 
 /// The breadth of the prefetch request.
@@ -37,6 +37,18 @@ impl Mode {
             }
         }
     }
+}
+
+/// Modes for seeking to a key path.
+#[derive(Debug, Clone, Copy)]
+pub enum SeekMode {
+    /// Retrieve the pages with the child location of any sibling nodes which are also leaves.
+    ///
+    /// This should be used when preparing to delete a key, which can cause leaf nodes to be
+    /// relocated.
+    RetrieveSiblingLeafChildren,
+    /// Retrieve the pages along the path to the key path's corresponding terminal node only.
+    PathOnly,
 }
 
 /// A cursor wrapping a [`PageCache`].
@@ -124,17 +136,28 @@ impl PageCacheCursor {
     ///
     /// After returning of this function, the cursor is positioned either at the given key path or
     /// at the closest key path that is on the way to the given key path.
-    pub fn seek(&mut self, dest: KeyPath) {
+    ///
+    /// If the terminal node is a leaf, this returns the leaf data associated with that leaf.
+    pub fn seek(&mut self, dest: KeyPath, seek_mode: SeekMode) -> Option<trie::LeafData> {
         self.rewind();
         if !trie::is_internal(&self.root) {
             // The root either a leaf or the terminator. In either case, we can't navigate anywhere.
-            return;
+            return if trie::is_leaf(&self.root) {
+                Some(self.read_leaf_children())
+            } else {
+                None
+            };
         }
 
         let mut ppf = PageIdsIterator::new(dest);
         for bit in dest.view_bits::<Msb0>().iter().by_vals() {
             if !trie::is_internal(&self.node()) {
-                break;
+                return if trie::is_leaf(&self.node()) {
+                    let leaf_data = self.read_leaf_children();
+                    Some(leaf_data)
+                } else {
+                    None
+                };
             }
             if self.depth as usize % DEPTH == 0 {
                 // attempt to load next page if we are at the end of our previous page or the root.
@@ -145,10 +168,37 @@ impl PageCacheCursor {
                     };
                     self.pages.prepopulate(page_id);
                 }
+
+                if let (&Some((ref id, _)), SeekMode::RetrieveSiblingLeafChildren, true) = (
+                    &self.cached_page,
+                    seek_mode,
+                    trie::is_leaf(&self.peek_sibling()),
+                ) {
+                    // sibling is a leaf and at the end of the (non-root) page.
+                    // initiate a load of the sibling's page.
+                    let path = last_page_path(&self.path, self.depth);
+                    let page_idx = {
+                        let this_page_idx = path.load_be::<u8>();
+                        if this_page_idx % 2 == 0 {
+                            this_page_idx + 1
+                        } else {
+                            this_page_idx - 1
+                        }
+                    };
+                    let child_page_id = id.child_page_id(page_idx).expect(
+                        "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
+                    );
+
+                    // async; just warm up.
+                    let _ = self.pages.prepopulate(child_page_id);
+                }
             }
             // page is loaded, so this won't block.
             self.down(bit);
         }
+
+        // sanity: should be impossible not to encounter a node.
+        None
     }
 
     /// Go up the trie by `d` levels.
@@ -229,8 +279,93 @@ impl PageCacheCursor {
             })
     }
 
-    /// Modify the node at the current location of the cursor.
-    pub fn modify(&mut self, node: Node) {
+    fn read_leaf_children(&self) -> trie::LeafData {
+        let fetched_page;
+        let (page, (left_idx, right_idx)) = match self.cached_page {
+            None => {
+                fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
+                (&fetched_page, (0, 1))
+            }
+            Some((page_id, ref page)) => {
+                let path = last_page_path(&self.path, self.depth);
+                match child_node_indices(path) {
+                    Some((left, right)) => (page, (left, right)),
+                    None => {
+                        let child_page_idx = path.load_be::<u8>();
+
+                        // unwrap: this is true even for the leaf node placement, as less than the
+                        // entire 42nd page is used with 256 bit keys.
+                        let child_page_id = page_id.child_page_id(child_page_idx).expect(
+                            "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
+                        );
+                        fetched_page = self.pages.retrieve_sync(child_page_id);
+                        (&fetched_page, (0, 1))
+                    }
+                }
+            }
+        };
+
+        self.mode.with_read_pass(|read_pass| trie::LeafData {
+            key_path: page.node(&read_pass, left_idx),
+            value_hash: page.node(&read_pass, right_idx),
+        })
+    }
+
+    fn write_leaf_children(&mut self, leaf_data: trie::LeafData) {
+        let (write_pass, dirtied) = match self.mode {
+            Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
+            Mode::Write {
+                ref mut write_pass,
+                ref mut dirtied,
+            } => (write_pass, dirtied),
+        };
+        let fetched_page;
+
+        let (page_id, page, (left_idx, right_idx)) = match self.cached_page {
+            None => {
+                fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
+                (ROOT_PAGE_ID, &fetched_page, (0, 1))
+            }
+            Some((page_id, ref page)) => {
+                let path = last_page_path(&self.path, self.depth);
+                match child_node_indices(path) {
+                    Some((left, right)) => (page_id, page, (left, right)),
+                    None => {
+                        let child_page_idx = path.load_be::<u8>();
+
+                        // unwrap: this is true even for the leaf node placement, as less than the
+                        // entire 42nd page is used with 256 bit keys.
+                        let child_page_id = page_id.child_page_id(child_page_idx).expect(
+                            "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
+                        );
+                        fetched_page = self.pages.retrieve_sync(child_page_id);
+                        (child_page_id, &fetched_page, (0, 1))
+                    }
+                }
+            }
+        };
+
+        page.set_node(&mut *write_pass.borrow_mut(), left_idx, leaf_data.key_path);
+        page.set_node(
+            &mut *write_pass.borrow_mut(),
+            right_idx,
+            leaf_data.value_hash,
+        );
+        dirtied.insert(page_id);
+    }
+
+    /// Place a non-leaf node at the current location.
+    pub fn place_non_leaf(&mut self, node: Node) {
+        if trie::is_leaf(&node) {
+            return;
+        }
+
+        // hack: this assumes that leaves are always explicitly deleted
+        // before being overwritten in order to maintain a consistent state.
+        if trie::is_terminator(&node) && trie::is_leaf(&self.node()) {
+            self.write_leaf_children(Default::default());
+        }
+
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
@@ -247,6 +382,105 @@ impl PageCacheCursor {
                 let index = node_index(path);
                 page.set_node(&mut *write_pass.borrow_mut(), index, node);
                 dirtied.insert(page_id);
+            }
+        }
+    }
+
+    /// Place a leaf node at the current location.
+    pub fn place_leaf(&mut self, node: Node, leaf: trie::LeafData) {
+        if !trie::is_leaf(&node) {
+            return;
+        }
+
+        self.write_leaf_children(leaf.clone());
+
+        let (write_pass, dirtied) = match self.mode {
+            Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
+            Mode::Write {
+                ref mut write_pass,
+                ref mut dirtied,
+            } => (write_pass, dirtied),
+        };
+        match self.cached_page {
+            None => {
+                self.root = node;
+            }
+            Some((page_id, ref mut page)) => {
+                let path = last_page_path(&self.path, self.depth);
+                let index = node_index(path);
+                page.set_node(&mut *write_pass.borrow_mut(), index, node);
+                dirtied.insert(page_id);
+            }
+        }
+    }
+
+    /// Attempt to compact this node with its sibling. There are four possible outcomes.
+    ///
+    /// 1. If both this and the sibling are terminators, this moves the cursor up one position
+    ///    and replaces the parent with a terminator.
+    /// 2. If one of this and the sibling is a leaf, and the other is a terminator, this deletes
+    ///    the leaf, moves the cursor up one position, and replaces the parent with the deleted
+    ///    leaf.
+    /// 3. If either or both is an internal node, this moves the cursor up one position and
+    ///    return an internal node data structure comprised of this and this sibling.
+    /// 4. This is the root - return.
+    pub fn compact_up(&mut self) -> Option<trie::InternalData> {
+        if self.depth == 0 {
+            return None;
+        }
+
+        let node = self.node();
+        let sibling = self.peek_sibling();
+
+        let this_bit_idx = self.depth as usize - 1;
+        // unwrap: depth != 0 above
+        let bit = *self.path.view_bits::<Msb0>().get(this_bit_idx).unwrap();
+
+        match (NodeKind::of(&node), NodeKind::of(&sibling)) {
+            (NodeKind::Terminator, NodeKind::Terminator) => {
+                // compact terminators.
+                self.up(1);
+                self.place_non_leaf(trie::TERMINATOR);
+                None
+            }
+            (NodeKind::Leaf, NodeKind::Terminator) => {
+                // compact: clear this node, move leaf up.
+
+                let prev = self.read_leaf_children();
+                self.write_leaf_children(Default::default());
+                self.place_non_leaf(trie::TERMINATOR);
+                self.up(1);
+                self.place_leaf(node, prev.clone());
+
+                None
+            }
+            (NodeKind::Terminator, NodeKind::Leaf) => {
+                // compact: clear sibling node, move leaf up.
+                self.sibling();
+
+                let prev = self.read_leaf_children();
+                self.write_leaf_children(Default::default());
+                self.place_non_leaf(trie::TERMINATOR);
+                self.up(1);
+                self.place_leaf(sibling, prev);
+
+                None
+            }
+            _ => {
+                // otherwise, internal
+                let node_data = if bit {
+                    trie::InternalData {
+                        left: sibling,
+                        right: node,
+                    }
+                } else {
+                    trie::InternalData {
+                        left: node,
+                        right: sibling,
+                    }
+                };
+                self.up(1);
+                Some(node_data)
             }
         }
     }
@@ -302,7 +536,7 @@ impl nomt_core::Cursor for PageCacheCursor {
     }
 
     fn seek(&mut self, path: KeyPath) {
-        PageCacheCursor::seek(self, path)
+        PageCacheCursor::seek(self, path, SeekMode::PathOnly);
     }
 
     fn sibling(&mut self) {
@@ -317,8 +551,16 @@ impl nomt_core::Cursor for PageCacheCursor {
         PageCacheCursor::up(self, d)
     }
 
-    fn modify(&mut self, node: Node) {
-        PageCacheCursor::modify(self, node)
+    fn place_non_leaf(&mut self, node: Node) {
+        PageCacheCursor::place_non_leaf(self, node)
+    }
+
+    fn place_leaf(&mut self, node: Node, leaf: trie::LeafData) {
+        PageCacheCursor::place_leaf(self, node, leaf)
+    }
+
+    fn compact_up(&mut self) -> Option<trie::InternalData> {
+        PageCacheCursor::compact_up(self)
     }
 }
 
@@ -340,6 +582,25 @@ fn sibling_index(page_path: &BitSlice<u8, Msb0>) -> usize {
         index + 1
     } else {
         index - 1
+    }
+}
+
+// Transform a bit-path to the index in a page corresponding to the child node indices.
+//
+// The expected length of the page path is between 0 and `DEPTH` - 1, inclusive.
+// A length out of range returns `None`.
+fn child_node_indices(page_path: &BitSlice<u8, Msb0>) -> Option<(usize, usize)> {
+    if page_path.is_empty() {
+        Some((0, 1))
+    } else if page_path.len() >= DEPTH {
+        None
+    } else {
+        let depth = page_path.len();
+
+        // parent is at (2^depth - 2) + as_uint(parent)
+        // children are at (2^(depth+1) - 2) + as_uint(parent)*2 + (0 or 1)
+        let base = (1 << depth + 1) - 2 + 2 * page_path[..depth].load_be::<usize>();
+        Some((base, base + 1))
     }
 }
 

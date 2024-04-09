@@ -66,6 +66,7 @@ impl Store {
     }
 
     /// Load the preimage of a leaf, given its hash.
+    #[allow(unused)]
     pub fn load_leaf(&self, hash: Node) -> anyhow::Result<Option<LeafData>> {
         let cf = self.shared.db.cf_handle(LEAF_CF).unwrap();
         let value = self.shared.db.get_cf(&cf, hash.as_ref())?;
