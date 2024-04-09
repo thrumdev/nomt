@@ -382,6 +382,7 @@ impl WitnessBuilder {
                         path_index: i,
                     }),
             );
+            let has_writes = !terminal.writes.is_empty();
             writes.extend(
                 terminal
                     .writes
@@ -393,7 +394,7 @@ impl WitnessBuilder {
                         path_index: i,
                     }),
             );
-            if let Some(leaf) = terminal.leaf {
+            if let Some(leaf) = terminal.leaf.filter(|_| has_writes) {
                 visited_leaves.push(leaf)
             }
         }
