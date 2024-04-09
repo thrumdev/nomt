@@ -11,7 +11,7 @@ fn path(id: u64) -> KeyPath {
     let mut rng = rand_pcg::Lcg64Xsh32::from_seed(seed);
     let mut path = KeyPath::default();
     for i in 0..4 {
-        path[i] = rng.next_u32() as u8;
+        path[i * 4 ..][..4].copy_from_slice(&rng.next_u32().to_le_bytes());
     }
     path
 }
