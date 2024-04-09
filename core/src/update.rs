@@ -81,13 +81,12 @@ pub fn update<H: NodeHasher>(
         let next_batch_start = batch_start + 1 + batch_len;
         let compact_layers = if next_batch_start < ops.len() {
             let current_depth = cursor.position().1 as usize;
-            let shared_depth = shared_with_cursor(&*cursor, ops[next_batch_start].0) + 1;
+            let shared_depth = shared_with_cursor(&*cursor, ops[next_batch_start].0);
 
             // shared_depth is guaranteed less than current_depth because the full prefix isn't
             // shared.
-            // we don't want to compute the node at `shared_depth` before that terminal is replaced
-            // therefore:
-            current_depth - shared_depth - 1
+            // we want to compact up (inclusive) to the depth `shared_depth + 1`
+            current_depth - (shared_depth + 1)
         } else {
             // last batch: all the way to root
             cursor.position().1 as usize
@@ -205,6 +204,11 @@ pub fn build_sub_trie<H: NodeHasher>(
     let mut b = leaf_ops.next();
     let mut c = leaf_ops.next();
 
+    if let (None, Some(leaf)) = (b, leaf) {
+        visit(leaf.key_path, skip as u8, trie::TERMINATOR);
+        return trie::TERMINATOR;
+    }
+
     let make_leaf = |(k, value)| {
         H::hash_leaf(&trie::LeafData {
             key_path: k,
@@ -243,6 +247,7 @@ pub fn build_sub_trie<H: NodeHasher>(
 
         let mut layer = depth_after_skip;
         let mut last_node = leaf;
+        visit(this_key, (skip + depth_after_skip) as u8, leaf);
         for bit in this_key.view_bits::<Msb0>()[..depth_after_skip]
             .iter()
             .by_vals()
@@ -269,7 +274,7 @@ pub fn build_sub_trie<H: NodeHasher>(
                 }
             };
             last_node = H::hash_internal(&node_data);
-            visit(this_key, layer as u8, last_node);
+            visit(this_key, (skip + layer) as u8, last_node);
         }
         pending_siblings.push((last_node, layer));
 
@@ -282,9 +287,6 @@ pub fn build_sub_trie<H: NodeHasher>(
         .pop()
         .map(|n| n.0)
         .unwrap_or(trie::TERMINATOR);
-    if let Some(leaf) = leaf {
-        visit(leaf.key_path, skip as u8, new_root);
-    }
     new_root
 }
 
