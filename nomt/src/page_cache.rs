@@ -282,9 +282,21 @@ impl PageCache {
                 |data| PageData::pristine_with_data(&self.shared.page_rw_pass_domain, data),
             );
         let entry = Arc::new(entry);
-        self.shared
+        let prev = self
+            .shared
             .cached
             .insert(page_id.clone(), PageState::Cached(entry.clone()));
+        match prev {
+            None => {}
+            Some(PageState::Inflight(inflight)) => {
+                inflight.complete_and_notify(Page {
+                    inner: entry.clone(),
+                });
+            }
+            Some(PageState::Cached(_)) => {
+                panic!("page was already cached");
+            }
+        }
         return Page { inner: entry };
     }
 
