@@ -12,6 +12,7 @@ use cursor::PageCacheCursor;
 use nomt_core::{
     proof::PathProof,
     trie::{NodeHasher, TERMINATOR},
+    update::VisitedTerminal,
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -246,10 +247,10 @@ impl Nomt {
             }
             witness_builder.insert(path, terminal_info.clone(), &read_write);
         }
-        let (witness, _witnessed, visited_leaves) = witness_builder.build(&mut cursor);
+        let (witness, _witnessed, visited_terminals) = witness_builder.build(&mut cursor);
         ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-        nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_leaves);
+        nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_terminals);
         cursor.rewind();
         let new_root = cursor.node();
         self.shared.lock().root = cursor.node();
@@ -355,11 +356,11 @@ impl WitnessBuilder {
 
     // builds the witness, the witnessed operations, and returns additional write operations
     // for leaves which are updated but where the existing value should be preserved.
-    fn build(self, cursor: &mut PageCacheCursor) -> (Witness, WitnessedOperations, Vec<LeafData>) {
+    fn build(self, cursor: &mut PageCacheCursor) -> (Witness, WitnessedOperations, Vec<VisitedTerminal>) {
         let mut paths = Vec::with_capacity(self.terminals.len());
         let mut reads = Vec::new();
         let mut writes = Vec::new();
-        let mut visited_leaves = Vec::new();
+        let mut visited_terminals = Vec::new();
 
         for (i, (path, terminal)) in self.terminals.into_iter().enumerate() {
             let (_, siblings) = nomt_core::proof::record_path(cursor, &path[..]);
@@ -368,6 +369,15 @@ impl WitnessBuilder {
                 terminal: terminal.leaf.clone(),
                 siblings,
             };
+            visited_terminals.push(VisitedTerminal {
+                path: {
+                    let mut full_path = KeyPath::default();
+                    full_path.view_bits_mut::<Msb0>()[..path.len()].copy_from_bitslice(&path);
+                    full_path
+                },
+                depth: path.len() as u8,
+                leaf: terminal.leaf,
+            });
             paths.push(WitnessedPath {
                 inner: path_proof,
                 path,
@@ -382,7 +392,6 @@ impl WitnessBuilder {
                         path_index: i,
                     }),
             );
-            let has_writes = !terminal.writes.is_empty();
             writes.extend(
                 terminal
                     .writes
@@ -394,15 +403,12 @@ impl WitnessBuilder {
                         path_index: i,
                     }),
             );
-            if let Some(leaf) = terminal.leaf.filter(|_| has_writes) {
-                visited_leaves.push(leaf)
-            }
         }
 
         (
             Witness { path_proofs: paths },
             WitnessedOperations { reads, writes },
-            visited_leaves,
+            visited_terminals,
         )
     }
 }

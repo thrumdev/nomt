@@ -36,6 +36,17 @@ use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, Node
 
 use bitvec::prelude::*;
 
+/// A visited terminal node.
+#[derive(Clone)]
+pub struct VisitedTerminal {
+    /// the path to the terminal node. only the first `depth` bits matter.
+    pub path: KeyPath,
+    /// the depth of the terminal node.
+    pub depth: u8,
+    /// the leaf at the terminal. `None` if it's a terminator.
+    pub leaf: Option<LeafData>,
+}
+
 /// Apply an update, represented as a sequence of operations, to the trie
 /// navigated by the given cursor.
 ///
@@ -50,7 +61,7 @@ use bitvec::prelude::*;
 pub fn update<H: NodeHasher>(
     cursor: &mut impl Cursor,
     ops: &[(KeyPath, Option<ValueHash>)],
-    visited_leaves: &[LeafData],
+    visited_terminals: &[VisitedTerminal],
 ) {
     if ops.is_empty() {
         return;
@@ -59,16 +70,18 @@ pub fn update<H: NodeHasher>(
     cursor.rewind();
 
     let mut batch_start = 0;
-    let mut terminal_leaves = visited_leaves.iter().cloned();
+    let mut visited_terminals = visited_terminals.iter().cloned();
     while batch_start < ops.len() {
-        cursor.seek(ops[batch_start].0);
-        let leaf_data = if trie::is_leaf(&cursor.node()) {
-            // note: this should always be `Some` in correct
-            // API usage.
-            terminal_leaves.next()
-        } else {
-            None
+        let terminal = match visited_terminals.next() {
+            Some(t) => t,
+            None => {
+                // sanity: should never occur in correct API usage.
+                return
+            }
         };
+        let leaf_data = terminal.leaf.clone();
+
+        cursor.jump(terminal.path, terminal.depth);
 
         // note: cursor position does not move during these
         // comparisons.
