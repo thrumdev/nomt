@@ -241,12 +241,12 @@ impl PageCache {
     ///
     /// This method is blocking, but doesn't suffer from the channel overhead.
     pub fn retrieve_sync(&self, page_id: PageId) -> Page {
-        match self.shared.cached.entry(page_id) {
+        let maybe_inflight = match self.shared.cached.entry(page_id) {
             dashmap::mapref::entry::Entry::Occupied(o) => {
                 let page = o.get();
                 match page {
                     PageState::Inflight(inflight) => {
-                        return inflight.promise().wait();
+                        Some(inflight.promise())
                     }
                     PageState::Cached(page) => {
                         return Page {
@@ -257,7 +257,13 @@ impl PageCache {
             }
             dashmap::mapref::entry::Entry::Vacant(v) => {
                 v.insert(PageState::Inflight(InflightFetch::new()));
+                None
             }
+        };
+
+        // do not wait with dashmap lock held; deadlock
+        if let Some(existing_inflight) = maybe_inflight {
+            return existing_inflight.wait();
         }
 
         let entry = self
