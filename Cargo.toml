@@ -1,10 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "benchtop",
-    "core",
-    "nomt",
-]
+members = ["benchtop", "core", "nomt", "fuzz"]
 
 [workspace.package]
 authors = ["thrum"]

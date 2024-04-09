@@ -96,6 +96,7 @@ struct TerminalInfo {
 }
 
 /// Whether a key was read, written, or both, along with old and new values.
+#[derive(Debug, Clone)]
 pub enum KeyReadWrite {
     /// The key was read. Contains the read value.
     Read(Option<Value>),
@@ -149,7 +150,7 @@ pub struct Nomt {
     warmup_tp: ThreadPool,
     shared: Arc<Mutex<Shared>>,
     /// The number of active sessions. Expected to be either 0 or 1.
-    session_cnt: AtomicUsize,
+    session_cnt: Arc<AtomicUsize>,
 }
 
 impl Nomt {
@@ -166,7 +167,7 @@ impl Nomt {
                 .thread_name("nomt-warmup".to_string())
                 .build(),
             shared: Arc::new(Mutex::new(Shared { root })),
-            session_cnt: AtomicUsize::new(0),
+            session_cnt: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -196,6 +197,7 @@ impl Nomt {
             store: self.store.clone(),
             warmup_tp: self.warmup_tp.clone(),
             terminals: Arc::new(DashMap::new()),
+            session_cnt: self.session_cnt.clone(),
         }
     }
 
@@ -207,32 +209,20 @@ impl Nomt {
     /// [`Session::tentative_write_slot`] must be called before committing.
     pub fn commit_and_prove(
         &self,
-        session: Session,
+        mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Node, Witness)> {
-        let prev = self
-            .session_cnt
-            .swap(0, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(prev, 1, "expected one active session at commit time");
-
-        let Session {
-            prev_root,
-            page_cache,
-            store: _,
-            warmup_tp,
-            terminals,
-        } = session;
-
         // Wait for all warmup tasks to finish. That way, we can be sure that all terminal
         // information is available and that `terminals` would be the only reference.
-        warmup_tp.join();
+        self.warmup_tp.join();
 
+        let prev_root = session.prev_root;
         // unwrap: since we waited for all warmup tasks to finish, there should be no other
         // references to `terminals`.
-        let terminals = Arc::into_inner(terminals).unwrap();
+        let terminals = Arc::get_mut(&mut session.terminals).unwrap();
 
         let mut tx = self.store.new_tx();
-        let mut cursor = page_cache.new_write_cursor(prev_root);
+        let mut cursor = self.page_cache.new_write_cursor(prev_root);
 
         let mut ops = vec![];
         let mut witness_builder = WitnessBuilder::default();
@@ -283,6 +273,7 @@ pub struct Session {
     store: Store,
     warmup_tp: ThreadPool,
     terminals: Arc<DashMap<KeyPath, TerminalInfo>>,
+    session_cnt: Arc<AtomicUsize>,
 }
 
 impl Session {
@@ -319,6 +310,15 @@ impl Session {
             terminals.insert(path, terminal_info);
         };
         self.warmup_tp.execute(f);
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let prev = self
+            .session_cnt
+            .swap(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(prev, 1, "expected one active session at commit time");
     }
 }
 
