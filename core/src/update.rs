@@ -248,7 +248,7 @@ pub fn build_sub_trie<H: NodeHasher>(
         let mut layer = depth_after_skip;
         let mut last_node = leaf;
         visit(this_key, (skip + depth_after_skip) as u8, leaf);
-        for bit in this_key.view_bits::<Msb0>()[..depth_after_skip]
+        for bit in this_key.view_bits::<Msb0>()[skip..skip + depth_after_skip]
             .iter()
             .by_vals()
             .rev()
