@@ -139,12 +139,27 @@ impl Timer {
         println!("  ops={}", self.ops);
         for q in [0.001, 0.01, 0.25, 0.50, 0.75, 0.95, 0.99, 0.999] {
             let lat = self.h.value_at_quantile(q);
-            println!("  {}th: {} ns", q * 100.0, lat);
+            println!("  {}th: {}", q * 100.0, pretty_display_ns(lat));
         }
-        println!("  mean={} ns", self.h.mean());
+        println!("  mean={}", pretty_display_ns(self.h.mean() as u64));
         println!();
         self.ops = 0;
     }
+}
+
+fn pretty_display_ns(ns: u64) -> String {
+    // preserve 3 sig figs at minimum.
+    let (val, unit) = if ns > 100 * 1_000_000_000 {
+        (ns / 1_000_000_000, "s")
+    } else if ns > 100 * 1_000_000 {
+        (ns / 1_000_000, "ms")
+    } else if ns > 100 * 1_000 {
+        (ns / 1_000, "us")
+    } else {
+        (ns, "ns")
+    };
+
+    format!("{val} {unit}")
 }
 
 fn main() {
