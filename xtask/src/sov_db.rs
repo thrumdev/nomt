@@ -30,7 +30,7 @@ impl SovDB {
 
 impl Db for SovDB {
     fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>) {
-        let _timer_guard = timer.and_then(|t| Some(t.record()));
+        let _timer_guard = timer.map(|t| t.record());
 
         self.state_db.inc_next_version();
 

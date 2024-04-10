@@ -28,7 +28,7 @@ impl NomtDB {
 
 impl Db for NomtDB {
     fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>) {
-        let _timer_guard = timer.and_then(|t| Some(t.record()));
+        let _timer_guard = timer.map(|t| t.record());
 
         let mut session = self.nomt.begin_session();
         let mut access: FxHashMap<KeyPath, KeyReadWrite> = FxHashMap::default();
@@ -37,7 +37,7 @@ impl Db for NomtDB {
             match action {
                 Action::Write { key, value } => {
                     let key_path = sha2::Sha256::digest(key).into();
-                    let value = value.map(|v| std::rc::Rc::new(v));
+                    let value = value.map(std::rc::Rc::new);
                     let is_delete = value.is_none();
 
                     match access.entry(key_path) {

@@ -1,4 +1,4 @@
-use crate::{backend::Db, timer::Timer};
+use crate::{backend::Db, timer::Timer, transfer_workload::TransferWorkload};
 use anyhow::Result;
 
 // Workload abstracts the type of work the DB will have to deal with.
@@ -13,27 +13,6 @@ use anyhow::Result;
 // whether the key is not present or already present.
 pub trait Workload {
     fn run(&self, backend: Box<dyn Db>, timer: &mut Timer);
-}
-
-// All transfers happen between different accounts.
-//
-// + `size` refers to the amount of transfer performed by the workload
-// + `percentage_cold_transfer` is the percentage of transfers to
-// a non-existing account, the remaining portion of transfers are to existing accounts.
-// + `additional_initial_capacity` is the amount of elements already present in the storage
-// without counting all the accounts needed for the transfers.
-#[derive(Debug, Clone)]
-#[allow(unused)]
-pub struct TransferWorkload {
-    size: u64,
-    percentage_cold_transfer: u8,
-    additional_initial_capacity: u64,
-}
-
-impl Workload for TransferWorkload {
-    fn run(&self, _backend: Box<dyn Db>, _timer: &mut Timer) {
-        todo!()
-    }
 }
 
 // The custom workload will follow these rules:
