@@ -143,7 +143,7 @@ impl PageCacheCursor {
                         Some(page) => page,
                         None => break,
                     };
-                    let _ = self.pages.retrieve(page_id);
+                    self.pages.prepopulate(page_id);
                 }
             }
             // page is loaded, so this won't block.
