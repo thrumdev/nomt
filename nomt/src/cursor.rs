@@ -286,7 +286,7 @@ impl PageCacheCursor {
                 fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
                 (&fetched_page, (0, 1))
             }
-            Some((page_id, ref page)) => {
+            Some((ref page_id, ref page)) => {
                 let depth_in_page = self.pos.depth_in_page();
                 if depth_in_page == DEPTH {
                     let child_page_id = page_id
@@ -321,16 +321,16 @@ impl PageCacheCursor {
                 fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
                 (ROOT_PAGE_ID, &fetched_page, 0)
             }
-            Some((page_id, ref page)) => {
+            Some((ref page_id, ref page)) => {
                 let depth_in_page = self.pos.depth_in_page();
                 if depth_in_page == DEPTH {
                     let child_page_id = page_id
                         .child_page_id(self.pos.child_page_index())
                         .expect("Pages do not go deeper than the maximum layer, 42");
-                    fetched_page = self.pages.retrieve_sync(child_page_id);
+                    fetched_page = self.pages.retrieve_sync(child_page_id.clone());
                     (child_page_id, &fetched_page, 0)
                 } else {
-                    (page_id, page, self.pos.child_node_indices().0)
+                    (page_id.clone(), page, self.pos.child_node_indices().0)
                 }
             }
         };
@@ -339,7 +339,7 @@ impl PageCacheCursor {
             None => page.clear_leaf_data(&mut *write_pass.borrow_mut(), left_idx),
             Some(leaf) => page.set_leaf_data(&mut *write_pass.borrow_mut(), left_idx, leaf),
         }
-        dirtied.insert(page_id);
+        dirtied.insert(page_id.clone());
     }
 
     /// Place a non-leaf node at the current location.
@@ -361,9 +361,9 @@ impl PageCacheCursor {
             None => {
                 self.root = node;
             }
-            Some((page_id, ref mut page)) => {
+            Some((ref page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.insert(page_id);
+                dirtied.insert(page_id.clone());
             }
         }
     }
@@ -385,9 +385,9 @@ impl PageCacheCursor {
             None => {
                 self.root = node;
             }
-            Some((page_id, ref mut page)) => {
+            Some((ref page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.insert(page_id);
+                dirtied.insert(page_id.clone());
             }
         }
     }
