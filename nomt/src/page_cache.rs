@@ -4,9 +4,10 @@ use crate::{
     store::{Store, Transaction},
     Options,
 };
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use fxhash::FxBuildHasher;
 use nomt_core::{page::DEPTH, page_id::PageId, trie::Node};
+use parking_lot::{Condvar, Mutex};
 use std::{fmt, mem, sync::Arc};
 use threadpool::ThreadPool;
 
@@ -72,7 +73,7 @@ fn page_is_empty(page: &[u8]) -> bool {
 }
 
 enum PageState {
-    Inflight(InflightFetch),
+    Inflight(Arc<InflightFetch>),
     Cached(Arc<PageData>),
 }
 
@@ -102,25 +103,6 @@ impl fmt::Debug for Page {
     }
 }
 
-pub enum PagePromise {
-    Now(Page),
-    Later(crossbeam_channel::Receiver<Page>),
-}
-
-impl PagePromise {
-    /// Waits for the page to be fetched.
-    pub fn wait(self) -> Page {
-        match self {
-            PagePromise::Now(page) => page,
-            PagePromise::Later(rx) => {
-                // TODO: this unwrap must be removed, it's edge-case. Specifically, during the
-                //       shutdown it may happen that the sender is dropped before the receiver.
-                rx.recv().unwrap()
-            }
-        }
-    }
-}
-
 /// Represents a fetch that is currently in progress.
 ///
 /// A fetch can be in one of the following states:
@@ -128,26 +110,34 @@ impl PagePromise {
 /// - Started. The db request has been issued but still waiting for the response.
 /// - Completed. The page has been fetched and the waiters are notified with the fetched page.
 struct InflightFetch {
-    tx: Option<crossbeam_channel::Sender<Page>>,
-    rx: crossbeam_channel::Receiver<Page>,
+    page: Mutex<Option<Page>>,
+    ready: Condvar,
 }
 
 impl InflightFetch {
     fn new() -> Self {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        Self { tx: Some(tx), rx }
-    }
-
-    /// Notifies all the waiting parties that the page has been fetched and destroys this handle.
-    fn complete_and_notify(mut self, page: Page) {
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(page);
+        Self {
+            page: Mutex::new(None),
+            ready: Condvar::new(),
         }
     }
 
-    /// Returns the promise that resolves when the page is fetched.
-    fn promise(&self) -> PagePromise {
-        PagePromise::Later(self.rx.clone())
+    /// Notifies all the waiting parties that the page has been fetched and destroys this handle.
+    fn complete_and_notify(&self, p: Page) {
+        let mut page = self.page.lock();
+        *page = Some(p);
+        self.ready.notify_all();
+    }
+
+    /// Waits until the page is fetched and returns it.
+    fn wait(&self) -> Page {
+        let mut page = self.page.lock();
+        loop {
+            if let Some(ref page) = &*page {
+                return page.clone();
+            }
+            self.ready.wait(&mut page);
+        }
     }
 }
 
@@ -186,60 +176,41 @@ impl PageCache {
         }
     }
 
-    /// Retrieves the page data at the given [`PageId`] asynchronously.
+    /// Initiates retrieval of the page data at the given [`PageId`] asynchronously.
     ///
-    /// If the page is in the cache, it is returned immediately. If the page is not in the cache, it
-    /// is fetched from the underlying store and returned.
-    pub fn retrieve(&self, page_id: PageId) -> PagePromise {
-        match self.shared.cached.entry(page_id) {
-            dashmap::mapref::entry::Entry::Occupied(o) => {
-                let page = o.get();
-                match page {
-                    PageState::Inflight(inflight) => {
-                        return inflight.promise();
-                    }
-                    PageState::Cached(page) => {
-                        return PagePromise::Now(Page {
-                            inner: page.clone(),
-                        });
-                    }
-                }
-            }
-            dashmap::mapref::entry::Entry::Vacant(v) => {
-                // Nope, then we need to fetch the page from the store.
-                let inflight = InflightFetch::new();
-                let promise = inflight.promise();
-                v.insert(PageState::Inflight(inflight));
-                let task = {
-                    let shared = self.shared.clone();
-                    move || {
-                        let entry = shared
-                            .store
-                            .load_page(page_id.clone())
-                            .expect("db load failed") // TODO: handle the error
-                            .map_or_else(
-                                || PageData::pristine_empty(&shared.page_rw_pass_domain),
-                                |data| {
-                                    PageData::pristine_with_data(&shared.page_rw_pass_domain, data)
-                                },
-                            );
-                        let entry = Arc::new(entry);
+    /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
+    /// page from the underlying store and caches it.
+    pub fn prepopulate(&self, page_id: PageId) {
+        if let Entry::Vacant(v) = self.shared.cached.entry(page_id) {
+            // Nope, then we need to fetch the page from the store.
+            let inflight = Arc::new(InflightFetch::new());
+            v.insert(PageState::Inflight(inflight));
+            let task = {
+                let shared = self.shared.clone();
+                move || {
+                    let entry = shared
+                        .store
+                        .load_page(page_id.clone())
+                        .expect("db load failed") // TODO: handle the error
+                        .map_or_else(
+                            || PageData::pristine_empty(&shared.page_rw_pass_domain),
+                            |data| PageData::pristine_with_data(&shared.page_rw_pass_domain, data),
+                        );
+                    let entry = Arc::new(entry);
 
-                        // Unwrap: the operation was inserted above. It is scheduled for execution only
-                        // once. It may removed only in the line below. Therefore, `None` is impossible.
-                        let mut page_state_guard = shared.cached.get_mut(&page_id).unwrap();
-                        let page_state = page_state_guard.value_mut();
-                        let PageState::Inflight(inflight) =
-                            mem::replace(page_state, PageState::Cached(entry.clone()))
-                        else {
-                            panic!("page was not inflight");
-                        };
-                        inflight.complete_and_notify(Page { inner: entry });
-                    }
-                };
-                self.shared.fetch_tp.execute(task);
-                promise
-            }
+                    // Unwrap: the operation was inserted above. It is scheduled for execution only
+                    // once. It may removed only in the line below. Therefore, `None` is impossible.
+                    let mut page_state_guard = shared.cached.get_mut(&page_id).unwrap();
+                    let page_state = page_state_guard.value_mut();
+                    let PageState::Inflight(inflight) =
+                        mem::replace(page_state, PageState::Cached(entry.clone()))
+                    else {
+                        panic!("page was not inflight");
+                    };
+                    inflight.complete_and_notify(Page { inner: entry });
+                }
+            };
+            self.shared.fetch_tp.execute(task);
         }
     }
 
@@ -251,10 +222,10 @@ impl PageCache {
     /// This method is blocking, but doesn't suffer from the channel overhead.
     pub fn retrieve_sync(&self, page_id: PageId) -> Page {
         let maybe_inflight = match self.shared.cached.entry(page_id) {
-            dashmap::mapref::entry::Entry::Occupied(o) => {
+            Entry::Occupied(o) => {
                 let page = o.get();
                 match page {
-                    PageState::Inflight(inflight) => Some(inflight.promise()),
+                    PageState::Inflight(inflight) => Some(inflight.clone()),
                     PageState::Cached(page) => {
                         return Page {
                             inner: page.clone(),
@@ -262,8 +233,8 @@ impl PageCache {
                     }
                 }
             }
-            dashmap::mapref::entry::Entry::Vacant(v) => {
-                v.insert(PageState::Inflight(InflightFetch::new()));
+            Entry::Vacant(v) => {
+                v.insert(PageState::Inflight(Arc::new(InflightFetch::new())));
                 None
             }
         };
