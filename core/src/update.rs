@@ -162,22 +162,36 @@ fn replace_subtrie<H: NodeHasher>(
     let start_pos = cursor.position();
     let skip = start_pos.1 as usize;
 
-    build_sub_trie::<H>(skip, leaf_data, ops, |key, depth, node| {
-        cursor.jump(key, depth);
+    build_sub_trie::<H>(skip, leaf_data, ops, |visit_control, node| {
+        cursor.up(visit_control.up);
+        for bit in visit_control.down.iter().by_vals() {
+            cursor.down(bit);
+        }
         cursor.modify(node);
     });
+}
+
+/// Indicates the relative position of the next node.
+pub struct VisitControl<'a> {
+    /// How many levels up.
+    pub up: u8,
+    /// Path to follow down.
+    pub down: &'a BitSlice<u8, Msb0>,
 }
 
 // Build a sub-trie out of the given prior terminal and operations. Operations should all start
 // with the same prefix of len `skip` and be ordered lexicographically.
 //
 // Provide a visitor which will be called for each computed node of the sub-trie.
+//
+// The visitor is assumed to have a default position at the root of the sub-trie and from
+// there will be controlled with `VisitControl` to indicate the position of the next node.
 // The root is always visited at the end.
 pub fn build_sub_trie<H: NodeHasher>(
     skip: usize,
     leaf: Option<LeafData>,
     ops: &[(KeyPath, Option<ValueHash>)],
-    mut visit: impl FnMut(KeyPath, u8, Node),
+    mut visit: impl FnMut(VisitControl, Node),
 ) -> Node {
     // we build a compact addressable sub-trie in-place based on the given set of ordered keys,
     // ignoring deletions as they are implicit in a fresh sub-trie.
@@ -217,8 +231,8 @@ pub fn build_sub_trie<H: NodeHasher>(
     let mut b = leaf_ops.next();
     let mut c = leaf_ops.next();
 
-    if let (None, Some(leaf)) = (b, leaf) {
-        visit(leaf.key_path, skip as u8, trie::TERMINATOR);
+    if b.is_none() {
+        visit(VisitControl { up: 0, down: BitSlice::empty() }, trie::TERMINATOR);
         return trie::TERMINATOR;
     }
 
@@ -239,7 +253,7 @@ pub fn build_sub_trie<H: NodeHasher>(
         let n2 = c.as_ref().map(|(k, _)| common_after_prefix(k, &this_key));
 
         let leaf = make_leaf((this_key, this_val));
-        let (depth_after_skip, hash_up_layers) = match (n1, n2) {
+        let (leaf_depth, hash_up_layers) = match (n1, n2) {
             (None, None) => {
                 // single value - no hashing required.
                 (0, 0)
@@ -258,10 +272,19 @@ pub fn build_sub_trie<H: NodeHasher>(
             }
         };
 
-        let mut layer = depth_after_skip;
+        let mut layer = leaf_depth;
         let mut last_node = leaf;
-        visit(this_key, (skip + depth_after_skip) as u8, leaf);
-        for bit in this_key.view_bits::<Msb0>()[skip..skip + depth_after_skip]
+        let down_start = skip + n1.unwrap_or(0);
+        let leaf_end_bit = skip + leaf_depth;
+
+        visit(
+            VisitControl {
+                up: n1.map_or(0, |_| 1), // previous iterations always get to current layer + 1
+                down: &this_key.view_bits::<Msb0>()[down_start .. leaf_end_bit],
+            },
+            leaf,
+        );
+        for bit in this_key.view_bits::<Msb0>()[skip..leaf_end_bit]
             .iter()
             .by_vals()
             .rev()
@@ -287,7 +310,13 @@ pub fn build_sub_trie<H: NodeHasher>(
                 }
             };
             last_node = H::hash_internal(&node_data);
-            visit(this_key, (skip + layer) as u8, last_node);
+            visit(
+                VisitControl {
+                    up: 1,
+                    down: BitSlice::empty(),
+                },
+                last_node,
+            );
         }
         pending_siblings.push((last_node, layer));
 
