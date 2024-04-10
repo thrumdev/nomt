@@ -109,7 +109,7 @@ impl Timer {
     fn new(name: &'static str) -> Self {
         Self {
             name,
-            h: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 1000000000, 3).unwrap(),
+            h: hdrhistogram::Histogram::<u64>::new(3).unwrap(),
             ops: 0,
         }
     }
