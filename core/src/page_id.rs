@@ -143,8 +143,7 @@ pub enum ChildPageIdError {
 /// Iterator of PageIds over a KeyPath,
 /// PageIds will be lazily constructed as needed
 pub struct PageIdsIterator {
-    key_path: KeyPath,
-    at: usize,
+    key_path: Uint<256, 4>,
     page_id: Option<PageId>,
 }
 
@@ -152,9 +151,8 @@ impl PageIdsIterator {
     /// Create a PageIds Iterator over a KeyPath
     pub fn new(key_path: KeyPath) -> Self {
         Self {
-            key_path,
-            at: 0,
-            page_id: None,
+            key_path: Uint::from_be_bytes(key_path),
+            page_id: Some(ROOT_PAGE_ID),
         }
     }
 }
@@ -163,27 +161,12 @@ impl Iterator for PageIdsIterator {
     type Item = PageId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // There are 42 sextet in a KeyPath (42 * 6 = 252),
-        // the last bits will not be used as a sextet to identify a page.
-        if self.at >= 42 {
-            // If sextets are finished, then there are no more pages to load
-            return None;
-        }
+        let prev = self.page_id.take()?;
 
-        let new_page_id = match &self.page_id {
-            None => Some(ROOT_PAGE_ID),
-            Some(prev_page_id) => {
-                let start = self.at * DEPTH;
-                let child_index =
-                    self.key_path.view_bits::<Msb0>()[start..start + DEPTH].load_be::<u8>();
-                self.at += 1;
-                Some(prev_page_id.child_page_id(child_index).expect(
-                    "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42",
-                ))
-            }
-        };
-        self.page_id = new_page_id.clone();
-        new_page_id
+        let child_index = self.key_path.byte(31) >> 2;
+        self.key_path <<= 6;
+        self.page_id = prev.child_page_id(child_index).ok();
+        Some(prev)
     }
 }
 
