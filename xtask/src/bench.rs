@@ -8,7 +8,7 @@ pub fn bench(params: Params) -> Result<()> {
         params
             .workload
             .initial_capacity
-            .and_then(|s| Some(1u64 << s))
+            .map(|s| 1u64 << s)
             .unwrap_or(0),
         params.workload.percentage_cold,
     )?;

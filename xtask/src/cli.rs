@@ -53,6 +53,8 @@ pub mod bench {
         /// Workload used by benchmarks.
         ///
         /// Possible values are: transfer, set_balance, heavy_read, heavy_update, heavy_delete
+        ///
+        /// Transfer workload involves balancing transfer between two different accounts
         #[clap(default_value = "transfer")]
         #[arg(long = "workload-name", short)]
         pub name: String,
@@ -61,6 +63,8 @@ pub mod bench {
         ///
         /// It is the percentage of transfers to a non-existing account,
         /// the remaining portion of transfers are to existing accounts
+        ///
+        /// Accepted values are in the range of 0 to 100
         #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
         #[arg(long = "workload-percentage-cold", short)]
         pub percentage_cold: Option<u8>,

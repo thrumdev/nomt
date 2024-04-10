@@ -4,6 +4,7 @@ mod cli;
 mod nomt;
 mod sov_db;
 mod timer;
+mod transfer_workload;
 mod workload;
 
 use clap::Parser;
