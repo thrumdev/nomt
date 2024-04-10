@@ -5,6 +5,7 @@ use crate::{
     Options,
 };
 use dashmap::DashMap;
+use fxhash::FxBuildHasher;
 use nomt_core::{page::DEPTH, page_id::PageId, trie::Node};
 use std::{fmt, mem, sync::Arc};
 use threadpool::ThreadPool;
@@ -165,7 +166,7 @@ struct Shared {
     /// Used for limiting the number of concurrent page fetches.
     fetch_tp: ThreadPool,
     /// The pages loaded from the store, possibly dirty.
-    cached: DashMap<PageId, PageState>,
+    cached: DashMap<PageId, PageState, FxBuildHasher>,
 }
 
 impl PageCache {
@@ -178,7 +179,7 @@ impl PageCache {
         Self {
             shared: Arc::new(Shared {
                 page_rw_pass_domain: RwPassDomain::new(),
-                cached: DashMap::new(),
+                cached: DashMap::with_hasher(FxBuildHasher::default()),
                 store,
                 fetch_tp,
             }),
