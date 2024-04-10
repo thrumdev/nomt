@@ -322,6 +322,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d231dfb89cfffdbc30e7fc41579ed6066ad03abda9e567ccafae602b97ec5024"
 
 [[package]]
+name = "hex-literal"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
+
+[[package]]
 name = "itertools"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -472,8 +478,11 @@ dependencies = [
  "crossbeam-channel",
  "dashmap",
  "fxhash",
+ "hex-literal",
  "nomt-core",
  "parking_lot",
+ "rand",
+ "rand_pcg",
  "rocksdb",
  "threadpool",
 ]
