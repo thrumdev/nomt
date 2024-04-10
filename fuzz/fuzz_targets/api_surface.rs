@@ -223,6 +223,8 @@ impl<'a> Arbitrary<'a> for NomtCalls {
                         | KeyReadWrite::Write(new_value) => {
                             if let Some(new_value) = new_value {
                                 cx.committed.insert(*key_path, new_value.clone());
+                            } else {
+                                cx.committed.remove(key_path);
                             }
                         }
                         KeyReadWrite::Read(_) => {}
