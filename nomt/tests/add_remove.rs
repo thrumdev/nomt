@@ -8,7 +8,6 @@ use nomt::Node;
 fn add_remove_1000() {
     let mut accounts = 0;
     let mut t = Test::new();
-    //let mut v = Vec::new();
 
     let expected_roots = [
         hex!("0000000000000000000000000000000000000000000000000000000000000000"),
