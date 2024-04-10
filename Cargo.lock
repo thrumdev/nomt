@@ -402,6 +402,7 @@ dependencies = [
 name = "nomt-core"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "bitvec",
  "blake3",
  "hex",

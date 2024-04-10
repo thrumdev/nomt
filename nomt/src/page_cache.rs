@@ -249,7 +249,7 @@ impl PageCache {
     /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
     /// page from the underlying store and caches it.
     pub fn prepopulate(&self, page_id: PageId) {
-        if let Entry::Vacant(v) = self.shared.cached.entry(page_id) {
+        if let Entry::Vacant(v) = self.shared.cached.entry(page_id.clone()) {
             // Nope, then we need to fetch the page from the store.
             let inflight = Arc::new(InflightFetch::new());
             v.insert(PageState::Inflight(inflight));
@@ -289,7 +289,7 @@ impl PageCache {
     ///
     /// This method is blocking, but doesn't suffer from the channel overhead.
     pub fn retrieve_sync(&self, page_id: PageId) -> Page {
-        let maybe_inflight = match self.shared.cached.entry(page_id) {
+        let maybe_inflight = match self.shared.cached.entry(page_id.clone()) {
             Entry::Occupied(o) => {
                 let page = o.get();
                 match page {
