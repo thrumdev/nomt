@@ -10,3 +10,8 @@
 profile.json
 /test
 /nomt/test
+
+# xtask
+/xtask/sov_db
+/xtask/nomt_db
+/xtask/target
