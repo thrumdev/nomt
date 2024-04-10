@@ -1,82 +1,155 @@
 //! This module contains all the relevant methods to work with PageIds.
 //!
-//! A PageId is an unique identifier for a Page,
-//! Root Page has id 0, its leftmost child 1 and so on.
+//! A PageId is an unique identifier for a Page in a tree of pages with branching factor 2^6 and
+//! a maximum depth of 42, with the root page counted as depth 0.
 //!
-//! PageId is a 256-bit big-endian integer because there are 2^250 possible pages,
-//! requiring at least 250 bits for representation
+//! Each PageId consists of a list of numbers between 0 and 2^6 - 1, which encodes a path through
+//! the tree. The list may have between 0 and 42 (inclusive) items.
 //!
-//! Given a KeyPath, it will be divided into chunks of 6 bits (sextet), forming
-//! an array of sextets. Each sextet will act as a child_index for the next page.
-//! Each PageId will be constructed in the following manner:
-//!
-//! page_id[i] = prev_page_id * 2^6 + sextet[i] + 1
-//!
-//! Only the first 42 sextets represent valid child indexes in a KeyPath,
-//! and the last four bits are discarded.
-//!
-//! Root PageId is at layer zero of the page tree,
-//! the second layer has index one and so on. There are 43 layers.
-//!
-//! For each layer between 1 and 42 the lowest id for layer I is:
-//!
-//! L(I) = sum_i(2^(6 * i)) where i goes from 0 to I - 1
-//!
-//! while the highest id for each layer is:
-//!
-//! H(I) = L(I) + 2^(6 * I) - 1 = sum_i(2^(6 * i)) where i goes from 1 to I
-//!
-//! So for each layer bigger than 0 the range of PageIds are:
-//!
-//! [L(I)..=H(I)]
-//!
-//! And L(I) = H(I - 1) + 1
+//! Page IDs also have a disambiguated 256-bit representation which is given by starting with a
+//! blank bit pattern, and then repeatedly shifting it to the left by 6 bits, then adding the next
+//! child index, then adding 1. This disambiguated representation uniquely encodes all the page IDs
+//! in a fixed-width bit pattern as, essentially, a base-64 integer.
 
 use crate::{page::DEPTH, trie::KeyPath};
 use bitvec::prelude::*;
-use core::ops::{AddAssign, ShlAssign, ShrAssign, SubAssign};
 use ruint::Uint;
 
 /// A unique ID for a page.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PageId(Uint<256, 4>);
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialOrd, Ord)]
+pub struct PageId {
+    depth: usize,
+    limbs: [u8; 42],
+}
+
+impl PartialEq for PageId {
+    fn eq(&self, other: &Self) -> bool {
+        if self.depth == other.depth {
+            self.limbs[..self.depth] == other.limbs[..self.depth]
+        } else {
+            false
+        }
+    }
+}
 
 /// The root page is the one containing the sub-trie directly descending from the root node.
 ///
 /// It has an ID consisting of all zeros.
-pub const ROOT_PAGE_ID: PageId = PageId(Uint::from_be_bytes([0; 32]));
+pub const ROOT_PAGE_ID: PageId = PageId {
+    depth: 0,
+    limbs: [0; 42],
+};
+
+#[allow(unused)]
+const LOWEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
+    0, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65,
+    4, 16, 65, 4, 16, 65,
+]);
+
+const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
+    16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65,
+    4, 16, 65, 4, 16, 64,
+]);
 
 /// The PageId of the leftmost page of the last layer of the page tree.
 /// It is the lowest PageId beyond which all pages with a PageId equal to
 /// or higher overflow if a child is attempted to be accessed
-pub const LOWEST_42: PageId = PageId(Uint::from_be_bytes([
-    0, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65,
-    4, 16, 65, 4, 16, 65,
-]));
+pub const LOWEST_42: PageId = PageId {
+    depth: 42,
+    limbs: [0; 42],
+};
 
 /// The PageId of the rightmost page of the last layer of the page tree.
 /// It is the highest possible PageId present in the page tree.
-pub const HIGHEST_42: PageId = PageId(Uint::from_be_bytes([
-    16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65,
-    4, 16, 65, 4, 16, 64,
-]));
+pub const HIGHEST_42: PageId = PageId {
+    depth: 42,
+    limbs: [0b111111; 42],
+};
 
 const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
 
 impl PageId {
-    /// Construct a PageId performing a bound check.
-    /// The given bytes cannot represent a PageId bigger than the biggest valid one.
-    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, InvalidPageIdBytes> {
-        let page_id = Uint::from_be_bytes(bytes);
-        if page_id > HIGHEST_42.0 {
+    /// Decode a page ID from its disambiguated representation.
+    ///
+    /// This can fall out of bounds.
+    pub fn decode(bytes: [u8; 32]) -> Result<Self, InvalidPageIdBytes> {
+        let uint = Uint::from_be_bytes(bytes);
+        if uint > HIGHEST_ENCODED_42 {
             return Err(InvalidPageIdBytes);
         }
-        Ok(Self(page_id))
+
+        let leading_zeros = uint.leading_zeros();
+        let bit_count = 256 - leading_zeros;
+        let sextets = (bit_count + 5) / 6;
+        let first_sextet_start = 256 - sextets * 6;
+
+        if bit_count == 0 {
+            return Ok(PageId {
+                depth: 0,
+                limbs: [0u8; 42]
+            });
+        }
+
+        // first we normalize the page ID: any sextet which is all zeros
+        // is an artifact from adding 1 to a sextet which was 2^6 - 1.
+        // by iterating the sextets from least significant to most significant and subtracting out
+        // the additional '1', we can restore the bit pattern to an
+        // ambiguous form and then iterate that. although the bit pattern will now be in an
+        // ambiguous form, we know where the MSB was initially and can use that to determine the
+        // correct number of limbs.
+        let normalized_page_id = {
+            let mut uint = uint;
+            for i in (0..sextets).rev() {
+                let bit_off = (sextets - i - 1) * 6;
+
+                let sub = if i == 0 {
+                    // check if the last sextet is now totally zeroed.
+                    let new_bit_count = 256 - uint.leading_zeros();
+                    let new_sextets = (new_bit_count + 5) / 6;
+                    if new_sextets < sextets {
+                        Uint::<256, 4>::from(0)
+                    } else {
+                        Uint::<256, 4>::from(1) << bit_off
+                    }
+                } else {
+                    Uint::<256, 4>::from(1) << bit_off
+                };
+                uint -= sub;
+            }
+            uint.to_be_bytes::<32>()
+        };
+
+        let mut real_depth = None;
+        let mut page_id = PageId {
+            depth: 0,
+            limbs: [0u8; 42],
+        };
+        for (i, sextet) in normalized_page_id.view_bits::<Msb0>()[first_sextet_start..]
+            .rchunks(6)
+            .enumerate()
+        {
+            if !sextet.is_empty() {
+                let depth = sextets - i;
+                if real_depth.is_none() {
+                    real_depth = Some(depth);
+                }
+                page_id.limbs[depth - 1] = sextet.load_be::<u8>();
+            }
+        }
+
+        page_id.depth = real_depth.unwrap_or(0);
+        Ok(page_id)
     }
 
-    /// Get raw bytes of the PageId.
-    pub fn to_bytes(self) -> [u8; 32] {
-        self.0.to_be_bytes()
+    /// Encode this page ID to its disambiguated representation.
+    pub fn encode(&self) -> [u8; 32] {
+        let mut uint = Uint::<256, 4>::default();
+        for child in self.limbs[0..self.depth].iter().rev() {
+            uint <<= 6;
+            uint += Uint::<256,4>::from(child + 1);
+        }
+
+        uint.to_be_bytes::<32>()
     }
 
     /// Construct the Child PageId given the previous PageId and the child index.
@@ -89,19 +162,13 @@ impl PageId {
             return Err(ChildPageIdError::InvalidChildIndex);
         }
 
-        // Any PageId larger than or equal to LOWEST_42 will overflow.
-        if *self >= LOWEST_42 {
+        if self.depth >= 42 {
             return Err(ChildPageIdError::PageIdOverflow);
         }
 
         let mut new_page_id = self.clone();
-        // next_page_id = (prev_page_id << d) + (child_index + 1)
-        // there is no need to do any check on the following operations
-        // because the previous checks make them impossible to overflow
-        new_page_id.0.shl_assign(DEPTH);
-        new_page_id
-            .0
-            .add_assign(Uint::<256, 4>::from(child_index + 1));
+        new_page_id.limbs[self.depth] = child_index;
+        new_page_id.depth += 1;
 
         Ok(new_page_id)
     }
@@ -117,9 +184,8 @@ impl PageId {
 
         let mut new_page_id = self.clone();
 
-        // prev_page_id = (next_page_id - 1) >> d
-        new_page_id.0.sub_assign(Uint::<256, 4>::from(1));
-        new_page_id.0.shr_assign(DEPTH);
+        new_page_id.depth -= 1;
+        new_page_id.limbs[new_page_id.depth] = 0;
 
         new_page_id
     }
@@ -177,19 +243,17 @@ mod tests {
 
     #[test]
     fn test_child_and_parent_page_id() {
-        let page_id_0 = ROOT_PAGE_ID;
-
         let mut page_id_1 = [0u8; 32]; // child index 6
         page_id_1[31] = 0b00000111;
-        let page_id_1 = PageId::from_bytes(page_id_1).unwrap();
+        let page_id_1 = PageId::decode(page_id_1).unwrap();
 
-        assert_eq!(Ok(page_id_1.clone()), page_id_0.child_page_id(6));
-        assert_eq!(page_id_0, page_id_1.parent_page_id());
+        assert_eq!(Ok(page_id_1.clone()), ROOT_PAGE_ID.child_page_id(6));
+        assert_eq!(ROOT_PAGE_ID, page_id_1.parent_page_id());
 
         let mut page_id_2 = [0u8; 32]; // child index 4
         page_id_2[31] = 0b11000101;
         page_id_2[30] = 0b00000001;
-        let page_id_2 = PageId::from_bytes(page_id_2).unwrap();
+        let page_id_2 = PageId::decode(page_id_2).unwrap();
 
         assert_eq!(Ok(page_id_2.clone()), page_id_1.child_page_id(4));
         assert_eq!(page_id_1, page_id_2.parent_page_id());
@@ -197,7 +261,7 @@ mod tests {
         let mut page_id_3 = [0u8; 32]; // child index 63
         page_id_3[31] = 0b10000000;
         page_id_3[30] = 0b01110001;
-        let page_id_3 = PageId::from_bytes(page_id_3).unwrap();
+        let page_id_3 = PageId::decode(page_id_3).unwrap();
 
         assert_eq!(
             Ok(page_id_3.clone()),
@@ -213,16 +277,15 @@ mod tests {
         key_path[0] = 0b00000100;
         key_path[1] = 0b00100000;
 
-        let page_id_0 = ROOT_PAGE_ID;
         let mut page_id_1 = [0u8; 32];
         page_id_1[31] = 0b00000010; // 0b000001 + 1
-        let page_id_1 = PageId::from_bytes(page_id_1).unwrap();
+        let page_id_1 = PageId::decode(page_id_1).unwrap();
         let mut page_id_2 = [0u8; 32];
         page_id_2[31] = 0b10000011; // (0b000001 + 1 << 6) + 0b000010 + 1
-        let page_id_2 = PageId::from_bytes(page_id_2).unwrap();
+        let page_id_2 = PageId::decode(page_id_2).unwrap();
 
         let mut page_ids = PageIdsIterator::new(key_path);
-        assert_eq!(page_ids.next(), Some(page_id_0));
+        assert_eq!(page_ids.next(), Some(ROOT_PAGE_ID));
         assert_eq!(page_ids.next(), Some(page_id_1));
         assert_eq!(page_ids.next(), Some(page_id_2));
 
@@ -231,17 +294,16 @@ mod tests {
         key_path[0] = 0b00001011;
         key_path[1] = 0b11110000;
 
-        let page_id_0 = ROOT_PAGE_ID;
         let mut page_id_1 = [0u8; 32];
         page_id_1[31] = 0b00000011; // 0b000010 + 1
-        let page_id_1 = PageId::from_bytes(page_id_1).unwrap();
+        let page_id_1 = PageId::decode(page_id_1).unwrap();
         let mut page_id_2 = [0u8; 32];
         page_id_2[31] = 0b0000000;
         page_id_2[30] = 0b0000001; // (0b00000011 << 6) + 0b111111 + 1 = (0b00000011 + 1) << 6
-        let page_id_2 = PageId::from_bytes(page_id_2).unwrap();
+        let page_id_2 = PageId::decode(page_id_2).unwrap();
 
         let mut page_ids = PageIdsIterator::new(key_path);
-        assert_eq!(page_ids.next(), Some(page_id_0));
+        assert_eq!(page_ids.next(), Some(ROOT_PAGE_ID));
         assert_eq!(page_ids.next(), Some(page_id_1));
         assert_eq!(page_ids.next(), Some(page_id_2));
     }
@@ -269,12 +331,12 @@ mod tests {
         // position 255
         let mut page_id = [0u8; 32];
         page_id[0] = 128;
-        assert_eq!(Err(InvalidPageIdBytes), PageId::from_bytes(page_id));
+        assert_eq!(Err(InvalidPageIdBytes), PageId::decode(page_id));
 
         // position 252
         let mut page_id = [0u8; 32];
         page_id[0] = 128;
-        assert_eq!(Err(InvalidPageIdBytes), PageId::from_bytes(page_id));
+        assert_eq!(Err(InvalidPageIdBytes), PageId::decode(page_id));
     }
 
     #[test]
@@ -291,18 +353,16 @@ mod tests {
         );
 
         // position 255
-        let mut page_id = [0u8; 32];
-        page_id[0] = 128;
-        let page_id = PageId(Uint::<256, 4>::from_be_bytes(page_id));
+        let page_id = HIGHEST_42;
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
             page_id.child_page_id(0)
         );
 
         // any PageId bigger than LOWEST_42 must overflow
-        let mut page_id = LOWEST_42.to_bytes();
+        let mut page_id = LOWEST_ENCODED_42.to_be_bytes();
         page_id[31] = 255;
-        let page_id = PageId::from_bytes(page_id).unwrap();
+        let page_id = PageId::decode(page_id).unwrap();
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
             page_id.child_page_id(0)
@@ -311,7 +371,7 @@ mod tests {
         // position 245
         let mut page_id = [0u8; 32];
         page_id[1] = 32;
-        let page_id = PageId::from_bytes(page_id).unwrap();
+        let page_id = PageId::decode(page_id).unwrap();
         assert!(page_id.child_page_id(0).is_ok());
 
         // neither of those two have to panic if called at most 41 times

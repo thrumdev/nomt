@@ -58,7 +58,7 @@ impl<'a> PageView<'a> {
             return Err(InvalidPage::Length);
         }
 
-        PageId::from_bytes(data[NODES_PER_PAGE + 1]).map_err(|_| InvalidPage::Id)?;
+        PageId::decode(data[NODES_PER_PAGE + 1]).map_err(|_| InvalidPage::Id)?;
 
         Ok(PageView { data })
     }
@@ -70,7 +70,7 @@ impl<'a> PageView<'a> {
 
     /// Get the page ID of the page.
     pub fn id(&self) -> PageId {
-        PageId::from_bytes(self.data[NODES_PER_PAGE + 1])
+        PageId::decode(self.data[NODES_PER_PAGE + 1])
             .expect("PageView is being created checking the validity of its PageId")
     }
 }

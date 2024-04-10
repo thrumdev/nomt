@@ -156,18 +156,16 @@ fn main() {
 
     let mut now = std::time::Instant::now();
     loop {
-        for _ in 0..100 {
+        for _ in 0..10_000 {
             set_balance(&mut t, accounts, 1000);
             accounts += 1;
         }
-        for _ in 0..1000 {
-            for _ in 0..accounts {
-                {
-                    let _guard = t_transfer.record();
-                    transfer(&mut t, cur_account, (cur_account + 1) % accounts, 1);
-                }
-                cur_account = (cur_account + 1) % accounts;
+        for _ in 0..accounts * 10 {
+            {
+                let _guard = t_transfer.record();
+                transfer(&mut t, cur_account, (cur_account + 1) % accounts, 1);
             }
+            cur_account = (cur_account + 1) % accounts;
         }
         {
             let _guard = t_commit.record();
