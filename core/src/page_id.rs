@@ -33,7 +33,6 @@
 //! And L(I) = H(I - 1) + 1
 
 use crate::{page::DEPTH, trie::KeyPath};
-use bitvec::prelude::*;
 use core::ops::{AddAssign, ShlAssign, ShrAssign, SubAssign};
 use ruint::Uint;
 
@@ -173,7 +172,6 @@ impl Iterator for PageIdsIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page_id::PageIdsIterator;
 
     #[test]
     fn test_child_and_parent_page_id() {
