@@ -363,7 +363,6 @@ impl WitnessBuilder {
                 terminal: terminal.leaf.clone(),
                 siblings,
             };
-
             if !terminal.writes.is_empty() {
                 visited_terminals.push(VisitedTerminal {
                     path: {
