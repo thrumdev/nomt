@@ -160,13 +160,14 @@ impl PageCacheCursor {
                 };
             }
             if self.depth as usize % DEPTH == 0 {
-                // attempt to load next page if we are at the end of our previous page or the root.
-                for _ in 0..PREFETCH_N {
-                    let page_id = match ppf.next() {
-                        Some(page) => page,
-                        None => break,
-                    };
-                    self.pages.prepopulate(page_id);
+                if self.depth as usize % PREFETCH_N == 0 {
+                    for _ in 0..PREFETCH_N {
+                        let page_id = match ppf.next() {
+                            Some(page) => page,
+                            None => break,
+                        };
+                        self.pages.prepopulate(page_id);
+                    }
                 }
 
                 if let (&Some((ref id, _)), SeekMode::RetrieveSiblingLeafChildren, true) = (
