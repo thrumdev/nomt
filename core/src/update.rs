@@ -107,10 +107,6 @@ pub fn update<H: NodeHasher>(
 
         let batch = &ops[batch_start..next_batch_start];
 
-        // hack: we need to explicitly clear the leaf so the cursor can clear metadata stored below.
-        if leaf_data.is_some() {
-            cursor.place_non_leaf(trie::TERMINATOR);
-        }
         replace_subtrie::<H>(cursor, leaf_data, batch);
         for _ in 0..compact_layers {
             if let Some(internal_data) = cursor.compact_up() {
@@ -182,8 +178,8 @@ fn replace_subtrie<H: NodeHasher>(
 // Build a sub-trie out of the given prior terminal and operations. Operations should all start
 // with the same prefix of len `skip` and be ordered lexicographically.
 //
-// Provide a visitor which will be called for each computed node of the sub-trie.
-// The root is always visited at the end.
+// Provide a visitor which will be called for each computed node of the sub-trie. If the written
+// node is a leaf, the leaf-data preimage will be provided.
 pub fn build_sub_trie<H: NodeHasher>(
     skip: usize,
     leaf: Option<LeafData>,
@@ -229,6 +225,9 @@ pub fn build_sub_trie<H: NodeHasher>(
     let mut c = leaf_ops.next();
 
     if b.is_none() {
+        if let Some(leaf) = leaf {
+            visit(leaf.key_path, skip as u8, trie::TERMINATOR, None);
+        }
         return trie::TERMINATOR;
     }
 

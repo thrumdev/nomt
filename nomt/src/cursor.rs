@@ -154,6 +154,10 @@ impl PageCacheCursor {
             if !trie::is_internal(&self.node()) {
                 return if trie::is_leaf(&self.node()) {
                     let leaf_data = self.read_leaf_children();
+                    assert!(leaf_data
+                        .key_path
+                        .view_bits::<Msb0>()
+                        .starts_with(&dest.view_bits::<Msb0>()[..self.depth as usize]));
                     Some(leaf_data)
                 } else {
                     None
@@ -185,9 +189,9 @@ impl PageCacheCursor {
                             this_page_idx - 1
                         }
                     };
-                    let child_page_id = id.child_page_id(page_idx).expect(
-                        "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
-                    );
+
+                    // UNWRAP: page index is valid, leaf children never fall beyond the 42nd page.
+                    let child_page_id = id.child_page_id(page_idx).unwrap();
 
                     // async; just warm up.
                     let _ = self.pages.prepopulate(child_page_id);
@@ -240,9 +244,8 @@ impl PageCacheCursor {
                 None => ROOT_PAGE_ID,
                 Some((ref id, _)) => {
                     let child_page_idx = last_page_path(&self.path, self.depth).load_be::<u8>();
-                    id.child_page_id(child_page_idx).expect(
-                        "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
-                    )
+                    // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
+                    id.child_page_id(child_page_idx).unwrap()
                 }
             };
 
@@ -293,11 +296,9 @@ impl PageCacheCursor {
                     None => {
                         let child_page_idx = path.load_be::<u8>();
 
-                        // unwrap: this is true even for the leaf node placement, as less than the
-                        // entire 42nd page is used with 256 bit keys.
-                        let child_page_id = page_id.child_page_id(child_page_idx).expect(
-                            "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
-                        );
+                        // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
+                        // page.
+                        let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
                         fetched_page = self.pages.retrieve_sync(child_page_id);
                         (&fetched_page, (0, 1))
                     }
@@ -311,7 +312,7 @@ impl PageCacheCursor {
         })
     }
 
-    fn write_leaf_children(&mut self, leaf_data: trie::LeafData) {
+    fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>) {
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
@@ -321,49 +322,41 @@ impl PageCacheCursor {
         };
         let fetched_page;
 
-        let (page_id, page, (left_idx, right_idx)) = match self.cached_page {
+        let (page_id, page, left_idx) = match self.cached_page {
             None => {
                 fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
-                (ROOT_PAGE_ID, &fetched_page, (0, 1))
+                (ROOT_PAGE_ID, &fetched_page, 0)
             }
             Some((page_id, ref page)) => {
                 let path = last_page_path(&self.path, self.depth);
                 match child_node_indices(path) {
-                    Some((left, right)) => (page_id, page, (left, right)),
+                    Some((left, _)) => (page_id, page, left),
                     None => {
                         let child_page_idx = path.load_be::<u8>();
 
-                        // unwrap: this is true even for the leaf node placement, as less than the
-                        // entire 42nd page is used with 256 bit keys.
-                        let child_page_id = page_id.child_page_id(child_page_idx).expect(
-                            "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
-                        );
+                        // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
+                        // page.
+                        let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
                         fetched_page = self.pages.retrieve_sync(child_page_id);
-                        (child_page_id, &fetched_page, (0, 1))
+                        (child_page_id, &fetched_page, 0)
                     }
                 }
             }
         };
 
-        page.set_node(&mut *write_pass.borrow_mut(), left_idx, leaf_data.key_path);
-        page.set_node(
-            &mut *write_pass.borrow_mut(),
-            right_idx,
-            leaf_data.value_hash,
-        );
+        match leaf_data {
+            None => page.clear_leaf_data(&mut *write_pass.borrow_mut(), left_idx),
+            Some(leaf) => page.set_leaf_data(&mut *write_pass.borrow_mut(), left_idx, leaf),
+        }
         dirtied.insert(page_id);
     }
 
     /// Place a non-leaf node at the current location.
     pub fn place_non_leaf(&mut self, node: Node) {
-        if trie::is_leaf(&node) {
-            return;
-        }
+        assert!(!trie::is_leaf(&node));
 
-        // hack: this assumes that leaves are always explicitly deleted
-        // before being overwritten in order to maintain a consistent state.
-        if trie::is_terminator(&node) && trie::is_leaf(&self.node()) {
-            self.write_leaf_children(Default::default());
+        if trie::is_leaf(&self.node()) {
+            self.write_leaf_children(None);
         }
 
         let (write_pass, dirtied) = match self.mode {
@@ -392,7 +385,7 @@ impl PageCacheCursor {
             return;
         }
 
-        self.write_leaf_children(leaf.clone());
+        self.write_leaf_children(Some(leaf));
 
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
@@ -447,10 +440,10 @@ impl PageCacheCursor {
                 // compact: clear this node, move leaf up.
 
                 let prev = self.read_leaf_children();
-                self.write_leaf_children(Default::default());
+                self.write_leaf_children(None);
                 self.place_non_leaf(trie::TERMINATOR);
                 self.up(1);
-                self.place_leaf(node, prev.clone());
+                self.place_leaf(node, prev);
 
                 None
             }
@@ -459,7 +452,7 @@ impl PageCacheCursor {
                 self.sibling();
 
                 let prev = self.read_leaf_children();
-                self.write_leaf_children(Default::default());
+                self.write_leaf_children(None);
                 self.place_non_leaf(trie::TERMINATOR);
                 self.up(1);
                 self.place_leaf(sibling, prev);
@@ -536,7 +529,7 @@ impl nomt_core::Cursor for PageCacheCursor {
     }
 
     fn seek(&mut self, path: KeyPath) {
-        PageCacheCursor::seek(self, path, SeekMode::PathOnly);
+        let _ = PageCacheCursor::seek(self, path, SeekMode::PathOnly);
     }
 
     fn sibling(&mut self) {

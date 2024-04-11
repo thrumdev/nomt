@@ -233,17 +233,8 @@ impl Nomt {
                 read_write
             {
                 let value_hash = value.as_ref().map(|v| *blake3::hash(v).as_bytes());
-                let prev_value = match terminal_info.leaf.as_ref() {
-                    None => None,
-                    Some(l) if l.key_path == path => Some(l.value_hash),
-                    Some(_) => None,
-                };
                 ops.push((path, value_hash));
-                tx.write_value::<Blake3Hasher>(
-                    path,
-                    prev_value,
-                    value_hash.zip(value.as_ref().map(|v| &v[..])),
-                );
+                tx.write_value(path, value.as_ref().map(|x| &x[..]));
             }
             witness_builder.insert(path, terminal_info.clone(), &read_write);
         }
