@@ -1,8 +1,8 @@
-use crate::{backend::Backend, cli::bench::Params, timer::Timer, workload::Workload};
+use crate::{backend::Backend, cli::bench::Params, timer::Timer, workload};
 use anyhow::Result;
 
 pub fn bench(params: Params) -> Result<()> {
-    let workload = Workload::parse(
+    let workload = workload::parse(
         params.workload.name.as_str(),
         params.workload.size,
         params
@@ -10,6 +10,7 @@ pub fn bench(params: Params) -> Result<()> {
             .initial_capacity
             .and_then(|s| Some(1u64 << s))
             .unwrap_or(0),
+        params.workload.percentage_cold,
     )?;
 
     let backends = if params.backends.is_empty() {
