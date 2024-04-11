@@ -347,7 +347,10 @@ impl WitnessBuilder {
 
     // builds the witness, the witnessed operations, and returns additional write operations
     // for leaves which are updated but where the existing value should be preserved.
-    fn build(self, cursor: &mut PageCacheCursor) -> (Witness, WitnessedOperations, Vec<VisitedTerminal>) {
+    fn build(
+        self,
+        cursor: &mut PageCacheCursor,
+    ) -> (Witness, WitnessedOperations, Vec<VisitedTerminal>) {
         let mut paths = Vec::with_capacity(self.terminals.len());
         let mut reads = Vec::new();
         let mut writes = Vec::new();
@@ -360,7 +363,6 @@ impl WitnessBuilder {
                 terminal: terminal.leaf.clone(),
                 siblings,
             };
-
             if !terminal.writes.is_empty() {
                 visited_terminals.push(VisitedTerminal {
                     path: {

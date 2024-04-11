@@ -25,6 +25,7 @@ fn add_remove_1000() {
 
     let mut root = Node::default();
     for i in 0..10 {
+        let _ = t.read(0);
         for _ in 0..100 {
             common::set_balance(&mut t, accounts, 1000);
             accounts += 1;
