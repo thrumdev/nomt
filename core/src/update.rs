@@ -93,7 +93,7 @@ pub fn update<H: NodeHasher>(
 
         let next_batch_start = batch_start + 1 + batch_len;
         let compact_layers = if next_batch_start < ops.len() {
-            let current_depth = cursor.position().1 as usize;
+            let current_depth = cursor.position().depth() as usize;
             let shared_depth = shared_with_cursor(&*cursor, ops[next_batch_start].0);
 
             // shared_depth is guaranteed less than current_depth because the full prefix isn't
@@ -102,7 +102,7 @@ pub fn update<H: NodeHasher>(
             current_depth - (shared_depth + 1)
         } else {
             // last batch: all the way to root
-            cursor.position().1 as usize
+            cursor.position().depth() as usize
         };
 
         let batch = &ops[batch_start..next_batch_start];
@@ -119,13 +119,15 @@ pub fn update<H: NodeHasher>(
 }
 
 fn shares_prefix(cursor: &impl Cursor, key: KeyPath) -> bool {
-    let (k, bits) = cursor.position();
-    &k.view_bits::<Msb0>()[..bits as usize] == &key.view_bits::<Msb0>()[..bits as usize]
+    let pos = cursor.position();
+    let bits = pos.depth() as usize;
+    &pos.path() == &key.view_bits::<Msb0>()[..bits as usize]
 }
 
 fn shared_with_cursor(cursor: &impl Cursor, key: KeyPath) -> usize {
-    let (k, _) = cursor.position();
-    shared_bits(&k.view_bits::<Msb0>(), key.view_bits::<Msb0>())
+    // TODO: check if this is correct
+    let pos = cursor.position();
+    shared_bits(&pos.path(), key.view_bits::<Msb0>())
 }
 
 fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
@@ -164,7 +166,7 @@ fn replace_subtrie<H: NodeHasher>(
     ops: &[(KeyPath, Option<ValueHash>)],
 ) {
     let start_pos = cursor.position();
-    let skip = start_pos.1 as usize;
+    let skip = start_pos.depth() as usize;
 
     build_sub_trie::<H>(skip, leaf_data, ops, |key, depth, node, leaf_data| {
         cursor.jump(key, depth);

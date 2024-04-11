@@ -3,7 +3,10 @@
 //! This is not intended so much for abstraction as it is for dependency injection and testability
 //! and should not be considered stable.
 
-use crate::trie::{InternalData, KeyPath, LeafData, Node};
+use crate::{
+    key_path::TriePosition,
+    trie::{InternalData, KeyPath, LeafData, Node},
+};
 
 /// Generic cursor over binary trie storage.
 ///
@@ -16,7 +19,7 @@ use crate::trie::{InternalData, KeyPath, LeafData, Node};
 pub trait Cursor {
     /// The current position of the cursor, expressed as a bit-path and length. Bits after the
     /// length are irrelevant.
-    fn position(&self) -> (KeyPath, u8);
+    fn position(&self) -> TriePosition;
     /// The current node.
     fn node(&self) -> Node;
     /// Peek at the sibling node of the current position. At the root, gives the terminator.
