@@ -112,9 +112,14 @@ impl LeafData {
     /// Encode the leaf node.
     pub fn encode(&self) -> NodePreimage {
         let mut node = [0u8; 64];
-        node[0..32].copy_from_slice(&self.key_path[..]);
-        node[32..64].copy_from_slice(&self.value_hash[..]);
+        self.encode_into(&mut node[..]);
         node
+    }
+
+    /// Encode the leaf node into the given slice. It must have length at least 64 or this panics.
+    pub fn encode_into(&self, buf: &mut [u8]) {
+        buf[0..32].copy_from_slice(&self.key_path[..]);
+        buf[32..64].copy_from_slice(&self.value_hash[..]);
     }
 
     /// Decode the leaf node. Fails if the provided slice is not 64 bytes.

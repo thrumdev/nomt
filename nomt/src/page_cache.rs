@@ -4,9 +4,14 @@ use crate::{
     store::{Store, Transaction},
     Options,
 };
+use bitvec::prelude::*;
 use dashmap::{mapref::entry::Entry, DashMap};
 use fxhash::FxBuildHasher;
-use nomt_core::{page::DEPTH, page_id::PageId, trie::Node};
+use nomt_core::{
+    page::DEPTH,
+    page_id::PageId,
+    trie::{LeafData, Node},
+};
 use parking_lot::{Condvar, Mutex};
 use std::{fmt, mem, sync::Arc};
 use threadpool::ThreadPool;
@@ -15,6 +20,9 @@ use threadpool::ThreadPool;
 // of the rootless sub-binary tree stored in a page following this formula:
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
+// Within the page, we also store a bitfield indicating whether leaf data is stored at a particular
+// location. This bitfield has '1' bits set for leaf data and '0' bits set for nodes.
+const LEAF_DATA_BITFIELD_OFF: usize = NODES_PER_PAGE * 32;
 
 struct PageData {
     data: RwPassCell<Option<Vec<u8>>>,
@@ -54,14 +62,59 @@ impl PageData {
     fn set_node(&self, write_pass: &mut WritePass, index: usize, node: Node) {
         assert!(index < NODES_PER_PAGE, "index out of bounds");
         let mut data = self.data.write(write_pass);
-        if data.is_none() {
-            *data = Some(vec![0; 4096]);
-        }
+        let data = data.get_or_insert_with(|| vec![0; 4096]);
         let start = index * 32;
         let end = start + 32;
-        // Unwrap: self.data is Some, we just ensured it above.
-        data.as_mut().unwrap()[start..end].copy_from_slice(&node);
+        data[start..end].copy_from_slice(&node);
+
+        // clobbering the leaf data bit here means that if a user is building a tree
+        // upwards (most algorithms do), they can overwrite the leaf children and then overwrite
+        // the leaf without worrying about deleting the node they've just written.
+        leaf_data_bits(data).set(index, false);
     }
+
+    fn set_leaf_data(&self, write_pass: &mut WritePass, left_index: usize, leaf_data: LeafData) {
+        assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
+        let mut data = self.data.write(write_pass);
+        let data = data.get_or_insert_with(|| vec![0; 4096]);
+        {
+            let leaf_meta = leaf_data_bits(data);
+            leaf_meta.set(left_index, true);
+            leaf_meta.set(left_index + 1, true);
+        }
+        let start = left_index * 32;
+        let end = start + 64;
+
+        leaf_data.encode_into(&mut data[start..end]);
+    }
+
+    fn clear_leaf_data(&self, write_pass: &mut WritePass, left_index: usize) {
+        assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
+        let mut data = self.data.write(write_pass);
+        let data = data.get_or_insert_with(|| vec![0; 4096]);
+        let (overwrite_l, overwrite_r) = {
+            let leaf_meta = leaf_data_bits(data);
+            (
+                leaf_meta.replace(left_index, false),
+                leaf_meta.replace(left_index + 1, false),
+            )
+        };
+
+        let start = left_index * 32;
+        let l_end = start + 32;
+        let r_end = l_end + 32;
+
+        if overwrite_l {
+            data[start..l_end].copy_from_slice(&[0u8; 32]);
+        }
+        if overwrite_r {
+            data[l_end..r_end].copy_from_slice(&[0u8; 32]);
+        }
+    }
+}
+
+fn leaf_data_bits(page: &mut [u8]) -> &mut BitSlice<u8, Msb0> {
+    page[LEAF_DATA_BITFIELD_OFF..][..32].view_bits_mut::<Msb0>()
 }
 
 fn page_is_empty(page: &[u8]) -> bool {
@@ -94,6 +147,21 @@ impl Page {
     /// Write the node at the given index.
     pub fn set_node(&self, write_pass: &mut WritePass, index: usize, node: Node) {
         self.inner.set_node(write_pass, index, node)
+    }
+
+    /// Write leaf data at two positions under a leaf node, `left_index` and `left_index + 1`.
+    pub fn set_leaf_data(
+        &self,
+        write_pass: &mut WritePass,
+        left_index: usize,
+        leaf_data: LeafData,
+    ) {
+        self.inner.set_leaf_data(write_pass, left_index, leaf_data);
+    }
+
+    /// Clear leaf data at two positions under a leaf node, `left_index` and `left_index + 1`.
+    pub fn clear_leaf_data(&self, write_pass: &mut WritePass, left_index: usize) {
+        self.inner.clear_leaf_data(write_pass, left_index);
     }
 }
 
