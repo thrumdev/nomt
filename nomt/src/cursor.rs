@@ -59,6 +59,7 @@ pub struct PageCacheCursor {
     root: Node,
     path: KeyPath,
     depth: u8,
+    node_index: usize,
     // Invariant: this is always set when not at the root and never
     // set at the root.
     cached_page: Option<(PageId, Page)>,
@@ -91,6 +92,7 @@ impl PageCacheCursor {
             root,
             path: KeyPath::default(),
             depth: 0,
+            node_index: 0,
             pages,
             cached_page: None,
             mode,
@@ -101,6 +103,7 @@ impl PageCacheCursor {
     pub fn rewind(&mut self) {
         self.depth = 0;
         self.cached_page = None;
+        self.node_index = 0;
     }
 
     /// Get the current position of the cursor expressed as a bit-path and length. Bits after the
@@ -124,6 +127,10 @@ impl PageCacheCursor {
         let page_id = PageIdsIterator::new(self.path)
             .nth(n_pages)
             .expect("all keys with <= 256 bits have pages; qed");
+        self.node_index = {
+            let path = last_page_path(&self.path, self.depth);
+            node_index(path)
+        };
 
         self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
     }
@@ -181,18 +188,10 @@ impl PageCacheCursor {
                 ) {
                     // sibling is a leaf and at the end of the (non-root) page.
                     // initiate a load of the sibling's page.
-                    let path = last_page_path(&self.path, self.depth);
-                    let page_idx = {
-                        let this_page_idx = path.load_be::<u8>();
-                        if this_page_idx % 2 == 0 {
-                            this_page_idx + 1
-                        } else {
-                            this_page_idx - 1
-                        }
-                    };
-
-                    // UNWRAP: page index is valid, leaf children never fall beyond the 42nd page.
-                    let child_page_id = id.child_page_id(page_idx).unwrap();
+                    let page_idx = bottom_node_index(sibling_index(self.node_index));
+                    let child_page_id = id.child_page_id(page_idx).expect(
+                        "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
+                    );
 
                     // async; just warm up.
                     let _ = self.pages.prepopulate(child_page_id);
@@ -216,7 +215,7 @@ impl PageCacheCursor {
         self.depth -= d;
 
         if self.depth == 0 {
-            self.cached_page = None;
+            self.rewind();
             return;
         }
 
@@ -230,6 +229,16 @@ impl PageCacheCursor {
             cur_page_id = cur_page_id.parent_page_id();
         }
 
+        if prev_page_depth == new_page_depth {
+            let depth_in_page = self.depth_in_page();
+            for depth in (depth_in_page..depth_in_page + d as usize).rev().map(|x| x + 1) {
+                self.node_index = parent_node_index(self.node_index, depth);
+            }
+        } else {
+            let path = last_page_path(&self.path, self.depth);
+            self.node_index = node_index(path);
+        }
+
         self.cached_page = Some((cur_page_id.clone(), self.retrieve(cur_page_id)));
     }
 
@@ -241,16 +250,17 @@ impl PageCacheCursor {
     pub fn down(&mut self, bit: bool) {
         if self.depth as usize % DEPTH == 0 {
             // attempt to load next page if we are at the end of our previous page or the root.
+            // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
             let page_id = match self.cached_page {
                 None => ROOT_PAGE_ID,
-                Some((ref id, _)) => {
-                    let child_page_idx = last_page_path(&self.path, self.depth).load_be::<u8>();
-                    // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
-                    id.child_page_id(child_page_idx).unwrap()
-                }
+                Some((ref id, _)) => id.child_page_id(bottom_node_index(self.node_index)).unwrap(),
             };
 
             self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
+            self.node_index = bit as usize;
+        } else {
+            let (l, r) = child_node_indices(self.node_index, self.depth_in_page());
+            self.node_index = if bit { r } else { l };
         }
 
         // Update the cursor's lookup path.
@@ -269,6 +279,7 @@ impl PageCacheCursor {
         let bits = self.path.view_bits_mut::<Msb0>();
         let i = self.depth as usize - 1;
         bits.set(i, !bits[i]);
+        self.node_index = sibling_index(self.node_index);
     }
 
     /// Returns the node at the current location of the cursor.
@@ -276,10 +287,7 @@ impl PageCacheCursor {
         self.mode
             .with_read_pass(|read_pass| match self.cached_page {
                 None => self.root,
-                Some((_, ref page)) => {
-                    let path = last_page_path(&self.path, self.depth);
-                    page.node(&read_pass, node_index(path))
-                }
+                Some((_, ref page)) => page.node(&read_pass, self.node_index),
             })
     }
 
@@ -291,18 +299,17 @@ impl PageCacheCursor {
                 (&fetched_page, (0, 1))
             }
             Some((page_id, ref page)) => {
-                let path = last_page_path(&self.path, self.depth);
-                match child_node_indices(path) {
-                    Some((left, right)) => (page, (left, right)),
-                    None => {
-                        let child_page_idx = path.load_be::<u8>();
+                let depth_in_page = self.depth_in_page();
+                if depth_in_page == DEPTH {
+                    let child_page_idx = bottom_node_index(self.node_index);
 
-                        // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
-                        // page.
-                        let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
-                        fetched_page = self.pages.retrieve_sync(child_page_id);
-                        (&fetched_page, (0, 1))
-                    }
+                    // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
+                    // page.
+                    let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
+                    fetched_page = self.pages.retrieve_sync(child_page_id);
+                    (&fetched_page, (0, 1))
+                } else {
+                    (page, child_node_indices(self.node_index, depth_in_page))
                 }
             }
         };
@@ -313,7 +320,16 @@ impl PageCacheCursor {
         })
     }
 
+    fn depth_in_page(&self) -> usize {
+        if self.depth == 0 {
+            0
+        } else {
+            self.depth as usize - ((self.depth as usize - 1) / DEPTH) * DEPTH
+        }
+    }
+
     fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>) {
+        let depth_in_page = self.depth_in_page();
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
@@ -329,18 +345,16 @@ impl PageCacheCursor {
                 (ROOT_PAGE_ID, &fetched_page, 0)
             }
             Some((page_id, ref page)) => {
-                let path = last_page_path(&self.path, self.depth);
-                match child_node_indices(path) {
-                    Some((left, _)) => (page_id, page, left),
-                    None => {
-                        let child_page_idx = path.load_be::<u8>();
+                if depth_in_page == DEPTH {
+                    let child_page_idx = bottom_node_index(self.node_index);
 
-                        // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
-                        // page.
-                        let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
-                        fetched_page = self.pages.retrieve_sync(child_page_id);
-                        (child_page_id, &fetched_page, 0)
-                    }
+                    // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
+                    // page.
+                    let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
+                    fetched_page = self.pages.retrieve_sync(child_page_id);
+                    (child_page_id, &fetched_page, 0)
+                } else {
+                    (page_id, page, child_node_indices(self.node_index, depth_in_page).0)
                 }
             }
         };
@@ -372,9 +386,7 @@ impl PageCacheCursor {
                 self.root = node;
             }
             Some((page_id, ref mut page)) => {
-                let path = last_page_path(&self.path, self.depth);
-                let index = node_index(path);
-                page.set_node(&mut *write_pass.borrow_mut(), index, node);
+                page.set_node(&mut *write_pass.borrow_mut(), self.node_index, node);
                 dirtied.insert(page_id);
             }
         }
@@ -382,9 +394,7 @@ impl PageCacheCursor {
 
     /// Place a leaf node at the current location.
     pub fn place_leaf(&mut self, node: Node, leaf: trie::LeafData) {
-        if !trie::is_leaf(&node) {
-            return;
-        }
+        assert!(trie::is_leaf(&node));
 
         self.write_leaf_children(Some(leaf));
 
@@ -400,9 +410,7 @@ impl PageCacheCursor {
                 self.root = node;
             }
             Some((page_id, ref mut page)) => {
-                let path = last_page_path(&self.path, self.depth);
-                let index = node_index(path);
-                page.set_node(&mut *write_pass.borrow_mut(), index, node);
+                page.set_node(&mut *write_pass.borrow_mut(), self.node_index, node);
                 dirtied.insert(page_id);
             }
         }
@@ -485,10 +493,7 @@ impl PageCacheCursor {
         self.mode
             .with_read_pass(|read_pass| match self.cached_page {
                 None => trie::TERMINATOR,
-                Some((_, ref page)) => {
-                    let path = last_page_path(&self.path, self.depth);
-                    page.node(&read_pass, sibling_index(path))
-                }
+                Some((_, ref page)) => page.node(&read_pass, sibling_index(self.node_index)),
             })
     }
 
@@ -564,38 +569,31 @@ fn last_page_path(total_path: &KeyPath, total_depth: u8) -> &BitSlice<u8, Msb0> 
     &total_path.view_bits::<Msb0>()[prev_page_end..total_depth as usize]
 }
 
-// Transform a bit-path to the index in a page corresponding to the sibling node.
-//
-// The expected length of the page path is between 1 and `DEPTH`, inclusive. A length of 0 returns
-// 0 and all bits beyond `DEPTH` are ignored.
-fn sibling_index(page_path: &BitSlice<u8, Msb0>) -> usize {
-    let index = node_index(page_path);
-    if page_path.is_empty() {
-        0
-    } else if index % 2 == 0 {
-        index + 1
+/// Given a node index, get the index of the sibling.
+fn sibling_index(node_index: usize) -> usize {
+    if node_index % 2 == 0 {
+        node_index + 1
     } else {
-        index - 1
+        node_index - 1
     }
 }
 
-// Transform a bit-path to the index in a page corresponding to the child node indices.
+// Transform a node index and depth in the current page to the indices where the child nodes are
+// stored.
 //
-// The expected length of the page path is between 0 and `DEPTH` - 1, inclusive.
-// A length out of range returns `None`.
-fn child_node_indices(page_path: &BitSlice<u8, Msb0>) -> Option<(usize, usize)> {
-    if page_path.is_empty() {
-        Some((0, 1))
-    } else if page_path.len() >= DEPTH {
-        None
-    } else {
-        let depth = page_path.len();
+// The expected range of `depth` is between 1 and `DEPTH` - 1, inclusive.
+// A depth out of range panics.
+fn child_node_indices(node_index: usize, depth: usize) -> (usize, usize) {
+    let left = match depth {
+        1 => 2 + node_index * 2,
+        2 => 6 + (node_index - 2) * 2,
+        3 => 14 + (node_index - 6) * 2,
+        4 => 30 + (node_index - 14) * 2,
+        5 => 62 + (node_index - 30) * 2,
+        _ => panic!("{depth} out of bounds 1..{}", DEPTH - 1),
+    };
 
-        // parent is at (2^depth - 2) + as_uint(parent)
-        // children are at (2^(depth+1) - 2) + as_uint(parent)*2 + (0 or 1)
-        let base = (1 << depth + 1) - 2 + 2 * page_path[..depth].load_be::<usize>();
-        Some((base, base + 1))
-    }
+    (left, left + 1)
 }
 
 // Transform a bit-path to an index in a page.
@@ -610,5 +608,25 @@ fn node_index(page_path: &BitSlice<u8, Msb0>) -> usize {
     } else {
         // each node is stored at (2^depth - 2) + as_uint(path)
         (1 << depth) - 2 + page_path[..depth].load_be::<usize>()
+    }
+}
+
+fn bottom_node_index(node_index: usize) -> u8 {
+    node_index as u8 - 62
+}
+
+// Transform a node index and depth in the current page to the indices where the parent node is
+// stored.
+//
+// The expected range of `depth` is between 2 and `DEPTH`, inclusive.
+// A depth out of range panics.
+fn parent_node_index(node_index: usize, depth: usize) -> usize {
+    match depth {
+        2 => (node_index - 2) / 2,
+        3 => 2 + (node_index - 6) / 2,
+        4 => 6 + (node_index - 14) / 2,
+        5 => 14 + (node_index - 30) / 2,
+        6 => 30 + (node_index - 62) / 2,
+        _ => panic!("depth {depth} out of bounds 2..=6"),
     }
 }

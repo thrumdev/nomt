@@ -13,6 +13,7 @@ license.workspace = true
 [dependencies]
 bitvec = { version = "1", default-features = false, features = ["alloc"] }
 ruint = { version = "1.12.1", default-features = false }
+hex = "0.4"
 
 [features]
 default = ["std"]

@@ -294,6 +294,7 @@ pub fn build_sub_trie<H: NodeHasher>(
                     right: sibling,
                 }
             };
+
             last_node = H::hash_internal(&node_data);
             visit(this_key, (skip + layer) as u8, last_node, None);
         }
