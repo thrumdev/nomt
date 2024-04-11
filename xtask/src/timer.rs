@@ -8,7 +8,8 @@ impl Timer {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            h: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 1000000000, 3).unwrap(),
+            // The minimum is 1 nanosecond and the maximum is 100 seconds
+            h: hdrhistogram::Histogram::<u64>::new_with_bounds(1, 100000000000, 3).unwrap(),
             ops: 0,
         }
     }

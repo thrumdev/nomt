@@ -1,3 +1,4 @@
+use crate::backend::Backend;
 use clap::{Args, Parser, Subcommand};
 use std::fmt::Display;
 
@@ -13,12 +14,6 @@ pub enum Commands {
     Bench(bench::Params),
 }
 
-#[derive(Debug, Clone, clap::ValueEnum)]
-pub enum Backend {
-    SovDB,
-    Nomt,
-}
-
 impl Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
@@ -29,26 +24,8 @@ impl Display for Backend {
     }
 }
 
-#[derive(Debug, Clone, clap::ValueEnum)]
-pub enum Workload {
-    /// Performs 1 write into the storage
-    SetBalance,
-    /// Performs 2 reads and 2 writes into the storage
-    Transfer,
-}
-
-impl Display for Workload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Workload::Transfer => "transer",
-            Workload::SetBalance => "set-balance",
-        };
-        f.write_str(name)
-    }
-}
-
 pub mod bench {
-    use super::{Args, Backend, Workload};
+    use super::{Args, Backend};
 
     #[derive(Debug, Args)]
     pub struct Params {
@@ -59,31 +36,45 @@ pub mod bench {
         /// Use ',' to separate backends
         #[clap(default_values_t = Vec::<Backend>::new(), value_delimiter = ',')]
         #[arg(long, short)]
-        pub backend: Vec<Backend>,
+        pub backends: Vec<Backend>,
 
-        /// Workloads used by benchmarks.
-        #[clap(default_value = "transfer")]
+        // TODO: Change this argument to a vector to allow for specifying multiple workloads
+        #[clap(flatten)]
+        pub workload: WorkloadParams,
+
+        /// Number of time the benchmark will be repeated on the same backend
+        #[clap(default_value = "100")]
         #[arg(long, short)]
-        pub workload: Workload,
+        pub iteration: u64,
+    }
+
+    #[derive(Clone, Debug, Args)]
+    pub struct WorkloadParams {
+        /// Workload used by benchmarks.
+        ///
+        /// Possible values are: transfer, set_balance, heavy_read, heavy_update, heavy_delete
+        #[clap(default_value = "transfer")]
+        #[arg(long = "workload-name", short)]
+        pub name: String,
 
         /// Amount of actions performed in the workload
         #[clap(default_value = "1000")]
-        #[arg(long, short = 's')]
-        pub workload_size: u64,
+        #[arg(long = "workload-size", short)]
+        pub size: u64,
 
-        /// Size of the db before starting the benchmarks.
+        /// Additional size of the database before starting the benchmarks.
+        ///
+        /// Some workloads operate over existing keys in the database,
+        /// and this size is additional to those entries.
         ///
         /// The provided argument is the power of two exponent of the
         /// number of elements already present in the storage.
         ///
+        /// Accepted values are in the range of 0 to 63
+        ///
         /// Leave it empty to specify an initial empty storage
-        #[clap(default_value = "0")]
-        #[arg(long, short)]
-        pub initial_size: Option<u8>,
-
-        /// Number of time the benchmark will be repeated on the same backend
-        #[clap(default_value = "100")]
-        #[arg(long)]
-        pub iteration: u64,
+        #[arg(long = "workload-capacity", short = 'c')]
+        #[clap(value_parser=clap::value_parser!(u8).range(0..64))]
+        pub initial_capacity: Option<u8>,
     }
 }
