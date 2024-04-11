@@ -76,7 +76,7 @@ pub fn update<H: NodeHasher>(
             Some(t) => t,
             None => {
                 // sanity: should never occur in correct API usage.
-                return
+                return;
             }
         };
         let leaf_data = terminal.leaf.clone();

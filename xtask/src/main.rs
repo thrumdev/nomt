@@ -5,12 +5,10 @@ mod sov_db;
 mod timer;
 
 use anyhow::Result;
-use bench::bench;
 use clap::Parser;
 use cli::{Backend, Cli, Commands, Workload};
 use nomt::NomtDB;
 use sov_db::SovDB;
-use std::rc::Rc;
 
 pub trait DB {
     /// Apply the given actions to the storage, committing them

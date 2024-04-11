@@ -57,7 +57,10 @@ impl Test {
                 v.insert(KeyReadWrite::Write(value));
             }
         }
-        self.session.as_mut().unwrap().tentative_write_slot(path, is_delete);
+        self.session
+            .as_mut()
+            .unwrap()
+            .tentative_write_slot(path, is_delete);
     }
 
     #[allow(unused)]
