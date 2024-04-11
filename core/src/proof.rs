@@ -5,7 +5,6 @@ use crate::trie::{
     self, InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, NodeKind, TERMINATOR,
 };
 
-use alloc::vec::Vec;
 use bitvec::prelude::*;
 
 /// A proof of some particular path through the trie.

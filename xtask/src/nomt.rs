@@ -1,8 +1,8 @@
 use crate::{Action, DB};
 use fxhash::FxHashMap;
-use nomt::{KeyPath, KeyReadWrite, Node, Nomt, Options, Session};
+use nomt::{KeyPath, KeyReadWrite, Nomt, Options};
 use sha2::Digest;
-use std::{collections::hash_map::Entry, path::PathBuf, rc::Rc};
+use std::{collections::hash_map::Entry, path::PathBuf};
 
 pub struct NomtDB {
     nomt: Nomt,

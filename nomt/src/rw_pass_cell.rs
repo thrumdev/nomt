@@ -86,8 +86,8 @@ impl RwPassDomain {
 }
 
 enum RwGuard {
-    Read(RwLockReadGuard),
-    Write(RwLockWriteGuard),
+    Read(#[allow(unused)] RwLockReadGuard),
+    Write(#[allow(unused)] RwLockWriteGuard),
 }
 
 /// A token that allows read access to the data within one domain.
