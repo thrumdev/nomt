@@ -60,7 +60,27 @@ pub const HIGHEST_42: PageId = PageId(Uint::from_be_bytes([
     4, 16, 65, 4, 16, 64,
 ]));
 
-const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
+pub const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
+
+/// The index of a children of a page.
+///
+/// Each page can be thought of a root-less binary tree. The leaves of that tree are roots of
+/// subtrees stored in subsequent pages. There are 64 (2^[`DEPTH`]) children in each page.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChildPageIndex(u8);
+
+impl ChildPageIndex {
+    pub fn new(index: u8) -> Option<Self> {
+        if index > MAX_CHILD_INDEX {
+            return None;
+        }
+        Some(Self(index))
+    }
+
+    pub fn to_u8(self) -> u8 {
+        self.0
+    }
+}
 
 impl PageId {
     /// Construct a PageId performing a bound check.
@@ -83,11 +103,7 @@ impl PageId {
     /// Child index must be a 6 bit integer, two most significant bits must be zero.
     /// Passed PageId must be a valid PageId and be located in a layer below 42 otherwise
     /// `PageIdOverflow` will be returned.
-    pub fn child_page_id(&self, child_index: u8) -> Result<Self, ChildPageIdError> {
-        if child_index > MAX_CHILD_INDEX {
-            return Err(ChildPageIdError::InvalidChildIndex);
-        }
-
+    pub fn child_page_id(&self, child_index: ChildPageIndex) -> Result<Self, ChildPageIdError> {
         // Any PageId larger than or equal to LOWEST_42 will overflow.
         if *self >= LOWEST_42 {
             return Err(ChildPageIdError::PageIdOverflow);
@@ -100,7 +116,7 @@ impl PageId {
         new_page_id.0.shl_assign(DEPTH);
         new_page_id
             .0
-            .add_assign(Uint::<256, 4>::from(child_index + 1));
+            .add_assign(Uint::<256, 4>::from(child_index.0 + 1));
 
         Ok(new_page_id)
     }
@@ -132,8 +148,6 @@ pub struct InvalidPageIdBytes;
 /// Errors related to the construction of a Child PageId
 #[derive(Debug, PartialEq)]
 pub enum ChildPageIdError {
-    /// Child index must be made by only the first 6 bits in a byte
-    InvalidChildIndex,
     /// PageId was at the last layer of the page tree
     /// or it was too big to represent a valid page
     PageIdOverflow,
@@ -162,7 +176,8 @@ impl Iterator for PageIdsIterator {
     fn next(&mut self) -> Option<Self::Item> {
         let prev = self.page_id.take()?;
 
-        let child_index = self.key_path.byte(31) >> 2;
+        // unwrap: `new` can't return an error because the key_path is shifted.
+        let child_index = ChildPageIndex::new(self.key_path.byte(31) >> 2).unwrap();
         self.key_path <<= 6;
         self.page_id = prev.child_page_id(child_index).ok();
         Some(prev)
@@ -173,6 +188,10 @@ impl Iterator for PageIdsIterator {
 mod tests {
     use super::*;
 
+    fn child_page_id(page_id: PageId, child_index: u8) -> Result<PageId, ChildPageIdError> {
+        page_id.child_page_id(ChildPageIndex::new(child_index).unwrap())
+    }
+
     #[test]
     fn test_child_and_parent_page_id() {
         let page_id_0 = ROOT_PAGE_ID;
@@ -181,7 +200,7 @@ mod tests {
         page_id_1[31] = 0b00000111;
         let page_id_1 = PageId::from_bytes(page_id_1).unwrap();
 
-        assert_eq!(Ok(page_id_1.clone()), page_id_0.child_page_id(6));
+        assert_eq!(Ok(page_id_1.clone()), child_page_id(page_id_0, 6));
         assert_eq!(page_id_0, page_id_1.parent_page_id());
 
         let mut page_id_2 = [0u8; 32]; // child index 4
@@ -189,7 +208,7 @@ mod tests {
         page_id_2[30] = 0b00000001;
         let page_id_2 = PageId::from_bytes(page_id_2).unwrap();
 
-        assert_eq!(Ok(page_id_2.clone()), page_id_1.child_page_id(4));
+        assert_eq!(Ok(page_id_2.clone()), child_page_id(page_id_1, 4));
         assert_eq!(page_id_1, page_id_2.parent_page_id());
 
         let mut page_id_3 = [0u8; 32]; // child index 63
@@ -199,7 +218,7 @@ mod tests {
 
         assert_eq!(
             Ok(page_id_3.clone()),
-            page_id_2.child_page_id(MAX_CHILD_INDEX)
+            child_page_id(page_id_2, MAX_CHILD_INDEX),
         );
         assert_eq!(page_id_2, page_id_3.parent_page_id());
     }
@@ -246,20 +265,9 @@ mod tests {
 
     #[test]
     fn invalid_child_index() {
-        assert_eq!(
-            Err(ChildPageIdError::InvalidChildIndex),
-            ROOT_PAGE_ID.child_page_id(0b01010000)
-        );
-
-        assert_eq!(
-            Err(ChildPageIdError::InvalidChildIndex),
-            ROOT_PAGE_ID.child_page_id(0b10000100)
-        );
-
-        assert_eq!(
-            Err(ChildPageIdError::InvalidChildIndex),
-            ROOT_PAGE_ID.child_page_id(0b11000101)
-        );
+        assert_eq!(None, ChildPageIndex::new(0b01010000));
+        assert_eq!(None, ChildPageIndex::new(0b10000100));
+        assert_eq!(None, ChildPageIndex::new(0b11000101));
     }
 
     #[test]
@@ -281,11 +289,11 @@ mod tests {
         let last_page_last_layer = PageIdsIterator::new([255; 32]).last().unwrap();
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
-            first_page_last_layer.child_page_id(0)
+            child_page_id(first_page_last_layer, 0),
         );
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
-            last_page_last_layer.child_page_id(0)
+            child_page_id(last_page_last_layer, 0),
         );
 
         // position 255
@@ -294,7 +302,7 @@ mod tests {
         let page_id = PageId(Uint::<256, 4>::from_be_bytes(page_id));
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
-            page_id.child_page_id(0)
+            child_page_id(page_id, 0),
         );
 
         // any PageId bigger than LOWEST_42 must overflow
@@ -303,21 +311,21 @@ mod tests {
         let page_id = PageId::from_bytes(page_id).unwrap();
         assert_eq!(
             Err(ChildPageIdError::PageIdOverflow),
-            page_id.child_page_id(0)
+            child_page_id(page_id, 0),
         );
 
         // position 245
         let mut page_id = [0u8; 32];
         page_id[1] = 32;
         let page_id = PageId::from_bytes(page_id).unwrap();
-        assert!(page_id.child_page_id(0).is_ok());
+        assert!(child_page_id(page_id, 0).is_ok());
 
         // neither of those two have to panic if called at most 41 times
         let mut low = ROOT_PAGE_ID;
         let mut high = ROOT_PAGE_ID;
         for _ in 0..42 {
-            low = low.child_page_id(0).unwrap();
-            high = high.child_page_id(MAX_CHILD_INDEX).unwrap();
+            low = child_page_id(low, 0).unwrap();
+            high = child_page_id(high, MAX_CHILD_INDEX).unwrap();
         }
     }
 }

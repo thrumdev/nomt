@@ -11,10 +11,12 @@
 extern crate alloc;
 
 pub mod cursor;
+pub mod key_path;
 pub mod page;
 pub mod page_id;
 pub mod proof;
 pub mod trie;
+pub mod trie_pos;
 pub mod update;
 
 pub use cursor::Cursor;

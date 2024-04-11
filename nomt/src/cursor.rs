@@ -1,4 +1,4 @@
-use std::{cell::RefCell, cmp, collections::HashSet};
+use std::{cell::RefCell, collections::HashSet};
 
 use crate::{
     page_cache::{Page, PageCache},
@@ -6,6 +6,7 @@ use crate::{
 };
 use bitvec::prelude::*;
 use nomt_core::{
+    key_path::TriePosition,
     page::DEPTH,
     page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node, NodeKind},
@@ -75,9 +76,7 @@ impl Seek {
 pub struct PageCacheCursor {
     pages: PageCache,
     root: Node,
-    path: KeyPath,
-    depth: u8,
-    node_index: usize,
+    pos: TriePosition,
     // Invariant: this is always set when not at the root and never
     // set at the root.
     cached_page: Option<(PageId, Page)>,
@@ -108,9 +107,7 @@ impl PageCacheCursor {
     fn new(root: Node, pages: PageCache, mode: Mode) -> Self {
         Self {
             root,
-            path: KeyPath::default(),
-            depth: 0,
-            node_index: 0,
+            pos: TriePosition::new(),
             pages,
             cached_page: None,
             mode,
@@ -119,37 +116,30 @@ impl PageCacheCursor {
 
     /// Moves the cursor back to the root.
     pub fn rewind(&mut self) {
-        self.depth = 0;
+        self.pos = TriePosition::new();
         self.cached_page = None;
-        self.node_index = 0;
     }
 
     /// Get the current position of the cursor expressed as a bit-path and length. Bits after the
     /// length are irrelevant.
-    pub fn position(&self) -> (KeyPath, u8) {
-        (self.path, self.depth)
+    pub fn position(&self) -> TriePosition {
+        self.pos.clone()
     }
 
     /// Jump to the node at the given path. Only the first `depth` bits are relevant.
     /// It is possible to jump out of bounds, that is, to a node whose parent is a terminal.
     pub fn jump(&mut self, path: KeyPath, depth: u8) {
-        self.path = path;
-        self.depth = depth;
-
         if depth == 0 {
             self.rewind();
             return;
         }
 
-        let n_pages = (self.depth - 1) as usize / DEPTH;
-        let page_id = PageIdsIterator::new(self.path)
+        self.pos = TriePosition::from_path_and_depth(path, depth);
+
+        let n_pages = (self.pos.depth() - 1) as usize / DEPTH;
+        let page_id = PageIdsIterator::new(path)
             .nth(n_pages)
             .expect("all keys with <= 256 bits have pages; qed");
-        self.node_index = {
-            let path = last_page_path(&self.path, self.depth);
-            node_index(path)
-        };
-
         self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
     }
 
@@ -188,15 +178,15 @@ impl PageCacheCursor {
                     assert!(leaf_data
                         .key_path
                         .view_bits::<Msb0>()
-                        .starts_with(&dest.view_bits::<Msb0>()[..self.depth as usize]));
+                        .starts_with(&dest.view_bits::<Msb0>()[..self.pos.depth() as usize]));
 
                     result.terminal = Some(leaf_data);
                 };
 
                 return result;
             }
-            if self.depth as usize % DEPTH == 0 {
-                if self.depth as usize % PREFETCH_N == 0 {
+            if self.pos.depth() as usize % DEPTH == 0 {
+                if self.pos.depth() as usize % PREFETCH_N == 0 {
                     for _ in 0..PREFETCH_N {
                         let page_id = match ppf.next() {
                             Some(page) => page,
@@ -213,11 +203,9 @@ impl PageCacheCursor {
                 ) {
                     // sibling is a leaf and at the end of the (non-root) page.
                     // initiate a load of the sibling's page.
-                    let page_idx = bottom_node_index(sibling_index(self.node_index));
-                    let child_page_id = id.child_page_id(page_idx).expect(
-                        "Child index is 6 bits and Pages do not go deeper than the maximum layer, 42"
-                    );
-
+                    let child_page_id = id
+                        .child_page_id(self.pos.sibling_child_page_index())
+                        .expect("Pages do not go deeper than the maximum layer, 42");
                     // async; just warm up.
                     let _ = self.pages.prepopulate(child_page_id);
                 }
@@ -235,36 +223,22 @@ impl PageCacheCursor {
     /// The cursor will not go beyond the root. If the cursor's location was sound before the call,
     /// it will be sound after the call.
     pub fn up(&mut self, d: u8) {
-        let d = cmp::min(self.depth, d);
-        let prev_depth = self.depth;
-        self.depth -= d;
+        let prev_depth = self.pos.depth();
+        self.pos.up(d);
 
-        if self.depth == 0 {
+        if self.pos.depth() == 0 {
             self.rewind();
             return;
         }
 
         let prev_page_depth = (prev_depth as usize + DEPTH - 1) / DEPTH;
-        let new_page_depth = (self.depth as usize + DEPTH - 1) / DEPTH;
+        let new_page_depth = (self.pos.depth() as usize + DEPTH - 1) / DEPTH;
 
         // sanity: always not root unless depth is zero, checked above.
         let mut cur_page_id = self.cached_page.as_ref().expect("not root; qed").0.clone();
 
         for _ in new_page_depth..prev_page_depth {
             cur_page_id = cur_page_id.parent_page_id();
-        }
-
-        if prev_page_depth == new_page_depth {
-            let depth_in_page = self.depth_in_page();
-            for depth in (depth_in_page..depth_in_page + d as usize)
-                .rev()
-                .map(|x| x + 1)
-            {
-                self.node_index = parent_node_index(self.node_index, depth);
-            }
-        } else {
-            let path = last_page_path(&self.path, self.depth);
-            self.node_index = node_index(path);
         }
 
         self.cached_page = Some((cur_page_id.clone(), self.retrieve(cur_page_id)));
@@ -276,40 +250,24 @@ impl PageCacheCursor {
     /// responsibility of the caller to ensure that. If violated,the cursor's location will be
     /// invalid.
     pub fn down(&mut self, bit: bool) {
-        if self.depth as usize % DEPTH == 0 {
+        if self.pos.depth() as usize % DEPTH == 0 {
             // attempt to load next page if we are at the end of our previous page or the root.
             // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
             let page_id = match self.cached_page {
                 None => ROOT_PAGE_ID,
                 Some((ref id, _)) => id
-                    .child_page_id(bottom_node_index(self.node_index))
-                    .unwrap(),
+                    .child_page_id(self.pos.child_page_index())
+                    .expect("Pages do not go deeper than the maximum layer, 42"),
             };
 
             self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
-            self.node_index = bit as usize;
-        } else {
-            let (l, r) = child_node_indices(self.node_index, self.depth_in_page());
-            self.node_index = if bit { r } else { l };
         }
-
-        // Update the cursor's lookup path.
-        self.path
-            .view_bits_mut::<Msb0>()
-            .set(self.depth as usize, bit);
-        self.depth += 1;
+        self.pos.down(bit);
     }
 
     /// Traverse to the sibling node of the current position. No-op at the root.
     pub fn sibling(&mut self) {
-        if self.depth == 0 {
-            return;
-        }
-
-        let bits = self.path.view_bits_mut::<Msb0>();
-        let i = self.depth as usize - 1;
-        bits.set(i, !bits[i]);
-        self.node_index = sibling_index(self.node_index);
+        self.pos.sibling();
     }
 
     /// Returns the node at the current location of the cursor.
@@ -317,7 +275,7 @@ impl PageCacheCursor {
         self.mode
             .with_read_pass(|read_pass| match self.cached_page {
                 None => self.root,
-                Some((_, ref page)) => page.node(&read_pass, self.node_index),
+                Some((_, ref page)) => page.node(&read_pass, self.pos.node_index()),
             })
     }
 
@@ -329,17 +287,15 @@ impl PageCacheCursor {
                 (&fetched_page, (0, 1))
             }
             Some((page_id, ref page)) => {
-                let depth_in_page = self.depth_in_page();
+                let depth_in_page = self.pos.depth_in_page();
                 if depth_in_page == DEPTH {
-                    let child_page_idx = bottom_node_index(self.node_index);
-
-                    // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
-                    // page.
-                    let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
+                    let child_page_id = page_id
+                        .child_page_id(self.pos.child_page_index())
+                        .expect("Pages do not go deeper than the maximum layer, 42");
                     fetched_page = self.pages.retrieve_sync(child_page_id);
                     (&fetched_page, (0, 1))
                 } else {
-                    (page, child_node_indices(self.node_index, depth_in_page))
+                    (page, self.pos.child_node_indices())
                 }
             }
         };
@@ -350,16 +306,7 @@ impl PageCacheCursor {
         })
     }
 
-    fn depth_in_page(&self) -> usize {
-        if self.depth == 0 {
-            0
-        } else {
-            self.depth as usize - ((self.depth as usize - 1) / DEPTH) * DEPTH
-        }
-    }
-
     fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>) {
-        let depth_in_page = self.depth_in_page();
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
@@ -375,20 +322,15 @@ impl PageCacheCursor {
                 (ROOT_PAGE_ID, &fetched_page, 0)
             }
             Some((page_id, ref page)) => {
+                let depth_in_page = self.pos.depth_in_page();
                 if depth_in_page == DEPTH {
-                    let child_page_idx = bottom_node_index(self.node_index);
-
-                    // UNWRAP: page index is valid, leaf children never fall beyond the 42nd
-                    // page.
-                    let child_page_id = page_id.child_page_id(child_page_idx).unwrap();
+                    let child_page_id = page_id
+                        .child_page_id(self.pos.child_page_index())
+                        .expect("Pages do not go deeper than the maximum layer, 42");
                     fetched_page = self.pages.retrieve_sync(child_page_id);
                     (child_page_id, &fetched_page, 0)
                 } else {
-                    (
-                        page_id,
-                        page,
-                        child_node_indices(self.node_index, depth_in_page).0,
-                    )
+                    (page_id, page, self.pos.child_node_indices().0)
                 }
             }
         };
@@ -420,7 +362,7 @@ impl PageCacheCursor {
                 self.root = node;
             }
             Some((page_id, ref mut page)) => {
-                page.set_node(&mut *write_pass.borrow_mut(), self.node_index, node);
+                page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
                 dirtied.insert(page_id);
             }
         }
@@ -444,7 +386,7 @@ impl PageCacheCursor {
                 self.root = node;
             }
             Some((page_id, ref mut page)) => {
-                page.set_node(&mut *write_pass.borrow_mut(), self.node_index, node);
+                page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
                 dirtied.insert(page_id);
             }
         }
@@ -461,16 +403,14 @@ impl PageCacheCursor {
     ///    return an internal node data structure comprised of this and this sibling.
     /// 4. This is the root - return.
     pub fn compact_up(&mut self) -> Option<trie::InternalData> {
-        if self.depth == 0 {
+        if self.pos.depth() == 0 {
             return None;
         }
 
         let node = self.node();
         let sibling = self.peek_sibling();
 
-        let this_bit_idx = self.depth as usize - 1;
-        // unwrap: depth != 0 above
-        let bit = *self.path.view_bits::<Msb0>().get(this_bit_idx).unwrap();
+        let bit = self.pos.peek_last_bit();
 
         match (NodeKind::of(&node), NodeKind::of(&sibling)) {
             (NodeKind::Terminator, NodeKind::Terminator) => {
@@ -527,7 +467,7 @@ impl PageCacheCursor {
         self.mode
             .with_read_pass(|read_pass| match self.cached_page {
                 None => trie::TERMINATOR,
-                Some((_, ref page)) => page.node(&read_pass, sibling_index(self.node_index)),
+                Some((_, ref page)) => page.node(&read_pass, self.pos.sibling_index()),
             })
     }
 
@@ -548,7 +488,7 @@ impl PageCacheCursor {
 }
 
 impl nomt_core::Cursor for PageCacheCursor {
-    fn position(&self) -> (KeyPath, u8) {
+    fn position(&self) -> TriePosition {
         PageCacheCursor::position(self)
     }
 
@@ -590,73 +530,5 @@ impl nomt_core::Cursor for PageCacheCursor {
 
     fn compact_up(&mut self) -> Option<trie::InternalData> {
         PageCacheCursor::compact_up(self)
-    }
-}
-
-// extract the relevant portion of the key path to the last page. panics on empty path.
-fn last_page_path(total_path: &KeyPath, total_depth: u8) -> &BitSlice<u8, Msb0> {
-    let prev_page_end = ((total_depth as usize - 1) / DEPTH) * DEPTH;
-    &total_path.view_bits::<Msb0>()[prev_page_end..total_depth as usize]
-}
-
-/// Given a node index, get the index of the sibling.
-fn sibling_index(node_index: usize) -> usize {
-    if node_index % 2 == 0 {
-        node_index + 1
-    } else {
-        node_index - 1
-    }
-}
-
-// Transform a node index and depth in the current page to the indices where the child nodes are
-// stored.
-//
-// The expected range of `depth` is between 1 and `DEPTH` - 1, inclusive.
-// A depth out of range panics.
-fn child_node_indices(node_index: usize, depth: usize) -> (usize, usize) {
-    let left = match depth {
-        1 => 2 + node_index * 2,
-        2 => 6 + (node_index - 2) * 2,
-        3 => 14 + (node_index - 6) * 2,
-        4 => 30 + (node_index - 14) * 2,
-        5 => 62 + (node_index - 30) * 2,
-        _ => panic!("{depth} out of bounds 1..{}", DEPTH - 1),
-    };
-
-    (left, left + 1)
-}
-
-// Transform a bit-path to an index in a page.
-//
-// The expected length of the page path is between 1 and `DEPTH`, inclusive. A length of 0 returns
-// 0 and all bits beyond `DEPTH` are ignored.
-fn node_index(page_path: &BitSlice<u8, Msb0>) -> usize {
-    let depth = core::cmp::min(DEPTH, page_path.len());
-
-    if depth == 0 {
-        0
-    } else {
-        // each node is stored at (2^depth - 2) + as_uint(path)
-        (1 << depth) - 2 + page_path[..depth].load_be::<usize>()
-    }
-}
-
-fn bottom_node_index(node_index: usize) -> u8 {
-    node_index as u8 - 62
-}
-
-// Transform a node index and depth in the current page to the indices where the parent node is
-// stored.
-//
-// The expected range of `depth` is between 2 and `DEPTH`, inclusive.
-// A depth out of range panics.
-fn parent_node_index(node_index: usize, depth: usize) -> usize {
-    match depth {
-        2 => (node_index - 2) / 2,
-        3 => 2 + (node_index - 6) / 2,
-        4 => 6 + (node_index - 14) / 2,
-        5 => 14 + (node_index - 30) / 2,
-        6 => 30 + (node_index - 62) / 2,
-        _ => panic!("depth {depth} out of bounds 2..=6"),
     }
 }
