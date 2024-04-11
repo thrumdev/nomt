@@ -1,12 +1,11 @@
-use crate::{Action, DB};
+use crate::backend::{Action, Db};
+use crate::timer::Timer;
 use jmt::KeyHash;
 use jmt::{storage::TreeWriter, JellyfishMerkleTree};
 use sov_db::state_db::StateDB;
 use sov_prover_storage_manager::SnapshotManager;
 use sov_schema_db::snapshot::DbSnapshot;
 use std::sync::{Arc, RwLock};
-
-// https://github.com/Sovereign-Labs/sovereign-sdk/blob/2cc0656df3f12fca2026c20554b5f78ccb210b89/full-node/db/sov-db/benches/state_db_bench.rs#L70
 
 pub struct SovDB {
     state_db: StateDB<SnapshotManager>,
@@ -15,14 +14,12 @@ pub struct SovDB {
 impl SovDB {
     pub fn new() -> Self {
         // Delete previously existing db
-        let _ = std::fs::remove_dir_all("tmp_sov_db");
+        let _ = std::fs::remove_dir_all("sov_db");
 
         // Create the underlying rocks db database
-        let state_db_raw = StateDB::<SnapshotManager>::setup_schema_db("tmp_sov_db").unwrap();
-
+        let state_db_raw = StateDB::<SnapshotManager>::setup_schema_db("sov_db").unwrap();
         // Create a 'dummy' SnapshotManager who just reads from the provided database
         let state_db_sm = Arc::new(RwLock::new(SnapshotManager::orphan(state_db_raw)));
-
         // Create a snapshot db and then the state db over RocksDB
         let state_db_snapshot = DbSnapshot::<SnapshotManager>::new(0, state_db_sm.into());
         let state_db = StateDB::with_db_snapshot(state_db_snapshot).unwrap();
@@ -31,15 +28,17 @@ impl SovDB {
     }
 }
 
-impl DB for SovDB {
-    fn apply_actions(&mut self, actions: Vec<Action>) {
+impl Db for SovDB {
+    fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>) {
+        let _timer_guard = timer.and_then(|t| Some(t.record()));
+
         self.state_db.inc_next_version();
 
-        // Actions are applied to jmt and then applied to the backend if committed
+        // Actions are applied to jmt and then applied to the backend
         let jmt = JellyfishMerkleTree::<_, sha2::Sha256>::new(&self.state_db);
 
         let mut preimages = vec![];
-        let mut tree_update = None;
+        let mut value_set = vec![];
 
         // Sov-db uses the struct `ProverStorage` to handle the modification of the trie.
         // https://github.com/Sovereign-Labs/sovereign-sdk/blob/2cc0656df3f12fca2026c20554b5f78ccb210b89/module-system/sov-state/src/prover_storage.rs#L75
@@ -59,34 +58,40 @@ impl DB for SovDB {
         // + commit
         //      insert key_preimages with `put_preimage` and write the
         //      node batch created by the `compute_state_update` method
+        //
+        // Reads are executed sequentially, reading actions, while writes
+        // are collected and applied at the end before committing everything
+        // to the database
+        //
+        // TODO: Collect writes is not technically correct, in a real scenario,
+        // there could be reads that refer to previous writes,
+        // but for now let's just collect them
         for action in actions.into_iter() {
             match action {
-                Action::Writes(writes) => {
-                    let mut value_set = vec![];
-                    for (key, val) in writes.into_iter() {
-                        let key_hash = KeyHash::with::<sha2::Sha256>(&key);
-                        value_set.push((key_hash, val));
-                        preimages.push((key_hash, key.clone()));
-                    }
-
-                    // We are not interested in storing the witness, but we want to measure
-                    // the time required to create the proof
-                    let (_new_root, _proof, jmt_tree_update) = jmt
-                        .put_value_set_with_proof(value_set, 1)
-                        .expect("JMT update must succeed");
-                    tree_update = Some(jmt_tree_update);
+                Action::Write { key, value } => {
+                    let key_hash = KeyHash::with::<sha2::Sha256>(&key);
+                    value_set.push((key_hash, value));
+                    preimages.push((key_hash, key.clone()));
                 }
-                _ => todo!(),
+                Action::Read { key } => {
+                    let key_hash = KeyHash::with::<sha2::Sha256>(&key);
+                    let _result = jmt.get_with_proof(key_hash, 1);
+                }
             }
         }
 
-        // commit and prove
-        let Some(ref update) = tree_update else {
-            panic!("Commit without any write")
-        };
+        // apply all writes
+        // We are not interested in storing the witness, but we want to measure
+        // the time required to create the proof
+        let (_new_root, _proof, tree_update) = jmt
+            .put_value_set_with_proof(value_set, 1)
+            .expect("JMT update must succeed");
+
         self.state_db
             .put_preimages(preimages.iter().map(|(k, v)| (*k, v)))
             .unwrap();
-        self.state_db.write_node_batch(&update.node_batch).unwrap();
+        self.state_db
+            .write_node_batch(&tree_update.node_batch)
+            .unwrap();
     }
 }
