@@ -51,6 +51,24 @@ pub enum SeekMode {
     PathOnly,
 }
 
+/// The results of a seek operation.
+#[derive(Debug, Clone)]
+pub struct Seek {
+    /// The siblings encountered along the path, in ascending order by depth.
+    ///
+    /// The number of siblings is equal to the depth of the sought key.
+    pub siblings: Vec<Node>,
+    /// The terminal node encountered.
+    pub terminal: Option<trie::LeafData>,
+}
+
+impl Seek {
+    /// Get the depth of the terminal node.
+    pub fn depth(&self) -> usize {
+        self.siblings.len()
+    }
+}
+
 /// A cursor wrapping a [`PageCache`].
 ///
 /// This performs I/O internally.
@@ -142,33 +160,40 @@ impl PageCacheCursor {
     /// hints.
     ///
     /// After returning of this function, the cursor is positioned either at the given key path or
-    /// at the closest key path that is on the way to the given key path.
+    /// at the closest node that is on the way to the given key path.
     ///
-    /// If the terminal node is a leaf, this returns the leaf data associated with that leaf.
-    pub fn seek(&mut self, dest: KeyPath, seek_mode: SeekMode) -> Option<trie::LeafData> {
+    /// This returns a [`Seek`] object encapsulating the results of the seek.
+    pub fn seek(&mut self, dest: KeyPath, seek_mode: SeekMode) -> Seek {
         self.rewind();
+
+        let mut result = Seek {
+            siblings: Vec::new(),
+            terminal: None,
+        };
+
         if !trie::is_internal(&self.root) {
-            // The root either a leaf or the terminator. In either case, we can't navigate anywhere.
-            return if trie::is_leaf(&self.root) {
-                Some(self.read_leaf_children())
-            } else {
-                None
+            // fast path: don't pre-fetch when trie is just a root.
+            if trie::is_leaf(&self.root) {
+                result.terminal = Some(self.read_leaf_children());
             };
+
+            return result;
         }
 
         let mut ppf = PageIdsIterator::new(dest);
         for bit in dest.view_bits::<Msb0>().iter().by_vals() {
             if !trie::is_internal(&self.node()) {
-                return if trie::is_leaf(&self.node()) {
+                if trie::is_leaf(&self.node()) {
                     let leaf_data = self.read_leaf_children();
                     assert!(leaf_data
                         .key_path
                         .view_bits::<Msb0>()
                         .starts_with(&dest.view_bits::<Msb0>()[..self.depth as usize]));
-                    Some(leaf_data)
-                } else {
-                    None
+
+                    result.terminal = Some(leaf_data);
                 };
+
+                return result;
             }
             if self.depth as usize % DEPTH == 0 {
                 if self.depth as usize % PREFETCH_N == 0 {
@@ -197,12 +222,12 @@ impl PageCacheCursor {
                     let _ = self.pages.prepopulate(child_page_id);
                 }
             }
-            // page is loaded, so this won't block.
+
             self.down(bit);
+            result.siblings.push(self.peek_sibling());
         }
 
-        // sanity: should be impossible not to encounter a node.
-        None
+        panic!("no terminal along path {}", dest.view_bits::<Msb0>());
     }
 
     /// Go up the trie by `d` levels.
@@ -231,7 +256,10 @@ impl PageCacheCursor {
 
         if prev_page_depth == new_page_depth {
             let depth_in_page = self.depth_in_page();
-            for depth in (depth_in_page..depth_in_page + d as usize).rev().map(|x| x + 1) {
+            for depth in (depth_in_page..depth_in_page + d as usize)
+                .rev()
+                .map(|x| x + 1)
+            {
                 self.node_index = parent_node_index(self.node_index, depth);
             }
         } else {
@@ -253,7 +281,9 @@ impl PageCacheCursor {
             // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
             let page_id = match self.cached_page {
                 None => ROOT_PAGE_ID,
-                Some((ref id, _)) => id.child_page_id(bottom_node_index(self.node_index)).unwrap(),
+                Some((ref id, _)) => id
+                    .child_page_id(bottom_node_index(self.node_index))
+                    .unwrap(),
             };
 
             self.cached_page = Some((page_id.clone(), self.retrieve(page_id)));
@@ -354,7 +384,11 @@ impl PageCacheCursor {
                     fetched_page = self.pages.retrieve_sync(child_page_id);
                     (child_page_id, &fetched_page, 0)
                 } else {
-                    (page_id, page, child_node_indices(self.node_index, depth_in_page).0)
+                    (
+                        page_id,
+                        page,
+                        child_node_indices(self.node_index, depth_in_page).0,
+                    )
                 }
             }
         };
@@ -532,10 +566,6 @@ impl nomt_core::Cursor for PageCacheCursor {
 
     fn jump(&mut self, path: KeyPath, depth: u8) {
         PageCacheCursor::jump(self, path, depth)
-    }
-
-    fn seek(&mut self, path: KeyPath) {
-        let _ = PageCacheCursor::seek(self, path, SeekMode::PathOnly);
     }
 
     fn sibling(&mut self) {

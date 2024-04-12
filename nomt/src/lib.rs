@@ -8,7 +8,7 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
-use cursor::{PageCacheCursor, SeekMode};
+use cursor::{Seek, SeekMode};
 use nomt_core::{
     proof::PathProof,
     trie::{NodeHasher, TERMINATOR},
@@ -85,15 +85,6 @@ pub struct WitnessedWrite {
     pub value: Option<Value>,
     /// The index of the path in the corresponding witness.
     pub path_index: usize,
-}
-
-/// Information about an encountered terminal during the lookup of some key.
-#[derive(Clone)]
-struct TerminalInfo {
-    /// A leaf, if this is a leaf. `None` indicates this is a terminator node.
-    pub leaf: Option<LeafData>,
-    /// The depth
-    pub depth: u8,
 }
 
 /// Whether a key was read, written, or both, along with old and new values.
@@ -197,7 +188,7 @@ impl Nomt {
             page_cache: self.page_cache.clone(),
             store: self.store.clone(),
             warmup_tp: self.warmup_tp.clone(),
-            terminals: Arc::new(DashMap::new()),
+            seek_results: Arc::new(DashMap::new()),
             session_cnt: self.session_cnt.clone(),
         }
     }
@@ -213,14 +204,14 @@ impl Nomt {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Node, Witness)> {
-        // Wait for all warmup tasks to finish. That way, we can be sure that all terminal
-        // information is available and that `terminals` would be the only reference.
+        // Wait for all warmup tasks to finish. That way, we can be sure that all seek result
+        // information is available and that `seek_results` would be the only reference.
         self.warmup_tp.join();
 
         let prev_root = session.prev_root;
         // unwrap: since we waited for all warmup tasks to finish, there should be no other
-        // references to `terminals`.
-        let terminals = Arc::get_mut(&mut session.terminals).unwrap();
+        // references to `seek_results`.
+        let seek_results = Arc::get_mut(&mut session.seek_results).unwrap();
 
         let mut tx = self.store.new_tx();
         let mut cursor = self.page_cache.new_write_cursor(prev_root);
@@ -228,7 +219,10 @@ impl Nomt {
         let mut ops = vec![];
         let mut witness_builder = WitnessBuilder::default();
         for (path, read_write) in actuals {
-            let terminal_info = terminals.remove(&path).expect("terminal info not found").1;
+            let seek_result = seek_results
+                .remove(&path)
+                .expect("terminal info not found")
+                .1;
             if let KeyReadWrite::Write(ref value) | KeyReadWrite::ReadThenWrite(_, ref value) =
                 read_write
             {
@@ -236,9 +230,9 @@ impl Nomt {
                 ops.push((path, value_hash));
                 tx.write_value(path, value.as_ref().map(|x| &x[..]));
             }
-            witness_builder.insert(path, terminal_info.clone(), &read_write);
+            witness_builder.insert(path, seek_result, &read_write);
         }
-        let (witness, _witnessed, visited_terminals) = witness_builder.build(&mut cursor);
+        let (witness, _witnessed, visited_terminals) = witness_builder.build();
         ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_terminals);
@@ -264,7 +258,7 @@ pub struct Session {
     page_cache: PageCache,
     store: Store,
     warmup_tp: ThreadPool,
-    terminals: Arc<DashMap<KeyPath, TerminalInfo>>,
+    seek_results: Arc<DashMap<KeyPath, Seek>>,
     session_cnt: Arc<AtomicUsize>,
 }
 
@@ -286,7 +280,7 @@ impl Session {
 
     fn warmup(&self, path: KeyPath, delete: bool) {
         let page_cache = self.page_cache.clone();
-        let terminals = self.terminals.clone();
+        let seek_results = self.seek_results.clone();
         let root = self.prev_root;
         let f = move || {
             let mut cur = page_cache.new_read_cursor(root);
@@ -295,10 +289,7 @@ impl Session {
             } else {
                 SeekMode::PathOnly
             };
-            let leaf = cur.seek(path, seek_mode);
-            let (_, depth) = cur.position();
-            let terminal_info = TerminalInfo { leaf, depth };
-            terminals.insert(path, terminal_info);
+            seek_results.insert(path, cur.seek(path, seek_mode));
         };
         self.warmup_tp.execute(f);
     }
@@ -319,12 +310,13 @@ struct WitnessBuilder {
 }
 
 impl WitnessBuilder {
-    fn insert(&mut self, key_path: KeyPath, terminal: TerminalInfo, read_write: &KeyReadWrite) {
-        let slice = key_path.view_bits::<Msb0>()[..terminal.depth as usize].into();
+    fn insert(&mut self, key_path: KeyPath, seek_result: Seek, read_write: &KeyReadWrite) {
+        let slice = key_path.view_bits::<Msb0>()[..seek_result.depth()].into();
         let entry = self.terminals.entry(slice).or_insert_with(|| TerminalOps {
-            leaf: terminal.leaf.clone(),
+            leaf: seek_result.terminal.clone(),
             reads: Vec::new(),
             writes: Vec::new(),
+            siblings: seek_result.siblings,
         });
 
         if let KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) = read_write {
@@ -338,21 +330,16 @@ impl WitnessBuilder {
 
     // builds the witness, the witnessed operations, and returns additional write operations
     // for leaves which are updated but where the existing value should be preserved.
-    fn build(
-        self,
-        cursor: &mut PageCacheCursor,
-    ) -> (Witness, WitnessedOperations, Vec<VisitedTerminal>) {
+    fn build(self) -> (Witness, WitnessedOperations, Vec<VisitedTerminal>) {
         let mut paths = Vec::with_capacity(self.terminals.len());
         let mut reads = Vec::new();
         let mut writes = Vec::new();
         let mut visited_terminals = Vec::new();
 
         for (i, (path, terminal)) in self.terminals.into_iter().enumerate() {
-            let (_, siblings) = nomt_core::proof::record_path(cursor, &path[..]);
-
             let path_proof = PathProof {
                 terminal: terminal.leaf.clone(),
-                siblings,
+                siblings: terminal.siblings,
             };
             if !terminal.writes.is_empty() {
                 visited_terminals.push(VisitedTerminal {
@@ -405,4 +392,5 @@ struct TerminalOps {
     leaf: Option<LeafData>,
     reads: Vec<(KeyPath, Option<Value>)>,
     writes: Vec<(KeyPath, Option<Value>)>,
+    siblings: Vec<Node>,
 }
