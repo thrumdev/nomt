@@ -7,7 +7,7 @@ use nomt::Node;
 #[test]
 fn add_remove_1000() {
     let mut accounts = 0;
-    let mut t = Test::new();
+    let mut t = Test::new("add_remove");
 
     let expected_roots = [
         hex!("0000000000000000000000000000000000000000000000000000000000000000"),
@@ -31,7 +31,7 @@ fn add_remove_1000() {
             accounts += 1;
         }
         {
-            root = t.commit();
+            root = t.commit().0;
         }
 
         assert_eq!(root, expected_roots[i + 1]);
@@ -45,7 +45,7 @@ fn add_remove_1000() {
             common::kill(&mut t, accounts);
         }
         {
-            root = t.commit();
+            root = t.commit().0;
         }
         assert_eq!(root, expected_roots[10 - i - 1]);
     }

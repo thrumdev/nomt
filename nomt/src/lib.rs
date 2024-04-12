@@ -19,6 +19,7 @@ use parking_lot::Mutex;
 use store::Store;
 use threadpool::ThreadPool;
 
+pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
 
 mod cursor;
@@ -126,7 +127,8 @@ impl KeyReadWrite {
     }
 }
 
-struct Blake3Hasher;
+/// Hash nodes with blake3.
+pub struct Blake3Hasher;
 
 impl NodeHasher for Blake3Hasher {
     fn hash_node(data: &nomt_core::trie::NodePreimage) -> [u8; 32] {
@@ -203,9 +205,9 @@ impl Nomt {
         &self,
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
-    ) -> anyhow::Result<(Node, Witness)> {
-        // Wait for all warmup tasks to finish. That way, we can be sure that all seek result
-        // information is available and that `seek_results` would be the only reference.
+    ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
+        // Wait for all warmup tasks to finish. That way, we can be sure that all terminal
+        // information is available and that `terminals` would be the only reference.
         self.warmup_tp.join();
 
         let prev_root = session.prev_root;
@@ -232,7 +234,7 @@ impl Nomt {
             }
             witness_builder.insert(path, seek_result, &read_write);
         }
-        let (witness, _witnessed, visited_terminals) = witness_builder.build();
+        let (witness, witnessed, visited_terminals) = witness_builder.build();
         ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_terminals);
@@ -243,7 +245,7 @@ impl Nomt {
 
         self.page_cache.commit(cursor, &mut tx);
         self.store.commit(tx)?;
-        Ok((new_root, witness))
+        Ok((new_root, witness, witnessed))
     }
 }
 

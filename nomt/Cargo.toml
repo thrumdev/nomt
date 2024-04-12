@@ -13,7 +13,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.81"
 crossbeam-channel = "0.5.12"
-nomt-core = { path = "../core" }
+nomt-core = { path = "../core", features = ["std"] }
 parking_lot = { version = "0.12.1", features = ["arc_lock"] }
 rocksdb = "0.21.0"
 threadpool = "1.8.1"

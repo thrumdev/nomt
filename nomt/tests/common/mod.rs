@@ -1,7 +1,8 @@
-use nomt::{KeyPath, KeyReadWrite, Node, Nomt, Options, Session};
+use nomt::{KeyPath, KeyReadWrite, Node, Nomt, Options, Session, Witness, WitnessedOperations};
 use std::{
     collections::{hash_map::Entry, HashMap},
     mem,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -19,9 +20,9 @@ pub fn account_path(id: u64) -> KeyPath {
     path
 }
 
-fn opts() -> Options {
+fn opts(path: PathBuf) -> Options {
     Options {
-        path: "test".into(),
+        path,
         fetch_concurrency: 1,
         traversal_concurrency: 1,
     }
@@ -34,9 +35,14 @@ pub struct Test {
 }
 
 impl Test {
-    pub fn new() -> Self {
-        let _ = std::fs::remove_dir_all("test");
-        let nomt = Nomt::open(opts()).unwrap();
+    pub fn new(name: impl AsRef<Path>) -> Self {
+        let path = {
+            let mut p = PathBuf::from("test");
+            p.push(name);
+            p
+        };
+        let _ = std::fs::remove_dir_all(&path);
+        let nomt = Nomt::open(opts(path)).unwrap();
         let session = nomt.begin_session();
         Self {
             nomt,
@@ -83,13 +89,13 @@ impl Test {
         to_u64(value.as_ref().map(|v| &v[..]))
     }
 
-    pub fn commit(&mut self) -> Node {
+    pub fn commit(&mut self) -> (Node, Witness, WitnessedOperations) {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        self.nomt.commit_and_prove(session, actual_access).unwrap();
+        let x = self.nomt.commit_and_prove(session, actual_access).unwrap();
         self.session = Some(self.nomt.begin_session());
-        self.nomt.root()
+        x
     }
 }
 

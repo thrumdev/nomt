@@ -12,7 +12,7 @@ pub struct PathProof {
     /// The terminal node encountered when looking up a key. This is always either a terminator or
     /// leaf.
     pub terminal: Option<LeafData>,
-    /// Sibling nodes encountered during lookup, in ascending order by depth.
+    /// Sibling nodes encountered during lookup, in descending order by depth.
     pub siblings: Vec<Node>,
 }
 
@@ -81,6 +81,7 @@ pub fn hash_path<H: NodeHasher>(
 pub struct KeyOutOfScope;
 
 /// Errors in path proof verification.
+#[derive(Debug, Clone, Copy)]
 pub enum PathProofVerificationError {
     /// Amount of provided siblings is impossible for the expected trie depth.
     TooManySiblings,
@@ -159,6 +160,7 @@ impl VerifiedPathProof {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum VerifyUpdateError {
     PathsOutOfOrder,
     OpsOutOfOrder,
@@ -185,7 +187,7 @@ pub struct PathUpdate {
 /// All paths should share the same root.
 pub fn verify_update<H: NodeHasher>(
     prev_root: Node,
-    paths: &[&PathUpdate],
+    paths: &[PathUpdate],
 ) -> Result<Node, VerifyUpdateError> {
     if paths.iter().any(|p| p.inner.root() != prev_root) {
         return Err(VerifyUpdateError::RootMismatch);
@@ -199,7 +201,7 @@ pub fn verify_update<H: NodeHasher>(
         }
 
         for (j, (key, _value)) in path.ops.iter().enumerate() {
-            if j != 0 && &path.ops[i - 1].0 >= key {
+            if j != 0 && &path.ops[j - 1].0 >= key {
                 return Err(VerifyUpdateError::OpsOutOfOrder);
             }
 
