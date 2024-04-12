@@ -52,7 +52,7 @@ pub mod bench {
     pub struct WorkloadParams {
         /// Workload used by benchmarks.
         ///
-        /// Possible values are: transfer, set_balance, heavy_read, heavy_update, heavy_delete
+        /// Possible values are: transfer, set_balance/heavy_write, heavy_read, heavy_update, heavy_delete
         ///
         /// Transfer workload involves balancing transfer between two different accounts
         #[clap(default_value = "transfer")]
