@@ -1,6 +1,7 @@
 mod backend;
 mod bench;
 mod cli;
+mod custom_workload;
 mod nomt;
 mod sov_db;
 mod timer;
