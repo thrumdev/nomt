@@ -14,7 +14,8 @@ use anyhow::Result;
 // Each workload will set up the DB differently and reads and writes arbitrarily,
 // whether the key is not present or already present.
 pub trait Workload {
-    fn run(&self, backend: Box<dyn Db>, timer: &mut Timer);
+    fn init(&self, backend: &mut Box<dyn Db>);
+    fn run(&self, backend: &mut Box<dyn Db>, timer: &mut Timer);
 }
 
 pub fn parse(
@@ -24,11 +25,11 @@ pub fn parse(
     percentage_cold_transfer: Option<u8>,
 ) -> Result<Box<dyn Workload>> {
     Ok(match name {
-        "transfer" => Box::new(TransferWorkload {
+        "transfer" => Box::new(TransferWorkload::new(
             size,
-            percentage_cold_transfer: percentage_cold_transfer.unwrap_or(0),
+            percentage_cold_transfer.unwrap_or(0),
             additional_initial_capacity,
-        }),
+        )),
         "set_balance" | "heavy_write" => Box::new(CustomWorkload::new(
             0,   // reads
             100, // writes

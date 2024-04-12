@@ -23,10 +23,11 @@ pub fn bench(params: Params) -> Result<()> {
         let mut timer = Timer::new(format!("{}", backend));
 
         for _ in 0..params.iteration {
-            let backend_instance = backend.instantiate();
+            let mut backend_instance = backend.instantiate();
 
+            workload.init(&mut backend_instance);
             // it's up to the workload implementation to measure the relevant parts
-            workload.run(backend_instance, &mut timer);
+            workload.run(&mut backend_instance, &mut timer);
         }
 
         timer.print();
