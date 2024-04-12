@@ -27,11 +27,6 @@ pub trait Cursor {
     /// Jump to the node at the given path. Only the first `depth` bits are relevant.
     /// It is possible to jump out of bounds, that is, to a node whose parent is a terminal.
     fn jump(&mut self, path: KeyPath, depth: u8);
-    /// Seek to the terminal of the given path. Returns the terminal node and its depth.
-    ///
-    /// This can be more efficient than using repeated calls to `down` in the case that I/O may
-    /// be predicted based on the key-path.
-    fn seek(&mut self, path: KeyPath);
 
     /// Traverse to the sibling node of the current position. No-op at the root.
     fn sibling(&mut self);

@@ -1,6 +1,5 @@
 //! Proving and verifying inclusion, non-inclusion, and updates to the trie.
 
-use crate::cursor::Cursor;
 use crate::trie::{
     self, InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, NodeKind, TERMINATOR,
 };
@@ -37,7 +36,7 @@ impl PathProof {
             Some(leaf_data) => H::hash_leaf(&leaf_data),
         };
 
-        let new_root = hash_path::<H>(cur_node, relevant_path, self.siblings.iter().cloned());
+        let new_root = hash_path::<H>(cur_node, relevant_path, self.siblings.iter().rev().cloned());
 
         if new_root == root {
             Ok(VerifiedPathProof {
@@ -160,32 +159,6 @@ impl VerifiedPathProof {
     }
 }
 
-/// Record a query path through the trie. This does no sanity-checking of the underlying
-/// cursor's results, so a faulty cursor will lead to a faulty path.
-///
-/// This returns the sibling nodes and the terminal node encountered when looking up
-/// a key.
-pub fn record_path(cursor: &mut impl Cursor, key: &BitSlice<u8, Msb0>) -> (Node, Vec<Node>) {
-    let mut siblings = Vec::new();
-    let mut terminal = TERMINATOR;
-
-    cursor.rewind();
-
-    for bit in key.iter().by_vals() {
-        terminal = cursor.node();
-
-        if crate::trie::is_internal(&cursor.node()) {
-            cursor.down(bit);
-            siblings.push(cursor.peek_sibling());
-        } else {
-            break;
-        }
-    }
-
-    let siblings: Vec<_> = siblings.into_iter().rev().collect();
-    (terminal, siblings)
-}
-
 pub enum VerifyUpdateError {
     PathsOutOfOrder,
     OpsOutOfOrder,
@@ -268,7 +241,7 @@ pub fn verify_update<H: NodeHasher>(
             .by_vals()
             .rev()
             .take(up_layers)
-            .zip(&path.inner.siblings)
+            .zip(path.inner.siblings.iter().rev())
         {
             let sibling = if pending_siblings.last().map_or(false, |p| p.1 == cur_layer) {
                 // unwrap: checked above
