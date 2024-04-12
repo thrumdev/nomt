@@ -12,8 +12,11 @@ pub struct NomtDB {
 }
 
 impl NomtDB {
-    pub fn new() -> Self {
-        let _ = std::fs::remove_dir_all("nomt_db");
+    pub fn new(reset: bool) -> Self {
+        if reset {
+            // Delete previously existing db
+            let _ = std::fs::remove_dir_all("nomt_db");
+        }
 
         let opts = Options {
             path: PathBuf::from("nomt_db"),

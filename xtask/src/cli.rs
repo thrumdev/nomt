@@ -11,7 +11,19 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Benchmark different workloads against different backends
     Bench(bench::Params),
+    /// Profile the execution of a workload on a backend
+    ///
+    /// Given the workload, the backend will be initialized with
+    /// all the data required. The command `samply cargo run -- exec ..`
+    /// will then be executed with the same arguments on the
+    /// prepared backend's database
+    Profile(profile::Params),
+    /// Execute a workload once over an already set up backend's db
+    ///
+    /// If the backend's db is not there it will start from an empty db
+    Exec(profile::Params),
 }
 
 impl Display for Backend {
@@ -24,8 +36,50 @@ impl Display for Backend {
     }
 }
 
+#[derive(Clone, Debug, Args)]
+pub struct WorkloadParams {
+    /// Workload used by benchmarks.
+    ///
+    /// Possible values are: transfer, set_balance/heavy_write, heavy_read, heavy_update, heavy_delete
+    ///
+    /// Transfer workload involves balancing transfer between two different accounts
+    #[clap(default_value = "transfer")]
+    #[arg(long = "workload-name", short)]
+    pub name: String,
+
+    /// Parameters avaiable only with workload "transfer".
+    ///
+    /// It is the percentage of transfers to a non-existing account,
+    /// the remaining portion of transfers are to existing accounts
+    ///
+    /// Accepted values are in the range of 0 to 100
+    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
+    #[arg(long = "workload-percentage-cold", short)]
+    pub percentage_cold: Option<u8>,
+
+    /// Amount of operations performed in the workload
+    #[clap(default_value = "1000")]
+    #[arg(long = "workload-size", short)]
+    pub size: u64,
+
+    /// Additional size of the database before starting the benchmarks.
+    ///
+    /// Some workloads operate over existing keys in the database,
+    /// and this size is additional to those entries.
+    ///
+    /// The provided argument is the power of two exponent of the
+    /// number of elements already present in the storage.
+    ///
+    /// Accepted values are in the range of 0 to 63
+    ///
+    /// Leave it empty to specify an initial empty storage
+    #[arg(long = "workload-capacity", short = 'c')]
+    #[clap(value_parser=clap::value_parser!(u8).range(0..64))]
+    pub initial_capacity: Option<u8>,
+}
+
 pub mod bench {
-    use super::{Args, Backend};
+    use super::{Args, Backend, WorkloadParams};
 
     #[derive(Debug, Args)]
     pub struct Params {
@@ -47,46 +101,18 @@ pub mod bench {
         #[arg(long, short)]
         pub iteration: u64,
     }
+}
 
-    #[derive(Clone, Debug, Args)]
-    pub struct WorkloadParams {
-        /// Workload used by benchmarks.
-        ///
-        /// Possible values are: transfer, set_balance/heavy_write, heavy_read, heavy_update, heavy_delete
-        ///
-        /// Transfer workload involves balancing transfer between two different accounts
-        #[clap(default_value = "transfer")]
-        #[arg(long = "workload-name", short)]
-        pub name: String,
+pub mod profile {
+    use super::{Args, Backend, WorkloadParams};
 
-        /// Parameters avaiable only with workload "transfer".
-        ///
-        /// It is the percentage of transfers to a non-existing account,
-        /// the remaining portion of transfers are to existing accounts
-        ///
-        /// Accepted values are in the range of 0 to 100
-        #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-        #[arg(long = "workload-percentage-cold", short)]
-        pub percentage_cold: Option<u8>,
+    #[derive(Debug, Args)]
+    pub struct Params {
+        /// Possible Backends to run the workflow on
+        #[arg(long, short)]
+        pub backend: Backend,
 
-        /// Amount of operations performed in the workload
-        #[clap(default_value = "1000")]
-        #[arg(long = "workload-size", short)]
-        pub size: u64,
-
-        /// Additional size of the database before starting the benchmarks.
-        ///
-        /// Some workloads operate over existing keys in the database,
-        /// and this size is additional to those entries.
-        ///
-        /// The provided argument is the power of two exponent of the
-        /// number of elements already present in the storage.
-        ///
-        /// Accepted values are in the range of 0 to 63
-        ///
-        /// Leave it empty to specify an initial empty storage
-        #[arg(long = "workload-capacity", short = 'c')]
-        #[clap(value_parser=clap::value_parser!(u8).range(0..64))]
-        pub initial_capacity: Option<u8>,
+        #[clap(flatten)]
+        pub workload: WorkloadParams,
     }
 }

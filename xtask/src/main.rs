@@ -3,6 +3,7 @@ mod bench;
 mod cli;
 mod custom_workload;
 mod nomt;
+mod profile;
 mod sov_db;
 mod timer;
 mod transfer_workload;
@@ -16,5 +17,7 @@ pub fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Bench(params) => bench::bench(params),
+        Commands::Profile(params) => profile::profile(params),
+        Commands::Exec(params) => profile::exec(params),
     }
 }
