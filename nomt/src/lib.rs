@@ -1,3 +1,5 @@
+#![warn(unused_crate_dependencies, missing_docs)]
+
 use bitvec::prelude::*;
 use dashmap::DashMap;
 use std::{
