@@ -23,11 +23,14 @@ pub fn bench(params: Params) -> Result<()> {
         let mut timer = Timer::new(format!("{}", backend));
 
         for _ in 0..params.iteration {
-            let mut backend_instance = backend.instantiate();
+            let mut backend_instance = backend.instantiate(true);
 
+            // TODO: if the initial capacity is large, this repetition could become time-consuming.
+            // It would be better to initialize the database once,
+            // copy it to a location, and then only run the workload for each iteration
             workload.init(&mut backend_instance);
             // it's up to the workload implementation to measure the relevant parts
-            workload.run(&mut backend_instance, &mut timer);
+            workload.run(&mut backend_instance, Some(&mut timer));
         }
 
         timer.print();

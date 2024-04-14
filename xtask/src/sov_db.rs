@@ -12,9 +12,11 @@ pub struct SovDB {
 }
 
 impl SovDB {
-    pub fn new() -> Self {
-        // Delete previously existing db
-        let _ = std::fs::remove_dir_all("sov_db");
+    pub fn new(reset: bool) -> Self {
+        if reset {
+            // Delete previously existing db
+            let _ = std::fs::remove_dir_all("sov_db");
+        }
 
         // Create the underlying rocks db database
         let state_db_raw = StateDB::<SnapshotManager>::setup_schema_db("sov_db").unwrap();
