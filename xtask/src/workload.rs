@@ -26,8 +26,8 @@ impl Workload {
         backend.apply_actions(self.init_actions.clone(), None);
     }
 
-    pub fn run(&self, backend: &mut Box<dyn Db>, timer: &mut Timer) {
-        backend.apply_actions(self.run_actions.clone(), Some(timer));
+    pub fn run(&self, backend: &mut Box<dyn Db>, timer: Option<&mut Timer>) {
+        backend.apply_actions(self.run_actions.clone(), timer);
     }
 }
 

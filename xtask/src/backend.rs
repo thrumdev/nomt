@@ -33,10 +33,13 @@ impl Backend {
         vec![Backend::SovDB, Backend::Nomt]
     }
 
-    pub fn instantiate(&self) -> Box<dyn Db> {
+    // If reset is true, then erase any previous backend's database
+    // and restart from an empty database.
+    // Otherwise, use the already present database.
+    pub fn instantiate(&self, reset: bool) -> Box<dyn Db> {
         match self {
-            Backend::SovDB => Box::new(SovDB::new()),
-            Backend::Nomt => Box::new(NomtDB::new()),
+            Backend::SovDB => Box::new(SovDB::new(reset)),
+            Backend::Nomt => Box::new(NomtDB::new(reset)),
         }
     }
 }
