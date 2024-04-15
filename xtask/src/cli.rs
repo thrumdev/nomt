@@ -43,9 +43,15 @@ impl Display for Backend {
 pub struct WorkloadParams {
     /// Workload used by benchmarks.
     ///
-    /// Possible values are: transfer, set_balance/heavy_write, heavy_read, heavy_update, heavy_delete
+    /// Possible values are: transfer, randr, randw, seqr and seqw
     ///
-    /// Transfer workload involves balancing transfer between two different accounts
+    /// `transfer` workload involves balancing transfer between two different accounts.
+    ///
+    /// `randr` and `randw` will perform randomly uniformly distributed reads and writes,
+    /// respectively, over the key space.
+    ///
+    /// `seqr` and `seqw` will perform sequential reads and writes, respectively,
+    /// starting from a random key.
     #[clap(default_value = "transfer")]
     #[arg(long = "workload-name", short)]
     pub name: String,

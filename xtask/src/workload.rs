@@ -43,35 +43,39 @@ pub fn parse(
             percentage_cold_transfer.unwrap_or(0),
             additional_initial_capacity,
         ),
-        "set_balance" | "heavy_write" => new_custom_workload(
-            0,   // reads
-            100, // writes
-            0,   // deletes
-            0,   // updates
+        "randw" => new_custom_workload(
+            0,     // reads
+            100,   // writes
+            0,     // deletes
+            0,     // updates
+            false, // seq
             size,
             additional_initial_capacity,
         )?,
-        "heavy_read" => new_custom_workload(
-            90, // reads
-            10, // writes
-            0,  // deletes
-            0,  // updates
+        "randr" => new_custom_workload(
+            100,   // reads
+            0,     // writes
+            0,     // deletes
+            0,     // updates
+            false, // seq
             size,
             additional_initial_capacity,
         )?,
-        "heavy_update" => new_custom_workload(
-            5,  // reads
-            5,  // writes
-            0,  // deletes
-            90, // updates
+        "seqw" => new_custom_workload(
+            0,    // reads
+            100,  // writes
+            0,    // deletes
+            0,    // updates
+            true, // seq
             size,
             additional_initial_capacity,
         )?,
-        "heavy_delete" => new_custom_workload(
-            5,  // reads
-            5,  // writes
-            90, // deletes
-            0,  // updates
+        "seqr" => new_custom_workload(
+            100,  // reads
+            0,    // writes
+            0,    // deletes
+            0,    // updates
+            true, // seq
             size,
             additional_initial_capacity,
         )?,
