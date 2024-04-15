@@ -14,4 +14,5 @@ profile.json
 # xtask
 /xtask/sov_db
 /xtask/nomt_db
+/xtask/sp_trie_db
 /xtask/target

@@ -25,5 +25,15 @@ sov-schema-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }
 sov-prover-storage-manager = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }
 jmt = { git = "https://github.com/penumbra-zone/jmt.git", rev = "1d007e11cb68aa5ca13e9a5af4a12e6439d5f7b6" }
 
+# sp-trie
+sp-trie = "32.0.0"
+sp-state-machine = "0.35.0"
+trie-db = "0.28.0"
+hash-db = "0.16.0"
+sp-core = "31.0.0"
+kvdb = "0.13.0"
+kvdb-rocksdb = "0.19.0"
+array-bytes = "6.1"
+
 # nomt
 nomt = { path = "../nomt" }
