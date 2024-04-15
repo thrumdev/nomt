@@ -4,6 +4,7 @@ mod cli;
 mod custom_workload;
 mod nomt;
 mod sov_db;
+mod sp_trie;
 mod timer;
 mod transfer_workload;
 mod workload;

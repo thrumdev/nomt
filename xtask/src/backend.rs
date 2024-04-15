@@ -1,4 +1,4 @@
-use crate::{nomt::NomtDB, sov_db::SovDB, timer::Timer};
+use crate::{nomt::NomtDB, sov_db::SovDB, sp_trie::SpTrieDB, timer::Timer};
 
 type Value = Vec<u8>;
 type Key = Vec<u8>;
@@ -7,6 +7,7 @@ type Key = Vec<u8>;
 pub enum Backend {
     SovDB,
     Nomt,
+    SpTrie,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +41,7 @@ impl Backend {
         match self {
             Backend::SovDB => Box::new(SovDB::new(reset)),
             Backend::Nomt => Box::new(NomtDB::new(reset)),
+            Backend::SpTrie => Box::new(SpTrieDB::new(reset)),
         }
     }
 }

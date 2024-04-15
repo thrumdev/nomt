@@ -33,6 +33,7 @@ impl Display for Backend {
         let name = match self {
             Backend::SovDB => "sov-db",
             Backend::Nomt => "nomt",
+            Backend::SpTrie => "sp-trie",
         };
         f.write_str(name)
     }
