@@ -157,7 +157,7 @@ impl PageCacheCursor {
         self.rewind();
 
         let mut result = Seek {
-            siblings: Vec::new(),
+            siblings: Vec::with_capacity(32),
             terminal: None,
         };
 
