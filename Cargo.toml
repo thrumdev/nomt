@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["benchtop", "core", "nomt", "fuzz"]
-exclude = [ "xtask" ]
+members = ["core", "nomt", "fuzz"]
+exclude = [ "benchtop" ]
 
 [workspace.package]
 authors = ["thrum"]
