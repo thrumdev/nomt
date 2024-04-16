@@ -38,6 +38,8 @@ pub struct Options {
     pub fetch_concurrency: usize,
     /// The maximum number of concurrent background page fetches.
     pub traversal_concurrency: usize,
+    /// The number of pages to keep in the page cache.
+    pub page_cache_size: usize,
 }
 
 struct Shared {

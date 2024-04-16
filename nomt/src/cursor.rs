@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashSet};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::{
     page_cache::{Page, PageCache},
@@ -17,11 +17,46 @@ use nomt_core::{
 /// The number of items we want to request in a single batch.
 const PREFETCH_N: usize = 7;
 
+pub struct PageRef(pub Page);
+
+impl PartialEq for PageRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0.inner, &other.0.inner)
+    }
+}
+
+impl Eq for PageRef {}
+
+impl std::hash::Hash for PageRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0.inner).hash(state)
+    }
+}
+
+pub struct DirtyPages {
+    // This should be thought of as a HashSet of Page, or more specifically an Arc<Page>, but with
+    // an associated PageId.
+    pub(crate) dirtied: HashMap<PageRef, PageId>,
+}
+
+impl DirtyPages {
+    /// Create a new empty set of dirty pages.
+    pub fn new() -> Self {
+        Self {
+            dirtied: HashMap::new(),
+        }
+    }
+
+    pub fn mark(&mut self, page_id: PageId, page: Page) {
+        self.dirtied.insert(PageRef(page), page_id);
+    }
+}
+
 enum Mode {
     Read(ReadPass),
     Write {
         write_pass: RefCell<WritePass>,
-        dirtied: HashSet<PageId>,
+        dirtied: DirtyPages,
     },
 }
 
@@ -98,7 +133,7 @@ impl PageCacheCursor {
             pages,
             Mode::Write {
                 write_pass: RefCell::new(write_pass),
-                dirtied: HashSet::new(),
+                dirtied: DirtyPages::new(),
             },
         )
     }
@@ -339,7 +374,8 @@ impl PageCacheCursor {
             None => page.clear_leaf_data(&mut *write_pass.borrow_mut(), left_idx),
             Some(leaf) => page.set_leaf_data(&mut *write_pass.borrow_mut(), left_idx, leaf),
         }
-        dirtied.insert(page_id);
+        dirtied.mark(page_id, page.clone());
+        {}
     }
 
     /// Place a non-leaf node at the current location.
@@ -363,7 +399,7 @@ impl PageCacheCursor {
             }
             Some((page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.insert(page_id);
+                dirtied.mark(page_id, page.clone());
             }
         }
     }
@@ -387,7 +423,7 @@ impl PageCacheCursor {
             }
             Some((page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.insert(page_id);
+                dirtied.mark(page_id, page.clone());
             }
         }
     }
@@ -476,7 +512,7 @@ impl PageCacheCursor {
     }
 
     /// Called when the write is finished.
-    pub fn finish_write(self) -> (HashSet<PageId>, WritePass) {
+    pub fn finish_write(self) -> (DirtyPages, WritePass) {
         match self.mode {
             Mode::Read(_) => panic!("attempted to call dirtied_pages on a read-only cursor"),
             Mode::Write {

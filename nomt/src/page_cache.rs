@@ -12,7 +12,7 @@ use nomt_core::{
     page_id::PageId,
     trie::{LeafData, Node},
 };
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::{fmt, mem, sync::Arc};
 use threadpool::ThreadPool;
 
@@ -24,7 +24,7 @@ pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 // location. This bitfield has '1' bits set for leaf data and '0' bits set for nodes.
 const LEAF_DATA_BITFIELD_OFF: usize = NODES_PER_PAGE * 32;
 
-struct PageData {
+pub struct PageData {
     data: RwPassCell<Option<Vec<u8>>>,
 }
 
@@ -135,7 +135,7 @@ enum PageState {
 /// Can be cloned cheaply.
 #[derive(Clone)]
 pub struct Page {
-    inner: Arc<PageData>,
+    pub(crate) inner: Arc<PageData>,
 }
 
 impl Page {
@@ -209,6 +209,15 @@ impl InflightFetch {
     }
 }
 
+slotmap::new_key_type! {
+    struct CacheSlotIndex;
+}
+
+struct CacheSlot {
+    inner: Arc<Mutex<PageState>>,
+    // next: CacheSlotIndex,
+}
+
 /// The page-cache provides an in-memory layer between the user and the underlying DB.
 /// It stores full pages and can be shared between threads.
 #[derive(Clone)]
@@ -223,8 +232,11 @@ struct Shared {
     ///
     /// Used for limiting the number of concurrent page fetches.
     fetch_tp: ThreadPool,
+
+    slot_registry: DashMap<PageId, CacheSlotIndex, FxBuildHasher>,
     /// The pages loaded from the store, possibly dirty.
-    cached: DashMap<PageId, PageState, FxBuildHasher>,
+    cache_slots: RwLock<slotmap::SlotMap<CacheSlotIndex, CacheSlot>>,
+    max_sz: usize,
 }
 
 impl PageCache {
@@ -237,9 +249,13 @@ impl PageCache {
         Self {
             shared: Arc::new(Shared {
                 page_rw_pass_domain: RwPassDomain::new(),
-                cached: DashMap::with_hasher(FxBuildHasher::default()),
+                slot_registry: DashMap::with_hasher(FxBuildHasher::default()),
+                cache_slots: RwLock::new(slotmap::SlotMap::with_capacity_and_key(
+                    o.page_cache_size,
+                )),
                 store,
                 fetch_tp,
+                max_sz: o.page_cache_size,
             }),
         }
     }
@@ -249,37 +265,7 @@ impl PageCache {
     /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
     /// page from the underlying store and caches it.
     pub fn prepopulate(&self, page_id: PageId) {
-        if let Entry::Vacant(v) = self.shared.cached.entry(page_id) {
-            // Nope, then we need to fetch the page from the store.
-            let inflight = Arc::new(InflightFetch::new());
-            v.insert(PageState::Inflight(inflight));
-            let task = {
-                let shared = self.shared.clone();
-                move || {
-                    let entry = shared
-                        .store
-                        .load_page(page_id.clone())
-                        .expect("db load failed") // TODO: handle the error
-                        .map_or_else(
-                            || PageData::pristine_empty(&shared.page_rw_pass_domain),
-                            |data| PageData::pristine_with_data(&shared.page_rw_pass_domain, data),
-                        );
-                    let entry = Arc::new(entry);
-
-                    // Unwrap: the operation was inserted above. It is scheduled for execution only
-                    // once. It may removed only in the line below. Therefore, `None` is impossible.
-                    let mut page_state_guard = shared.cached.get_mut(&page_id).unwrap();
-                    let page_state = page_state_guard.value_mut();
-                    let PageState::Inflight(inflight) =
-                        mem::replace(page_state, PageState::Cached(entry.clone()))
-                    else {
-                        panic!("page was not inflight");
-                    };
-                    inflight.complete_and_notify(Page { inner: entry });
-                }
-            };
-            self.shared.fetch_tp.execute(task);
-        }
+        let _ = self.begin_load_page(page_id, /* sync */ false);
     }
 
     /// Retrieves the page data at the given [`PageId`] synchronously.
@@ -289,55 +275,122 @@ impl PageCache {
     ///
     /// This method is blocking, but doesn't suffer from the channel overhead.
     pub fn retrieve_sync(&self, page_id: PageId) -> Page {
-        let maybe_inflight = match self.shared.cached.entry(page_id) {
-            Entry::Occupied(o) => {
-                let page = o.get();
-                match page {
-                    PageState::Inflight(inflight) => Some(inflight.clone()),
-                    PageState::Cached(page) => {
-                        return Page {
-                            inner: page.clone(),
-                        };
-                    }
+        self.begin_load_page(page_id, /* sync */ true).unwrap()
+    }
+
+    /// TODO:
+    /// If `block` is true, then `Page` is guaranteed to be `Some`.`
+    fn begin_load_page(&self, page_id: PageId, block: bool) -> Option<Page> {
+        // On a high-level, we need to do the following:
+        //
+        // 1. Insert a new `InflightFetch` into the `cache_slot[slot_ix]`, where
+        //    `slot_ix = slot_registry[page_id]`, if not already present. If it is present, then
+        //    wait on it and return the page if `block` is `true` or `None` if `block` is `false`.
+        //
+        // 1. Call `load_page_sync` to load the page from the store and cache it. Depending on the
+        //    value of `block`, do it either synchronously or submit a task to the thread pool.
+        //
+        // 2. If `block` is `true`, return the page. Otherwise, return `None`.
+        //
+        // This is complicated due to the fact that slot_registry is separate from cache_slots, so
+        // we need to do some gymnastics to ensure that we don't lock excessively and deadlock.
+
+        let (slot_ix_guard, known_page_id) = {
+            let this = self.shared.slot_registry.entry(page_id);
+            match this {
+                Entry::Occupied(entry) => (entry.into_ref(), true),
+                Entry::Vacant(entry) => {
+                    let slot_ix = self.shared.cache_slots.write().insert(CacheSlot {
+                        inner: Arc::new(Mutex::new(PageState::Inflight(Arc::new(
+                            InflightFetch::new(),
+                        )))),
+                        // TODO: next = back, back = prev
+                        // next: todo!(),
+                    });
+                    (entry.insert(slot_ix), false)
                 }
-            }
-            Entry::Vacant(v) => {
-                v.insert(PageState::Inflight(Arc::new(InflightFetch::new())));
-                None
             }
         };
 
-        // do not wait with dashmap lock held; deadlock
-        if let Some(existing_inflight) = maybe_inflight {
-            return existing_inflight.wait();
+        if known_page_id {
+            let slot_ix = *slot_ix_guard;
+            // Unwrap is justified because slot_ix is ensured to be present above.
+            let cache_slots = self.shared.cache_slots.read();
+            let slot = cache_slots.get(slot_ix).unwrap();
+
+            let page_state = slot.inner.lock();
+            return match &*page_state {
+                PageState::Inflight(inflight) => {
+                    if block {
+                        // Take out the inflight, drop the locks and only then wait.
+                        let inflight = inflight.clone();
+                        drop(page_state);
+                        drop(cache_slots);
+                        drop(slot_ix_guard);
+                        Some(inflight.wait())
+                    } else {
+                        None
+                    }
+                }
+                PageState::Cached(page_data) => Some(Page {
+                    inner: page_data.clone(),
+                }),
+            };
         }
 
-        let entry = self
-            .shared
+        // The page is not known, so we need to load it from the store.
+        let slot_ix = *slot_ix_guard;
+        drop(slot_ix_guard);
+
+        if block {
+            let page_data = Self::load_page_sync(&self.shared, page_id, slot_ix);
+            Some(Page { inner: page_data })
+        } else {
+            let shared = self.shared.clone();
+            self.shared.fetch_tp.execute(move || {
+                let _ = Self::load_page_sync(&shared, page_id, slot_ix);
+            });
+            None
+        }
+    }
+
+    // Must not be called while holding a mutable lock to `shared.cached`.
+    fn load_page_sync(shared: &Shared, page_id: PageId, slot_ix: CacheSlotIndex) -> Arc<PageData> {
+        let entry = shared
             .store
             .load_page(page_id.clone())
             .expect("db load failed") // TODO: handle the error
             .map_or_else(
-                || PageData::pristine_empty(&self.shared.page_rw_pass_domain),
-                |data| PageData::pristine_with_data(&self.shared.page_rw_pass_domain, data),
+                || PageData::pristine_empty(&shared.page_rw_pass_domain),
+                |data| PageData::pristine_with_data(&shared.page_rw_pass_domain, data),
             );
         let entry = Arc::new(entry);
-        let prev = self
-            .shared
-            .cached
-            .insert(page_id.clone(), PageState::Cached(entry.clone()));
-        match prev {
-            None => {}
-            Some(PageState::Inflight(inflight)) => {
+
+        let mut cache_slots = shared.cache_slots.write();
+        if cache_slots.len() >= shared.max_sz {
+            // TODO: evict a page
+        }
+
+        // TODO: next = back, back = prev
+        let slot = cache_slots.get_mut(slot_ix).unwrap();
+        let new = CacheSlot {
+            inner: Arc::new(Mutex::new(PageState::Cached(entry.clone()))),
+            // next: slot.next,
+        };
+        let prev = mem::replace(slot, new);
+        drop(cache_slots);
+
+        match &*prev.inner.lock() {
+            PageState::Inflight(inflight) => {
                 inflight.complete_and_notify(Page {
                     inner: entry.clone(),
                 });
             }
-            Some(PageState::Cached(_)) => {
+            PageState::Cached(_) => {
                 panic!("page was already cached");
             }
         }
-        return Page { inner: entry };
+        entry
     }
 
     pub fn new_read_cursor(&self, root: Node) -> PageCacheCursor {
@@ -355,22 +408,10 @@ impl PageCache {
     /// After the commit, all the dirty pages are cleared.
     pub fn commit(&self, cursor: PageCacheCursor, tx: &mut Transaction) {
         let (dirty_pages, mut write_pass) = cursor.finish_write();
-        for page_id in dirty_pages {
-            // Unwrap: the invariant is that all items from `dirty` are present in the `cached` and
-            // thus cannot be `None`.
-            let page_state = self
-                .shared
-                .cached
-                .get_mut(&page_id)
-                .expect("a dirty page is not in the cache");
-            let page_state = page_state.value();
-            if let PageState::Cached(ref page) = *page_state {
-                let page_data = page.data.read(write_pass.downgrade());
-                let page_data = page_data.as_ref().map(|v| &v[..]);
-                tx.write_page(page_id, page_data.filter(|p| !page_is_empty(p)));
-            } else {
-                panic!("dirty page is inflight");
-            }
+        for (page, page_id) in dirty_pages.dirtied {
+            let page_data = page.0.inner.data.read(write_pass.downgrade());
+            let page_data = page_data.as_ref().map(|v| &v[..]);
+            tx.write_page(page_id, page_data.filter(|p| !page_is_empty(p)));
         }
     }
 }

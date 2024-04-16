@@ -21,6 +21,7 @@ fn opts() -> Options {
         path: PathBuf::from("test"),
         fetch_concurrency: 1,
         traversal_concurrency: 1,
+        page_cache_size: 2 << 20,
     }
 }
 
