@@ -12,7 +12,7 @@ profile.json
 /nomt/test
 
 # xtask
-/xtask/sov_db
-/xtask/nomt_db
-/xtask/sp_trie_db
-/xtask/target
+/benchtop/sov_db
+/benchtop/nomt_db
+/benchtop/sp_trie_db
+/benchtop/target
