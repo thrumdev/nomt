@@ -168,8 +168,12 @@ fn replace_subtrie<H: NodeHasher>(
     let start_pos = cursor.position();
     let skip = start_pos.depth() as usize;
 
-    build_sub_trie::<H>(skip, leaf_data, ops, |key, depth, node, leaf_data| {
-        cursor.jump(key, depth);
+    build_sub_trie::<H>(skip, leaf_data, ops, |visit_control, node, leaf_data| {
+        cursor.up(visit_control.up);
+        for bit in visit_control.down.iter().by_vals() {
+            cursor.down(bit);
+        }
+
         match leaf_data {
             None => cursor.place_non_leaf(node),
             Some(leaf_data) => cursor.place_leaf(node, leaf_data),
@@ -177,16 +181,28 @@ fn replace_subtrie<H: NodeHasher>(
     });
 }
 
+/// Indicates the relative position of the next node.
+pub struct VisitControl<'a> {
+    /// How many levels up.
+    pub up: u8,
+    /// Path to follow down.
+    pub down: &'a BitSlice<u8, Msb0>,
+}
+
 // Build a sub-trie out of the given prior terminal and operations. Operations should all start
 // with the same prefix of len `skip` and be ordered lexicographically.
 //
-// Provide a visitor which will be called for each computed node of the sub-trie. If the written
-// node is a leaf, the leaf-data preimage will be provided.
+// Provide a visitor which will be called for each computed node of the sub-trie.
+//
+// The visitor is assumed to have a default position at the root of the sub-trie and from
+// there will be controlled with `VisitControl` to indicate the position of the next node.
+// The root is always visited at the end. If the written node is a leaf, the leaf-data preimage
+// will be provided.
 pub fn build_sub_trie<H: NodeHasher>(
     skip: usize,
     leaf: Option<LeafData>,
     ops: &[(KeyPath, Option<ValueHash>)],
-    mut visit: impl FnMut(KeyPath, u8, Node, Option<LeafData>),
+    mut visit: impl FnMut(VisitControl, Node, Option<LeafData>),
 ) -> Node {
     // we build a compact addressable sub-trie in-place based on the given set of ordered keys,
     // ignoring deletions as they are implicit in a fresh sub-trie.
@@ -227,9 +243,14 @@ pub fn build_sub_trie<H: NodeHasher>(
     let mut c = leaf_ops.next();
 
     if b.is_none() {
-        if let Some(leaf) = leaf {
-            visit(leaf.key_path, skip as u8, trie::TERMINATOR, None);
-        }
+        visit(
+            VisitControl {
+                up: 0,
+                down: BitSlice::empty(),
+            },
+            trie::TERMINATOR,
+            None,
+        );
         return trie::TERMINATOR;
     }
 
@@ -248,7 +269,7 @@ pub fn build_sub_trie<H: NodeHasher>(
             value_hash: this_val,
         };
         let leaf = H::hash_leaf(&leaf_data);
-        let (depth_after_skip, hash_up_layers) = match (n1, n2) {
+        let (leaf_depth, hash_up_layers) = match (n1, n2) {
             (None, None) => {
                 // single value - no hashing required.
                 (0, 0)
@@ -267,11 +288,21 @@ pub fn build_sub_trie<H: NodeHasher>(
             }
         };
 
-        let mut layer = depth_after_skip;
+        let mut layer = leaf_depth;
         let mut last_node = leaf;
+        let down_start = skip + n1.unwrap_or(0);
+        let leaf_end_bit = skip + leaf_depth;
 
-        visit(this_key, (skip + layer) as u8, leaf, Some(leaf_data));
-        for bit in this_key.view_bits::<Msb0>()[skip..skip + depth_after_skip]
+        visit(
+            VisitControl {
+                up: n1.map_or(0, |_| 1), // previous iterations always get to current layer + 1
+                down: &this_key.view_bits::<Msb0>()[down_start..leaf_end_bit],
+            },
+            leaf,
+            Some(leaf_data),
+        );
+
+        for bit in this_key.view_bits::<Msb0>()[skip..leaf_end_bit]
             .iter()
             .by_vals()
             .rev()
@@ -298,7 +329,14 @@ pub fn build_sub_trie<H: NodeHasher>(
             };
 
             last_node = H::hash_internal(&node_data);
-            visit(this_key, (skip + layer) as u8, last_node, None);
+            visit(
+                VisitControl {
+                    up: 1,
+                    down: BitSlice::empty(),
+                },
+                last_node,
+                None,
+            );
         }
         pending_siblings.push((last_node, layer));
 

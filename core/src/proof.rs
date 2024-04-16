@@ -228,7 +228,7 @@ pub fn verify_update<H: NodeHasher>(
             }
         };
 
-        let sub_root = crate::update::build_sub_trie::<H>(skip, leaf, ops, |_, _, _, _| {});
+        let sub_root = crate::update::build_sub_trie::<H>(skip, leaf, ops, |_, _, _| {});
 
         let mut cur_node = sub_root;
         let mut cur_layer = skip;
