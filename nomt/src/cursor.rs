@@ -8,7 +8,7 @@ use bitvec::prelude::*;
 use nomt_core::{
     key_path::TriePosition,
     page::DEPTH,
-    page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
+    page_id::{PageId, PageIdsIterator},
     trie::{self, KeyPath, Node, NodeKind},
 };
 
@@ -289,7 +289,7 @@ impl PageCacheCursor {
             // attempt to load next page if we are at the end of our previous page or the root.
             // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
             let page_id = match self.cached_page {
-                None => ROOT_PAGE_ID,
+                None => PageId::root_page(),
                 Some((ref id, _)) => id
                     .child_page_id(self.pos.child_page_index())
                     .expect("Pages do not go deeper than the maximum layer, 42"),
@@ -318,10 +318,10 @@ impl PageCacheCursor {
         let fetched_page;
         let (page, (left_idx, right_idx)) = match self.cached_page {
             None => {
-                fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
+                fetched_page = self.pages.retrieve_sync(PageId::root_page());
                 (&fetched_page, (0, 1))
             }
-            Some((page_id, ref page)) => {
+            Some((ref page_id, ref page)) => {
                 let depth_in_page = self.pos.depth_in_page();
                 if depth_in_page == DEPTH {
                     let child_page_id = page_id
@@ -353,19 +353,19 @@ impl PageCacheCursor {
 
         let (page_id, page, left_idx) = match self.cached_page {
             None => {
-                fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
-                (ROOT_PAGE_ID, &fetched_page, 0)
+                fetched_page = self.pages.retrieve_sync(PageId::root_page());
+                (PageId::root_page(), &fetched_page, 0)
             }
-            Some((page_id, ref page)) => {
+            Some((ref page_id, ref page)) => {
                 let depth_in_page = self.pos.depth_in_page();
                 if depth_in_page == DEPTH {
                     let child_page_id = page_id
                         .child_page_id(self.pos.child_page_index())
                         .expect("Pages do not go deeper than the maximum layer, 42");
-                    fetched_page = self.pages.retrieve_sync(child_page_id);
+                    fetched_page = self.pages.retrieve_sync(child_page_id.clone());
                     (child_page_id, &fetched_page, 0)
                 } else {
-                    (page_id, page, self.pos.child_node_indices().0)
+                    (page_id.clone(), page, self.pos.child_node_indices().0)
                 }
             }
         };
@@ -397,9 +397,9 @@ impl PageCacheCursor {
             None => {
                 self.root = node;
             }
-            Some((page_id, ref mut page)) => {
+            Some((ref page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.mark(page_id, page.clone());
+                dirtied.mark(page_id.clone(), page.clone());
             }
         }
     }
@@ -421,9 +421,9 @@ impl PageCacheCursor {
             None => {
                 self.root = node;
             }
-            Some((page_id, ref mut page)) => {
+            Some((ref page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.mark(page_id, page.clone());
+                dirtied.mark(page_id.clone(), page.clone());
             }
         }
     }

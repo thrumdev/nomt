@@ -7,6 +7,7 @@
 //! standard library, but do require Rust's alloc crate.
 
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
+#![cfg_attr(miri, feature(exposed_provenance))]
 
 extern crate alloc;
 

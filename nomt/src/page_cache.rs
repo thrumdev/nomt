@@ -296,7 +296,7 @@ impl PageCache {
         // we need to do some gymnastics to ensure that we don't lock excessively and deadlock.
 
         let (slot_ix_guard, known_page_id) = {
-            let this = self.shared.slot_registry.entry(page_id);
+            let this = self.shared.slot_registry.entry(page_id.clone());
             match this {
                 Entry::Occupied(entry) => (entry.into_ref(), true),
                 Entry::Vacant(entry) => {
@@ -347,6 +347,7 @@ impl PageCache {
             Some(Page { inner: page_data })
         } else {
             let shared = self.shared.clone();
+            let page_id = page_id.clone();
             self.shared.fetch_tp.execute(move || {
                 let _ = Self::load_page_sync(&shared, page_id, slot_ix);
             });
