@@ -61,6 +61,15 @@ pub fn parse(
             size,
             additional_initial_capacity,
         )?,
+        "randrw" => new_custom_workload(
+            50,    // reads
+            50,    // writes
+            0,     // deletes
+            0,     // updates
+            false, // seq
+            size,
+            additional_initial_capacity,
+        )?,
         "seqw" => new_custom_workload(
             0,    // reads
             100,  // writes
@@ -73,6 +82,15 @@ pub fn parse(
         "seqr" => new_custom_workload(
             100,  // reads
             0,    // writes
+            0,    // deletes
+            0,    // updates
+            true, // seq
+            size,
+            additional_initial_capacity,
+        )?,
+        "seqrw" => new_custom_workload(
+            50,   // reads
+            50,   // writes
             0,    // deletes
             0,    // updates
             true, // seq
