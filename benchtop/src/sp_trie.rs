@@ -70,8 +70,8 @@ impl SpTrieDB {
 }
 
 impl Db for SpTrieDB {
-    fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>) {
-        let _timer_guard = timer.map(|t| t.record());
+    fn apply_actions(&mut self, actions: Vec<Action>, mut timer: Option<&mut Timer>) {
+        let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
         let mut new_root = self.root;
         let mut overlay: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
@@ -82,36 +82,39 @@ impl Db for SpTrieDB {
         };
 
         let recorder: sp_trie::recorder::Recorder<Hasher> = Default::default();
-        {
-            let mut trie_recorder = recorder.as_trie_recorder(new_root);
-            let mut trie_db_mut = TrieDBMutBuilderV1::from_existing(&mut trie, &mut new_root)
-                .with_recorder(&mut trie_recorder)
-                .build();
+        let mut trie_recorder = recorder.as_trie_recorder(new_root);
+        let mut trie_db_mut = TrieDBMutBuilderV1::from_existing(&mut trie, &mut new_root)
+            .with_recorder(&mut trie_recorder)
+            .build();
 
-            for action in actions.into_iter() {
-                match action {
-                    Action::Write { key, value } => {
-                        // sp_trie does not require hashed keys,
-                        // but if keys are not hashed, the comparison does not seem to be efficient.
-                        // Not applying hashing to keys would significantly speed up sp_trie.
-                        let key_path = sha2::Sha256::digest(key);
+        for action in actions.into_iter() {
+            match action {
+                Action::Write { key, value } => {
+                    // sp_trie does not require hashed keys,
+                    // but if keys are not hashed, the comparison does not seem to be efficient.
+                    // Not applying hashing to keys would significantly speed up sp_trie.
+                    let key_path = sha2::Sha256::digest(key);
 
-                        trie_db_mut
-                            .insert(&key_path, &value.unwrap_or(vec![]))
-                            .expect("Impossible writing into sp-trie db");
-                    }
-                    Action::Read { key } => {
-                        let key_path = sha2::Sha256::digest(key);
+                    trie_db_mut
+                        .insert(&key_path, &value.unwrap_or(vec![]))
+                        .expect("Impossible writing into sp-trie db");
+                }
+                Action::Read { key } => {
+                    let key_path = sha2::Sha256::digest(key);
 
-                        trie_db_mut
-                            .get(&key_path)
-                            .expect("Impossible fetching from sp-trie db");
-                    }
+                    let _timer_guard_read = timer.as_mut().map(|t| t.record_span("read"));
+                    trie_db_mut
+                        .get(&key_path)
+                        .expect("Impossible fetching from sp-trie db");
                 }
             }
-
-            trie_db_mut.commit();
         }
+
+        let _timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
+
+        trie_db_mut.commit();
+        drop(trie_db_mut);
+        drop(trie_recorder);
 
         let _proof = recorder.drain_storage_proof().is_empty();
 
