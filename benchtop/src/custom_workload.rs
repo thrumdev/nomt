@@ -47,7 +47,7 @@ pub fn new_custom_workload(
                     Some(prev_key) => *prev_key + Uint::<256, 4>::from(1),
                     None => Uint::<256, 4>::from_be_bytes(rand_key(rng)),
                 };
-                *prev = Some(new_key.clone());
+                *prev = Some(new_key);
                 new_key.to_be_bytes::<32>().to_vec()
             } else {
                 rand_key(rng).to_vec()

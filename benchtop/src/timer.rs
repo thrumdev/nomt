@@ -1,48 +1,68 @@
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+// At least three spans are expected to be measured
+// + `workload`
+// + `read`
+// + `commit_and_prove`
 pub struct Timer {
     name: String,
-    h: hdrhistogram::Histogram<u64>,
-    ops: u64,
+    spans: HashMap<&'static str, Rc<RefCell<hdrhistogram::Histogram<u64>>>>,
 }
 
 impl Timer {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            h: hdrhistogram::Histogram::<u64>::new(3).unwrap(),
-            ops: 0,
+            spans: HashMap::new(),
         }
     }
 
-    pub fn record<'a>(&'a mut self) -> impl Drop + 'a {
-        struct RecordSpan<'a> {
-            h: &'a mut hdrhistogram::Histogram<u64>,
-            ops: &'a mut u64,
+    pub fn record_span(&mut self, span_name: &'static str) -> impl Drop {
+        struct RecordSpan {
+            h: Rc<RefCell<hdrhistogram::Histogram<u64>>>,
             start: std::time::Instant,
         }
-        impl Drop for RecordSpan<'_> {
+        impl Drop for RecordSpan {
             fn drop(&mut self) {
                 let elapsed = self.start.elapsed().as_nanos() as u64;
-                self.h.record(elapsed).unwrap();
-                *self.ops += 1;
+                self.h.borrow_mut().record(elapsed).unwrap();
             }
         }
+
+        let h = self.spans.entry(span_name).or_insert(Rc::new(RefCell::new(
+            hdrhistogram::Histogram::<u64>::new(3).unwrap(),
+        )));
+
         RecordSpan {
-            h: &mut self.h,
-            ops: &mut self.ops,
+            h: h.clone(),
             start: std::time::Instant::now(),
         }
     }
 
     pub fn print(&mut self) {
         println!("{}", self.name);
-        println!("  ops={}", self.ops);
-        for q in [0.001, 0.01, 0.25, 0.50, 0.75, 0.95, 0.99, 0.999] {
-            let lat = self.h.value_at_quantile(q);
-            println!("  {}th: {}", q * 100.0, pretty_display_ns(lat));
+
+        // print expectd spans in order
+        for span_name in ["workload", "read", "commit_and_prove"] {
+            let h = self.spans.remove(span_name);
+            match h {
+                Some(h) => println!(
+                    "  mean {}: {}",
+                    span_name,
+                    pretty_display_ns(h.borrow().mean() as u64)
+                ),
+                None => println!("{} not measured", span_name),
+            };
         }
-        println!("  mean={}", pretty_display_ns(self.h.mean() as u64));
-        println!();
-        self.ops = 0;
+
+        // print all other measured spans
+        for (span_name, h) in &self.spans {
+            println!(
+                "  mean {}: {}",
+                span_name,
+                pretty_display_ns(h.borrow().mean() as u64)
+            )
+        }
     }
 }
 

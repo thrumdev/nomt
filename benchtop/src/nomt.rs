@@ -30,8 +30,8 @@ impl NomtDB {
 }
 
 impl Db for NomtDB {
-    fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>) {
-        let _timer_guard = timer.map(|t| t.record());
+    fn apply_actions(&mut self, actions: Vec<Action>, mut timer: Option<&mut Timer>) {
+        let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
         let mut session = self.nomt.begin_session();
         let mut access: FxHashMap<KeyPath, KeyReadWrite> = FxHashMap::default();
@@ -56,6 +56,8 @@ impl Db for NomtDB {
                 }
                 Action::Read { key } => {
                     let key_path = sha2::Sha256::digest(key).into();
+
+                    let _timer_guard_read = timer.as_mut().map(|t| t.record_span("read"));
                     let _value = match access.entry(key_path) {
                         Entry::Occupied(o) => o.get().last_value().cloned(),
                         Entry::Vacant(v) => {
@@ -68,6 +70,7 @@ impl Db for NomtDB {
             }
         }
 
+        let _timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
         let mut actual_access: Vec<_> = access.into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
         self.nomt.commit_and_prove(session, actual_access).unwrap();

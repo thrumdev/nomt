@@ -24,8 +24,16 @@ pub trait Db {
     /// Apply the given actions to the storage, committing them
     /// to the database at the end.
     ///
-    /// The function also accepts an optional timer that will be used to measure
-    /// the relevant parts of the backend that effectively apply the actions.
+    /// The function can take an optional timer to measure key parts of backend operations.
+    ///
+    /// For each backend, three spans are required to be measured:
+    /// + `workload` :: measuring the entirety of the workload execution
+    /// + `read` :: measuring the read latency
+    /// + `commit_and_prove` :: measuring the time required to commit everything to the database
+    ///    and create a proof
+    ///
+    /// Other spans can be measured by each backend, leaving space
+    /// for more detailed tasks specific to each backend.
     fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>);
 }
 

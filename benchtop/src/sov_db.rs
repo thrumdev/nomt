@@ -31,8 +31,8 @@ impl SovDB {
 }
 
 impl Db for SovDB {
-    fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>) {
-        let _timer_guard = timer.map(|t| t.record());
+    fn apply_actions(&mut self, actions: Vec<Action>, mut timer: Option<&mut Timer>) {
+        let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
         self.state_db.inc_next_version();
 
@@ -72,16 +72,20 @@ impl Db for SovDB {
             match action {
                 Action::Write { key, value } => {
                     let key_hash = KeyHash::with::<sha2::Sha256>(&key);
+
                     value_set.push((key_hash, value));
                     preimages.push((key_hash, key.clone()));
                 }
                 Action::Read { key } => {
                     let key_hash = KeyHash::with::<sha2::Sha256>(&key);
+
+                    let _timer_guard_read = timer.as_mut().map(|t| t.record_span("read"));
                     let _result = jmt.get_with_proof(key_hash, 1);
                 }
             }
         }
 
+        let _timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
         // apply all writes
         // We are not interested in storing the witness, but we want to measure
         // the time required to create the proof
