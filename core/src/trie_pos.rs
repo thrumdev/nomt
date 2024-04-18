@@ -104,12 +104,8 @@ impl TriePosition {
         let prev_page_depth = (prev_depth as usize + DEPTH - 1) / DEPTH;
         let new_page_depth = (self.depth as usize + DEPTH - 1) / DEPTH;
         if prev_page_depth == new_page_depth {
-            let depth_in_page = self.depth_in_page();
-            for depth in (depth_in_page..depth_in_page + d as usize)
-                .rev()
-                .map(|x| x + 1)
-            {
-                self.node_index = parent_node_index(self.node_index, depth);
+            for _ in 0..d {
+                self.node_index = parent_node_index(self.node_index);
             }
         } else {
             let path = last_page_path(&self.path, self.depth);
@@ -157,17 +153,14 @@ impl TriePosition {
     }
 
     /// Transform a bit-path to the index in a page corresponding to the child node indices.
+    ///
+    /// Panics if the node is not at a depth in the range 1..=5
     pub fn child_node_indices(&self) -> (usize, usize) {
-        let node_index = self.node_index;
         let depth = self.depth_in_page();
-        let left = match depth {
-            1 => 2 + node_index * 2,
-            2 => 6 + (node_index - 2) * 2,
-            3 => 14 + (node_index - 6) * 2,
-            4 => 30 + (node_index - 14) * 2,
-            5 => 62 + (node_index - 30) * 2,
-            _ => panic!("{depth} out of bounds 1..{}", DEPTH - 1),
-        };
+        if depth == 0 || depth > DEPTH - 1 {
+            panic!("{depth} out of bounds 1..={}", DEPTH - 1);
+        }
+        let left = self.node_index * 2 + 2;
         (left, left + 1)
     }
 
@@ -231,20 +224,12 @@ fn sibling_index(node_index: usize) -> usize {
     }
 }
 
-// Transform a node index and depth in the current page to the indices where the parent node is
-// stored.
-//
-// The expected range of `depth` is between 2 and `DEPTH`, inclusive.
-// A depth out of range panics.
-fn parent_node_index(node_index: usize, depth: usize) -> usize {
-    match depth {
-        2 => (node_index - 2) / 2,
-        3 => 2 + (node_index - 6) / 2,
-        4 => 6 + (node_index - 14) / 2,
-        5 => 14 + (node_index - 30) / 2,
-        6 => 30 + (node_index - 62) / 2,
-        _ => panic!("depth {depth} out of bounds 2..=6"),
-    }
+// Transform a node index to the index where the parent node is stored
+// Id does not check for an overflow of the maximum valid node index
+// and panics if the provided node_index is one of the first two
+// nodes in a page, thus node_index 0 or 1
+fn parent_node_index(node_index: usize) -> usize {
+    (node_index - 2) / 2
 }
 
 impl fmt::Debug for TriePosition {
