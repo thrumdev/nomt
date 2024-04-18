@@ -1,4 +1,6 @@
-#![warn(unused_crate_dependencies, missing_docs)]
+#![warn(missing_docs)]
+
+//! A Nearly-Optimal Merkle Trie Database.
 
 use bitvec::prelude::*;
 use dashmap::DashMap;
@@ -21,6 +23,8 @@ use parking_lot::Mutex;
 use store::Store;
 use threadpool::ThreadPool;
 
+// CARGO HACK: silence lint; this is used in integration tests
+
 pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
 
@@ -29,8 +33,10 @@ mod page_cache;
 mod rw_pass_cell;
 mod store;
 
+/// A full value stored within the trie.
 pub type Value = Rc<Vec<u8>>;
 
+/// Options when opening a [`Nomt`] instance.
 pub struct Options {
     /// The path to the directory where the trie is stored.
     pub path: PathBuf,
