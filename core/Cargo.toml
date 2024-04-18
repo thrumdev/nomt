@@ -15,6 +15,9 @@ bitvec = { version = "1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 ruint = { version = "1.12.1", default-features = false }
 
+[dev-dependencies]
+blake3 = "1.5.1"
+
 [features]
 default = ["std"]
 std = ["bitvec/std"]

@@ -56,8 +56,7 @@ pub struct VisitedTerminal {
 /// lexicographically ascending by key.
 ///
 /// In short, the API accepts a sorted set of operations, which may be partitioned into contiguous
-/// slices by the terminal nodes that they look up to in the trie. When that node is a leaf, it
-/// should be present in the `visited_leaves` slice.
+/// slices by the terminal nodes that they look up to in the trie.
 pub fn update<H: NodeHasher>(
     cursor: &mut impl Cursor,
     ops: &[(KeyPath, Option<ValueHash>)],
@@ -350,4 +349,237 @@ pub fn build_sub_trie<H: NodeHasher>(
         .map(|n| n.0)
         .unwrap_or(trie::TERMINATOR);
     new_root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyNodeHasher;
+
+    impl NodeHasher for DummyNodeHasher {
+        fn hash_node(data: &trie::NodePreimage) -> [u8; 32] {
+            blake3::hash(data).into()
+        }
+    }
+
+    fn leaf(key: u8) -> (LeafData, [u8; 32]) {
+        let key = [key; 32];
+        let leaf = trie::LeafData {
+            key_path: key.clone(),
+            value_hash: key.clone(),
+        };
+
+        let hash = DummyNodeHasher::hash_leaf(&leaf);
+        (leaf, hash)
+    }
+
+    fn branch_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+        let data = trie::InternalData { left, right };
+
+        let hash = DummyNodeHasher::hash_internal(&data);
+        hash
+    }
+
+    #[derive(Default)]
+    struct Visited {
+        key: BitVec<u8, Msb0>,
+        visited: Vec<(BitVec<u8, Msb0>, Node)>,
+    }
+
+    impl Visited {
+        fn at(key: BitVec<u8, Msb0>) -> Self {
+            Visited {
+                key,
+                visited: Vec::new(),
+            }
+        }
+
+        fn visit(&mut self, control: VisitControl, node: Node) {
+            let n = self.key.len() - control.up as usize;
+            self.key.truncate(n);
+            self.key.extend_from_bitslice(&control.down);
+            self.visited.push((self.key.clone(), node));
+        }
+    }
+
+    #[test]
+    fn build_empty_trie() {
+        let mut visited = Visited::default();
+        let root = build_sub_trie::<DummyNodeHasher>(0, None, &[], |control, node, _| {
+            visited.visit(control, node)
+        });
+
+        let visited = visited.visited;
+
+        assert_eq!(visited, vec![(bitvec![u8, Msb0;], [0u8; 32]),],);
+
+        assert_eq!(root, [0u8; 32]);
+    }
+
+    #[test]
+    fn build_single_value_trie() {
+        let mut visited = Visited::default();
+
+        let (leaf, leaf_hash) = leaf(0xff);
+        let root = build_sub_trie::<DummyNodeHasher>(
+            0,
+            None,
+            &[(leaf.key_path, Some(leaf.value_hash))],
+            |control, node, _| visited.visit(control, node),
+        );
+
+        let visited = visited.visited;
+
+        assert_eq!(visited, vec![(bitvec![u8, Msb0;], leaf_hash),],);
+
+        assert_eq!(root, leaf_hash);
+    }
+
+    #[test]
+    fn preserve_single_value_trie() {
+        let mut visited = Visited::default();
+
+        let (leaf, leaf_hash) = leaf(0xff);
+        let root =
+            build_sub_trie::<DummyNodeHasher>(0, Some(leaf.clone()), &[], |control, node, _| {
+                visited.visit(control, node)
+            });
+
+        let visited = visited.visited;
+
+        assert_eq!(visited, vec![(bitvec![u8, Msb0;], leaf_hash),],);
+
+        assert_eq!(root, leaf_hash);
+    }
+
+    #[test]
+    fn overwrite_leaf() {
+        let mut visited = Visited::default();
+
+        let (leaf, leaf_hash) = leaf(0xff);
+        let prev_leaf = trie::LeafData {
+            key_path: leaf.key_path,
+            value_hash: [0x01; 32],
+        };
+        assert_ne!(leaf.value_hash, prev_leaf.value_hash);
+        let root = build_sub_trie::<DummyNodeHasher>(
+            0,
+            Some(prev_leaf),
+            &[(leaf.key_path, Some(leaf.value_hash))],
+            |control, node, _| visited.visit(control, node),
+        );
+
+        let visited = visited.visited;
+
+        assert_eq!(visited, vec![(bitvec![u8, Msb0;], leaf_hash),],);
+
+        assert_eq!(root, leaf_hash);
+    }
+
+    #[test]
+    fn delete_single_value_trie() {
+        let mut visited = Visited::default();
+
+        let (leaf, _) = leaf(0xff);
+        let root = build_sub_trie::<DummyNodeHasher>(
+            0,
+            Some(leaf.clone()),
+            &[(leaf.key_path, None)],
+            |control, node, _| visited.visit(control, node),
+        );
+
+        let visited = visited.visited;
+
+        assert_eq!(visited, vec![(bitvec![u8, Msb0;], [0; 32]),],);
+
+        assert_eq!(root, [0; 32]);
+    }
+
+    #[test]
+    fn sub_trie() {
+        let (leaf_a, leaf_hash_a) = leaf(0b0001_0001);
+        let (leaf_b, leaf_hash_b) = leaf(0b0001_0010);
+        let (leaf_c, leaf_hash_c) = leaf(0b0001_0100);
+
+        let mut visited = Visited::at(bitvec![u8, Msb0; 0, 0, 0, 1]);
+
+        let ops = [leaf_a, leaf_b, leaf_c]
+            .iter()
+            .map(|l| (l.key_path, Some(l.value_hash)))
+            .collect::<Vec<_>>();
+
+        let root = build_sub_trie::<DummyNodeHasher>(4, None, &ops, |control, node, _| {
+            visited.visit(control, node)
+        });
+
+        let visited = visited.visited;
+
+        let branch_ab_hash = branch_hash(leaf_hash_a, leaf_hash_b);
+        let branch_abc_hash = branch_hash(branch_ab_hash, leaf_hash_c);
+        let root_branch_hash = branch_hash(branch_abc_hash, [0u8; 32]);
+
+        assert_eq!(
+            visited,
+            vec![
+                (bitvec![u8, Msb0; 0, 0, 0, 1, 0, 0, 0], leaf_hash_a),
+                (bitvec![u8, Msb0; 0, 0, 0, 1, 0, 0, 1], leaf_hash_b),
+                (bitvec![u8, Msb0; 0, 0, 0, 1, 0, 0], branch_ab_hash),
+                (bitvec![u8, Msb0; 0, 0, 0, 1, 0, 1], leaf_hash_c),
+                (bitvec![u8, Msb0; 0, 0, 0, 1, 0], branch_abc_hash),
+                (bitvec![u8, Msb0; 0, 0, 0, 1], root_branch_hash),
+            ],
+        );
+
+        assert_eq!(root, root_branch_hash);
+    }
+
+    #[test]
+    fn multi_value() {
+        let (leaf_a, leaf_hash_a) = leaf(0b0001_0000);
+        let (leaf_b, leaf_hash_b) = leaf(0b0010_0000);
+        let (leaf_c, leaf_hash_c) = leaf(0b0100_0000);
+        let (leaf_d, leaf_hash_d) = leaf(0b1010_0000);
+        let (leaf_e, leaf_hash_e) = leaf(0b1011_0000);
+
+        let mut visited = Visited::default();
+
+        let ops = [leaf_a, leaf_b, leaf_c, leaf_d, leaf_e]
+            .iter()
+            .map(|l| (l.key_path, Some(l.value_hash)))
+            .collect::<Vec<_>>();
+        let root = build_sub_trie::<DummyNodeHasher>(0, None, &ops, |control, node, _| {
+            visited.visit(control, node)
+        });
+
+        let visited = visited.visited;
+
+        let branch_ab_hash = branch_hash(leaf_hash_a, leaf_hash_b);
+        let branch_abc_hash = branch_hash(branch_ab_hash, leaf_hash_c);
+
+        let branch_de_hash_1 = branch_hash(leaf_hash_d, leaf_hash_e);
+        let branch_de_hash_2 = branch_hash([0u8; 32], branch_de_hash_1);
+        let branch_de_hash_3 = branch_hash(branch_de_hash_2, [0u8; 32]);
+
+        let branch_abc_de_hash = branch_hash(branch_abc_hash, branch_de_hash_3);
+
+        assert_eq!(
+            visited,
+            vec![
+                (bitvec![u8, Msb0; 0, 0, 0], leaf_hash_a),
+                (bitvec![u8, Msb0; 0, 0, 1], leaf_hash_b),
+                (bitvec![u8, Msb0; 0, 0], branch_ab_hash),
+                (bitvec![u8, Msb0; 0, 1], leaf_hash_c),
+                (bitvec![u8, Msb0; 0], branch_abc_hash),
+                (bitvec![u8, Msb0; 1, 0, 1, 0], leaf_hash_d),
+                (bitvec![u8, Msb0; 1, 0, 1, 1], leaf_hash_e),
+                (bitvec![u8, Msb0; 1, 0, 1], branch_de_hash_1),
+                (bitvec![u8, Msb0; 1, 0], branch_de_hash_2),
+                (bitvec![u8, Msb0; 1], branch_de_hash_3),
+                (bitvec![u8, Msb0;], branch_abc_de_hash),
+            ],
+        );
+
+        assert_eq!(root, branch_abc_de_hash);
+    }
 }
