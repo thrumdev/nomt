@@ -135,7 +135,7 @@ fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
 
 /// Creates an iterator of all provided operations, with the leaf value spliced in if its key
 /// does not appear in the original ops list. Then filters out all `None`s.
-fn leaf_ops_spliced(
+pub fn leaf_ops_spliced(
     leaf: Option<LeafData>,
     ops: &[(KeyPath, Option<ValueHash>)],
 ) -> impl Iterator<Item = (KeyPath, ValueHash)> + '_ {
@@ -167,7 +167,9 @@ fn replace_subtrie<H: NodeHasher>(
     let start_pos = cursor.position();
     let skip = start_pos.depth() as usize;
 
-    build_sub_trie::<H>(skip, leaf_data, ops, |visit_control, node, leaf_data| {
+    let ops = leaf_ops_spliced(leaf_data, ops);
+
+    build_trie::<H>(skip, ops, |visit_control, node, leaf_data| {
         cursor.up(visit_control.up);
         for bit in visit_control.down.iter().by_vals() {
             cursor.down(bit);
@@ -188,19 +190,20 @@ pub struct VisitControl<'a> {
     pub down: &'a BitSlice<u8, Msb0>,
 }
 
-// Build a sub-trie out of the given prior terminal and operations. Operations should all start
-// with the same prefix of len `skip` and be ordered lexicographically.
+// Build a trie out of the given prior terminal and operations. Operations should all start
+// with the same prefix of len `skip` and be ordered lexicographically. The root node of the
+// generated trie is the one residing at path `prefix[..skip]`. When skip=0, this is the actual
+// root.
 //
-// Provide a visitor which will be called for each computed node of the sub-trie.
+// Provide a visitor which will be called for each computed node of the trie.
 //
-// The visitor is assumed to have a default position at the root of the sub-trie and from
+// The visitor is assumed to have a default position at the root of the trie and from
 // there will be controlled with `VisitControl` to indicate the position of the next node.
 // The root is always visited at the end. If the written node is a leaf, the leaf-data preimage
 // will be provided.
-pub fn build_sub_trie<H: NodeHasher>(
+pub fn build_trie<H: NodeHasher>(
     skip: usize,
-    leaf: Option<LeafData>,
-    ops: &[(KeyPath, Option<ValueHash>)],
+    ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
     mut visit: impl FnMut(VisitControl, Node, Option<LeafData>),
 ) -> Node {
     // we build a compact addressable sub-trie in-place based on the given set of ordered keys,
@@ -235,7 +238,7 @@ pub fn build_sub_trie<H: NodeHasher>(
     // `b`, so this stores their layers.
     let mut pending_siblings: Vec<(Node, usize)> = Vec::new();
 
-    let mut leaf_ops = crate::update::leaf_ops_spliced(leaf.clone(), ops);
+    let mut leaf_ops = ops.into_iter();
 
     let mut a = None;
     let mut b = leaf_ops.next();
@@ -406,7 +409,7 @@ mod tests {
     #[test]
     fn build_empty_trie() {
         let mut visited = Visited::default();
-        let root = build_sub_trie::<DummyNodeHasher>(0, None, &[], |control, node, _| {
+        let root = build_trie::<DummyNodeHasher>(0, vec![], |control, node, _| {
             visited.visit(control, node)
         });
 
@@ -422,10 +425,9 @@ mod tests {
         let mut visited = Visited::default();
 
         let (leaf, leaf_hash) = leaf(0xff);
-        let root = build_sub_trie::<DummyNodeHasher>(
+        let root = build_trie::<DummyNodeHasher>(
             0,
-            None,
-            &[(leaf.key_path, Some(leaf.value_hash))],
+            vec![(leaf.key_path, leaf.value_hash)],
             |control, node, _| visited.visit(control, node),
         );
 
@@ -434,66 +436,6 @@ mod tests {
         assert_eq!(visited, vec![(bitvec![u8, Msb0;], leaf_hash),],);
 
         assert_eq!(root, leaf_hash);
-    }
-
-    #[test]
-    fn preserve_single_value_trie() {
-        let mut visited = Visited::default();
-
-        let (leaf, leaf_hash) = leaf(0xff);
-        let root =
-            build_sub_trie::<DummyNodeHasher>(0, Some(leaf.clone()), &[], |control, node, _| {
-                visited.visit(control, node)
-            });
-
-        let visited = visited.visited;
-
-        assert_eq!(visited, vec![(bitvec![u8, Msb0;], leaf_hash),],);
-
-        assert_eq!(root, leaf_hash);
-    }
-
-    #[test]
-    fn overwrite_leaf() {
-        let mut visited = Visited::default();
-
-        let (leaf, leaf_hash) = leaf(0xff);
-        let prev_leaf = trie::LeafData {
-            key_path: leaf.key_path,
-            value_hash: [0x01; 32],
-        };
-        assert_ne!(leaf.value_hash, prev_leaf.value_hash);
-        let root = build_sub_trie::<DummyNodeHasher>(
-            0,
-            Some(prev_leaf),
-            &[(leaf.key_path, Some(leaf.value_hash))],
-            |control, node, _| visited.visit(control, node),
-        );
-
-        let visited = visited.visited;
-
-        assert_eq!(visited, vec![(bitvec![u8, Msb0;], leaf_hash),],);
-
-        assert_eq!(root, leaf_hash);
-    }
-
-    #[test]
-    fn delete_single_value_trie() {
-        let mut visited = Visited::default();
-
-        let (leaf, _) = leaf(0xff);
-        let root = build_sub_trie::<DummyNodeHasher>(
-            0,
-            Some(leaf.clone()),
-            &[(leaf.key_path, None)],
-            |control, node, _| visited.visit(control, node),
-        );
-
-        let visited = visited.visited;
-
-        assert_eq!(visited, vec![(bitvec![u8, Msb0;], [0; 32]),],);
-
-        assert_eq!(root, [0; 32]);
     }
 
     #[test]
@@ -506,12 +448,11 @@ mod tests {
 
         let ops = [leaf_a, leaf_b, leaf_c]
             .iter()
-            .map(|l| (l.key_path, Some(l.value_hash)))
+            .map(|l| (l.key_path, l.value_hash))
             .collect::<Vec<_>>();
 
-        let root = build_sub_trie::<DummyNodeHasher>(4, None, &ops, |control, node, _| {
-            visited.visit(control, node)
-        });
+        let root =
+            build_trie::<DummyNodeHasher>(4, ops, |control, node, _| visited.visit(control, node));
 
         let visited = visited.visited;
 
@@ -546,11 +487,11 @@ mod tests {
 
         let ops = [leaf_a, leaf_b, leaf_c, leaf_d, leaf_e]
             .iter()
-            .map(|l| (l.key_path, Some(l.value_hash)))
+            .map(|l| (l.key_path, l.value_hash))
             .collect::<Vec<_>>();
-        let root = build_sub_trie::<DummyNodeHasher>(0, None, &ops, |control, node, _| {
-            visited.visit(control, node)
-        });
+
+        let root =
+            build_trie::<DummyNodeHasher>(0, ops, |control, node, _| visited.visit(control, node));
 
         let visited = visited.visited;
 
