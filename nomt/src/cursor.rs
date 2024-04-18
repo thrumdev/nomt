@@ -6,10 +6,10 @@ use crate::{
 };
 use bitvec::prelude::*;
 use nomt_core::{
-    key_path::TriePosition,
     page::DEPTH,
     page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node, NodeKind},
+    trie_pos::TriePosition,
 };
 
 /// The breadth of the prefetch request.
