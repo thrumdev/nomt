@@ -4,8 +4,8 @@
 //! and should not be considered stable.
 
 use crate::{
-    key_path::TriePosition,
     trie::{InternalData, KeyPath, LeafData, Node},
+    trie_pos::TriePosition,
 };
 
 /// Generic cursor over binary trie storage.
