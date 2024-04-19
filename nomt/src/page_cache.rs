@@ -9,8 +9,9 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use fxhash::FxBuildHasher;
 use nomt_core::{
     page::DEPTH,
-    page_id::PageId,
+    page_id::{PageId, ROOT_PAGE_ID},
     trie::{LeafData, Node},
+    trie_pos::{ChildNodeIndices, TriePosition},
 };
 use parking_lot::{Condvar, Mutex};
 use std::{fmt, mem, sync::Arc};
@@ -73,7 +74,13 @@ impl PageData {
         leaf_data_bits(data).set(index, false);
     }
 
-    fn set_leaf_data(&self, write_pass: &mut WritePass, left_index: usize, leaf_data: LeafData) {
+    fn set_leaf_data(
+        &self,
+        write_pass: &mut WritePass,
+        children: ChildNodeIndices,
+        leaf_data: LeafData,
+    ) {
+        let left_index = children.left();
         assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
         let mut data = self.data.write(write_pass);
         let data = data.get_or_insert_with(|| vec![0; 4096]);
@@ -88,7 +95,8 @@ impl PageData {
         leaf_data.encode_into(&mut data[start..end]);
     }
 
-    fn clear_leaf_data(&self, write_pass: &mut WritePass, left_index: usize) {
+    fn clear_leaf_data(&self, write_pass: &mut WritePass, children: ChildNodeIndices) {
+        let left_index = children.left();
         assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
         let mut data = self.data.write(write_pass);
         let data = data.get_or_insert_with(|| vec![0; 4096]);
@@ -149,25 +157,51 @@ impl Page {
         self.inner.set_node(write_pass, index, node)
     }
 
-    /// Write leaf data at two positions under a leaf node, `left_index` and `left_index + 1`.
+    /// Write leaf data at two positions under a leaf node.
     pub fn set_leaf_data(
         &self,
         write_pass: &mut WritePass,
-        left_index: usize,
+        children: ChildNodeIndices,
         leaf_data: LeafData,
     ) {
-        self.inner.set_leaf_data(write_pass, left_index, leaf_data);
+        self.inner.set_leaf_data(write_pass, children, leaf_data);
     }
 
-    /// Clear leaf data at two positions under a leaf node, `left_index` and `left_index + 1`.
-    pub fn clear_leaf_data(&self, write_pass: &mut WritePass, left_index: usize) {
-        self.inner.clear_leaf_data(write_pass, left_index);
+    /// Clear leaf data at two child positions.
+    pub fn clear_leaf_data(&self, write_pass: &mut WritePass, children: ChildNodeIndices) {
+        self.inner.clear_leaf_data(write_pass, children);
     }
 }
 
 impl fmt::Debug for Page {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Page").finish()
+    }
+}
+
+/// Given a trie position and a current page corresponding to that trie position (None at the root)
+/// along with a function for synchronously loading a new page, get the page and indices where the
+/// leaf data for a leaf at `trie_pos` should be stored.
+pub fn leaf_data_positions(
+    trie_pos: &TriePosition,
+    current_page: Option<&(PageId, Page)>,
+    load: impl Fn(PageId) -> Page,
+) -> (Page, PageId, ChildNodeIndices) {
+    match current_page {
+        None => {
+            let page = load(ROOT_PAGE_ID);
+            (page, ROOT_PAGE_ID, ChildNodeIndices::from_left(0))
+        }
+        Some((ref page_id, ref page)) => {
+            let depth_in_page = trie_pos.depth_in_page();
+            if depth_in_page == DEPTH {
+                let child_page_id = page_id.child_page_id(trie_pos.child_page_index()).unwrap();
+                let child_page = load(child_page_id.clone());
+                (child_page, child_page_id, ChildNodeIndices::from_left(0))
+            } else {
+                (page.clone(), page_id.clone(), trie_pos.child_node_indices())
+            }
+        }
     }
 }
 

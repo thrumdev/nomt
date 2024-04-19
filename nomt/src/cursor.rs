@@ -280,33 +280,25 @@ impl PageCacheCursor {
     }
 
     fn read_leaf_children(&self) -> trie::LeafData {
-        let fetched_page;
-        let (page, (left_idx, right_idx)) = match self.cached_page {
-            None => {
-                fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
-                (&fetched_page, (0, 1))
-            }
-            Some((ref page_id, ref page)) => {
-                let depth_in_page = self.pos.depth_in_page();
-                if depth_in_page == DEPTH {
-                    let child_page_id = page_id
-                        .child_page_id(self.pos.child_page_index())
-                        .expect("Pages do not go deeper than the maximum layer, 42");
-                    fetched_page = self.pages.retrieve_sync(child_page_id);
-                    (&fetched_page, (0, 1))
-                } else {
-                    (page, self.pos.child_node_indices())
-                }
-            }
-        };
+        let (page, _page_id, children) = crate::page_cache::leaf_data_positions(
+            &self.pos,
+            self.cached_page.as_ref(),
+            |page_id| self.pages.retrieve_sync(page_id),
+        );
 
         self.mode.with_read_pass(|read_pass| trie::LeafData {
-            key_path: page.node(&read_pass, left_idx),
-            value_hash: page.node(&read_pass, right_idx),
+            key_path: page.node(&read_pass, children.left()),
+            value_hash: page.node(&read_pass, children.right()),
         })
     }
 
     fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>) {
+        let (page, page_id, children) = crate::page_cache::leaf_data_positions(
+            &self.pos,
+            self.cached_page.as_ref(),
+            |page_id| self.pages.retrieve_sync(page_id),
+        );
+
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
@@ -314,30 +306,10 @@ impl PageCacheCursor {
                 ref mut dirtied,
             } => (write_pass, dirtied),
         };
-        let fetched_page;
-
-        let (page_id, page, left_idx) = match self.cached_page {
-            None => {
-                fetched_page = self.pages.retrieve_sync(ROOT_PAGE_ID);
-                (ROOT_PAGE_ID, &fetched_page, 0)
-            }
-            Some((ref page_id, ref page)) => {
-                let depth_in_page = self.pos.depth_in_page();
-                if depth_in_page == DEPTH {
-                    let child_page_id = page_id
-                        .child_page_id(self.pos.child_page_index())
-                        .expect("Pages do not go deeper than the maximum layer, 42");
-                    fetched_page = self.pages.retrieve_sync(child_page_id.clone());
-                    (child_page_id, &fetched_page, 0)
-                } else {
-                    (page_id.clone(), page, self.pos.child_node_indices().0)
-                }
-            }
-        };
 
         match leaf_data {
-            None => page.clear_leaf_data(&mut *write_pass.borrow_mut(), left_idx),
-            Some(leaf) => page.set_leaf_data(&mut *write_pass.borrow_mut(), left_idx, leaf),
+            None => page.clear_leaf_data(&mut *write_pass.borrow_mut(), children),
+            Some(leaf) => page.set_leaf_data(&mut *write_pass.borrow_mut(), children, leaf),
         }
         dirtied.insert(page_id.clone());
     }
