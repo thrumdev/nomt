@@ -346,17 +346,19 @@ impl WitnessBuilder {
         let mut visited_terminals = Vec::new();
 
         for (i, (path, terminal)) in self.terminals.into_iter().enumerate() {
+            let mut full_path = KeyPath::default();
+            full_path.view_bits_mut::<Msb0>()[..path.len()].copy_from_bitslice(&path);
+
             let path_proof = PathProof {
-                terminal: terminal.leaf.clone(),
+                terminal: match &terminal.leaf {
+                    Some(leaf_data) => proof::PathProofTerminal::Leaf(leaf_data.clone()),
+                    None => proof::PathProofTerminal::Terminator(full_path),
+                },
                 siblings: terminal.siblings,
             };
             if !terminal.writes.is_empty() {
                 visited_terminals.push(VisitedTerminal {
-                    path: {
-                        let mut full_path = KeyPath::default();
-                        full_path.view_bits_mut::<Msb0>()[..path.len()].copy_from_bitslice(&path);
-                        full_path
-                    },
+                    path: full_path,
                     depth: path.len() as u8,
                     leaf: terminal.leaf,
                 });
