@@ -16,6 +16,7 @@ use crossbeam::channel::{Receiver, Sender};
 
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
+    proof::PathProofTerminal,
     trie::{KeyPath, Node, NodeHasher, ValueHash},
 };
 
@@ -318,7 +319,10 @@ impl<H: NodeHasher> RangeCommitter<H> {
         let path = WitnessedPath {
             inner: PathProof {
                 siblings,
-                terminal: seek_result.terminal.clone(),
+                terminal: match seek_result.terminal.clone() {
+                    Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
+                    None => PathProofTerminal::Terminator(seek_result.position.path().to_bitvec()),
+                },
             },
             path: seek_result.position.path().to_bitvec(),
         };

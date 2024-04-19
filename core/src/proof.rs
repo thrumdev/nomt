@@ -6,12 +6,30 @@ use crate::trie::{
 
 use bitvec::prelude::*;
 
+/// Wrapper for a terminal node, it will store the LeafData if it is a leaf node,
+/// and just the KeyPath to that terminal if it is a terminator node
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathProofTerminal {
+    Leaf(LeafData),
+    Terminator(BitVec<u8, Msb0>),
+}
+
+impl PathProofTerminal {
+    /// Return the KeyPath of the Terminal Node
+    pub fn key_path(&self) -> &BitSlice<u8, Msb0> {
+        match self {
+            Self::Leaf(leaf_data) => &leaf_data.key_path.view_bits(),
+            Self::Terminator(key_path) => key_path,
+        }
+    }
+}
+
 /// A proof of some particular path through the trie.
 #[derive(Debug, Clone)]
 pub struct PathProof {
     /// The terminal node encountered when looking up a key. This is always either a terminator or
     /// leaf.
-    pub terminal: Option<LeafData>,
+    pub terminal: PathProofTerminal,
     /// Sibling nodes encountered during lookup, in descending order by depth.
     pub siblings: Vec<Node>,
 }
@@ -32,8 +50,8 @@ impl PathProof {
         let relevant_path = &key_path[..self.siblings.len()];
 
         let cur_node = match &self.terminal {
-            None => TERMINATOR,
-            Some(leaf_data) => H::hash_leaf(&leaf_data),
+            PathProofTerminal::Terminator(_) => TERMINATOR,
+            PathProofTerminal::Leaf(leaf_data) => H::hash_leaf(&leaf_data),
         };
 
         let new_root = hash_path::<H>(cur_node, relevant_path, self.siblings.iter().rev().cloned());
@@ -41,7 +59,10 @@ impl PathProof {
         if new_root == root {
             Ok(VerifiedPathProof {
                 key_path: relevant_path.into(),
-                terminal: self.terminal.clone(),
+                terminal: match &self.terminal {
+                    PathProofTerminal::Leaf(leaf_data) => Some(leaf_data.clone()),
+                    PathProofTerminal::Terminator(_) => None,
+                },
                 siblings: self.siblings.clone(),
                 root,
             })
