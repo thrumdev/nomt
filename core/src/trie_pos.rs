@@ -60,6 +60,11 @@ impl TriePosition {
         }
     }
 
+    /// Whether the position is at the root.
+    pub fn is_root(&self) -> bool {
+        self.depth == 0
+    }
+
     /// Get the current `depth` of the position.
     pub fn depth(&self) -> u8 {
         self.depth
@@ -78,8 +83,12 @@ impl TriePosition {
         if self.depth as usize % DEPTH == 0 {
             self.node_index = bit as usize;
         } else {
-            let (l, r) = self.child_node_indices();
-            self.node_index = if bit { r } else { l };
+            let children = self.child_node_indices();
+            self.node_index = if bit {
+                children.right()
+            } else {
+                children.left()
+            };
         }
         self.path
             .view_bits_mut::<Msb0>()
@@ -155,13 +164,13 @@ impl TriePosition {
     /// Transform a bit-path to the index in a page corresponding to the child node indices.
     ///
     /// Panics if the node is not at a depth in the range 1..=5
-    pub fn child_node_indices(&self) -> (usize, usize) {
+    pub fn child_node_indices(&self) -> ChildNodeIndices {
         let depth = self.depth_in_page();
         if depth == 0 || depth > DEPTH - 1 {
             panic!("{depth} out of bounds 1..={}", DEPTH - 1);
         }
         let left = self.node_index * 2 + 2;
-        (left, left + 1)
+        ChildNodeIndices(left)
     }
 
     /// Get the index of the sibling node within a page.
@@ -244,6 +253,26 @@ impl fmt::Debug for TriePosition {
                 hex::encode(&self.path[..self.depth as usize]),
             )
         }
+    }
+}
+
+/// Child node indices.
+#[derive(Debug, Clone, Copy)]
+pub struct ChildNodeIndices(usize);
+
+impl ChildNodeIndices {
+    /// Create from a left child index.
+    pub fn from_left(left: usize) -> Self {
+        ChildNodeIndices(left)
+    }
+
+    /// Get the index of the left child.
+    pub fn left(&self) -> usize {
+        self.0
+    }
+    /// Get the index of the right child.
+    pub fn right(&self) -> usize {
+        self.0 + 1
     }
 }
 
