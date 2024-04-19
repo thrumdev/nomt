@@ -12,13 +12,12 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
-use cursor::{Seek, SeekMode};
 use nomt_core::{
     proof::PathProof,
     trie::{NodeHasher, TERMINATOR},
     update::VisitedTerminal,
 };
-use page_cache::PageCache;
+use page_cache::{PageCache, Seek, SeekMode};
 use parking_lot::Mutex;
 use store::Store;
 use threadpool::ThreadPool;
@@ -293,13 +292,13 @@ impl Session {
         let seek_results = self.seek_results.clone();
         let root = self.prev_root;
         let f = move || {
-            let mut cur = page_cache.new_read_cursor(root);
+            let seeker = page_cache.new_seeker(root);
             let seek_mode = if delete {
                 SeekMode::RetrieveSiblingLeafChildren
             } else {
                 SeekMode::PathOnly
             };
-            seek_results.insert(path, cur.seek(path, seek_mode));
+            seek_results.insert(path, seeker.seek(path, seek_mode));
         };
         self.warmup_tp.execute(f);
     }

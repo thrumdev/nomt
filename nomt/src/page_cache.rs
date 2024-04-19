@@ -9,8 +9,8 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use fxhash::FxBuildHasher;
 use nomt_core::{
     page::DEPTH,
-    page_id::{PageId, ROOT_PAGE_ID},
-    trie::{LeafData, Node},
+    page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
+    trie::{self, KeyPath, LeafData, Node},
     trie_pos::{ChildNodeIndices, TriePosition},
 };
 use parking_lot::{Condvar, Mutex};
@@ -374,14 +374,14 @@ impl PageCache {
         return Page { inner: entry };
     }
 
-    pub fn new_read_cursor(&self, root: Node) -> PageCacheCursor {
-        let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
-        PageCacheCursor::new_read(root, self.clone(), read_pass)
-    }
-
     pub fn new_write_cursor(&self, root: Node) -> PageCacheCursor {
         let write_pass = self.shared.page_rw_pass_domain.new_write_pass();
         PageCacheCursor::new_write(root, self.clone(), write_pass)
+    }
+
+    pub fn new_seeker(&self, root: Node) -> Seeker {
+        let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
+        Seeker::new(self.clone(), read_pass, root)
     }
 
     /// Flushes all the dirty pages into the underlying store.
@@ -406,5 +406,175 @@ impl PageCache {
                 panic!("dirty page is inflight");
             }
         }
+    }
+}
+
+/// Modes for seeking to a key path.
+#[derive(Debug, Clone, Copy)]
+pub enum SeekMode {
+    /// Retrieve the pages with the child location of any sibling nodes which are also leaves.
+    ///
+    /// This should be used when preparing to delete a key, which can cause leaf nodes to be
+    /// relocated.
+    RetrieveSiblingLeafChildren,
+    /// Retrieve the pages along the path to the key path's corresponding terminal node only.
+    PathOnly,
+}
+
+/// The results of a seek operation.
+#[derive(Debug, Clone)]
+pub struct Seek {
+    /// The siblings encountered along the path, in ascending order by depth.
+    ///
+    /// The number of siblings is equal to the depth of the sought key.
+    pub siblings: Vec<Node>,
+    /// The terminal node encountered.
+    pub terminal: Option<trie::LeafData>,
+}
+
+impl Seek {
+    /// Get the depth of the terminal node.
+    pub fn depth(&self) -> usize {
+        self.siblings.len()
+    }
+}
+
+/// A [`Seeker`] can be used to seek for keys in the trie..
+pub struct Seeker {
+    cache: PageCache,
+    read_pass: ReadPass,
+    root: Node,
+}
+
+impl Seeker {
+    /// Create a new Seeker, given the cache, page read pass, and a root node.
+    pub fn new(cache: PageCache, read_pass: ReadPass, root: Node) -> Self {
+        Seeker {
+            cache,
+            read_pass,
+            root,
+        }
+    }
+
+    fn read_leaf_children(
+        &self,
+        trie_pos: &TriePosition,
+        current_page: Option<&(PageId, Page)>,
+    ) -> trie::LeafData {
+        let (page, _, children) = leaf_data_positions(trie_pos, current_page, |page_id| {
+            self.cache.retrieve_sync(page_id)
+        });
+        trie::LeafData {
+            key_path: page.node(&self.read_pass, children.left()),
+            value_hash: page.node(&self.read_pass, children.right()),
+        }
+    }
+
+    fn down(
+        &self,
+        bit: bool,
+        pos: &mut TriePosition,
+        cur_page: &mut Option<(PageId, Page)>,
+    ) -> (Node, Node) {
+        if pos.depth() as usize % DEPTH == 0 {
+            // attempt to load next page if we are at the end of our previous page or the root.
+            // UNWRAP: page index is valid, nodes never fall beyond the 42nd page.
+            let page_id = match cur_page {
+                None => ROOT_PAGE_ID,
+                Some((ref id, _)) => id
+                    .child_page_id(pos.child_page_index())
+                    .expect("Pages do not go deeper than the maximum layer, 42"),
+            };
+
+            *cur_page = Some((page_id.clone(), self.cache.retrieve_sync(page_id)));
+        }
+        pos.down(bit);
+
+        // UNWRAP: safe, was just set if at root
+        let page = &cur_page.as_ref().unwrap().1;
+
+        (
+            page.node(&self.read_pass, pos.node_index()),
+            page.node(&self.read_pass, pos.sibling_index()),
+        )
+    }
+
+    /// Seek to the given [`KeyPath`], loading the terminal node, all siblings on the path, and caching
+    /// all pages.
+    ///
+    /// This returns a [`Seek`] object encapsulating the results of the seek.
+    pub fn seek(&self, dest: KeyPath, mode: SeekMode) -> Seek {
+        /// The breadth of the prefetch request.
+        ///
+        /// The number of items we want to request in a single batch.
+        const PREFETCH_N: usize = 7;
+
+        let mut result = Seek {
+            siblings: Vec::with_capacity(32),
+            terminal: None,
+        };
+
+        let mut trie_pos = TriePosition::new();
+        let mut page: Option<(PageId, Page)> = None;
+
+        if !trie::is_internal(&self.root) {
+            // fast path: don't pre-fetch when trie is just a root.
+            if trie::is_leaf(&self.root) {
+                result.terminal = Some(self.read_leaf_children(&trie_pos, None));
+            };
+
+            return result;
+        }
+
+        let mut ppf = PageIdsIterator::new(dest);
+
+        let mut sibling = trie::TERMINATOR;
+        let mut cur_node = self.root;
+
+        for bit in dest.view_bits::<Msb0>().iter().by_vals() {
+            if !trie::is_internal(&cur_node) {
+                if trie::is_leaf(&cur_node) {
+                    let leaf_data = self.read_leaf_children(&trie_pos, page.as_ref());
+                    assert!(leaf_data
+                        .key_path
+                        .view_bits::<Msb0>()
+                        .starts_with(&dest.view_bits::<Msb0>()[..trie_pos.depth() as usize]));
+
+                    result.terminal = Some(leaf_data);
+                };
+
+                return result;
+            }
+            if trie_pos.depth() as usize % DEPTH == 0 {
+                if trie_pos.depth() as usize % PREFETCH_N == 0 {
+                    for _ in 0..PREFETCH_N {
+                        let page_id = match ppf.next() {
+                            Some(page) => page,
+                            None => break,
+                        };
+                        self.cache.prepopulate(page_id);
+                    }
+                }
+
+                if let (&Some((ref id, _)), SeekMode::RetrieveSiblingLeafChildren, true) =
+                    (&page, mode, trie::is_leaf(&sibling))
+                {
+                    // sibling is a leaf and at the end of the (non-root) page.
+                    // initiate a load of the sibling's page.
+                    let child_page_id = id
+                        .child_page_id(trie_pos.sibling_child_page_index())
+                        .expect("Pages do not go deeper than the maximum layer, 42");
+                    // async; just warm up.
+                    let _ = self.cache.prepopulate(child_page_id);
+                }
+            }
+
+            let (new_node, new_sibling) = self.down(bit, &mut trie_pos, &mut page);
+            cur_node = new_node;
+            sibling = new_sibling;
+            result.siblings.push(new_sibling);
+        }
+
+        panic!("no terminal along path {}", dest.view_bits::<Msb0>());
     }
 }
