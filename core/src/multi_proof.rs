@@ -8,26 +8,30 @@ use crate::{
 };
 use bitvec::{order::Msb0, view::BitView};
 
-// Each terminal node may have a set of siblings that are uniquely
-// used during the verification with its terminal node.
-// This struct contains the terminal node itself,
-// the depth at which the siblings start to be uniquely associated to that terminal,
-// and the siblings themselves.
+/// Each terminal node may have a unique set of sibling nodes
+/// that are exclusively used in its verification process.
+/// This struct includes the terminal node, the depth from which
+/// the siblings are uniquely associated with that terminal,
+/// and the siblings themselves.
 #[derive(Debug, Clone)]
-struct SubPathProof {
-    terminal: PathProofTerminal,
-    depth: u8,
-    inner_siblings: Vec<Node>,
+pub struct SubPathProof {
+    /// Terminal node
+    pub terminal: PathProofTerminal,
+    /// Depth after which sibligns are collected
+    pub depth: u8,
+    /// Siblings uniquely associated with the terminal node,
+    /// stored in the order in which they are encountered
+    pub inner_siblings: Vec<Node>,
 }
 
 /// A proof of multiple path through the trie.
 #[derive(Debug, Clone)]
 pub struct MultiProof {
-    // All subpaths related to a single terminal node
-    sub_paths: Vec<SubPathProof>,
-    // Vector containing the minimum number of nodes required
-    // to reconstruct all other nodes later.
-    external_siblings: Vec<Node>,
+    /// All subpaths related to a single terminal node
+    pub sub_paths: Vec<SubPathProof>,
+    /// Vector containing the minimum number of nodes required
+    /// to reconstruct all other nodes later.
+    pub external_siblings: Vec<Node>,
 }
 
 impl MultiProof {
@@ -70,6 +74,7 @@ impl MultiProof {
 
         // it represent a slice of the vector of key_paths with the notion of
         // path_index, at which bit in the key_path that slice is pointing at
+
         struct TraverseInfo {
             path_index: usize,
             path_slice_lower: usize,
