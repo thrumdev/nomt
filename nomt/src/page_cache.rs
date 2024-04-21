@@ -119,6 +119,13 @@ impl PageData {
             data[l_end..r_end].copy_from_slice(&[0u8; 32]);
         }
     }
+
+    fn read_leaf_data(&self, read_pass: &ReadPass, children: ChildNodeIndices) -> trie::LeafData {
+        trie::LeafData {
+            key_path: self.node(read_pass, children.left()),
+            value_hash: self.node(read_pass, children.right()),
+        }
+    }
 }
 
 fn leaf_data_bits(page: &mut [u8]) -> &mut BitSlice<u8, Msb0> {
@@ -170,6 +177,15 @@ impl Page {
     /// Clear leaf data at two child positions.
     pub fn clear_leaf_data(&self, write_pass: &mut WritePass, children: ChildNodeIndices) {
         self.inner.clear_leaf_data(write_pass, children);
+    }
+
+    /// Read the leaf data from the two given positions.
+    pub fn read_leaf_data(
+        &self,
+        read_pass: &ReadPass,
+        children: ChildNodeIndices,
+    ) -> trie::LeafData {
+        self.inner.read_leaf_data(read_pass, children)
     }
 }
 
@@ -409,6 +425,23 @@ impl PageCache {
     }
 }
 
+/// The page allocator allows users to allocate pages which may later be placed into the page
+/// cache.
+#[derive(Clone)]
+pub struct PageAllocator {
+    inner: Arc<Shared>,
+}
+
+impl PageAllocator {
+    /// Allocate a new page.
+    pub fn allocate(&self) -> Page {
+        let page_data = PageData::pristine_empty(&self.inner.page_rw_pass_domain);
+        Page {
+            inner: Arc::new(page_data),
+        }
+    }
+}
+
 /// Modes for seeking to a key path.
 #[derive(Debug, Clone, Copy)]
 pub enum SeekMode {
@@ -426,7 +459,7 @@ pub enum SeekMode {
 pub struct Seek {
     /// The siblings encountered along the path, in ascending order by depth.
     ///
-    /// The number of siblings is equal to the depth of the sought key.
+    /// The number of siblings is equal to the depth of the found terminal node.
     pub siblings: Vec<Node>,
     /// The terminal node encountered.
     pub terminal: Option<trie::LeafData>,
@@ -464,10 +497,7 @@ impl Seeker {
         let (page, _, children) = leaf_data_positions(trie_pos, current_page, |page_id| {
             self.cache.retrieve_sync(page_id)
         });
-        trie::LeafData {
-            key_path: page.node(&self.read_pass, children.left()),
-            value_hash: page.node(&self.read_pass, children.right()),
-        }
+        page.read_leaf_data(&self.read_pass, children)
     }
 
     fn down(

@@ -21,6 +21,7 @@ use page_cache::{PageCache, Seek, SeekMode};
 use parking_lot::Mutex;
 use store::Store;
 use threadpool::ThreadPool;
+use updater::PageUpdater;
 
 // CARGO HACK: silence lint; this is used in integration tests
 
@@ -31,6 +32,7 @@ mod cursor;
 mod page_cache;
 mod rw_pass_cell;
 mod store;
+mod updater;
 
 /// A full value stored within the trie.
 pub type Value = Rc<Vec<u8>>;

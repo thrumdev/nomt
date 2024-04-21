@@ -75,6 +75,16 @@ impl TriePosition {
         &self.path.view_bits::<Msb0>()[..self.depth as usize]
     }
 
+    /// Get the shared bits of this path with the other.
+    pub fn shared_bits(&self, other: &Self) -> usize {
+        self.path()
+            .iter()
+            .by_vals()
+            .zip(other.path().iter().by_vals())
+            .take_while(|(a, b)| a == b)
+            .count()
+    }
+
     /// Move the position down by 1, towards either the left or right child.
     ///
     /// Panics on depth out of range.
@@ -168,16 +178,13 @@ impl TriePosition {
     /// Transform a bit-path to the index in a page corresponding to the child node indices.
     pub fn child_node_indices(&self) -> ChildNodeIndices {
         let node_index = self.node_index;
-        let depth = self.depth_in_page();
-        let left = match depth {
-            1 => 2 + node_index * 2,
-            2 => 6 + (node_index - 2) * 2,
-            3 => 14 + (node_index - 6) * 2,
-            4 => 30 + (node_index - 14) * 2,
-            5 => 62 + (node_index - 30) * 2,
-            _ => panic!("{depth} out of bounds 1..{}", DEPTH - 1),
-        };
-        ChildNodeIndices(left)
+        ChildNodeIndices(2 + node_index * 2)
+    }
+
+    /// Get the child node indices of the sibling node.
+    pub fn sibling_child_node_indices(&self) -> ChildNodeIndices {
+        let node_index = sibling_index(self.node_index);
+        ChildNodeIndices(2 + node_index * 2)
     }
 
     /// Get the index of the sibling node within a page.
@@ -188,6 +195,12 @@ impl TriePosition {
     /// Get the index of the current node within a page.
     pub fn node_index(&self) -> usize {
         self.node_index
+    }
+
+    /// Get the depth in the page tree this position occupies. The root returns 0, and any other
+    /// position returns a value of at least 1.
+    pub fn page_depth(&self) -> usize {
+        (self.depth as usize + 5) / DEPTH
     }
 
     /// Get the number of bits traversed in the current page.

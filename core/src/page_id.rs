@@ -21,7 +21,7 @@ const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
 ]);
 
 /// A unique ID for a page.
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd)]
 pub struct PageId {
     limbs: ArrayVec<u8, 42>,
 }
@@ -122,6 +122,8 @@ impl PageId {
         limbs.push(child_index.0);
         Ok(PageId { limbs })
     }
+
+    /// Construct the sibling Page
 
     /// Extract the Parent PageId given a PageId.
     ///
