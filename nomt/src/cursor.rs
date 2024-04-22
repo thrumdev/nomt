@@ -164,11 +164,10 @@ impl PageCacheCursor {
     }
 
     fn read_leaf_children(&self) -> trie::LeafData {
-        let (page, _page_id, children) = crate::page_cache::leaf_data_positions(
-            &self.pos,
-            self.cached_page.as_ref(),
-            |page_id| self.pages.retrieve_sync(page_id),
-        );
+        let (page, _page_id, children) =
+            crate::page_cache::locate_leaf_data(&self.pos, self.cached_page.as_ref(), |page_id| {
+                self.pages.retrieve_sync(page_id)
+            });
 
         self.mode.with_read_pass(|read_pass| trie::LeafData {
             key_path: page.node(&read_pass, children.left()),
@@ -177,11 +176,10 @@ impl PageCacheCursor {
     }
 
     fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>) {
-        let (page, page_id, children) = crate::page_cache::leaf_data_positions(
-            &self.pos,
-            self.cached_page.as_ref(),
-            |page_id| self.pages.retrieve_sync(page_id),
-        );
+        let (page, page_id, children) =
+            crate::page_cache::locate_leaf_data(&self.pos, self.cached_page.as_ref(), |page_id| {
+                self.pages.retrieve_sync(page_id)
+            });
 
         let (write_pass, dirtied) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),

@@ -182,13 +182,14 @@ impl fmt::Debug for Page {
 /// Given a trie position and a current page corresponding to that trie position (None at the root)
 /// along with a function for synchronously loading a new page, get the page and indices where the
 /// leaf data for a leaf at `trie_pos` should be stored.
-pub fn leaf_data_positions(
+pub fn locate_leaf_data(
     trie_pos: &TriePosition,
     current_page: Option<&(PageId, Page)>,
     load: impl Fn(PageId) -> Page,
 ) -> (Page, PageId, ChildNodeIndices) {
     match current_page {
         None => {
+            assert!(trie_pos.is_root());
             let page = load(ROOT_PAGE_ID);
             (page, ROOT_PAGE_ID, ChildNodeIndices::from_left(0))
         }
@@ -381,7 +382,7 @@ impl PageCache {
 
     pub fn new_seeker(&self, root: Node) -> Seeker {
         let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
-        Seeker::new(self.clone(), read_pass, root)
+        Seeker::new(root, self.clone(), read_pass)
     }
 
     /// Flushes all the dirty pages into the underlying store.
@@ -448,7 +449,7 @@ pub struct Seeker {
 
 impl Seeker {
     /// Create a new Seeker, given the cache, page read pass, and a root node.
-    pub fn new(cache: PageCache, read_pass: ReadPass, root: Node) -> Self {
+    pub fn new(root: Node, cache: PageCache, read_pass: ReadPass) -> Self {
         Seeker {
             cache,
             read_pass,
@@ -461,7 +462,7 @@ impl Seeker {
         trie_pos: &TriePosition,
         current_page: Option<&(PageId, Page)>,
     ) -> trie::LeafData {
-        let (page, _, children) = leaf_data_positions(trie_pos, current_page, |page_id| {
+        let (page, _, children) = locate_leaf_data(trie_pos, current_page, |page_id| {
             self.cache.retrieve_sync(page_id)
         });
         trie::LeafData {
