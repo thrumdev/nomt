@@ -256,7 +256,7 @@ impl fmt::Debug for TriePosition {
     }
 }
 
-/// Child node indices.
+/// A helper type representing two child node indices within a page.
 #[derive(Debug, Clone, Copy)]
 pub struct ChildNodeIndices(usize);
 

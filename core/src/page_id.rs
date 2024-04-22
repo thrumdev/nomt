@@ -15,6 +15,7 @@ use crate::{page::DEPTH, trie::KeyPath};
 use arrayvec::ArrayVec;
 use ruint::Uint;
 
+// The encoded representation of the highest valid page ID: the highest one at layer 42.
 const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
     16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65,
     4, 16, 65, 4, 16, 64,
@@ -23,14 +24,14 @@ const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
 /// A unique ID for a page.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct PageId {
-    limbs: ArrayVec<u8, 42>,
+    path: ArrayVec<u8, 42>,
 }
 
 /// The root page is the one containing the sub-trie directly descending from the root node.
 ///
 /// It has an ID consisting of all zeros.
 pub const ROOT_PAGE_ID: PageId = PageId {
-    limbs: ArrayVec::new_const(),
+    path: ArrayVec::new_const(),
 };
 
 pub const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
@@ -76,26 +77,26 @@ impl PageId {
 
         // we iterate the sextets from least significant to most significant, subtracting out
         // 1 from each sextet. if the last sextet is zero after this operation, we skip it.
-        let mut limbs = ArrayVec::new();
+        let mut path = ArrayVec::new();
         for _ in 0..sextets - 1 {
             uint -= Uint::<256, 4>::from(1);
             let x = uint & Uint::from(0b111111);
-            limbs.push(x.to::<u8>());
+            path.push(x.to::<u8>());
             uint >>= DEPTH;
         }
         if uint.byte(0) != 0 {
             uint -= Uint::<256, 4>::from(1);
-            limbs.push(uint.byte(0));
+            path.push(uint.byte(0));
         }
-        limbs.reverse();
+        path.reverse();
 
-        Ok(PageId { limbs })
+        Ok(PageId { path })
     }
 
     /// Encode this page ID to its disambiguated (fixed-width) representation.
     pub fn encode(&self) -> [u8; 32] {
         let mut uint = Uint::<256, 4>::from(0);
-        for limb in &self.limbs {
+        for limb in &self.path {
             uint += Uint::from(limb + 1);
             uint <<= 6;
         }
@@ -105,7 +106,7 @@ impl PageId {
 
     /// Get a length-dependent representation of the page id.
     pub fn length_dependent_encoding(&self) -> &[u8] {
-        &self.limbs[..]
+        &self.path[..]
     }
 
     /// Construct the Child PageId given the previous PageId and the child index.
@@ -114,13 +115,13 @@ impl PageId {
     /// Passed PageId must be a valid PageId and be located in a layer below 42 otherwise
     /// `PageIdOverflow` will be returned.
     pub fn child_page_id(&self, child_index: ChildPageIndex) -> Result<Self, ChildPageIdError> {
-        if self.limbs.len() >= 42 {
+        if self.path.len() >= 42 {
             return Err(ChildPageIdError::PageIdOverflow);
         }
 
-        let mut limbs = self.limbs.clone();
-        limbs.push(child_index.0);
-        Ok(PageId { limbs })
+        let mut path = self.path.clone();
+        path.push(child_index.0);
+        Ok(PageId { path })
     }
 
     /// Extract the Parent PageId given a PageId.
@@ -132,9 +133,9 @@ impl PageId {
             return ROOT_PAGE_ID;
         }
 
-        let mut limbs = self.limbs.clone();
-        let _ = limbs.pop();
-        PageId { limbs }
+        let mut path = self.path.clone();
+        let _ = path.pop();
+        PageId { path }
     }
 }
 
