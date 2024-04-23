@@ -4,7 +4,8 @@ use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node, TERMINATOR},
 };
-use rocksdb::{ColumnFamilyDescriptor, WriteBatch, DB};
+use rocksdb::{ColumnFamilyDescriptor, MergeOperands, WriteBatch, DB};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 static FLAT_KV_CF: &str = "flat_kv";
@@ -29,9 +30,16 @@ impl Store {
         open_opts.create_if_missing(true);
         open_opts.create_missing_column_families(true);
 
+        let pages_cf_opts = {
+            let mut opts = open_opts.clone();
+            opts.set_merge_operator("page update operator", merge_page, partial_merge_page_ops);
+
+            opts
+        };
+
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(FLAT_KV_CF, open_opts.clone()),
-            ColumnFamilyDescriptor::new(PAGES_CF, open_opts.clone()),
+            ColumnFamilyDescriptor::new(PAGES_CF, pages_cf_opts),
             ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
         ];
         let db = DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
@@ -110,23 +118,80 @@ impl Transaction {
         }
     }
 
-    /// Write a page to flat storage as part of the atomic batch.
-    /// Any previous page is overwritten. This does not sanity check page-length.
-    pub fn write_page<V: AsRef<[u8]>>(&mut self, page_id: PageId, value: Option<V>) {
+    /// Write a page node diff to storage.
+    ///
+    /// The diff should consist of 33 bytes per updated slot. The first byte indicates the slot
+    /// number and the following 32 bytes contain the slot data.
+    ///
+    /// This does not sanity-check slot number.
+    pub fn write_page_nodes(&mut self, page_id: PageId, tagged_nodes: Vec<u8>) {
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
-        match value {
-            None => self
-                .batch
-                .delete_cf(&cf, page_id.length_dependent_encoding()),
-            Some(value) => self
-                .batch
-                .put_cf(&cf, page_id.length_dependent_encoding(), value),
-        }
+        self.batch
+            .merge_cf(&cf, page_id.length_dependent_encoding(), tagged_nodes);
+    }
+
+    /// Write a page to storage in its entirety.
+    pub fn write_page<V: AsRef<[u8]>>(&mut self, page_id: PageId, value: V) {
+        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
+        self.batch
+            .put_cf(&cf, page_id.length_dependent_encoding(), value);
+    }
+
+    /// Delete a page from storage.
+    pub fn delete_page(&mut self, page_id: PageId) {
+        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
+        self.batch
+            .delete_cf(&cf, page_id.length_dependent_encoding());
     }
 
     /// Write the root to metadata.
     pub fn write_root(&mut self, root: Node) {
         let cf = self.shared.db.cf_handle(METADATA_CF).unwrap();
         self.batch.put_cf(&cf, b"root", &root[..]);
+    }
+}
+
+fn merge_page(_key: &[u8], prev_value: Option<&[u8]>, operands: &MergeOperands) -> Option<Vec<u8>> {
+    let mut val = prev_value.map(|x| x.to_vec());
+    for op in operands.iter() {
+        for op in op.chunks_exact(33) {
+            let val = val.get_or_insert_with(|| vec![0u8; 4096]);
+            let slot_index = op[0] as usize;
+
+            let slot_start = slot_index * 32;
+            let slot_end = slot_start + 32;
+            val[slot_start..slot_end].copy_from_slice(&op[1..]);
+        }
+    }
+
+    // merge operators are not supposed to fail unless there is corruption.
+    val
+}
+
+fn partial_merge_page_ops(
+    _key: &[u8],
+    prev_value: Option<&[u8]>,
+    operands: &MergeOperands,
+) -> Option<Vec<u8>> {
+    let mut slots = HashMap::new();
+
+    for prev_op in prev_value.into_iter().flat_map(|x| x.chunks_exact(33)) {
+        slots.insert(prev_op[0], prev_op);
+    }
+
+    for op in operands.iter() {
+        for op in op.chunks_exact(33) {
+            slots.insert(op[0], op);
+        }
+    }
+
+    if slots.is_empty() {
+        None
+    } else {
+        let mut v = Vec::with_capacity(33 * slots.len());
+        for (_, op) in slots.into_iter() {
+            v.extend(op);
+        }
+        Some(v)
     }
 }
