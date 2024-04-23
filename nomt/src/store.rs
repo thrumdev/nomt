@@ -4,8 +4,8 @@ use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node, TERMINATOR},
 };
-use rocksdb::{ColumnFamilyDescriptor, WriteBatch, DB};
-use std::sync::Arc;
+use rocksdb::{ColumnFamilyDescriptor, WriteBatch, WriteOptions, DB};
+use std::{sync::Arc, thread::JoinHandle};
 
 static FLAT_KV_CF: &str = "flat_kv";
 static PAGES_CF: &str = "pages";
@@ -18,7 +18,12 @@ pub struct Store {
 }
 
 struct Shared {
-    db: DB,
+    db: Arc<DB>,
+    bg_flusher: Option<JoinHandle<()>>,
+    /// Channel used to communicate that a flush is requested.
+    tx_flush: crossbeam_channel::Sender<()>,
+    /// Channel used to communicate that the background flusher should stop.
+    tx_stop: crossbeam_channel::Sender<()>,
 }
 
 impl Store {
@@ -35,8 +40,16 @@ impl Store {
             ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
         ];
         let db = DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
+        let db = Arc::new(db);
+
+        let (bg_flusher, tx_flush, tx_stop) = spawn_bg_flusher(db.clone());
         Ok(Self {
-            shared: Arc::new(Shared { db }),
+            shared: Arc::new(Shared {
+                db,
+                bg_flusher: Some(bg_flusher),
+                tx_flush,
+                tx_stop,
+            }),
         })
     }
 
@@ -86,8 +99,61 @@ impl Store {
     /// After this function returns, accessor methods such as [`Self::load_page`] will return the
     /// updated values.
     pub fn commit(&self, tx: Transaction) -> anyhow::Result<()> {
-        self.shared.db.write(tx.batch)?;
+        let mut writeopts = WriteOptions::new();
+        writeopts.disable_wal(true);
+        self.shared.db.write_opt(tx.batch, &writeopts)?;
+        // NOTE on the ?. the other side can hung up only after the destructor of Shared is called,
+        // and that cannot happen evidently because we are holding a reference to it.
+        self.shared.tx_flush.send(())?;
         Ok(())
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        let _ = self.tx_stop.send(());
+        // unwrap: the only place we take from `bg_flusher` Option is here, in this destructor.
+        // Destructor is called only once, so this is unwrap-safe.
+        let _ = self.bg_flusher.take().unwrap().join();
+    }
+}
+
+fn spawn_bg_flusher(
+    db: Arc<DB>,
+) -> (
+    JoinHandle<()>,
+    crossbeam_channel::Sender<()>,
+    crossbeam_channel::Sender<()>,
+) {
+    let (tx_flush, rx_flush) = crossbeam_channel::bounded(1);
+    let (tx_stop, rx_stop) = crossbeam_channel::bounded(1);
+    let jh = std::thread::Builder::new()
+        .name("nomt-bg-flusher".to_string())
+        .spawn(move || {
+            if let Err(e) = std::panic::catch_unwind(|| bg_flusher(db, rx_flush, rx_stop)) {
+                // Best effort.
+                eprintln!("background flusher panicked: {:?}", e);
+            }
+        })
+        .unwrap();
+    (jh, tx_flush, tx_stop)
+}
+
+fn bg_flusher(
+    db: Arc<DB>,
+    flush: crossbeam_channel::Receiver<()>,
+    stop: crossbeam_channel::Receiver<()>,
+) {
+    loop {
+        crossbeam_channel::select! {
+            recv(flush) -> _ => {
+                let _ = db.flush_wal(true); // TODO: handle error
+            },
+            recv(stop) -> _ => {
+                let _ = db.flush_wal(true);
+                return;
+            }
+        }
     }
 }
 
