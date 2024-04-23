@@ -21,9 +21,12 @@ use threadpool::ThreadPool;
 // of the rootless sub-binary tree stored in a page following this formula:
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
-// Within the page, we also store a bitfield indicating whether leaf data is stored at a particular
-// location. This bitfield has '1' bits set for leaf data and '0' bits set for nodes.
-const LEAF_DATA_BITFIELD_OFF: usize = NODES_PER_PAGE * 32;
+
+/// Within the page, we also store a bitfield indicating whether leaf data is stored at a particular
+/// location. This bitfield has '1' bits set for leaf data and '0' bits set for nodes.
+pub const LEAF_META_BITFIELD_SLOT: usize = NODES_PER_PAGE;
+/// This is the offset of the leaf meta bitfield in the page data.
+pub const LEAF_DATA_BITFIELD_OFF: usize = LEAF_META_BITFIELD_SLOT * 32;
 
 struct PageData {
     data: RwPassCell<Option<Vec<u8>>>,
@@ -125,12 +128,29 @@ fn leaf_data_bits(page: &mut [u8]) -> &mut BitSlice<u8, Msb0> {
     page[LEAF_DATA_BITFIELD_OFF..][..32].view_bits_mut::<Msb0>()
 }
 
-fn page_is_empty(page: &[u8]) -> bool {
+/// Checks whether a page is empty.
+pub fn page_is_empty(page: &[u8]) -> bool {
     // 1. we assume the top layer of nodes are kept at index 0 and 1, respectively, and this
     //    is packed as the first two 32-byte slots.
     // 2. if both are empty, then the whole page is empty. this is because internal nodes
     //    with both children as terminals are not allowed to exist.
     &page[..64] == [0u8; 64].as_slice()
+}
+
+/// Tracks which nodes have changed within a page.
+#[derive(Debug, Default, Clone)]
+pub struct PageDiff {
+    /// A bitfield indicating the number of updated slots
+    updated_slots: BitArray<[u64; 2], Lsb0>,
+}
+
+impl PageDiff {
+    /// Note that some 32-byte slot in the page data has changed.
+    /// The acceptable range is 0..=LEAF_META_BITFIELD_SLOT
+    pub fn set_changed(&mut self, slot_index: usize) {
+        assert!(slot_index <= LEAF_META_BITFIELD_SLOT);
+        self.updated_slots.set(slot_index, true);
+    }
 }
 
 enum PageState {
@@ -429,22 +449,41 @@ impl PageCache {
     ///
     /// After the commit, all the dirty pages are cleared.
     pub fn commit(&self, cursor: PageCacheCursor, tx: &mut Transaction) {
-        let (dirty_pages, mut write_pass) = cursor.finish_write();
-        for page_id in dirty_pages {
-            // Unwrap: the invariant is that all items from `dirty` are present in the `cached` and
-            // thus cannot be `None`.
-            let page_state = self
-                .shared
-                .cached
-                .get_mut(&page_id)
-                .expect("a dirty page is not in the cache");
-            let page_state = page_state.value();
-            if let PageState::Cached(ref page) = *page_state {
-                let page_data = page.data.read(write_pass.downgrade());
-                let page_data = page_data.as_ref().map(|v| &v[..]);
-                tx.write_page(page_id, page_data.filter(|p| !page_is_empty(p)));
-            } else {
-                panic!("dirty page is inflight");
+        const FULL_PAGE_THRESHOLD: usize = 32;
+
+        let (dirty_nodes, mut write_pass) = cursor.finish_write();
+        for (page_id, page_diff) in dirty_nodes {
+            if let Some(ref page) = self.shared.cached.get(&page_id) {
+                match page.value() {
+                    PageState::Cached(ref page) => {
+                        let page_data = page.data.read(&*write_pass.downgrade());
+                        if page_data.as_ref().map_or(true, |p| page_is_empty(&p[..])) {
+                            tx.delete_page(page_id);
+                            continue;
+                        }
+
+                        let Some(page_data) = page_data.as_ref() else {
+                            continue;
+                        };
+
+                        let updated_count = page_diff.updated_slots.count_ones();
+                        if updated_count >= FULL_PAGE_THRESHOLD {
+                            tx.write_page(page_id, page_data);
+                            continue;
+                        }
+
+                        let mut tagged_nodes = Vec::with_capacity(33 * updated_count);
+                        for slot_index in page_diff.updated_slots.iter_ones() {
+                            tagged_nodes.push(slot_index as u8);
+
+                            tagged_nodes.extend(&page_data[slot_index * 32..][..32]);
+                        }
+                        tx.write_page_nodes(page_id, tagged_nodes);
+                    }
+                    PageState::Inflight(_) => {
+                        panic!("dirty page is inflight");
+                    }
+                }
             }
         }
     }

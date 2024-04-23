@@ -1,7 +1,7 @@
-use std::{cell::RefCell, collections::HashSet};
+use std::{cell::RefCell, collections::HashMap};
 
 use crate::{
-    page_cache::{Page, PageCache},
+    page_cache::{Page, PageCache, PageDiff},
     rw_pass_cell::{ReadPass, WritePass},
 };
 use nomt_core::{
@@ -17,7 +17,7 @@ enum Mode {
     Read(ReadPass),
     Write {
         write_pass: RefCell<WritePass>,
-        dirtied: HashSet<PageId>,
+        updated: HashMap<PageId, PageDiff>,
     },
 }
 
@@ -57,7 +57,7 @@ impl PageCacheCursor {
             pages,
             Mode::Write {
                 write_pass: RefCell::new(write_pass),
-                dirtied: HashSet::new(),
+                updated: HashMap::new(),
             },
         )
     }
@@ -187,19 +187,27 @@ impl PageCacheCursor {
                 self.pages.retrieve_sync(page_id, hint_fresh)
             });
 
-        let (write_pass, dirtied) = match self.mode {
+        let (write_pass, updated) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
                 ref mut write_pass,
-                ref mut dirtied,
-            } => (write_pass, dirtied),
+                ref mut updated,
+            } => (write_pass, updated),
         };
 
         match leaf_data {
-            None => page.clear_leaf_data(&mut *write_pass.borrow_mut(), children),
-            Some(leaf) => page.set_leaf_data(&mut *write_pass.borrow_mut(), children, leaf),
+            None => {
+                page.clear_leaf_data(&mut *write_pass.borrow_mut(), children);
+            }
+            Some(leaf) => {
+                page.set_leaf_data(&mut *write_pass.borrow_mut(), children, leaf);
+            }
         }
-        dirtied.insert(page_id.clone());
+
+        let diff = updated.entry(page_id.clone()).or_default();
+        diff.set_changed(children.left());
+        diff.set_changed(children.right());
+        diff.set_changed(crate::page_cache::LEAF_META_BITFIELD_SLOT);
     }
 
     /// Place a non-leaf node at the current location.
@@ -210,12 +218,12 @@ impl PageCacheCursor {
             self.write_leaf_children(None, false);
         }
 
-        let (write_pass, dirtied) = match self.mode {
+        let (write_pass, updated) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
                 ref mut write_pass,
-                ref mut dirtied,
-            } => (write_pass, dirtied),
+                ref mut updated,
+            } => (write_pass, updated),
         };
         match self.cached_page {
             None => {
@@ -223,7 +231,10 @@ impl PageCacheCursor {
             }
             Some((ref page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.insert(page_id.clone());
+                updated
+                    .entry(page_id.clone())
+                    .or_default()
+                    .set_changed(self.pos.node_index());
             }
         }
     }
@@ -234,12 +245,12 @@ impl PageCacheCursor {
 
         self.write_leaf_children(Some(leaf), true);
 
-        let (write_pass, dirtied) = match self.mode {
+        let (write_pass, updated) = match self.mode {
             Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
             Mode::Write {
                 ref mut write_pass,
-                ref mut dirtied,
-            } => (write_pass, dirtied),
+                ref mut updated,
+            } => (write_pass, updated),
         };
         match self.cached_page {
             None => {
@@ -247,7 +258,10 @@ impl PageCacheCursor {
             }
             Some((ref page_id, ref mut page)) => {
                 page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                dirtied.insert(page_id.clone());
+                updated
+                    .entry(page_id.clone())
+                    .or_default()
+                    .set_changed(self.pos.node_index());
             }
         }
     }
@@ -336,13 +350,13 @@ impl PageCacheCursor {
     }
 
     /// Called when the write is finished.
-    pub fn finish_write(self) -> (HashSet<PageId>, WritePass) {
+    pub fn finish_write(self) -> (HashMap<PageId, PageDiff>, WritePass) {
         match self.mode {
             Mode::Read(_) => panic!("attempted to call dirtied_pages on a read-only cursor"),
             Mode::Write {
-                dirtied,
+                updated,
                 write_pass,
-            } => (dirtied, write_pass.into_inner()),
+            } => (updated, write_pass.into_inner()),
         }
     }
 }
