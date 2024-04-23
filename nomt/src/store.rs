@@ -73,6 +73,42 @@ impl Store {
         Ok(value)
     }
 
+    /// Load the pages for a set of page IDs where each depends on the load of the previous.
+    ///
+    /// The dependence condition is this: if one page is `None`, all subsequent pages are assumed
+    /// `None` without performing a DB query.
+    pub fn load_pages_dependent(&self, pages: Vec<PageId>) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
+        let mut raw_iter = self.shared.db.raw_iterator_cf(&cf);
+
+        let mut cascade_none = false;
+        pages
+            .into_iter()
+            .map(move |page_id| {
+                if cascade_none {
+                    return Ok(None);
+                }
+
+                let key = page_id.length_dependent_encoding();
+                raw_iter.seek(key);
+
+                raw_iter.status()?;
+
+                match raw_iter
+                    .key()
+                    .filter(|found_key| &found_key[..] == key)
+                    .and_then(|_| raw_iter.value())
+                {
+                    Some(v) => Ok(Some(v.to_vec())),
+                    None => {
+                        cascade_none = true;
+                        Ok(None)
+                    }
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+    }
+
     /// Create a new transaction to be applied against this database.
     pub fn new_tx(&self) -> Transaction {
         Transaction {
