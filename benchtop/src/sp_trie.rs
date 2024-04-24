@@ -15,6 +15,9 @@ use trie_db::TrieMut;
 type Hasher = sp_core::Blake2Hasher;
 type Hash = sp_core::H256;
 
+const SP_TRIE_DB_FOLDER: &str = "sp_trie_db";
+const SP_TRIE_DB_FOLDER_COPY: &str = "sp_trie_db_copy";
+
 pub struct SpTrieDB {
     pub kvdb: Arc<dyn KeyValueDB>,
     pub root: Hash,
@@ -26,14 +29,15 @@ pub struct Trie<'a> {
 }
 
 impl SpTrieDB {
-    pub fn new(reset: bool) -> Self {
+    pub fn open(reset: bool) -> Self {
         if reset {
             // Delete previously existing db
-            let _ = std::fs::remove_dir_all("sp_trie_db");
+            let _ = std::fs::remove_dir_all(SP_TRIE_DB_FOLDER);
         }
 
         let db_cfg = DatabaseConfig::with_columns(1);
-        let kvdb = Arc::new(Database::open(&db_cfg, "sp_trie_db").expect("Database backend error"));
+        let kvdb =
+            Arc::new(Database::open(&db_cfg, SP_TRIE_DB_FOLDER).expect("Database backend error"));
 
         let mut root = Hash::default();
         let mut overlay = HashMap::new();
@@ -70,6 +74,26 @@ impl SpTrieDB {
 }
 
 impl Db for SpTrieDB {
+    fn open_copy(&self) -> Box<dyn Db> {
+        // Delete any previously existing copy of the db
+        let _ = std::fs::remove_dir_all(SP_TRIE_DB_FOLDER_COPY);
+
+        std::process::Command::new("cp")
+            .args(["-r", SP_TRIE_DB_FOLDER, SP_TRIE_DB_FOLDER_COPY])
+            .output()
+            .expect("Impossible make a copy of the nomt db");
+
+        let db_cfg = DatabaseConfig::with_columns(1);
+        let kvdb = Arc::new(
+            Database::open(&db_cfg, SP_TRIE_DB_FOLDER_COPY).expect("Database backend error"),
+        );
+
+        Box::new(Self {
+            kvdb,
+            root: self.root,
+        })
+    }
+
     fn apply_actions(&mut self, actions: Vec<Action>, mut timer: Option<&mut Timer>) {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 

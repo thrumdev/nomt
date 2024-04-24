@@ -21,6 +21,10 @@ pub enum Action {
 
 /// Trait implemented by all backends who wants to be benchmarked.
 pub trait Db {
+    /// Create a new backend using a copy of the database.
+    /// Delete any existing copies beforehand
+    fn open_copy(&self) -> Box<dyn Db>;
+
     /// Apply the given actions to the storage, committing them
     /// to the database at the end.
     ///
@@ -35,6 +39,14 @@ pub trait Db {
     /// Other spans can be measured by each backend, leaving space
     /// for more detailed tasks specific to each backend.
     fn apply_actions(&mut self, actions: Vec<Action>, timer: Option<&mut Timer>);
+
+    /// Apply the actions to a copy of the backend to measure performance without altering
+    /// the original database structure. This allows for applying and reverting actions
+    /// iteratively to measure performance.
+    fn apply_and_revert_actions(&self, actions: Vec<Action>, timer: Option<&mut Timer>) {
+        let mut revert_db = self.open_copy();
+        revert_db.apply_actions(actions, timer);
+    }
 }
 
 impl Backend {
@@ -47,9 +59,9 @@ impl Backend {
     // Otherwise, use the already present database.
     pub fn instantiate(&self, reset: bool) -> Box<dyn Db> {
         match self {
-            Backend::SovDB => Box::new(SovDB::new(reset)),
-            Backend::Nomt => Box::new(NomtDB::new(reset)),
-            Backend::SpTrie => Box::new(SpTrieDB::new(reset)),
+            Backend::SovDB => Box::new(SovDB::open(reset)),
+            Backend::Nomt => Box::new(NomtDB::open(reset)),
+            Backend::SpTrie => Box::new(SpTrieDB::open(reset)),
         }
     }
 }
