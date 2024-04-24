@@ -228,6 +228,9 @@ impl InflightFetch {
     /// Notifies all the waiting parties that the page has been fetched and destroys this handle.
     fn complete_and_notify(&self, p: Page) {
         let mut page = self.page.lock();
+        if page.is_some() {
+            return;
+        }
         *page = Some(p);
         self.ready.notify_all();
     }
@@ -305,12 +308,18 @@ impl PageCache {
                     // once. It may removed only in the line below. Therefore, `None` is impossible.
                     let mut page_state_guard = shared.cached.get_mut(&page_id).unwrap();
                     let page_state = page_state_guard.value_mut();
-                    let PageState::Inflight(inflight) =
+
+                    if let PageState::Cached(_) = page_state {
+                        // We race against pre-emption in the case other code pre-empts us by
+                        // allocating an empty page.
+                        return;
+                    }
+
+                    if let PageState::Inflight(inflight) =
                         mem::replace(page_state, PageState::Cached(entry.clone()))
-                    else {
-                        panic!("page was not inflight");
-                    };
-                    inflight.complete_and_notify(Page { inner: entry });
+                    {
+                        inflight.complete_and_notify(Page { inner: entry });
+                    }
                 }
             };
             self.shared.fetch_tp.execute(task);
@@ -326,14 +335,31 @@ impl PageCache {
     /// This method is blocking, but doesn't suffer from the channel overhead.
     pub fn retrieve_sync(&self, page_id: PageId, hint_fresh: bool) -> Page {
         let maybe_inflight = match self.shared.cached.entry(page_id.clone()) {
-            Entry::Occupied(o) => {
-                let page = o.get();
+            Entry::Occupied(mut o) => {
+                let page = o.get_mut();
                 match page {
-                    PageState::Inflight(inflight) => Some(inflight.clone()),
-                    PageState::Cached(page) => {
+                    PageState::Cached(ref page) => {
                         return Page {
                             inner: page.clone(),
                         };
+                    }
+                    PageState::Inflight(ref inflight) => {
+                        if hint_fresh {
+                            // pre-empt stale fetch.
+
+                            let page_data = Arc::new(PageData::pristine_empty(
+                                &self.shared.page_rw_pass_domain,
+                            ));
+                            let fresh_page = Page {
+                                inner: page_data.clone(),
+                            };
+
+                            inflight.complete_and_notify(fresh_page.clone());
+                            *page = PageState::Cached(page_data);
+                            return fresh_page;
+                        } else {
+                            Some(inflight.clone())
+                        }
                     }
                 }
             }
@@ -367,22 +393,26 @@ impl PageCache {
                 |data| PageData::pristine_with_data(&self.shared.page_rw_pass_domain, data),
             );
         let entry = Arc::new(entry);
-        let prev = self
-            .shared
-            .cached
-            .insert(page_id.clone(), PageState::Cached(entry.clone()));
-        match prev {
-            None => {}
-            Some(PageState::Inflight(inflight)) => {
-                inflight.complete_and_notify(Page {
-                    inner: entry.clone(),
-                });
-            }
-            Some(PageState::Cached(_)) => {
-                panic!("page was already cached");
-            }
+
+        // UNWRAP: we inserted a value into the map which cannot have been evicted in the meantime.
+        let mut page_state_guard = self.shared.cached.get_mut(&page_id).unwrap();
+        let page_state = page_state_guard.value_mut();
+
+        if let PageState::Cached(page_data) = page_state {
+            // pre-empted by retrieve_sync (hint_fresh=true) on another thread
+            return Page {
+                inner: page_data.clone(),
+            };
         }
-        return Page { inner: entry };
+
+        if let PageState::Inflight(inflight) =
+            std::mem::replace(page_state, PageState::Cached(entry.clone()))
+        {
+            inflight.complete_and_notify(Page {
+                inner: entry.clone(),
+            });
+        }
+        Page { inner: entry }
     }
 
     pub fn new_write_cursor(&self, root: Node) -> PageCacheCursor {
