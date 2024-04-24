@@ -7,19 +7,22 @@ use nomt::{KeyPath, KeyReadWrite, Nomt, Options};
 use sha2::Digest;
 use std::{collections::hash_map::Entry, path::PathBuf};
 
+const NOMT_DB_FOLDER: &str = "nomt_db";
+const NOMT_DB_FOLDER_COPY: &str = "nomt_db_copy";
+
 pub struct NomtDB {
     nomt: Nomt,
 }
 
 impl NomtDB {
-    pub fn new(reset: bool) -> Self {
+    pub fn open(reset: bool) -> Self {
         if reset {
             // Delete previously existing db
-            let _ = std::fs::remove_dir_all("nomt_db");
+            let _ = std::fs::remove_dir_all(NOMT_DB_FOLDER);
         }
 
         let opts = Options {
-            path: PathBuf::from("nomt_db"),
+            path: PathBuf::from(NOMT_DB_FOLDER),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
         };
@@ -30,6 +33,25 @@ impl NomtDB {
 }
 
 impl Db for NomtDB {
+    fn open_copy(&self) -> Box<dyn Db> {
+        // Delete any previously existing copy of the db
+        let _ = std::fs::remove_dir_all(NOMT_DB_FOLDER_COPY);
+
+        std::process::Command::new("cp")
+            .args(["-r", NOMT_DB_FOLDER, NOMT_DB_FOLDER_COPY])
+            .output()
+            .expect("Impossible make a copy of the nomt db");
+
+        let opts = Options {
+            path: PathBuf::from(NOMT_DB_FOLDER_COPY),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        };
+
+        let nomt = Nomt::open(opts).unwrap();
+        Box::new(Self { nomt })
+    }
+
     fn apply_actions(&mut self, actions: Vec<Action>, mut timer: Option<&mut Timer>) {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 

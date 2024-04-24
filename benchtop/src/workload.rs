@@ -22,12 +22,15 @@ pub struct Workload {
 }
 
 impl Workload {
+    // The workload initialization will persist in the database
     pub fn init(&self, backend: &mut Box<dyn Db>) {
         backend.apply_actions(self.init_actions.clone(), None);
     }
 
+    // The execution of the workload will not be persistent,
+    // any modifications made to the database will be rolled back to its previous state
     pub fn run(&self, backend: &mut Box<dyn Db>, timer: Option<&mut Timer>) {
-        backend.apply_actions(self.run_actions.clone(), timer);
+        backend.apply_and_revert_actions(self.run_actions.clone(), timer);
     }
 }
 

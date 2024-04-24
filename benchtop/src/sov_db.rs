@@ -7,19 +7,22 @@ use sov_prover_storage_manager::SnapshotManager;
 use sov_schema_db::snapshot::DbSnapshot;
 use std::sync::{Arc, RwLock};
 
+const SOV_DB_FOLDER: &str = "sov_db";
+const SOV_DB_FOLDER_COPY: &str = "sov_db_copy";
+
 pub struct SovDB {
     state_db: StateDB<SnapshotManager>,
 }
 
 impl SovDB {
-    pub fn new(reset: bool) -> Self {
+    pub fn open(reset: bool) -> Self {
         if reset {
             // Delete previously existing db
-            let _ = std::fs::remove_dir_all("sov_db");
+            let _ = std::fs::remove_dir_all(SOV_DB_FOLDER);
         }
 
         // Create the underlying rocks db database
-        let state_db_raw = StateDB::<SnapshotManager>::setup_schema_db("sov_db").unwrap();
+        let state_db_raw = StateDB::<SnapshotManager>::setup_schema_db(SOV_DB_FOLDER).unwrap();
         // Create a 'dummy' SnapshotManager who just reads from the provided database
         let state_db_sm = Arc::new(RwLock::new(SnapshotManager::orphan(state_db_raw)));
         // Create a snapshot db and then the state db over RocksDB
@@ -31,6 +34,25 @@ impl SovDB {
 }
 
 impl Db for SovDB {
+    fn open_copy(&self) -> Box<dyn Db> {
+        // Delete any previously existing copy of the db
+        let _ = std::fs::remove_dir_all(SOV_DB_FOLDER_COPY);
+
+        std::process::Command::new("cp")
+            .args(["-r", SOV_DB_FOLDER, SOV_DB_FOLDER_COPY])
+            .output()
+            .expect("Impossible make a copy of the nomt db");
+
+        // Create the underlying rocks db database
+        let state_db_raw = StateDB::<SnapshotManager>::setup_schema_db(SOV_DB_FOLDER_COPY).unwrap();
+        // Create a 'dummy' SnapshotManager who just reads from the provided database
+        let state_db_sm = Arc::new(RwLock::new(SnapshotManager::orphan(state_db_raw)));
+        // Create a snapshot db and then the state db over RocksDB
+        let state_db_snapshot = DbSnapshot::<SnapshotManager>::new(0, state_db_sm.into());
+        let state_db = StateDB::with_db_snapshot(state_db_snapshot).unwrap();
+
+        Box::new(Self { state_db })
+    }
     fn apply_actions(&mut self, actions: Vec<Action>, mut timer: Option<&mut Timer>) {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
