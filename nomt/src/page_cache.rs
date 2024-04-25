@@ -290,10 +290,15 @@ impl PageCache {
         if let Entry::Vacant(v) = self.shared.cached.entry(page_id.clone()) {
             // Nope, then we need to fetch the page from the store.
             let inflight = Arc::new(InflightFetch::new());
-            v.insert(PageState::Inflight(inflight));
+            v.insert(PageState::Inflight(inflight.clone()));
             let task = {
                 let shared = self.shared.clone();
                 move || {
+                    // the page fetch has been pre-empted in the meantime. avoid querying.
+                    if Arc::strong_count(&inflight) == 1 {
+                        return;
+                    }
+
                     let entry = shared
                         .store
                         .load_page(page_id.clone())
@@ -324,6 +329,31 @@ impl PageCache {
             };
             self.shared.fetch_tp.execute(task);
         }
+    }
+
+    /// Pre-empt a previously submitted prepopulation request on a best-effort basis by returning
+    /// an empty page to all waiters. This should only be called when it is known that the page
+    /// will definitely not exist.
+    ///
+    /// This is not guaranteed to cancel the request if it is already being processed by a
+    /// DB thread.
+    pub fn cancel_prepopulate(&self, page_id: PageId) {
+        let Some(mut page_state_guard) = self.shared.cached.get_mut(&page_id) else {
+            return;
+        };
+        let page_state = page_state_guard.value_mut();
+
+        let page_data = {
+            let PageState::Inflight(inflight) = page_state else {
+                return;
+            };
+            let page_data = Arc::new(PageData::pristine_empty(&self.shared.page_rw_pass_domain));
+            inflight.complete_and_notify(Page {
+                inner: page_data.clone(),
+            });
+            page_data
+        };
+        *page_state = PageState::Cached(page_data);
     }
 
     /// Retrieves the page data at the given [`PageId`] synchronously.
@@ -572,10 +602,15 @@ impl Seeker {
         let mut sibling = trie::TERMINATOR;
         let mut cur_node = self.root;
 
+        let mut pending_prefetches = Vec::with_capacity(PREFETCH_N);
         for bit in dest.view_bits::<Msb0>().iter().by_vals() {
             if !trie::is_internal(&cur_node) {
                 if trie::is_leaf(&cur_node) {
                     let leaf_data = self.read_leaf_children(&trie_pos, page.as_ref());
+                    if trie_pos.depth() as usize % DEPTH == 0 {
+                        // leaf data page was needed.
+                        let _ = pending_prefetches.pop();
+                    }
                     assert!(leaf_data
                         .key_path
                         .view_bits::<Msb0>()
@@ -583,6 +618,10 @@ impl Seeker {
 
                     result.terminal = Some(leaf_data);
                 };
+
+                for page_id in pending_prefetches {
+                    self.cache.cancel_prepopulate(page_id)
+                }
 
                 return result;
             }
@@ -593,9 +632,14 @@ impl Seeker {
                             Some(page) => page,
                             None => break,
                         };
+                        pending_prefetches.push(page_id.clone());
                         self.cache.prepopulate(page_id);
                     }
+                    pending_prefetches.reverse();
                 }
+
+                // next step `down` after this if block relies on this page having been fetched.
+                let _ = pending_prefetches.pop();
 
                 if let (&Some((ref id, _)), SeekMode::RetrieveSiblingLeafChildren, true) =
                     (&page, mode, trie::is_leaf(&sibling))
