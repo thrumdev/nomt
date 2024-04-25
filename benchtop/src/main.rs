@@ -45,7 +45,7 @@ pub fn run(params: WorkloadParams) -> Result<()> {
         params.percentage_cold,
     )?;
 
-    workload.run(&mut Backend::Nomt.instantiate(false), None);
+    workload.run(&mut Backend::Nomt.instantiate(false), None, true);
 
     Ok(())
 }
