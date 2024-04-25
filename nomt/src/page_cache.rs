@@ -283,35 +283,22 @@ impl PageCache {
     ///
     /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
     /// page from the underlying store and caches it.
-    fn prepopulate(&self, page_ids: Vec<PageId>) {
-        let mut fetches = Vec::with_capacity(page_ids.len());
-
-        for page_id in page_ids {
-            if let Entry::Vacant(v) = self.shared.cached.entry(page_id.clone()) {
-                // Nope, then we need to fetch the page from the store.
-                let inflight = Arc::new(InflightFetch::new());
-                v.insert(PageState::Inflight(inflight));
-                fetches.push(page_id);
-            }
-        }
-
-        if fetches.is_empty() {
-            return;
-        }
-
-        let task = {
-            let shared = self.shared.clone();
-            move || {
-                let pages = shared
-                    .store
-                    .load_pages_dependent(fetches.clone())
-                    .expect("db load failed"); // TODO: handle the error.
-
-                for (page_id, page) in fetches.into_iter().zip(pages) {
-                    let entry = page.map_or_else(
-                        || PageData::pristine_empty(&shared.page_rw_pass_domain),
-                        |data| PageData::pristine_with_data(&shared.page_rw_pass_domain, data),
-                    );
+    pub fn prepopulate(&self, page_id: PageId) {
+        if let Entry::Vacant(v) = self.shared.cached.entry(page_id.clone()) {
+            // Nope, then we need to fetch the page from the store.
+            let inflight = Arc::new(InflightFetch::new());
+            v.insert(PageState::Inflight(inflight));
+            let task = {
+                let shared = self.shared.clone();
+                move || {
+                    let entry = shared
+                        .store
+                        .load_page(page_id.clone())
+                        .expect("db load failed") // TODO: handle the error
+                        .map_or_else(
+                            || PageData::pristine_empty(&shared.page_rw_pass_domain),
+                            |data| PageData::pristine_with_data(&shared.page_rw_pass_domain, data),
+                        );
                     let entry = Arc::new(entry);
 
                     // Unwrap: the operation was inserted above. It is scheduled for execution only
@@ -325,10 +312,9 @@ impl PageCache {
                     };
                     inflight.complete_and_notify(Page { inner: entry });
                 }
-            }
-        };
-
-        self.shared.fetch_tp.execute(task);
+            };
+            self.shared.fetch_tp.execute(task);
+        }
     }
 
     /// Retrieves the page data at the given [`PageId`] synchronously.
@@ -572,8 +558,13 @@ impl Seeker {
             }
             if trie_pos.depth() as usize % DEPTH == 0 {
                 if trie_pos.depth() as usize % PREFETCH_N == 0 {
-                    let page_ids = (&mut ppf).take(PREFETCH_N).collect();
-                    self.cache.prepopulate(page_ids);
+                    for _ in 0..PREFETCH_N {
+                        let page_id = match ppf.next() {
+                            Some(page) => page,
+                            None => break,
+                        };
+                        self.cache.prepopulate(page_id);
+                    }
                 }
 
                 if let (&Some((ref id, _)), SeekMode::RetrieveSiblingLeafChildren, true) =
@@ -585,7 +576,7 @@ impl Seeker {
                         .child_page_id(trie_pos.sibling_child_page_index())
                         .expect("Pages do not go deeper than the maximum layer, 42");
                     // async; just warm up.
-                    let _ = self.cache.prepopulate(vec![child_page_id]);
+                    let _ = self.cache.prepopulate(child_page_id);
                 }
             }
 
