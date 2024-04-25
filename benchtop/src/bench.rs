@@ -3,19 +3,17 @@ use anyhow::Result;
 
 pub fn bench(params: Params) -> Result<()> {
     let workloads: Vec<_> = (0..params.iteration)
-        .map(|_| {
-            workload::parse(
-                params.workload.name.as_str(),
-                params.workload.size,
-                params
-                    .workload
-                    .initial_capacity
-                    .map(|s| 1u64 << s)
-                    .unwrap_or(0),
-                params.workload.percentage_cold,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
+        .map(|_| workload::parse(
+            params.workload.name.as_str(),
+            params.workload.size,
+            params
+                .workload
+                .initial_capacity
+                .map(|s| 1u64 << s)
+                .unwrap_or(0),
+            params.workload.percentage_cold,
+        ))
+        .collect::<Result<Vec<_>, >>()?;
 
     let backends = if params.backends.is_empty() {
         Backend::all_backends()
