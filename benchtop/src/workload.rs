@@ -27,10 +27,15 @@ impl Workload {
         backend.apply_actions(self.init_actions.clone(), None);
     }
 
-    // The execution of the workload will not be persistent,
-    // any modifications made to the database will be rolled back to its previous state
-    pub fn run(&self, backend: &mut Box<dyn Db>, timer: Option<&mut Timer>) {
-        backend.apply_and_revert_actions(self.run_actions.clone(), timer);
+    // The workload execution is not persistent, any database modifications will be reverted
+    // to the previous state if `revert` is true.
+    // Otherwise, actions are applied to the backend
+    pub fn run(&self, backend: &mut Box<dyn Db>, timer: Option<&mut Timer>, revert: bool) {
+        if revert {
+            backend.apply_and_revert_actions(self.run_actions.clone(), timer);
+        } else {
+            backend.apply_actions(self.run_actions.clone(), timer);
+        }
     }
 }
 

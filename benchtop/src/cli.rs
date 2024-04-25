@@ -13,9 +13,10 @@ pub struct Cli {
 pub enum Commands {
     /// Benchmark different workloads against different backends
     ///
-    /// It is a combination of Init and Exec with specifiable iterations
-    /// over possible multiple backends
-    Bench(bench::Params),
+    /// It is a combination of Init and Exec with the ability to specify the stopping
+    /// parameters of the execution of workloads over multiple backends.
+    #[command(subcommand)]
+    Bench(bench::BenchType),
     /// Initialize NOMT backend for the specified workload.
     ///
     /// The backend will be initialized with all the data required
@@ -90,8 +91,17 @@ pub struct WorkloadParams {
 pub mod bench {
     use super::{Args, Backend, WorkloadParams};
 
+    #[derive(clap::Subcommand, Debug)]
+    pub enum BenchType {
+        /// Each Workload execution will be performed on a copy of the initialized backend
+        Isolate(IsolateParams),
+
+        /// All workloads will be performed on the same backend after being initialized
+        Sequential(SequentialParams),
+    }
+
     #[derive(Debug, Args)]
-    pub struct Params {
+    pub struct CommonParams {
         /// Possible Backends to run benchmarks against
         ///
         /// Leave this flag empty to run benchmarks against all avaiable backends
@@ -104,10 +114,32 @@ pub mod bench {
         // TODO: Change this argument to a vector to allow for specifying multiple workloads
         #[clap(flatten)]
         pub workload: WorkloadParams,
+    }
+
+    #[derive(Debug, Args)]
+    pub struct SequentialParams {
+        #[clap(flatten)]
+        pub common_params: CommonParams,
+
+        // TODO: better descriptions
+        /// Repeat the Workload on the same backends until the total amount of
+        /// operations performed by all workloads reach the specified amount.
+        #[arg(long)]
+        pub op_limit: Option<u64>,
+
+        /// Repeat the Workload on the same backends until the specified duration is exeeded [ms]
+        #[arg(long)]
+        pub time_limit: Option<u64>,
+    }
+
+    #[derive(Debug, Args)]
+    pub struct IsolateParams {
+        #[clap(flatten)]
+        pub common_params: CommonParams,
 
         /// Number of time the benchmark will be repeated on the same backend
-        #[clap(default_value = "100")]
+        #[clap(default_value = "10")]
         #[arg(long, short)]
-        pub iteration: u64,
+        pub iterations: u64,
     }
 }

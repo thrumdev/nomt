@@ -39,6 +39,19 @@ impl Timer {
         }
     }
 
+    pub fn get_last_workload_duration(&self) -> anyhow::Result<u64> {
+        let h = self
+            .spans
+            .get("workload")
+            .ok_or(anyhow::anyhow!("`workload` span not recordered"))?;
+
+        Ok(h.borrow()
+            .iter_recorded()
+            .last()
+            .ok_or(anyhow::anyhow!("No recorded value for `workload` span"))?
+            .value_iterated_to())
+    }
+
     pub fn print(&mut self) {
         println!("{}", self.name);
 
