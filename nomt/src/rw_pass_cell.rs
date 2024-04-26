@@ -25,8 +25,12 @@
 
 use std::{
     cell::UnsafeCell,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Weak,
+    },
 };
 
 use parking_lot::{RawRwLock, RwLock};
@@ -51,7 +55,16 @@ impl RwPassDomain {
 
     /// Protects the given inner value with a [`RwPassCell`].
     pub fn protect<T>(&self, inner: T) -> RwPassCell<T> {
-        RwPassCell::new(Arc::downgrade(&self.shared), inner)
+        RwPassCell::new(Arc::downgrade(&self.shared), inner, ())
+    }
+
+    /// Protects the given inner value, along with an immutable identifier inside a [`RwPassCell`].
+    ///
+    /// This enables you to make use of [`RegionedWritePass`] to mutably access multiple cells
+    /// simultaneously.
+    #[allow(unused)] // TODO - parallel update will use this.
+    pub fn protect_with_id<T, Id>(&self, inner: T, id: Id) -> RwPassCell<T, Id> {
+        RwPassCell::new(Arc::downgrade(&self.shared), inner, id)
     }
 
     /// Creates a new read pass.
@@ -83,6 +96,31 @@ impl RwPassDomain {
             },
         }
     }
+
+    /// Create a new regioned write pass.
+    ///
+    /// The pass can be used to access the data within any [`RwPassCell`]s created within this
+    /// domain.
+    ///
+    /// Furthermore, the pass can be split recursively into sub-regions, such that each pass
+    /// can read data tagged with an ID that belongs to its respective sub-region.
+    ///
+    /// If there are any read or write passes active, this method will block until they are dropped.
+    #[allow(unused)] // TODO - parallel update will use this.
+    pub fn new_regioned_write_pass<R: Region>(&self) -> RegionedWritePass<R> {
+        let guard = self.shared.write_arc();
+
+        RegionedWritePass {
+            parent: None,
+            region: R::universe(),
+            read_pass: Arc::new(ReadPass {
+                domain: self.shared.clone(),
+                _guard: RwGuard::Write(guard),
+            }),
+
+            sync_dummy: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 enum RwGuard {
@@ -111,7 +149,10 @@ impl WritePass {
 
 /// A cell corresponding with a [`RwPassDomain`]. This may be read and written only with a pass from
 /// the domain.
-pub struct RwPassCell<T> {
+///
+/// The cell may also hold a unique ID which can be used with the [`RegionedWritePass`] to further
+/// shard access.
+pub struct RwPassCell<T, Id = ()> {
     // A weak reference to the creator of the cell.
     //
     // It's weak because we don't actually care about it's internal data, we just need to make
@@ -119,13 +160,15 @@ pub struct RwPassCell<T> {
     // be reused, and the provenance check would be invalid.
     provenance: Weak<Shared>,
     inner: UnsafeCell<T>,
+    id: Id,
 }
 
-impl<T> RwPassCell<T> {
-    fn new(provenance: Weak<Shared>, inner: T) -> Self {
+impl<T, Id> RwPassCell<T, Id> {
+    fn new(provenance: Weak<Shared>, inner: T, id: Id) -> Self {
         Self {
             provenance,
             inner: UnsafeCell::new(inner),
+            id,
         }
     }
 
@@ -135,8 +178,8 @@ impl<T> RwPassCell<T> {
     pub fn read<'a, 'pass>(&'a self, read_pass: &'pass ReadPass) -> ReadGuard<'a, 'pass, T> {
         self.check_domain(&read_pass.domain);
         ReadGuard {
-            inner: self,
-            _read_pass: read_pass,
+            inner: &self.inner,
+            _read_pass: PhantomData,
         }
     }
 
@@ -149,8 +192,25 @@ impl<T> RwPassCell<T> {
     ) -> WriteGuard<'a, 'pass, T> {
         self.check_domain(&write_pass.read_pass.domain);
         WriteGuard {
-            inner: self,
-            _write_pass: write_pass,
+            inner: &self.inner,
+            _write_pass: PhantomData,
+        }
+    }
+
+    /// Returns a handle to write the value. Requires showing a regioned write pass.
+    ///
+    /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell or
+    /// the value's ID is not contained within the region.
+    #[allow(unused)] // TODO: parallel update will use this
+    pub fn write_regioned<'a, 'pass, R: Region<Id = Id> + Clone>(
+        &'a self,
+        regioned_write_pass: &'pass mut RegionedWritePass<R>,
+    ) -> WriteGuard<'a, 'pass, T> {
+        self.check_domain(&regioned_write_pass.read_pass.domain);
+        assert!(regioned_write_pass.region().contains(&self.id));
+        WriteGuard {
+            inner: &self.inner,
+            _write_pass: PhantomData,
         }
     }
 
@@ -166,15 +226,21 @@ impl<T> RwPassCell<T> {
 // SAFETY: The RwPassCell is Send and Sync if the inner value is Send and Sync. This is because the
 //         undelying value is protected by the RwPassDomain, which ensures that the value is only
 //         accessed when the correct pass is shown.
-unsafe impl<T: Send> Send for RwPassCell<T> {}
-unsafe impl<T: Sync> Sync for RwPassCell<T> {}
+// SAFETY: The RwPasscell is Send if the inner value is Send and the Id is Sync. The underlying
+//         value is protected by the RwPassDomain, but mutable exclusive access of the value
+//         may occur on multiple threads. The Id is read-only.
+unsafe impl<T: Send, Id: Sync> Send for RwPassCell<T, Id> {}
+// SAFETY: The RwPasscell is Sync if both the inner value the Id are Sync. The underlying
+//         They may both be read simultaneously from multiple threads if the appropriate passes
+//         are shown.
+unsafe impl<T: Sync, Id: Sync> Sync for RwPassCell<T, Id> {}
 
 /// A read guard for the value of an [`RwPassCell`]. This may exist concurrently with other
 /// readers.
 // SAFETY: this cannot be `Clone`.
 pub struct ReadGuard<'a, 'pass, T> {
-    inner: &'a RwPassCell<T>,
-    _read_pass: &'pass ReadPass,
+    inner: &'a UnsafeCell<T>,
+    _read_pass: PhantomData<&'pass ReadPass>,
 }
 
 impl<'a, 'pass, T> ReadGuard<'a, 'pass, T>
@@ -185,7 +251,7 @@ where
     pub fn get(&self) -> &'pass T {
         // SAFETY: The existence of the guard ensures that there are only shared references
         //         to the inner value. The returned reference cannot outlive the guard.
-        unsafe { &*self.inner.inner.get() }
+        unsafe { &*self.inner.get() }
     }
 }
 
@@ -200,8 +266,8 @@ impl<'a, 'pass, T> Deref for ReadGuard<'a, 'pass, T> {
 /// A read guard for the value of an [`RwPassCell`]. This may exist concurrently with other
 /// readers.
 pub struct WriteGuard<'a, 'pass: 'a, T> {
-    inner: &'a RwPassCell<T>,
-    _write_pass: &'pass mut WritePass,
+    inner: &'a UnsafeCell<T>,
+    _write_pass: PhantomData<&'pass mut WritePass>,
 }
 
 impl<'a, 'pass, T> WriteGuard<'a, 'pass, T>
@@ -212,7 +278,7 @@ where
     pub fn get(&self) -> &T {
         // SAFETY: The existence of the guard ensures that there is only one mutable reference
         //         to the inner value. The returned reference cannot outlive the guard.
-        unsafe { &*self.inner.inner.get() }
+        unsafe { &*self.inner.get() }
     }
 
     /// Get a mutable reference to the underlying value.
@@ -220,7 +286,7 @@ where
         // SAFETY: The existence of the mutable guard reference ensures that there is only one
         //         mutable reference to the inner value. The returned reference cannot outlive the
         //         guard.
-        unsafe { &mut *self.inner.inner.get() }
+        unsafe { &mut *self.inner.get() }
     }
 }
 
@@ -235,5 +301,195 @@ impl<'a, 'pass, T> Deref for WriteGuard<'a, 'pass, T> {
 impl<'a, 'pass, T> DerefMut for WriteGuard<'a, 'pass, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.get_mut()
+    }
+}
+
+/// `Region`s indicate a range of data identifiers. This trait is unsafe because the memory safety
+/// of [`RegionedWritePass`] depends on the results of its functions.
+///
+/// Safely implementing this trait means correctly implementing the functions and choosing an ID
+/// type which cannot break the invariants of the trait.
+pub unsafe trait Region {
+    /// The ID type this region spans.
+    type Id;
+
+    /// Create a region which encompasses the entire universe of the type.
+    ///
+    /// # Safety
+    ///
+    /// This region must encompass all other regions, intersect all other regions, and contain
+    /// all values.
+    fn universe() -> Self;
+
+    /// Whether the region contains a value.
+    ///
+    /// # Safety
+    ///
+    /// If this function is ever invoked with an ID, it must return the same result whenever it is
+    /// called in the future.
+    fn contains(&self, value: &Self::Id) -> bool;
+
+    /// Whether the region completely encompasses another region.
+    ///
+    /// # Safety
+    ///
+    /// If this returns true, then it must be the case that this region contains every ID the other
+    /// region does.
+    fn encompasses(&self, other: &Self) -> bool;
+
+    /// Whether the region has no overlaps with another region.
+    ///
+    /// # Safety
+    ///
+    /// If this returns true, then it must be the case that this region does not contains any ID
+    /// the other region does, and vice versa.
+    fn excludes(&self, other: &Self) -> bool;
+}
+
+struct ParentRegionedWritePass<R> {
+    parent: Option<Arc<ParentRegionedWritePass<R>>>,
+    remaining_count: AtomicUsize,
+    region: R,
+}
+
+/// A wrapper around a [`RegionedWritePass`] which can be sent between threads.
+///
+/// The reason for this type is that `RegionedWritePass` is not safe to send between threads.
+pub struct RegionedWritePassEnvelope<R> {
+    inner: RegionedWritePass<R>,
+}
+
+impl<R> RegionedWritePassEnvelope<R> {
+    /// Open the envelope, yielding a write pass to be used on another thread.
+    pub fn into_inner(self) -> RegionedWritePass<R> {
+        // SAFETY: ensure writes from other threads propagate to this thread.
+        //         see note on declaration for more info.
+        self.inner.read_propagated_writes();
+        self.inner
+    }
+}
+
+/// SAFETY: this is safe to send because we deliberately read propagated writes from other threads
+///     and all regioned write pass drops and envelope creations propagate those writes.
+unsafe impl<R: Send + Sync> Send for RegionedWritePassEnvelope<R> {}
+
+/// A [`RegionedWritePass`] allows for a write pass to be sharded across a dataset based on
+/// by making use of non-overlapping regions.
+///
+/// Use [`RwPassDomain::new_regioned_write_pass`] to create this, and then `split` and `consume`
+/// as needed.
+#[allow(unused)] // TODO - parallel update will use this.
+pub struct RegionedWritePass<R> {
+    parent: Option<Arc<ParentRegionedWritePass<R>>>,
+    region: R,
+    read_pass: Arc<ReadPass>,
+
+    // We use this to ensure we acquire the writes of dropped passes in other threads.
+    //
+    // Whenever a pass is dropped, it stores to this with `Release`.
+    // Whenever a parent pass is created or an envelope is opened, we read from it with `Acquire`
+    // to ensure that any writes to data from another thread are written.
+    sync_dummy: Arc<AtomicUsize>,
+}
+
+#[allow(unused)] // TODO - parallel update will use this.
+impl<R: Region + Clone> RegionedWritePass<R> {
+    /// Get the region associated with this write pass.
+    pub fn region(&self) -> &R {
+        &self.region
+    }
+
+    /// Wrap this in an envelope to be safely sent across threads.
+    ///
+    /// The [`RegionedWritePassEnvelope`] ensures that any writes to memory will be propagated
+    /// to the remote thread before allowing the recipient to read or write.
+    pub fn into_envelope(self) -> RegionedWritePassEnvelope<R> {
+        // SAFETY: Propagate any writes which have been performed on this thread before sending it
+        //         to another.
+        self.propagate_writes();
+
+        RegionedWritePassEnvelope { inner: self }
+    }
+
+    /// Split this write pass into two parts encompassing non-overlapping sub-regions.
+    ///
+    /// The result will be a `(left, right)` tuple corresponding to the input argument regions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the regions overlap with each other or are not encompassed by the region of this
+    /// pass.
+    pub fn split(mut self, left: R, right: R) -> (Self, Self) {
+        assert!(self.region.encompasses(&left));
+        assert!(self.region.encompasses(&right));
+        assert!(left.excludes(&right), "left and right regions overlap");
+
+        let new_parent = Arc::new(ParentRegionedWritePass {
+            parent: self.parent.take(),
+            region: self.region.clone(),
+            remaining_count: AtomicUsize::new(2),
+        });
+
+        let left_pass = RegionedWritePass {
+            parent: Some(new_parent.clone()),
+            region: left,
+            read_pass: self.read_pass.clone(),
+            sync_dummy: self.sync_dummy.clone(),
+        };
+
+        let right_pass = RegionedWritePass {
+            parent: Some(new_parent),
+            region: right,
+            read_pass: self.read_pass.clone(),
+            sync_dummy: self.sync_dummy.clone(),
+        };
+
+        (left_pass, right_pass)
+    }
+
+    /// Consume this regioned write-pass, possibly yielding the parent region back.
+    ///
+    /// If all other split descendents of the parent write pass have been dropped or consumed,
+    /// this will return a region equivalent to the parent's.
+    pub fn consume(self) -> Option<Self> {
+        let Some(ref parent) = self.parent else {
+            return None;
+        };
+
+        if parent.remaining_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            // SAFETY: synchronize in case other children are from other threads.
+            self.read_propagated_writes();
+
+            Some(RegionedWritePass {
+                parent: parent.parent.clone(),
+                region: parent.region.clone(),
+                read_pass: self.read_pass.clone(),
+                sync_dummy: self.sync_dummy.clone(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl<R> RegionedWritePass<R> {
+    fn propagate_writes(&self) {
+        self.sync_dummy.fetch_add(1, Ordering::Release);
+    }
+
+    fn read_propagated_writes(&self) {
+        self.sync_dummy.fetch_add(1, Ordering::Acquire);
+    }
+}
+
+impl<R> Drop for RegionedWritePass<R> {
+    fn drop(&mut self) {
+        if let Some(ref parent) = self.parent {
+            parent.remaining_count.fetch_sub(1, Ordering::Relaxed);
+        }
+
+        // SAFETY: dropping this region can lead to it being reclaimed
+        // by a sibling.
+        self.propagate_writes();
     }
 }
