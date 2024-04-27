@@ -250,8 +250,8 @@ impl Nomt {
         self.shared.lock().root = cursor.node();
         tx.write_root(new_root);
 
-        self.page_cache.commit(cursor, &mut tx);
-        self.store.commit(tx)?;
+        self.page_cache.commit(cursor, tx);
+        //self.store.commit(tx)?;
         Ok((new_root, witness, witnessed))
     }
 }

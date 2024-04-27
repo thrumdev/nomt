@@ -4,7 +4,7 @@ use crate::{
     store::{Store, Transaction},
     Options,
 };
-use bitvec::prelude::*;
+use bitvec::{prelude::*, slice::BitSliceIndex};
 use dashmap::{mapref::entry::Entry, DashMap};
 use fxhash::FxBuildHasher;
 use nomt_core::{
@@ -14,7 +14,14 @@ use nomt_core::{
     trie_pos::{ChildNodeIndices, TriePosition},
 };
 use parking_lot::{Condvar, Mutex};
-use std::{fmt, mem, sync::Arc};
+use std::{
+    cell::RefCell,
+    fmt, mem,
+    sync::{
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use threadpool::ThreadPool;
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
@@ -261,8 +268,30 @@ struct Shared {
     ///
     /// Used for limiting the number of concurrent page fetches.
     fetch_tp: ThreadPool,
+    /// The thread pool used for committing pages to store.
+    commit_tp: ThreadPool,
+    /// Pointer to the chached map who act as current overlay.
+    cached_index: Arc<AtomicU8>,
     /// The pages loaded from the store, possibly dirty.
-    cached: DashMap<PageId, PageState, FxBuildHasher>,
+    cached: [DashMap<PageId, PageState, FxBuildHasher>; 2],
+}
+
+impl Shared {
+    pub fn cached(&self) -> &DashMap<PageId, PageState, FxBuildHasher> {
+        &self.cached[self.cached_index.load(Ordering::Relaxed) as usize]
+    }
+
+    pub fn overlay(&self) -> &DashMap<PageId, PageState, FxBuildHasher> {
+        let overlay_index = (self.cached_index.load(Ordering::Relaxed) + 1) % 2;
+        &self.cached[overlay_index as usize]
+    }
+
+    pub fn move_cached(&self) -> usize {
+        let new_cached_index = (self.cached_index.load(Ordering::Relaxed) + 1) % 2;
+        self.cached_index
+            .swap(new_cached_index, Ordering::Relaxed)
+            .into()
+    }
 }
 
 impl PageCache {
@@ -272,12 +301,24 @@ impl PageCache {
             .num_threads(o.fetch_concurrency)
             .thread_name("nomt-page-fetch".to_string())
             .build();
+        let commit_tp = threadpool::Builder::new()
+            .num_threads(o.fetch_concurrency)
+            .thread_name("nomt-page-commit".to_string())
+            .build();
+
+        // TODO: possibly spawn a timer
+
         Self {
             shared: Arc::new(Shared {
                 page_rw_pass_domain: RwPassDomain::new(),
-                cached: DashMap::with_hasher(FxBuildHasher::default()),
+                cached: [
+                    DashMap::with_hasher(FxBuildHasher::default()),
+                    DashMap::with_hasher(FxBuildHasher::default()),
+                ],
+                cached_index: Arc::new(AtomicU8::new(0)),
                 store,
                 fetch_tp,
+                commit_tp,
             }),
         }
     }
@@ -287,7 +328,29 @@ impl PageCache {
     /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
     /// page from the underlying store and caches it.
     pub fn prepopulate(&self, page_id: PageId) {
-        if let Entry::Vacant(v) = self.shared.cached.entry(page_id.clone()) {
+        if let Entry::Vacant(v) = self.shared.cached().entry(page_id.clone()) {
+            // fetch from the overly before star the inflight request
+            if let Entry::Occupied(page_state) = self.shared.overlay().entry(page_id.clone()) {
+                let PageState::Cached(ref page_data) = page_state.get() else {
+                    panic!("there must be only cached page in the overlay");
+                };
+
+                // TODO: is this read pass correct?
+                //let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
+                //let page_data = page.data.read(&read_pass);
+                //let page_data = page_data.as_ref().map(|v| &v[..]).unwrap();
+
+                //let page_data = Arc::new(PageData::pristine_with_data(
+                //    &self.shared.page_rw_pass_domain,
+                //    page_data.to_vec(),
+                //));
+
+                v.insert(PageState::Cached(page_data.clone()));
+                //println!("Prepopulate: page present in OVERLAY");
+                //println!("Prepopulate: page written into cached");
+                return;
+            };
+
             // Nope, then we need to fetch the page from the store.
             let inflight = Arc::new(InflightFetch::new());
             v.insert(PageState::Inflight(inflight.clone()));
@@ -311,7 +374,7 @@ impl PageCache {
 
                     // Unwrap: the operation was inserted above. It is scheduled for execution only
                     // once. It may removed only in the line below. Therefore, `None` is impossible.
-                    let mut page_state_guard = shared.cached.get_mut(&page_id).unwrap();
+                    let mut page_state_guard = shared.cached().get_mut(&page_id).unwrap();
                     let page_state = page_state_guard.value_mut();
 
                     if let PageState::Cached(_) = page_state {
@@ -329,6 +392,7 @@ impl PageCache {
             };
             self.shared.fetch_tp.execute(task);
         }
+        //println!("Prepopulate: page present in CACHED");
     }
 
     /// Pre-empt a previously submitted prepopulation request on a best-effort basis by returning
@@ -338,7 +402,7 @@ impl PageCache {
     /// This is not guaranteed to cancel the request if it is already being processed by a
     /// DB thread.
     pub fn cancel_prepopulate(&self, page_id: PageId) {
-        let Some(mut page_state_guard) = self.shared.cached.get_mut(&page_id) else {
+        let Some(mut page_state_guard) = self.shared.cached().get_mut(&page_id) else {
             return;
         };
         let page_state = page_state_guard.value_mut();
@@ -364,8 +428,9 @@ impl PageCache {
     ///
     /// This method is blocking, but doesn't suffer from the channel overhead.
     pub fn retrieve_sync(&self, page_id: PageId, hint_fresh: bool) -> Page {
-        let maybe_inflight = match self.shared.cached.entry(page_id.clone()) {
+        let maybe_inflight = match self.shared.cached().entry(page_id.clone()) {
             Entry::Occupied(mut o) => {
+                //println!("Retrieve: page found in CACHED");
                 let page = o.get_mut();
                 match page {
                     PageState::Cached(ref page) => {
@@ -394,7 +459,9 @@ impl PageCache {
                 }
             }
             Entry::Vacant(v) => {
+                //println!("Retrieve: NOT page found in cached");
                 if hint_fresh {
+                    //println!("Retrieve: hint_fresh");
                     let page_data =
                         Arc::new(PageData::pristine_empty(&self.shared.page_rw_pass_domain));
                     let page = Page {
@@ -403,6 +470,32 @@ impl PageCache {
                     v.insert(PageState::Cached(page_data));
                     return page;
                 }
+
+                // before going into storage let's check the previous overlay
+                if let Entry::Occupied(page_state) = self.shared.overlay().entry(page_id.clone()) {
+                    panic!("this should never been reached");
+                    //println!("Retrieve: FOUND IN  page found in OVERLAY -> it should never happen");
+                    let PageState::Cached(ref page_data) = page_state.get() else {
+                        panic!("there must be only cached page in the overlay");
+                    };
+
+                    // TODO: is this read pass correct?
+                    //let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
+                    //let page_data = page.data.read(&read_pass);
+                    //let page_data = page_data.as_ref().map(|v| &v[..]).unwrap();
+
+                    //let page_data = Arc::new(PageData::pristine_with_data(
+                    //    &self.shared.page_rw_pass_domain,
+                    //    page_data.to_vec(),
+                    //));
+
+                    let page = Page {
+                        inner: page_data.clone(),
+                    };
+                    v.insert(PageState::Cached(page_data.clone()));
+                    return page;
+                };
+
                 v.insert(PageState::Inflight(Arc::new(InflightFetch::new())));
                 None
             }
@@ -425,7 +518,7 @@ impl PageCache {
         let entry = Arc::new(entry);
 
         // UNWRAP: we inserted a value into the map which cannot have been evicted in the meantime.
-        let mut page_state_guard = self.shared.cached.get_mut(&page_id).unwrap();
+        let mut page_state_guard = self.shared.cached().get_mut(&page_id).unwrap();
         let page_state = page_state_guard.value_mut();
 
         if let PageState::Cached(page_data) = page_state {
@@ -458,25 +551,48 @@ impl PageCache {
     /// Flushes all the dirty pages into the underlying store.
     ///
     /// After the commit, all the dirty pages are cleared.
-    pub fn commit(&self, cursor: PageCacheCursor, tx: &mut Transaction) {
-        let (dirty_pages, mut write_pass) = cursor.finish_write();
-        for page_id in dirty_pages {
-            // Unwrap: the invariant is that all items from `dirty` are present in the `cached` and
-            // thus cannot be `None`.
-            let page_state = self
-                .shared
-                .cached
-                .get_mut(&page_id)
-                .expect("a dirty page is not in the cache");
-            let page_state = page_state.value();
-            if let PageState::Cached(ref page) = *page_state {
-                let page_data = page.data.read(write_pass.downgrade());
-                let page_data = page_data.as_ref().map(|v| &v[..]);
-                tx.write_page(page_id, page_data.filter(|p| !page_is_empty(p)));
-            } else {
-                panic!("dirty page is inflight");
+    pub fn commit(&self, cursor: PageCacheCursor, mut tx: Transaction) {
+        // wait on previous commit to be finished
+        //println!("waiting on previous commit");
+        self.shared.commit_tp.join();
+
+        let (dirty_pages, _) = cursor.finish_write();
+        //let frozen_overlay = dbg!(self.shared.move_cached());
+        let frozen_overlay = self.shared.move_cached();
+
+        let task = {
+            let shared = self.shared.clone();
+            move || {
+                // TODO: probably this read pass is wrong
+                let read_pass = shared.page_rw_pass_domain.new_read_pass();
+                for page_id in dirty_pages {
+                    // Unwrap: the invariant is that all items from `dirty` are present in the `cached` and
+                    // thus cannot be `None`.
+                    let page_state = shared.cached[frozen_overlay as usize]
+                        .get_mut(&page_id)
+                        .expect("a dirty page is not in the cache");
+                    let page_state = page_state.value();
+                    if let PageState::Cached(ref page) = *page_state {
+                        let page_data = page.data.read(&read_pass);
+                        let page_data = page_data.as_ref().map(|v| &v[..]);
+                        tx.write_page(page_id, page_data.filter(|p| !page_is_empty(p)));
+                    } else {
+                        panic!("dirty page is inflight");
+                    }
+                }
+
+                //TODO: handle error
+                shared.store.commit(tx).unwrap();
+                shared.cached[frozen_overlay as usize].clear();
+
+                //println!(
+                //    "overlay: {} all written into storage and cleared",
+                //    frozen_overlay
+                //)
             }
-        }
+        };
+
+        self.shared.commit_tp.execute(task);
     }
 }
 

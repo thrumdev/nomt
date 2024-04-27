@@ -2045,6 +2045,7 @@ dependencies = [
  "anyhow",
  "bitvec",
  "blake3",
+ "crossbeam-channel",
  "dashmap",
  "fxhash",
  "nomt-core",
