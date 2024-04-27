@@ -20,6 +20,7 @@ bitvec = { version = "1" }
 blake3 = "1.5.1"
 fxhash = "0.2.1"
 dashmap = "5.5.3"
+crossbeam = "0.8.4"
 
 [dev-dependencies]
 rand = "0.8.5"

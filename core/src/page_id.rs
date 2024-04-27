@@ -22,7 +22,16 @@ const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
 ]);
 
 /// A unique ID for a page.
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+///
+/// # Ordering
+///
+/// Page IDs are ordered "depth-first" such that:
+///  - An ID is always less than its child IDs.
+///  - An ID's child IDs are ordered ascending by child index.
+///  - An ID's child IDs are always less than any sibling IDs to the right of the ID.
+///
+/// This property lets us refer to sub-trees cleanly with simple ordering statements.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd)]
 pub struct PageId {
     path: ArrayVec<u8, 42>,
 }
