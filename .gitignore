@@ -12,6 +12,7 @@ profile.json
 /nomt/test
 
 # xtask
+/benchtop/regression.toml
 /benchtop/sov_db*
 /benchtop/nomt_db*
 /benchtop/sp_trie_db*

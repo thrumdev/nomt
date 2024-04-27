@@ -1,65 +1,89 @@
-use crate::{
-    backend::Backend,
-    cli::bench::{BenchType, CommonParams, IsolateParams, SequentialParams},
-    timer::Timer,
-    workload,
-    workload::Workload,
-};
+use crate::{backend::Backend, cli::bench::BenchType, timer::Timer, workload, workload::Workload};
 use anyhow::Result;
 
 pub fn bench(bench_type: BenchType) -> Result<()> {
-    match bench_type {
-        BenchType::Isolate(params) => bench_isolate(params),
-        BenchType::Sequential(params) => bench_sequential(params),
-    }
-}
+    let common_params = match bench_type {
+        BenchType::Isolate(ref params) => &params.common_params,
+        BenchType::Sequential(ref params) => &params.common_params,
+    };
 
-fn get_workload_and_backends(params: CommonParams) -> Result<(Workload, Vec<Backend>)> {
     let workload = workload::parse(
-        params.workload.name.as_str(),
-        params.workload.size,
-        params
+        common_params.workload.name.as_str(),
+        common_params.workload.size,
+        common_params
             .workload
             .initial_capacity
             .map(|s| 1u64 << s)
             .unwrap_or(0),
-        params.workload.percentage_cold,
+        common_params.workload.percentage_cold,
     )?;
 
-    let backends = if params.backends.is_empty() {
+    let backends = if common_params.backends.is_empty() {
         Backend::all_backends()
     } else {
-        params.backends
+        common_params.backends.clone()
     };
 
-    Ok((workload, backends))
+    match bench_type {
+        BenchType::Isolate(params) => {
+            bench_isolate(workload, backends, params.iterations, true).map(|_| ())
+        }
+        BenchType::Sequential(params) => {
+            bench_sequential(workload, backends, params.op_limit, params.time_limit, true)
+                .map(|_| ())
+        }
+    }
 }
 
-pub fn bench_isolate(params: IsolateParams) -> Result<()> {
-    let (workload, backends) = get_workload_and_backends(params.common_params)?;
-
+// Benchmark the workload across multiple backends multiple times.
+// Each iteration will be executed on a freshly initialized database.
+//
+// Return the mean execution time of the workloads for each backends
+// in the order the backends are provided
+pub fn bench_isolate(
+    workload: Workload,
+    backends: Vec<Backend>,
+    iterations: u64,
+    print: bool,
+) -> Result<Vec<u64>> {
+    let mut mean_results = vec![];
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
         let mut backend_instance = backend.instantiate(true);
 
         workload.init(&mut backend_instance);
 
-        for _ in 0..params.iterations {
+        for _ in 0..iterations {
             workload.run(&mut backend_instance, Some(&mut timer), true);
         }
 
-        timer.print();
+        if print {
+            timer.print();
+        }
+        mean_results.push(timer.get_mean_workload_duration()?);
     }
 
-    Ok(())
+    Ok(mean_results)
 }
 
-pub fn bench_sequential(params: SequentialParams) -> Result<()> {
-    let (workload, backends) = get_workload_and_backends(params.common_params)?;
-
-    if let (None, None) = (params.op_limit, params.time_limit) {
+// Benchmark the workload across multiple backends multiple times.
+// Each iteration will be executed on the same db repeatedly
+// without clearing it until a time or operation count limit is reaced.
+//
+// Return the mean execution time of the workloads for each backends
+// in the order the backends are provided
+pub fn bench_sequential(
+    workload: Workload,
+    backends: Vec<Backend>,
+    op_limit: Option<u64>,
+    time_limit: Option<u64>,
+    print: bool,
+) -> Result<Vec<u64>> {
+    if let (None, None) = (op_limit, time_limit) {
         anyhow::bail!("You need to specify at least one limiter between operations and time")
     }
+
+    let mut mean_results = vec![];
 
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
@@ -75,20 +99,23 @@ pub fn bench_sequential(params: SequentialParams) -> Result<()> {
 
             // check if time limit exceeded
             elapsed_time += timer.get_last_workload_duration()?;
-            match params.time_limit {
+            match time_limit {
                 Some(limit) if elapsed_time >= (limit * 1000000) => break,
                 _ => (),
             };
 
             // check if op limit exceeded
             op_count += workload.run_actions.len() as u64;
-            match params.op_limit {
+            match op_limit {
                 Some(limit) if op_count >= limit => break,
                 _ => (),
             };
         }
 
-        timer.print();
+        if print {
+            timer.print();
+        }
+        mean_results.push(timer.get_mean_workload_duration()?);
     }
-    Ok(())
+    Ok(mean_results)
 }
