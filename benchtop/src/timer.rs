@@ -52,6 +52,15 @@ impl Timer {
             .value_iterated_to())
     }
 
+    pub fn get_mean_workload_duration(&self) -> anyhow::Result<u64> {
+        Ok(self
+            .spans
+            .get("workload")
+            .ok_or(anyhow::anyhow!("`workload` span not recordered"))?
+            .borrow()
+            .mean() as u64)
+    }
+
     pub fn print(&mut self) {
         println!("{}", self.name);
 
@@ -79,7 +88,7 @@ impl Timer {
     }
 }
 
-fn pretty_display_ns(ns: u64) -> String {
+pub fn pretty_display_ns(ns: u64) -> String {
     // preserve 3 sig figs at minimum.
     let (val, unit) = if ns > 100 * 1_000_000_000 {
         (ns / 1_000_000_000, "s")

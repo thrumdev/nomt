@@ -16,6 +16,7 @@ use anyhow::Result;
 //
 // Each workload will set up the DB differently and reads and writes arbitrarily,
 // whether the key is not present or already present.
+#[derive(Clone)]
 pub struct Workload {
     pub init_actions: Vec<Action>,
     pub run_actions: Vec<Action>,

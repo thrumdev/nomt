@@ -18,6 +18,8 @@ rand = "0.8.5"
 rand_pcg = "0.3.1"
 sha2 = { version = "0.10.6" }
 ruint = { version = "1.12.1" }
+toml = "0.8.12"
+serde = "1.0.199"
 
 # sov-db
 sov-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }
