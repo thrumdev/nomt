@@ -3,6 +3,7 @@ mod bench;
 mod cli;
 mod custom_workload;
 mod nomt;
+mod regression;
 mod sov_db;
 mod sp_trie;
 mod timer;
@@ -21,6 +22,7 @@ pub fn main() -> Result<()> {
         Commands::Bench(params) => bench::bench(params),
         Commands::Init(params) => init(params),
         Commands::Run(params) => run(params),
+        Commands::Regression(params) => regression::regression(params),
     }
 }
 

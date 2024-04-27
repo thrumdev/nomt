@@ -27,6 +27,29 @@ pub enum Commands {
     /// If the NOMT's database is not there, it will start with an empty database;
     /// otherwise, it will use the already present one.
     Run(WorkloadParams),
+
+    /// Check regression over multiple workloads
+    ///
+    /// Load a TOML file containing multiple workloads specifications
+    /// and their mean execution time, re-execute all the workloads,
+    /// and compare the results.
+    ///
+    /// Example of entry in the toml file:
+    ///
+    /// [workloads.<name_of_workload>] {n}
+    /// name = "randr" {n}
+    /// size = 25000 {n}
+    /// initial_capacity = 20 {n}
+    /// # then you can specify isolate {n}
+    /// [workloads.random_read_20.isolate] {n}
+    /// iterations = 10 {n}
+    /// mean = 909901824 # mean in ns to be compared with {n}
+    /// # or sequential (or both){n}
+    /// [workloads.random_read_20.sequential] {n}
+    /// time_limit = 100000 # in nanoseconds {n}
+    /// op_limit = 100 {n}
+    /// mean = 909901824 {n}
+    Regression(regression::Params),
 }
 
 impl Display for Backend {
@@ -141,5 +164,16 @@ pub mod bench {
         #[clap(default_value = "10")]
         #[arg(long, short)]
         pub iterations: u64,
+    }
+}
+
+pub mod regression {
+    use super::Args;
+
+    #[derive(Debug, Args)]
+    pub struct Params {
+        /// Path to the toml file
+        #[arg(long, short)]
+        pub input_file: String,
     }
 }
