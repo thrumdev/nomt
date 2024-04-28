@@ -198,17 +198,37 @@ impl<T, Id> RwPassCell<T, Id> {
     /// Returns a handle to write the value. Requires showing a regioned write pass.
     ///
     /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell or
-    /// the value's ID is not contained within the region.
+    /// the value's ID is not contained within the region exclusively.
     #[allow(unused)] // TODO: parallel update will use this
     pub fn write_regioned<'a, 'pass, R: Region<Id = Id> + Clone>(
         &'a self,
         regioned_write_pass: &'pass mut RegionedWritePass<R>,
     ) -> WriteGuard<'a, 'pass, T> {
         self.check_domain(&regioned_write_pass.read_pass.domain);
-        assert!(regioned_write_pass.region().contains(&self.id));
+        assert_eq!(
+            regioned_write_pass.region().contains(&self.id),
+            Some(RegionContains::ReadWrite),
+        );
         WriteGuard {
             inner: &self.inner,
             _write_pass: PhantomData,
+        }
+    }
+
+    /// Returns a handle to read the value. Requires showing a regioned write pass.
+    ///
+    /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell or
+    /// the value's ID is not contained within the region for read access.
+    #[allow(unused)] // TODO: parallel update will use this
+    pub fn read_regioned<'a, 'pass, R: Region<Id = Id> + Clone>(
+        &'a self,
+        regioned_write_pass: &'pass mut RegionedWritePass<R>,
+    ) -> ReadGuard<'a, 'pass, T> {
+        self.check_domain(&regioned_write_pass.read_pass.domain);
+        assert!(regioned_write_pass.region().contains(&self.id).is_some());
+        ReadGuard {
+            inner: &self.inner,
+            _read_pass: PhantomData,
         }
     }
 
@@ -302,11 +322,21 @@ impl<'a, 'pass, T> DerefMut for WriteGuard<'a, 'pass, T> {
     }
 }
 
+/// In what way a region contains a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionContains {
+    /// Read-only (shared) access.
+    Read,
+    /// Read and Write (exclusive) access.
+    ReadWrite,
+}
+
 /// `Region`s indicate a range of data identifiers. This trait is unsafe because the memory safety
 /// of [`RegionedWritePass`] depends on the results of its functions.
 ///
 /// Safely implementing this trait means correctly implementing the functions and choosing an ID
-/// type which cannot break the invariants of the trait.
+/// type which cannot break the invariants of the trait. Plain-Old Data types which do not support
+/// interior mutability are good choices for ID.
 pub unsafe trait Region {
     /// The ID type this region spans.
     type Id;
@@ -315,8 +345,8 @@ pub unsafe trait Region {
     ///
     /// # Safety
     ///
-    /// This region must encompass all other regions, intersect all other regions, and contain
-    /// all values.
+    /// This region must encompass all other regions, exclude all other regions, and contain
+    /// all values for write access.
     fn universe() -> Self;
 
     /// Whether the region contains a value.
@@ -325,23 +355,26 @@ pub unsafe trait Region {
     ///
     /// If this function is ever invoked with an ID, it must return the same result whenever it is
     /// called in the future.
-    fn contains(&self, value: &Self::Id) -> bool;
+    fn contains(&self, value: &Self::Id) -> Option<RegionContains>;
 
     /// Whether the region completely encompasses another region.
     ///
     /// # Safety
     ///
     /// If this returns true, then it must be the case that this region contains every ID the other
-    /// region does.
+    /// region does, for both shared and exclusive access.
     fn encompasses(&self, other: &Self) -> bool;
 
-    /// Whether the region has no overlaps with another region.
+    /// Whether the region has no exclusive access overlaps with another region.
     ///
     /// # Safety
     ///
-    /// If this returns true, then it must be the case that this region does not contains any ID
-    /// the other region does, and vice versa.
-    fn excludes(&self, other: &Self) -> bool;
+    /// If this returns true, then it must be the case that this region does not contain any ID
+    /// for exclusive access that the other region contains at all, and vice versa.
+    ///
+    /// It is safe for both regions to have read-only access to an ID as long as neither
+    /// has write access to it.
+    fn excludes_unique(&self, other: &Self) -> bool;
 }
 
 struct ParentRegionedWritePass<R> {
@@ -433,7 +466,10 @@ impl<R: Region + Clone> RegionedWritePass<R> {
     pub fn split(mut self, left: R, right: R) -> (Self, Self) {
         assert!(self.region.encompasses(&left));
         assert!(self.region.encompasses(&right));
-        assert!(left.excludes(&right), "left and right regions overlap");
+        assert!(
+            left.excludes_unique(&right),
+            "left and right regions overlap"
+        );
 
         let new_parent = Arc::new(ParentRegionedWritePass {
             parent: self.parent.take(),
