@@ -49,7 +49,7 @@ pub const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
 ///
 /// Each page can be thought of a root-less binary tree. The leaves of that tree are roots of
 /// subtrees stored in subsequent pages. There are 64 (2^[`DEPTH`]) children in each page.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ChildPageIndex(u8);
 
 impl ChildPageIndex {
@@ -145,6 +145,21 @@ impl PageId {
         let mut path = self.path.clone();
         let _ = path.pop();
         PageId { path }
+    }
+
+    /// Whether this page is a descendant of the other.
+    pub fn is_descendant_of(&self, other: &PageId) -> bool {
+        self.path.starts_with(&other.path)
+    }
+
+    /// Get the maximum descendant of this page.
+    pub fn max_descendant(&self) -> PageId {
+        let mut page_id = self.clone();
+        while page_id.path.len() < 42 {
+            page_id.path.push(MAX_CHILD_INDEX);
+        }
+
+        page_id
     }
 }
 
