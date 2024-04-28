@@ -22,7 +22,16 @@ const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
 ]);
 
 /// A unique ID for a page.
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+///
+/// # Ordering
+///
+/// Page IDs are ordered "depth-first" such that:
+///  - An ID is always less than its child IDs.
+///  - An ID's child IDs are ordered ascending by child index.
+///  - An ID's child IDs are always less than any sibling IDs to the right of the ID.
+///
+/// This property lets us refer to sub-trees cleanly with simple ordering statements.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageId {
     path: ArrayVec<u8, 42>,
 }
@@ -324,6 +333,53 @@ mod tests {
         for _ in 0..42 {
             low = child_page_id(&low, 0).unwrap();
             high = child_page_id(&high, MAX_CHILD_INDEX).unwrap();
+        }
+    }
+
+    #[test]
+    fn page_id_sibling_order() {
+        let root_page = ROOT_PAGE_ID;
+        let mut last_child = None;
+        for i in 0..=MAX_CHILD_INDEX {
+            let child = root_page.child_page_id(ChildPageIndex(i)).unwrap();
+            assert!(child > root_page);
+
+            if let Some(last) = last_child.take() {
+                assert!(child > last);
+            }
+            last_child = Some(child);
+        }
+    }
+
+    #[test]
+    fn page_max_descendants_all_less_than_right_sibling() {
+        let sibling_left = ROOT_PAGE_ID.child_page_id(ChildPageIndex(0)).unwrap();
+        let sibling_right = ROOT_PAGE_ID.child_page_id(ChildPageIndex(1)).unwrap();
+
+        let mut left_descendant = sibling_left.clone();
+        loop {
+            left_descendant = match left_descendant.child_page_id(ChildPageIndex(MAX_CHILD_INDEX)) {
+                Err(_) => break,
+                Ok(d) => d,
+            };
+
+            assert!(left_descendant < sibling_right);
+        }
+    }
+
+    #[test]
+    fn page_min_descendants_all_greater_than_left_sibling() {
+        let sibling_left = ROOT_PAGE_ID.child_page_id(ChildPageIndex(0)).unwrap();
+        let sibling_right = ROOT_PAGE_ID.child_page_id(ChildPageIndex(1)).unwrap();
+
+        let mut right_descendant = sibling_right.clone();
+        loop {
+            right_descendant = match right_descendant.child_page_id(ChildPageIndex(0)) {
+                Err(_) => break,
+                Ok(d) => d,
+            };
+
+            assert!(right_descendant > sibling_left);
         }
     }
 }
