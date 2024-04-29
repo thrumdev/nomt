@@ -169,8 +169,12 @@ pub mod regression {
 
     #[derive(Debug, Args)]
     pub struct Params {
-        /// Path to the toml file
+        /// Path to the toml file containing workloads info
         #[arg(long, short)]
-        pub input_file: String,
+        pub input_file: Option<String>,
+
+        /// Optional path file where results will be stored
+        #[arg(long, short)]
+        pub output_file: Option<String>,
     }
 }
