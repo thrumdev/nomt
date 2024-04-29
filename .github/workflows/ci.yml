@@ -7,6 +7,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
   build_and_test:
     name: NOMT  - latest
@@ -16,3 +19,34 @@ jobs:
       - run: rustup update stable && rustup default stable
       - run: cargo build --verbose --workspace
       - run: cargo test --verbose --workspace
+
+  regression:
+    if: github.event_name == 'pull_request'
+    name: NOMT regression
+    runs-on: ubuntu-latest
+    steps:
+      - run: rustup update stable && rustup default stable
+
+      # checkout to pr's base branch
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+
+      # run benchmarks and save results into ../regression_base.toml
+      - run: cargo run --manifest-path=benchtop/Cargo.toml --release -- regression -o ../regression_base.toml
+
+      # checkout to pr's head branch
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      # run benchmarks from ../regression_base.toml and compare to them
+      - run: cargo run --manifest-path=benchtop/Cargo.toml --release -- regression -i ../regression_base.toml > regression_outcome
+
+      # publish a pr comment with the regression results
+      - uses: thollander/actions-comment-pull-request@v2
+        with:
+          filePath: regression_outcome
+          comment_tag: execution
