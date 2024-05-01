@@ -133,14 +133,16 @@ impl PageRegion {
         }
     }
 
-    fn exclusive_min(&self) -> PageId {
+    /// Get the page ID which marks the beginning of the exclusive range.
+    pub fn exclusive_min(&self) -> PageId {
         match self.exclusive_min {
             None => self.path.clone(),
             Some(ref min) => min.clone(),
         }
     }
 
-    fn exclusive_max(&self) -> PageId {
+    /// Get the page ID which marks the end of the exclusive range.
+    pub fn exclusive_max(&self) -> PageId {
         self.exclusive_max.clone()
     }
 }

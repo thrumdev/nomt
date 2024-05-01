@@ -2,6 +2,7 @@
 
 use crate::{
     page_cache::{self, Page, PageCache},
+    page_region::PageRegion,
     rw_pass_cell::ReadPass,
 };
 use bitvec::prelude::*;
@@ -35,6 +36,8 @@ pub struct Seek {
     pub terminal: Option<trie::LeafData>,
     /// The trie position encountered.
     pub position: TriePosition,
+    /// The page ID where the trie position is located. None if at root.
+    pub page_id: Option<PageId>,
 }
 
 impl Seek {
@@ -47,31 +50,27 @@ impl Seek {
 /// A [`Seeker`] can be used to seek for keys in the trie.
 pub struct Seeker {
     cache: PageCache,
-    read_pass: ReadPass,
     root: Node,
 }
 
 impl Seeker {
     /// Create a new Seeker, given the cache, page read pass, and a root node.
-    pub fn new(root: Node, cache: PageCache, read_pass: ReadPass) -> Self {
-        Seeker {
-            cache,
-            read_pass,
-            root,
-        }
+    pub fn new(root: Node, cache: PageCache) -> Self {
+        Seeker { cache, root }
     }
 
     fn read_leaf_children(
         &self,
         trie_pos: &TriePosition,
         current_page: Option<&(PageId, Page)>,
+        read_pass: &ReadPass<PageRegion>,
     ) -> trie::LeafData {
         let (page, _, children) = page_cache::locate_leaf_data(trie_pos, current_page, |page_id| {
             self.cache.retrieve_sync(page_id, false)
         });
         trie::LeafData {
-            key_path: page.node(&self.read_pass, children.left()),
-            value_hash: page.node(&self.read_pass, children.right()),
+            key_path: page.node(&read_pass, children.left()),
+            value_hash: page.node(&read_pass, children.right()),
         }
     }
 
@@ -80,6 +79,7 @@ impl Seeker {
         bit: bool,
         pos: &mut TriePosition,
         cur_page: &mut Option<(PageId, Page)>,
+        read_pass: &ReadPass<PageRegion>,
     ) -> (Node, Node) {
         if pos.depth() as usize % DEPTH == 0 {
             // attempt to load next page if we are at the end of our previous page or the root.
@@ -99,8 +99,8 @@ impl Seeker {
         let page = &cur_page.as_ref().unwrap().1;
 
         (
-            page.node(&self.read_pass, pos.node_index()),
-            page.node(&self.read_pass, pos.sibling_index()),
+            page.node(&read_pass, pos.node_index()),
+            page.node(&read_pass, pos.sibling_index()),
         )
     }
 
@@ -108,7 +108,12 @@ impl Seeker {
     /// all pages.
     ///
     /// This returns a [`Seek`] object encapsulating the results of the seek.
-    pub fn seek(&self, dest: KeyPath, options: SeekOptions) -> Seek {
+    pub fn seek(
+        &self,
+        dest: KeyPath,
+        options: SeekOptions,
+        read_pass: &ReadPass<PageRegion>,
+    ) -> Seek {
         /// The breadth of the prefetch request.
         ///
         /// The number of items we want to request in a single batch.
@@ -118,6 +123,7 @@ impl Seeker {
             siblings: Vec::with_capacity(if options.record_siblings { 32 } else { 0 }),
             terminal: None,
             position: TriePosition::new(),
+            page_id: None,
         };
 
         let mut trie_pos = TriePosition::new();
@@ -126,7 +132,7 @@ impl Seeker {
         if !trie::is_internal(&self.root) {
             // fast path: don't pre-fetch when trie is just a root.
             if trie::is_leaf(&self.root) {
-                result.terminal = Some(self.read_leaf_children(&trie_pos, None));
+                result.terminal = Some(self.read_leaf_children(&trie_pos, None, read_pass));
             };
 
             return result;
@@ -141,7 +147,7 @@ impl Seeker {
         for bit in dest.view_bits::<Msb0>().iter().by_vals() {
             if !trie::is_internal(&cur_node) {
                 if trie::is_leaf(&cur_node) {
-                    let leaf_data = self.read_leaf_children(&trie_pos, page.as_ref());
+                    let leaf_data = self.read_leaf_children(&trie_pos, page.as_ref(), read_pass);
                     if trie_pos.depth() as usize % DEPTH == 0 {
                         // leaf data page was needed.
                         let _ = pending_prefetches.pop();
@@ -159,6 +165,7 @@ impl Seeker {
                 }
 
                 result.position = trie_pos;
+                result.page_id = page.map(|(id, _)| id);
                 return result;
             }
             if trie_pos.depth() as usize % DEPTH == 0 {
@@ -192,7 +199,7 @@ impl Seeker {
                 }
             }
 
-            let (new_node, new_sibling) = self.down(bit, &mut trie_pos, &mut page);
+            let (new_node, new_sibling) = self.down(bit, &mut trie_pos, &mut page, read_pass);
             cur_node = new_node;
             sibling = new_sibling;
 

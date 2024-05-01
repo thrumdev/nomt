@@ -60,7 +60,7 @@ fn produced_witness_validity() {
                 Some(ref v) => {
                     let leaf = LeafData {
                         key_path: read.key,
-                        value_hash: *blake3::hash(&*v).as_bytes(),
+                        value_hash: *v,
                     };
                     assert!(verified.confirm_value(&leaf).unwrap());
                 }
@@ -74,10 +74,7 @@ fn produced_witness_validity() {
             .skip_while(|r| r.path_index != i)
             .take_while(|r| r.path_index == i)
         {
-            write_ops.push((
-                write.key,
-                write.value.as_ref().map(|v| *blake3::hash(&*v).as_bytes()),
-            ));
+            write_ops.push((write.key, write.value.clone()));
         }
 
         if !write_ops.is_empty() {
