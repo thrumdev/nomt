@@ -62,7 +62,6 @@ impl RwPassDomain {
     ///
     /// This enables you to make use of [`RegionedWritePass`] to mutably access multiple cells
     /// simultaneously.
-    #[allow(unused)] // TODO - parallel update will use this.
     pub fn protect_with_id<T, Id>(&self, inner: T, id: Id) -> RwPassCell<T, Id> {
         RwPassCell::new(Arc::downgrade(&self.shared), inner, id)
     }
@@ -77,7 +76,8 @@ impl RwPassDomain {
         let guard = self.shared.read_arc();
         ReadPass {
             domain: self.shared.clone(),
-            _guard: RwGuard::Read(guard),
+            region: UniversalRegion,
+            _guard: Arc::new(RwGuard::Read(guard)),
         }
     }
 
@@ -90,33 +90,12 @@ impl RwPassDomain {
     pub fn new_write_pass(&self) -> WritePass {
         let guard = self.shared.write_arc();
         WritePass {
+            parent: None,
             read_pass: ReadPass {
                 domain: self.shared.clone(),
-                _guard: RwGuard::Write(guard),
+                region: UniversalRegion,
+                _guard: Arc::new(RwGuard::Write(guard)),
             },
-        }
-    }
-
-    /// Create a new regioned write pass.
-    ///
-    /// The pass can be used to access the data within any [`RwPassCell`]s created within this
-    /// domain.
-    ///
-    /// Furthermore, the pass can be split recursively into sub-regions, such that each pass
-    /// can read data tagged with an ID that belongs to its respective sub-region.
-    ///
-    /// If there are any read or write passes active, this method will block until they are dropped.
-    #[allow(unused)] // TODO - parallel update will use this.
-    pub fn new_regioned_write_pass<R: Region>(&self) -> RegionedWritePass<R> {
-        let guard = self.shared.write_arc();
-
-        RegionedWritePass {
-            parent: None,
-            region: R::universe(),
-            read_pass: Arc::new(ReadPass {
-                domain: self.shared.clone(),
-                _guard: RwGuard::Write(guard),
-            }),
         }
     }
 }
@@ -126,24 +105,197 @@ enum RwGuard {
     Write(#[allow(unused)] RwLockWriteGuard),
 }
 
+/// The Universal Region contains all IDs of all type but cannot be split.
+#[derive(Debug, Clone, Copy)]
+pub struct UniversalRegion;
+
 /// A token that allows read access to the data within one domain.
-pub struct ReadPass {
+pub struct ReadPass<R = UniversalRegion> {
     domain: Arc<Shared>,
-    _guard: RwGuard,
+    region: R,
+    _guard: Arc<RwGuard>,
+}
+
+impl<R> ReadPass<R> {
+    /// Get the underlying region of the pass.
+    pub fn region(&self) -> &R {
+        &self.region
+    }
+}
+
+struct ParentWritePass<R> {
+    parent: Option<Arc<ParentWritePass<R>>>,
+    region: R,
+    remaining_children: AtomicUsize,
 }
 
 /// A token that allows read-write access to the data within one domain.
-pub struct WritePass {
-    read_pass: ReadPass,
+pub struct WritePass<R = UniversalRegion> {
+    parent: Option<Arc<ParentWritePass<R>>>,
+    read_pass: ReadPass<R>,
 }
 
-impl WritePass {
+impl<R> WritePass<R> {
+    /// Get the underlying region of the pass.
+    pub fn region(&self) -> &R {
+        self.read_pass.region()
+    }
+
     /// Downgrades the write pass to a read pass.
-    pub fn downgrade(&mut self) -> &ReadPass {
+    pub fn downgrade(&mut self) -> &ReadPass<R> {
         // `mut` because otherwise, it will be possible to create an alias.
         &self.read_pass
     }
+
+    /// Wrap this in an envelope to be safely sent across threads.
+    ///
+    /// The [`WritePassEnvelope`] ensures that any writes to memory will be propagated
+    /// to the remote thread before allowing the recipient to read or write.
+    pub fn into_envelope(self) -> WritePassEnvelope<R> {
+        // SAFETY: We release all writes from this thread before sending to another.
+        //
+        //         Arc here is probably overkill and boxing would be fine, but according to the
+        //         rust docs: "A Rust atomic type that is exclusively owned or behind a mutable
+        //         reference does not correspond to an “atomic object” in C++".
+        //         (ref: https://doc.rust-lang.org/stable/std/sync/atomic/index.html)
+        //
+        //         Atomic variables that aren't at a stable reference and furthermore which aren't
+        //         behind a _shared pointer_ are not required to emit atomic instructions. So we
+        //         have to allocate and choose err on the side of caution.
+        let sync_flag = Arc::new(AtomicBool::new(false));
+        sync_flag.store(true, Ordering::Release);
+
+        WritePassEnvelope {
+            inner: self,
+            sync_flag,
+        }
+    }
 }
+
+impl<R: Region + Clone> WritePass<R> {
+    /// Split this write pass into two parts encompassing non-overlapping sub-regions.
+    ///
+    /// The result will be a `(left, right)` tuple corresponding to the input argument regions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the regions overlap with each other or are not encompassed by the region of this
+    /// pass.
+    pub fn split(mut self, left: R, right: R) -> (Self, Self) {
+        assert!(self.region().encompasses(&left));
+        assert!(self.region().encompasses(&right));
+        assert!(
+            left.excludes_unique(&right),
+            "left and right regions overlap"
+        );
+
+        let new_parent = Arc::new(ParentWritePass {
+            parent: self.parent.take(),
+            region: self.region().clone(),
+            remaining_children: AtomicUsize::new(2),
+        });
+
+        let left_pass = WritePass {
+            parent: Some(new_parent.clone()),
+            read_pass: ReadPass {
+                domain: self.read_pass.domain.clone(),
+                region: left,
+                _guard: self.read_pass._guard.clone(),
+            },
+        };
+
+        let right_pass = WritePass {
+            parent: Some(new_parent),
+            read_pass: ReadPass {
+                domain: self.read_pass.domain.clone(),
+                region: right,
+                _guard: self.read_pass._guard.clone(),
+            },
+        };
+
+        (left_pass, right_pass)
+    }
+
+    /// Consume this regioned write-pass, possibly yielding the parent region back.
+    ///
+    /// If all other split descendents of the parent write pass have been dropped or consumed,
+    /// this will return a region equivalent to the parent's.
+    pub fn consume(self) -> Option<Self> {
+        let Some(ref parent) = self.parent else {
+            return None;
+        };
+
+        // SAFETY: release our writes to other threads if _not_ the last sibling.
+        //         acquire writes from other threads if the last sibling.
+        //         the value of '1' must have been written by another thread with `Release`.
+        if parent.remaining_children.fetch_sub(1, Ordering::AcqRel) == 1 {
+            Some(WritePass {
+                parent: parent.parent.clone(),
+                read_pass: ReadPass {
+                    domain: self.read_pass.domain.clone(),
+                    region: parent.region.clone(),
+                    _guard: self.read_pass._guard.clone(),
+                },
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl WritePass<UniversalRegion> {
+    /// Supply a region type.
+    pub fn with_region<R>(self, region: R) -> WritePass<R> {
+        // sanity: UniversalRegion can't be split, so this should never be Some.
+        assert!(self.parent.is_none());
+
+        WritePass {
+            parent: None,
+            read_pass: ReadPass {
+                domain: self.read_pass.domain.clone(),
+                region,
+                _guard: self.read_pass._guard.clone(),
+            },
+        }
+    }
+}
+
+impl<R> Drop for WritePass<R> {
+    fn drop(&mut self) {
+        if let Some(ref parent) = self.parent {
+            // SAFETY: release our writes to other threads.
+            parent.remaining_children.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
+/// A wrapper around a [`WritePass`] which can be sent between threads.
+///
+/// The reason for this type is that `WritePass` is not safe to send between threads.
+pub struct WritePassEnvelope<R = UniversalRegion> {
+    inner: WritePass<R>,
+    sync_flag: Arc<AtomicBool>,
+}
+
+impl<R> WritePassEnvelope<R> {
+    /// Open the envelope, yielding a write pass to be used on another thread.
+    pub fn into_inner(self) -> WritePass<R> {
+        // SAFETY: acquire writes from the sending thread.
+        //         while this is technically a spin loop, it should be rare for it to hang for long,
+        //         since this flag is set before the envelope is even created. so spinning
+        //         at all requires some substantial reordering + unfortunate context switching away
+        //         from the sending thread.
+        while !self.sync_flag.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        self.inner
+    }
+}
+
+/// SAFETY: this is safe to send because we deliberately read propagated writes from other threads
+///         and all regioned write pass drops and envelope creations propagate those writes.
+///         The cell itself protects the data from being sent where not valid.
+unsafe impl<R: Send> Send for WritePassEnvelope<R> {}
 
 /// A cell corresponding with a [`RwPassDomain`]. This may be read and written only with a pass from
 /// the domain.
@@ -173,8 +325,14 @@ impl<T, Id> RwPassCell<T, Id> {
     /// Returns a handle to read the value. Requires showing a read pass.
     ///
     /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell.
-    pub fn read<'a, 'pass>(&'a self, read_pass: &'pass ReadPass) -> ReadGuard<'a, 'pass, T> {
+    /// If this pass is constrained to a specific region, this panics if the item's ID is outside
+    /// of the region's exclusive or non-exclusive access range.
+    pub fn read<'a, 'pass, R: RegionContains<Id>>(
+        &'a self,
+        read_pass: &'pass ReadPass<R>,
+    ) -> ReadGuard<'a, 'pass, T> {
         self.check_domain(&read_pass.domain);
+        assert!(read_pass.region().contains(&self.id));
         ReadGuard {
             inner: &self.inner,
             _read_pass: PhantomData,
@@ -184,51 +342,17 @@ impl<T, Id> RwPassCell<T, Id> {
     /// Returns a handle to write the value. Requires showing a write pass.
     ///
     /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell.
-    pub fn write<'a, 'pass>(
+    /// If this pass is constrained to a specific region, this panics if the item's ID is outside
+    /// of the region's exclusive access range.
+    pub fn write<'a, 'pass, R: RegionContains<Id>>(
         &'a self,
-        write_pass: &'pass mut WritePass,
+        write_pass: &'pass mut WritePass<R>,
     ) -> WriteGuard<'a, 'pass, T> {
         self.check_domain(&write_pass.read_pass.domain);
+        assert!(write_pass.region().contains_exclusive(&self.id));
         WriteGuard {
             inner: &self.inner,
             _write_pass: PhantomData,
-        }
-    }
-
-    /// Returns a handle to write the value. Requires showing a regioned write pass.
-    ///
-    /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell or
-    /// the value's ID is not contained within the region exclusively.
-    #[allow(unused)] // TODO: parallel update will use this
-    pub fn write_regioned<'a, 'pass, R: Region<Id = Id> + Clone>(
-        &'a self,
-        regioned_write_pass: &'pass mut RegionedWritePass<R>,
-    ) -> WriteGuard<'a, 'pass, T> {
-        self.check_domain(&regioned_write_pass.read_pass.domain);
-        assert_eq!(
-            regioned_write_pass.region().contains(&self.id),
-            Some(RegionContains::ReadWrite),
-        );
-        WriteGuard {
-            inner: &self.inner,
-            _write_pass: PhantomData,
-        }
-    }
-
-    /// Returns a handle to read the value. Requires showing a regioned write pass.
-    ///
-    /// Panics if the provided pass belongs to a different [`RwPassDomain`] than the cell or
-    /// the value's ID is not contained within the region for read access.
-    #[allow(unused)] // TODO: parallel update will use this
-    pub fn read_regioned<'a, 'pass, R: Region<Id = Id> + Clone>(
-        &'a self,
-        regioned_write_pass: &'pass mut RegionedWritePass<R>,
-    ) -> ReadGuard<'a, 'pass, T> {
-        self.check_domain(&regioned_write_pass.read_pass.domain);
-        assert!(regioned_write_pass.region().contains(&self.id).is_some());
-        ReadGuard {
-            inner: &self.inner,
-            _read_pass: PhantomData,
         }
     }
 
@@ -250,8 +374,9 @@ impl<T, Id> RwPassCell<T, Id> {
 unsafe impl<T: Send, Id: Sync> Send for RwPassCell<T, Id> {}
 // SAFETY: The RwPasscell is Sync if both the inner value the Id are Sync. The underlying
 //         They may both be read simultaneously from multiple threads if the appropriate passes
-//         are shown.
-unsafe impl<T: Sync, Id: Sync> Sync for RwPassCell<T, Id> {}
+//         are shown. This also requires T to be Send because multiple threads can take mutable
+//         access to the inner type in turn through a shared reference to the cell.
+unsafe impl<T: Sync + Send, Id: Sync> Sync for RwPassCell<T, Id> {}
 
 /// A read guard for the value of an [`RwPassCell`]. This may exist concurrently with other
 /// readers.
@@ -322,41 +447,36 @@ impl<'a, 'pass, T> DerefMut for WriteGuard<'a, 'pass, T> {
     }
 }
 
-/// In what way a region contains a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegionContains {
-    /// Read-only (shared) access.
-    Read,
-    /// Read and Write (exclusive) access.
-    ReadWrite,
-}
-
-/// `Region`s indicate a range of data identifiers. This trait is unsafe because the memory safety
-/// of [`RegionedWritePass`] depends on the results of its functions.
+/// Whether a region contains values or not.
+///
+/// This trait is unsafe because the memory safety of the [`RwPassCell`]
+/// depends on it being implemented accurately, as well as on the Region trait being
+/// implemented correctly.
 ///
 /// Safely implementing this trait means correctly implementing the functions and choosing an ID
 /// type which cannot break the invariants of the trait. Plain-Old Data types which do not support
 /// interior mutability are good choices for ID.
-pub unsafe trait Region {
-    /// The ID type this region spans.
-    type Id;
-
-    /// Create a region which encompasses the entire universe of the type.
-    ///
-    /// # Safety
-    ///
-    /// This region must encompass all other regions, exclude all other regions, and contain
-    /// all values for write access.
-    fn universe() -> Self;
-
-    /// Whether the region contains a value.
+pub unsafe trait RegionContains<Id>: Region {
+    /// Whether the region contains a ID, exclusively or not.
     ///
     /// # Safety
     ///
     /// If this function is ever invoked with an ID, it must return the same result whenever it is
     /// called in the future.
-    fn contains(&self, value: &Self::Id) -> Option<RegionContains>;
+    fn contains(&self, id: &Id) -> bool;
 
+    /// Whether the region contains a ID exclusively.
+    ///
+    /// # Safety
+    ///
+    /// If this function is ever invoked with an ID, it must return the same result whenever it is
+    /// called in the future.
+    fn contains_exclusive(&self, id: &Id) -> bool;
+}
+
+/// `Region`s, in conjunction with the [`RegionContains`] trait, expose a set-like abstraction
+/// over ranges of data identifiers.
+pub trait Region {
     /// Whether the region completely encompasses another region.
     ///
     /// # Safety
@@ -377,150 +497,24 @@ pub unsafe trait Region {
     fn excludes_unique(&self, other: &Self) -> bool;
 }
 
-struct ParentRegionedWritePass<R> {
-    parent: Option<Arc<ParentRegionedWritePass<R>>>,
-    remaining_children: AtomicUsize,
-    region: R,
-}
+// SAFETY: The Universal Region is safe because it has a single value, which does not exclude itself.
+impl Region for UniversalRegion {
+    fn encompasses(&self, _: &UniversalRegion) -> bool {
+        true
+    }
 
-/// A wrapper around a [`RegionedWritePass`] which can be sent between threads.
-///
-/// The reason for this type is that `RegionedWritePass` is not safe to send between threads.
-#[allow(unused)] // TODO - parallel update will use this.
-pub struct RegionedWritePassEnvelope<R> {
-    inner: RegionedWritePass<R>,
-    sync_flag: Arc<AtomicBool>,
-}
-
-#[allow(unused)] // TODO - parallel update will use this.
-impl<R> RegionedWritePassEnvelope<R> {
-    /// Open the envelope, yielding a write pass to be used on another thread.
-    pub fn into_inner(self) -> RegionedWritePass<R> {
-        // SAFETY: acquire writes from the sending thread.
-        //         while this is technically a spin loop, it should be rare for it to hang for long,
-        //         since this flag is set before the envelope is even created. so spinning
-        //         at all requires some substantial reordering + unfortunate context switching away
-        //         from the sending thread.
-        while !self.sync_flag.load(Ordering::Acquire) {
-            std::hint::spin_loop();
-        }
-        self.inner
+    fn excludes_unique(&self, _: &UniversalRegion) -> bool {
+        false
     }
 }
 
-/// SAFETY: this is safe to send because we deliberately read propagated writes from other threads
-///         and all regioned write pass drops and envelope creations propagate those writes.
-unsafe impl<R: Send> Send for RegionedWritePassEnvelope<R> {}
-
-/// A [`RegionedWritePass`] allows for a write pass to be sharded across a dataset based on
-/// by making use of non-overlapping regions.
-///
-/// Use [`RwPassDomain::new_regioned_write_pass`] to create this, and then `split` and `consume`
-/// as needed.
-#[allow(unused)] // TODO - parallel update will use this.
-pub struct RegionedWritePass<R> {
-    parent: Option<Arc<ParentRegionedWritePass<R>>>,
-    region: R,
-    read_pass: Arc<ReadPass>,
-}
-
-#[allow(unused)] // TODO - parallel update will use this.
-impl<R: Region + Clone> RegionedWritePass<R> {
-    /// Get the region associated with this write pass.
-    pub fn region(&self) -> &R {
-        &self.region
+// SAFETY: The Universal Region is safe because it has a single value, which does not exclude itself.
+unsafe impl<Id> RegionContains<Id> for UniversalRegion {
+    fn contains(&self, _: &Id) -> bool {
+        true
     }
 
-    /// Wrap this in an envelope to be safely sent across threads.
-    ///
-    /// The [`RegionedWritePassEnvelope`] ensures that any writes to memory will be propagated
-    /// to the remote thread before allowing the recipient to read or write.
-    pub fn into_envelope(self) -> RegionedWritePassEnvelope<R> {
-        // SAFETY: We release all writes from this thread before sending to another.
-        //
-        //         Arc here is probably overkill and boxing would be fine, but according to the
-        //         rust docs: "A Rust atomic type that is exclusively owned or behind a mutable
-        //         reference does not correspond to an “atomic object” in C++".
-        //         (ref: https://doc.rust-lang.org/stable/std/sync/atomic/index.html)
-        //
-        //         Atomic variables that aren't at a stable reference and furthermore which aren't
-        //         behind a _shared pointer_ are not required to emit atomic instructions. So we
-        //         have to allocate and choose err on the side of caution.
-        let sync_flag = Arc::new(AtomicBool::new(false));
-        sync_flag.store(true, Ordering::Release);
-
-        RegionedWritePassEnvelope {
-            inner: self,
-            sync_flag,
-        }
-    }
-
-    /// Split this write pass into two parts encompassing non-overlapping sub-regions.
-    ///
-    /// The result will be a `(left, right)` tuple corresponding to the input argument regions.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the regions overlap with each other or are not encompassed by the region of this
-    /// pass.
-    pub fn split(mut self, left: R, right: R) -> (Self, Self) {
-        assert!(self.region.encompasses(&left));
-        assert!(self.region.encompasses(&right));
-        assert!(
-            left.excludes_unique(&right),
-            "left and right regions overlap"
-        );
-
-        let new_parent = Arc::new(ParentRegionedWritePass {
-            parent: self.parent.take(),
-            region: self.region.clone(),
-            remaining_children: AtomicUsize::new(2),
-        });
-
-        let left_pass = RegionedWritePass {
-            parent: Some(new_parent.clone()),
-            region: left,
-            read_pass: self.read_pass.clone(),
-        };
-
-        let right_pass = RegionedWritePass {
-            parent: Some(new_parent),
-            region: right,
-            read_pass: self.read_pass.clone(),
-        };
-
-        (left_pass, right_pass)
-    }
-
-    /// Consume this regioned write-pass, possibly yielding the parent region back.
-    ///
-    /// If all other split descendents of the parent write pass have been dropped or consumed,
-    /// this will return a region equivalent to the parent's.
-    pub fn consume(self) -> Option<Self> {
-        let Some(ref parent) = self.parent else {
-            return None;
-        };
-
-        // SAFETY: release our writes to other threads if _not_ the last sibling.
-        //         acquire writes from other threads if the last sibling.
-        //         the value of '1' must have been written by another thread with `Release`.
-        if parent.remaining_children.fetch_sub(1, Ordering::AcqRel) == 1 {
-            Some(RegionedWritePass {
-                parent: parent.parent.clone(),
-                region: parent.region.clone(),
-                read_pass: self.read_pass.clone(),
-            })
-        } else {
-            None
-        }
-    }
-}
-
-impl<R> Drop for RegionedWritePass<R> {
-    fn drop(&mut self) {
-        if let Some(ref parent) = self.parent {
-            // SAFETY: release our writes to other threads.
-            parent.remaining_children.fetch_sub(1, Ordering::Release);
-        }
+    fn contains_exclusive(&self, _: &Id) -> bool {
+        true
     }
 }
