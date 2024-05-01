@@ -145,26 +145,7 @@ impl PageRegion {
 }
 
 /// SAFETY: Page ID has no interior mutability. We have upheld the contract of the trait.
-unsafe impl Region for PageRegion {
-    type Id = PageId;
-
-    // SAFETY: this region encompasses all others, contains all pages exclusively, and excludes
-    //         all others.
-    fn universe() -> Self {
-        PageRegion::universe()
-    }
-
-    // SAFETY: This result is stable as long as `self` and `page_id` remain the same.
-    fn contains(&self, page_id: &PageId) -> Option<RegionContains> {
-        if self.contains_exclusive(page_id) {
-            Some(RegionContains::ReadWrite)
-        } else if self.contains_non_exclusive(page_id) {
-            Some(RegionContains::Read)
-        } else {
-            None
-        }
-    }
-
+impl Region for PageRegion {
     // SAFETY: when this returns true, this region contains every ID the other region does, for
     //         both shared and exclusive access.
     fn encompasses(&self, other: &PageRegion) -> bool {
@@ -174,6 +155,18 @@ unsafe impl Region for PageRegion {
     // SAFETY: this is commutative and ensures mutual exclusion.
     fn excludes_unique(&self, other: &PageRegion) -> bool {
         PageRegion::excludes_unique(self, other)
+    }
+}
+
+/// SAFETY: Page ID has no interior mutability. We have upheld the contract of the trait.
+unsafe impl RegionContains<PageId> for PageRegion {
+    // SAFETY: This result is stable as long as `self` and `page_id` remain the same.
+    fn contains(&self, page_id: &PageId) -> bool {
+        PageRegion::contains_exclusive(self, page_id) || self.contains_non_exclusive(page_id)
+    }
+
+    fn contains_exclusive(&self, page_id: &PageId) -> bool {
+        PageRegion::contains_exclusive(self, page_id)
     }
 }
 
