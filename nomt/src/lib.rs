@@ -3,31 +3,28 @@
 //! A Nearly-Optimal Merkle Trie Database.
 
 use bitvec::prelude::*;
-use dashmap::DashMap;
 use std::{
-    collections::BTreeMap,
     mem,
     path::PathBuf,
     rc::Rc,
     sync::{atomic::AtomicUsize, Arc},
 };
 
+use commit::{CommitPool, Committer};
 use nomt_core::{
     proof::PathProof,
-    trie::{NodeHasher, TERMINATOR},
-    update::VisitedTerminal,
+    trie::{NodeHasher, ValueHash, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
-use seek::{Seek, SeekOptions};
 use store::Store;
-use threadpool::ThreadPool;
 
 // CARGO HACK: silence lint; this is used in integration tests
 
 pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
 
+mod commit;
 mod cursor;
 mod page_cache;
 mod page_region;
@@ -83,8 +80,8 @@ pub struct WitnessedPath {
 pub struct WitnessedRead {
     /// The key of the read value.
     pub key: KeyPath,
-    /// The value itself.
-    pub value: Option<Value>,
+    /// The hash of the value witnessed. None means no value.
+    pub value: Option<ValueHash>,
     /// The index of the path in the corresponding witness.
     pub path_index: usize,
 }
@@ -93,8 +90,8 @@ pub struct WitnessedRead {
 pub struct WitnessedWrite {
     /// The key of the written value.
     pub key: KeyPath,
-    /// The value itelf. `None` means "delete".
-    pub value: Option<Value>,
+    /// The hash of the written value. `None` means "delete".
+    pub value: Option<ValueHash>,
     /// The index of the path in the corresponding witness.
     pub path_index: usize,
 }
@@ -136,6 +133,17 @@ impl KeyReadWrite {
             }
         }
     }
+
+    fn to_compact(&self) -> crate::commit::KeyReadWrite {
+        let hash = |v: &Value| *blake3::hash(v).as_bytes();
+        match self {
+            KeyReadWrite::Read(_) => crate::commit::KeyReadWrite::Read,
+            KeyReadWrite::Write(val) => crate::commit::KeyReadWrite::Write(val.as_ref().map(hash)),
+            KeyReadWrite::ReadThenWrite(_, val) => {
+                crate::commit::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
+            }
+        }
+    }
 }
 
 /// Hash nodes with blake3.
@@ -149,10 +157,10 @@ impl NodeHasher for Blake3Hasher {
 
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt {
+    commit_pool: CommitPool,
     /// The handle to the page cache.
     page_cache: PageCache,
     store: Store,
-    warmup_tp: ThreadPool,
     shared: Arc<Mutex<Shared>>,
     /// The number of active sessions. Expected to be either 0 or 1.
     session_cnt: Arc<AtomicUsize>,
@@ -165,12 +173,9 @@ impl Nomt {
         let page_cache = PageCache::new(store.clone(), &o);
         let root = store.load_root()?;
         Ok(Self {
+            commit_pool: CommitPool::new(o.fetch_concurrency),
             page_cache,
             store,
-            warmup_tp: threadpool::Builder::new()
-                .num_threads(o.fetch_concurrency)
-                .thread_name("nomt-warmup".to_string())
-                .build(),
             shared: Arc::new(Mutex::new(Shared { root })),
             session_cnt: Arc::new(AtomicUsize::new(0)),
         })
@@ -200,8 +205,10 @@ impl Nomt {
             prev_root: self.root(),
             page_cache: self.page_cache.clone(),
             store: self.store.clone(),
-            warmup_tp: self.warmup_tp.clone(),
-            seek_results: Arc::new(DashMap::new()),
+            committer: Some(
+                self.commit_pool
+                    .begin::<Blake3Hasher>(self.page_cache.clone(), self.root()),
+            ),
             session_cnt: self.session_cnt.clone(),
         }
     }
@@ -219,44 +226,52 @@ impl Nomt {
     ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
         // Wait for all warmup tasks to finish. That way, we can be sure that all terminal
         // information is available and that `terminals` would be the only reference.
-        self.warmup_tp.join();
+        let mut compact_actuals = Vec::with_capacity(actuals.len());
+        for (path, read_write) in &actuals {
+            compact_actuals.push((path.clone(), read_write.to_compact()));
+        }
 
-        let prev_root = session.prev_root;
-        // unwrap: since we waited for all warmup tasks to finish, there should be no other
-        // references to `seek_results`.
-        let seek_results = Arc::get_mut(&mut session.seek_results).unwrap();
+        // UNWRAP: committer always `Some` during lifecycle.
+        let commit_handle = session.committer.take().unwrap().commit(compact_actuals);
 
         let mut tx = self.store.new_tx();
-        let mut cursor = self.page_cache.new_write_cursor(prev_root);
-
-        let mut ops = vec![];
-        let mut witness_builder = WitnessBuilder::default();
         for (path, read_write) in actuals {
-            let seek_result = seek_results
-                .remove(&path)
-                .expect("terminal info not found")
-                .1;
             if let KeyReadWrite::Write(ref value) | KeyReadWrite::ReadThenWrite(_, ref value) =
                 read_write
             {
-                let value_hash = value.as_ref().map(|v| *blake3::hash(v).as_bytes());
-                ops.push((path, value_hash));
                 tx.write_value(path, value.as_ref().map(|x| &x[..]));
             }
-            witness_builder.insert(path, seek_result, &read_write);
         }
-        let (witness, witnessed, visited_terminals) = witness_builder.build();
-        ops.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-        nomt_core::update::update::<Blake3Hasher>(&mut cursor, &ops, &visited_terminals);
-        cursor.rewind();
-        let new_root = cursor.node();
-        self.shared.lock().root = cursor.node();
+        let commit = commit_handle.join();
+
+        let new_root = commit.root;
+        self.page_cache
+            .commit(commit.page_diffs.into_iter().flatten(), &mut tx);
+        self.shared.lock().root = new_root;
         tx.write_root(new_root);
 
-        self.page_cache.commit(cursor, &mut tx);
         self.store.commit(tx)?;
-        Ok((new_root, witness, witnessed))
+        Ok((new_root, commit.witness, commit.witnessed_operations))
+    }
+}
+
+/// The results of a seek operation.
+// TODO: remove
+#[derive(Debug, Clone)]
+pub struct Seek {
+    /// The siblings encountered along the path, in ascending order by depth.
+    ///
+    /// The number of siblings is equal to the depth of the sought key.
+    pub siblings: Vec<Node>,
+    /// The terminal node encountered.
+    pub terminal: Option<nomt_core::trie::LeafData>,
+}
+
+impl Seek {
+    /// Get the depth of the terminal node.
+    pub fn depth(&self) -> usize {
+        self.siblings.len()
     }
 }
 
@@ -270,8 +285,7 @@ pub struct Session {
     prev_root: Node,
     page_cache: PageCache,
     store: Store,
-    warmup_tp: ThreadPool,
-    seek_results: Arc<DashMap<KeyPath, Seek>>,
+    committer: Option<Committer>, // always `Some` during lifecycle.
     session_cnt: Arc<AtomicUsize>,
 }
 
@@ -280,7 +294,8 @@ impl Session {
     ///
     /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
     pub fn tentative_read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
-        self.warmup(path, false);
+        // UNWRAP: committer always `Some` during lifecycle.
+        self.committer.as_mut().unwrap().warm_up(path, false);
         let value = self.store.load_value(path)?.map(Rc::new);
         Ok(value)
     }
@@ -288,22 +303,8 @@ impl Session {
     /// Signals that the given key is going to be written to. Set `delete` to true when the
     /// key is likely being deleted.
     pub fn tentative_write_slot(&mut self, path: KeyPath, delete: bool) {
-        self.warmup(path, delete);
-    }
-
-    fn warmup(&self, path: KeyPath, delete: bool) {
-        let page_cache = self.page_cache.clone();
-        let seek_results = self.seek_results.clone();
-        let root = self.prev_root;
-        let f = move || {
-            let seeker = page_cache.new_seeker(root);
-            let seek_options = SeekOptions {
-                retrieve_sibling_leaf_children: delete,
-                record_siblings: true,
-            };
-            seek_results.insert(path, seeker.seek(path, seek_options));
-        };
-        self.warmup_tp.execute(f);
+        // UNWRAP: committer always `Some` during lifecycle.
+        self.committer.as_mut().unwrap().warm_up(path, delete);
     }
 }
 
@@ -314,95 +315,4 @@ impl Drop for Session {
             .swap(0, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(prev, 1, "expected one active session at commit time");
     }
-}
-
-#[derive(Default)]
-struct WitnessBuilder {
-    terminals: BTreeMap<BitVec<u8, Msb0>, TerminalOps>,
-}
-
-impl WitnessBuilder {
-    fn insert(&mut self, key_path: KeyPath, seek_result: Seek, read_write: &KeyReadWrite) {
-        let slice = key_path.view_bits::<Msb0>()[..seek_result.depth()].into();
-        let entry = self.terminals.entry(slice).or_insert_with(|| TerminalOps {
-            leaf: seek_result.terminal.clone(),
-            reads: Vec::new(),
-            writes: Vec::new(),
-            siblings: seek_result.siblings,
-        });
-
-        if let KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) = read_write {
-            entry.reads.push((key_path, v.clone()));
-        }
-
-        if let KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) = read_write {
-            entry.writes.push((key_path, v.clone()));
-        }
-    }
-
-    // builds the witness, the witnessed operations, and returns additional write operations
-    // for leaves which are updated but where the existing value should be preserved.
-    fn build(self) -> (Witness, WitnessedOperations, Vec<VisitedTerminal>) {
-        let mut paths = Vec::with_capacity(self.terminals.len());
-        let mut reads = Vec::new();
-        let mut writes = Vec::new();
-        let mut visited_terminals = Vec::new();
-
-        for (i, (path, terminal)) in self.terminals.into_iter().enumerate() {
-            let path_proof = PathProof {
-                terminal: terminal.leaf.clone(),
-                siblings: terminal.siblings,
-            };
-            if !terminal.writes.is_empty() {
-                visited_terminals.push(VisitedTerminal {
-                    path: {
-                        let mut full_path = KeyPath::default();
-                        full_path.view_bits_mut::<Msb0>()[..path.len()].copy_from_bitslice(&path);
-                        full_path
-                    },
-                    depth: path.len() as u8,
-                    leaf: terminal.leaf,
-                });
-            }
-
-            paths.push(WitnessedPath {
-                inner: path_proof,
-                path,
-            });
-            reads.extend(
-                terminal
-                    .reads
-                    .into_iter()
-                    .map(|(key, value)| WitnessedRead {
-                        key,
-                        value,
-                        path_index: i,
-                    }),
-            );
-            writes.extend(
-                terminal
-                    .writes
-                    .iter()
-                    .cloned()
-                    .map(|(key, value)| WitnessedWrite {
-                        key,
-                        value,
-                        path_index: i,
-                    }),
-            );
-        }
-
-        (
-            Witness { path_proofs: paths },
-            WitnessedOperations { reads, writes },
-            visited_terminals,
-        )
-    }
-}
-
-struct TerminalOps {
-    leaf: Option<LeafData>,
-    reads: Vec<(KeyPath, Option<Value>)>,
-    writes: Vec<(KeyPath, Option<Value>)>,
-    siblings: Vec<Node>,
 }

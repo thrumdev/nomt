@@ -2,7 +2,6 @@ use crate::{
     cursor::PageCacheCursor,
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, RegionContains, RwPassCell, RwPassDomain, WritePass},
-    seek::Seeker,
     store::{Store, Transaction},
     Options,
 };
@@ -507,32 +506,44 @@ impl PageCache {
         Page { inner: entry }
     }
 
-    pub fn new_write_cursor(&self, root: Node) -> PageCacheCursor {
-        let write_pass = self
-            .shared
+    /// Acquire a read pass for all pages in the cache.
+    pub fn new_read_pass(&self) -> ReadPass<PageRegion> {
+        self.shared
+            .page_rw_pass_domain
+            .new_read_pass()
+            .with_region(PageRegion::universe())
+    }
+
+    /// Acquire a write pass for all pages in the cache.
+    pub fn new_write_pass(&self) -> WritePass<PageRegion> {
+        self.shared
             .page_rw_pass_domain
             .new_write_pass()
-            .with_region(PageRegion::universe());
+            .with_region(PageRegion::universe())
+    }
+
+    pub fn new_write_cursor(&self, root: Node) -> PageCacheCursor {
+        let write_pass = self.new_write_pass();
         PageCacheCursor::new_write(root, self.clone(), write_pass)
     }
 
-    pub fn new_seeker(&self, root: Node) -> Seeker {
-        let read_pass = self.shared.page_rw_pass_domain.new_read_pass();
-        Seeker::new(root, self.clone(), read_pass)
-    }
-
     /// Flushes all the dirty pages into the underlying store.
+    /// This takes a read pass.
     ///
     /// After the commit, all the dirty pages are cleared.
-    pub fn commit(&self, cursor: PageCacheCursor, tx: &mut Transaction) {
+    pub fn commit(
+        &self,
+        page_diffs: impl IntoIterator<Item = (PageId, PageDiff)>,
+        tx: &mut Transaction,
+    ) {
         const FULL_PAGE_THRESHOLD: usize = 32;
 
-        let (dirty_nodes, mut write_pass) = cursor.finish_write();
-        for (page_id, page_diff) in dirty_nodes {
+        let read_pass = self.new_read_pass();
+        for (page_id, page_diff) in page_diffs {
             if let Some(ref page) = self.shared.cached.get(&page_id) {
                 match page.value() {
                     PageState::Cached(ref page) => {
-                        let page_data = page.data.read(&*write_pass.downgrade());
+                        let page_data = page.data.read(&read_pass);
                         if page_data.as_ref().map_or(true, |p| page_is_empty(&p[..])) {
                             tx.delete_page(page_id);
                             continue;
