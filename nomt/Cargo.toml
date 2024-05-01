@@ -13,13 +13,14 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.81"
 nomt-core = { path = "../core", features = ["std"] }
-parking_lot = { version = "0.12.1", features = ["arc_lock"] }
+parking_lot = { version = "0.12.1", features = ["arc_lock", "send_guard"] }
 rocksdb = "0.21.0"
 threadpool = "1.8.1"
 bitvec = { version = "1" }
 blake3 = "1.5.1"
 fxhash = "0.2.1"
 dashmap = "5.5.3"
+crossbeam = "0.8.4"
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }
