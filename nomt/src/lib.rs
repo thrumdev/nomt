@@ -17,8 +17,9 @@ use nomt_core::{
     trie::{NodeHasher, TERMINATOR},
     update::VisitedTerminal,
 };
-use page_cache::{PageCache, Seek, SeekMode};
+use page_cache::PageCache;
 use parking_lot::Mutex;
+use seek::{Seek, SeekOptions};
 use store::Store;
 use threadpool::ThreadPool;
 
@@ -31,6 +32,7 @@ mod cursor;
 mod page_cache;
 mod page_region;
 mod rw_pass_cell;
+mod seek;
 mod store;
 
 /// A full value stored within the trie.
@@ -294,12 +296,11 @@ impl Session {
         let root = self.prev_root;
         let f = move || {
             let seeker = page_cache.new_seeker(root);
-            let seek_mode = if delete {
-                SeekMode::RetrieveSiblingLeafChildren
-            } else {
-                SeekMode::PathOnly
+            let seek_options = SeekOptions {
+                retrieve_sibling_leaf_children: delete,
+                record_siblings: true,
             };
-            seek_results.insert(path, seeker.seek(path, seek_mode));
+            seek_results.insert(path, seeker.seek(path, seek_options));
         };
         self.warmup_tp.execute(f);
     }
