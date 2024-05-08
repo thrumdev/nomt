@@ -218,8 +218,10 @@ impl<R: Region + Clone> WritePass<R> {
 
     /// Consume this regioned write-pass, possibly yielding the parent region back.
     ///
-    /// If all other split descendents of the parent write pass have been dropped or consumed,
+    /// If all other split descendents of the parent write pass have been consumed,
     /// this will return a region equivalent to the parent's.
+    ///
+    /// All write-passes need to be consumed before being dropped to yield the parent region.
     pub fn consume(self) -> Option<Self> {
         let Some(ref parent) = self.parent else {
             return None;
@@ -256,15 +258,6 @@ impl WritePass<UniversalRegion> {
                 region,
                 _guard: self.read_pass._guard.clone(),
             },
-        }
-    }
-}
-
-impl<R> Drop for WritePass<R> {
-    fn drop(&mut self) {
-        if let Some(ref parent) = self.parent {
-            // SAFETY: release our writes to other threads.
-            parent.remaining_children.fetch_sub(1, Ordering::Release);
         }
     }
 }
