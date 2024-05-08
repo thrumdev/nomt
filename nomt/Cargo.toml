@@ -21,6 +21,9 @@ blake3 = "1.5.1"
 fxhash = "0.2.1"
 dashmap = "5.5.3"
 
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.7", features = ["checkpoint"] }
+
 [dev-dependencies]
 rand = "0.8.5"
 rand_pcg = "0.3.1"
