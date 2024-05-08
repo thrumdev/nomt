@@ -46,6 +46,7 @@ use crate::rw_pass_cell::{Region, RegionContains};
 ///
 /// See module docs for more details.
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct PageRegion {
     // `path` has different effects depending on whether `exclusive_min` is `Some` or `None`.
     // non-exclusive access: if min is `None` any page along the path to this one (excluding this).

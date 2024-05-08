@@ -23,14 +23,25 @@
 //! assert_eq!(cell.read(&read_pass).get(), 42);
 //! ```
 
+#[cfg(loom)]
+mod loom_tests;
+
+#[cfg(loom)]
+use loom::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicUsize},
+};
+
+#[cfg(not(loom))]
 use std::{
     cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicUsize},
+};
+
+use std::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Weak,
-    },
+    sync::{atomic::Ordering, Arc, Weak},
 };
 
 use parking_lot::{RawRwLock, RwLock};
@@ -383,19 +394,33 @@ impl<'a, 'pass, T> ReadGuard<'a, 'pass, T>
 where
     'pass: 'a,
 {
+    #[cfg(not(loom))]
     /// Get a reference to the underlying value.
     pub fn get(&self) -> &'pass T {
         // SAFETY: The existence of the guard ensures that there are only shared references
         //         to the inner value. The returned reference cannot outlive the guard.
         unsafe { &*self.inner.get() }
     }
+
+    #[cfg(loom)]
+    fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        // SAFETY: The existence of the guard ensures that there is only one mutable reference
+        //         to the inner value. The returned reference cannot outlive the guard.
+        self.inner.with(|inner| f(unsafe { &*inner }))
+    }
 }
 
 impl<'a, 'pass, T> Deref for ReadGuard<'a, 'pass, T> {
     type Target = T;
 
+    #[cfg(not(loom))]
     fn deref(&self) -> &Self::Target {
         self.get()
+    }
+
+    #[cfg(loom)]
+    fn deref(&self) -> &Self::Target {
+        unreachable!("with loom cfg, ReadGuard::deref cannot be used")
     }
 }
 
@@ -410,6 +435,7 @@ impl<'a, 'pass, T> WriteGuard<'a, 'pass, T>
 where
     'pass: 'a,
 {
+    #[cfg(not(loom))]
     /// Get a reference to the underlying value.
     pub fn get(&self) -> &T {
         // SAFETY: The existence of the guard ensures that there is only one mutable reference
@@ -417,6 +443,14 @@ where
         unsafe { &*self.inner.get() }
     }
 
+    #[cfg(loom)]
+    fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        // SAFETY: The existence of the guard ensures that there is only one mutable reference
+        //         to the inner value. The returned reference cannot outlive the guard.
+        self.inner.with(|inner| f(unsafe { &*inner }))
+    }
+
+    #[cfg(not(loom))]
     /// Get a mutable reference to the underlying value.
     pub fn get_mut(&mut self) -> &mut T {
         // SAFETY: The existence of the mutable guard reference ensures that there is only one
@@ -424,19 +458,38 @@ where
         //         guard.
         unsafe { &mut *self.inner.get() }
     }
+
+    #[cfg(loom)]
+    fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: The existence of the guard ensures that there is only one mutable reference
+        //         to the inner value. The returned reference cannot outlive the guard.
+        self.inner.with_mut(|inner| f(unsafe { &mut *inner }))
+    }
 }
 
 impl<'a, 'pass, T> Deref for WriteGuard<'a, 'pass, T> {
     type Target = T;
 
+    #[cfg(not(loom))]
     fn deref(&self) -> &Self::Target {
         self.get()
+    }
+
+    #[cfg(loom)]
+    fn deref(&self) -> &Self::Target {
+        unreachable!("with loom cfg, WriteGuard::deref cannot be used")
     }
 }
 
 impl<'a, 'pass, T> DerefMut for WriteGuard<'a, 'pass, T> {
+    #[cfg(not(loom))]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.get_mut()
+    }
+
+    #[cfg(loom)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unreachable!("with loom cfg, WriteGuard::deref_mut cannot be used")
     }
 }
 
