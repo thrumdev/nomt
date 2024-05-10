@@ -1,8 +1,8 @@
 use crate::{
     cursor::PageCacheCursor,
     rw_pass_cell::{ReadPass, RwPassCell, RwPassDomain, WritePass},
-    store::{Store, Transaction},
     seek::Seeker,
+    store::{Store, Transaction},
     Options,
 };
 use bitvec::prelude::*;
