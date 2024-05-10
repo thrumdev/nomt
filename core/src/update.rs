@@ -124,12 +124,12 @@ fn shares_prefix(cursor: &impl Cursor, key: KeyPath) -> bool {
 }
 
 fn shared_with_cursor(cursor: &impl Cursor, key: KeyPath) -> usize {
-    // TODO: check if this is correct
     let pos = cursor.position();
     shared_bits(&pos.path(), key.view_bits::<Msb0>())
 }
 
-fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
+// TODO: feels extremely out of place.
+pub(crate) fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
     a.iter().zip(b.iter()).take_while(|(a, b)| a == b).count()
 }
 

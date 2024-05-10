@@ -31,6 +31,7 @@ pub use nomt_core::trie::{KeyPath, LeafData, Node};
 mod cursor;
 mod page_cache;
 mod page_region;
+mod page_walker;
 mod rw_pass_cell;
 mod seek;
 mod store;

@@ -1,15 +1,27 @@
-use crate::{page::DEPTH, page_id::ChildPageIndex, trie::KeyPath};
+use crate::{
+    page::DEPTH,
+    page_id::{ChildPageIndex, PageId, ROOT_PAGE_ID},
+    trie::KeyPath,
+};
 use alloc::fmt;
 use bitvec::prelude::*;
 
 /// Encapsulates logic for moving around in paged storage for a binary trie.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct TriePosition {
     // The bits after depth are irrelevant.
     path: [u8; 32],
     depth: u8,
     node_index: usize,
 }
+
+impl PartialEq for TriePosition {
+    fn eq(&self, other: &Self) -> bool {
+        self.path() == other.path()
+    }
+}
+
+impl Eq for TriePosition {}
 
 impl TriePosition {
     /// Create a new `TriePosition` at the root.
@@ -144,6 +156,28 @@ impl TriePosition {
         bit
     }
 
+    /// Get the page ID this position lands in. Returns `None` at the root.
+    pub fn page_id(&self) -> Option<PageId> {
+        if self.is_root() {
+            return None;
+        }
+
+        let mut page_id = ROOT_PAGE_ID;
+        for (i, chunk) in self.path().chunks_exact(DEPTH).enumerate() {
+            if (i + 1) * DEPTH == self.depth as usize {
+                return Some(page_id);
+            }
+
+            // UNWRAP: 6 bits never overflows child page index
+            let child_index = ChildPageIndex::new(chunk.load_be::<u8>()).unwrap();
+
+            // UNWRAP: trie position never overflows page tree.
+            page_id = page_id.child_page_id(child_index).unwrap();
+        }
+
+        Some(page_id)
+    }
+
     /// Get the child page index, relative to the current page,
     /// where the children of the current node are stored.
     ///
@@ -194,6 +228,21 @@ impl TriePosition {
             self.depth as usize - ((self.depth as usize - 1) / DEPTH) * DEPTH
         }
     }
+
+    /// Get the number of shared bits between this position and `other`.
+    ///
+    /// This is essentially the depth of a hypothetical internal node which both positions would
+    /// descend from.
+    pub fn shared_depth(&self, other: &Self) -> usize {
+        crate::update::shared_bits(self.path(), other.path())
+    }
+
+    /// Whether the sub-trie indicated by this position would contain
+    /// a given key-path.
+    pub fn subtrie_contains(&self, path: &crate::trie::KeyPath) -> bool {
+        path.view_bits::<Msb0>()
+            .starts_with(&self.path.view_bits::<Msb0>()[..self.depth as usize])
+    }
 }
 
 // extract the relevant portion of the key path to the last page. panics on empty path.
@@ -243,15 +292,10 @@ fn parent_node_index(node_index: usize) -> usize {
 
 impl fmt::Debug for TriePosition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let cropped_path = &self.path[..self.depth as usize];
-        if cropped_path.len() == 0 {
+        if self.depth == 0 {
             write!(f, "TriePosition(root)")
         } else {
-            write!(
-                f,
-                "TriePosition({})",
-                hex::encode(&self.path[..self.depth as usize]),
-            )
+            write!(f, "TriePosition({})", self.path(),)
         }
     }
 }
