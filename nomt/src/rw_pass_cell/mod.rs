@@ -97,6 +97,7 @@ impl RwPassDomain {
         let guard = self.shared.write_arc();
         WritePass {
             parent: None,
+            consumed: false,
             read_pass: ReadPass {
                 domain: self.shared.clone(),
                 region: UniversalRegion,
@@ -149,6 +150,7 @@ struct ParentWritePass<R> {
 /// A token that allows read-write access to the data within one domain.
 pub struct WritePass<R = UniversalRegion> {
     parent: Option<Arc<ParentWritePass<R>>>,
+    consumed: bool,
     read_pass: ReadPass<R>,
 }
 
@@ -226,6 +228,7 @@ impl<R: Region + Clone> WritePass<R> {
             .into_iter()
             .map(|region| WritePass {
                 parent: Some(new_parent.clone()),
+                consumed: false,
                 read_pass: ReadPass {
                     domain: self.read_pass.domain.clone(),
                     region,
@@ -241,10 +244,12 @@ impl<R: Region + Clone> WritePass<R> {
     /// this will return a region equivalent to the parent's.
     ///
     /// All write-passes need to be consumed before being dropped to yield the parent region.
-    pub fn consume(self) -> Option<Self> {
+    pub fn consume(mut self) -> Option<Self> {
         let Some(ref parent) = self.parent else {
             return None;
         };
+
+        self.consumed = true;
 
         // SAFETY: release our writes to other threads if _not_ the last sibling.
         //         acquire writes from other threads if the last sibling.
@@ -252,6 +257,7 @@ impl<R: Region + Clone> WritePass<R> {
         if parent.remaining_children.fetch_sub(1, Ordering::AcqRel) == 1 {
             Some(WritePass {
                 parent: parent.parent.clone(),
+                consumed: false,
                 read_pass: ReadPass {
                     domain: self.read_pass.domain.clone(),
                     region: parent.region.clone(),
@@ -264,6 +270,17 @@ impl<R: Region + Clone> WritePass<R> {
     }
 }
 
+impl<R> Drop for WritePass<R> {
+    fn drop(&mut self) {
+        if let Some(ref parent) = self.parent {
+            if !self.consumed {
+                // SAFETY: release our writes to other threads.
+                parent.remaining_children.fetch_sub(1, Ordering::Release);
+            }
+        }
+    }
+}
+
 impl WritePass<UniversalRegion> {
     /// Supply a region type.
     pub fn with_region<R>(self, region: R) -> WritePass<R> {
@@ -272,6 +289,7 @@ impl WritePass<UniversalRegion> {
 
         WritePass {
             parent: None,
+            consumed: false,
             read_pass: ReadPass {
                 domain: self.read_pass.domain.clone(),
                 region,

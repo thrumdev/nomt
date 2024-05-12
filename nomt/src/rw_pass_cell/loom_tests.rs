@@ -95,3 +95,73 @@ fn test_consume_in_two_threads() {
         }
     });
 }
+
+#[test]
+fn test_consume_and_drop() {
+    use crate::{page_region::PageRegion, rw_pass_cell::*};
+    use nomt_core::page_id::{ChildPageIndex, PageId, ROOT_PAGE_ID};
+
+    loom::model(|| {
+        let domain = RwPassDomain::new();
+        let cell: Arc<RwPassCell<usize, PageId>> = Arc::new(
+            domain.protect_with_id(
+                0usize,
+                ROOT_PAGE_ID
+                    .child_page_id(ChildPageIndex::new(0).unwrap())
+                    .unwrap(),
+            ),
+        );
+
+        let write_pass = domain.new_write_pass();
+
+        let region_a = PageRegion::from_page_id_descendants(
+            ROOT_PAGE_ID.clone(),
+            ChildPageIndex::new(0).unwrap(),
+            ChildPageIndex::new(12).unwrap(),
+        );
+
+        let region_b = PageRegion::from_page_id_descendants(
+            ROOT_PAGE_ID.clone(),
+            ChildPageIndex::new(13).unwrap(),
+            ChildPageIndex::new(63).unwrap(),
+        );
+        let write_pass = write_pass.with_region::<PageRegion>(PageRegion::universe());
+        let mut write_passes = write_pass.split_n(vec![region_a, region_b]);
+        let write_pass_b = write_passes.pop().unwrap();
+        let write_pass_a = write_passes.pop().unwrap();
+
+        let write_pass_a = write_pass_a.into_envelope();
+        let write_pass_b = write_pass_b.into_envelope();
+
+        // loom will execute those threads in all possible orders,
+        // thus write_pass_a could be dropped first and later write_pass_b
+        // consumed, resulting in a yield of the parent. Another possibility is
+        // that write_pass_b is consumed first (returning None) and then write_pass_a
+        // is dropped, resulting in no one being able to yield from the parent.
+        let h1 = loom::thread::spawn({
+            let cell = cell.clone();
+            move || {
+                let mut write_pass_a = write_pass_a.into_inner();
+                cell.write(&mut write_pass_a).with_mut(|x| *x += 1);
+                drop(write_pass_a);
+            }
+        });
+
+        let h2 = loom::thread::spawn({
+            move || {
+                let write_pass_b = write_pass_b.into_inner();
+
+                match write_pass_b.consume() {
+                    Some(mut wp) => {
+                        assert_eq!(*wp.region(), PageRegion::universe());
+                        cell.read(wp.downgrade()).with(|x| assert_eq!(*x, 1));
+                    }
+                    None => (),
+                }
+            }
+        });
+
+        h2.join().unwrap();
+        h1.join().unwrap();
+    });
+}
