@@ -1,6 +1,7 @@
 use crate::{
     cursor::PageCacheCursor,
-    rw_pass_cell::{ReadPass, RwPassCell, RwPassDomain, WritePass},
+    page_region::PageRegion,
+    rw_pass_cell::{ReadPass, RegionContains, RwPassCell, RwPassDomain, WritePass},
     seek::Seeker,
     store::{Store, Transaction},
     Options,
@@ -30,26 +31,25 @@ pub const LEAF_META_BITFIELD_SLOT: usize = NODES_PER_PAGE;
 pub const LEAF_DATA_BITFIELD_OFF: usize = LEAF_META_BITFIELD_SLOT * 32;
 
 struct PageData {
-    data: RwPassCell<Option<Vec<u8>>>,
+    data: RwPassCell<Option<Vec<u8>>, PageId>,
 }
 
 impl PageData {
     /// Creates a page with the given data.
-    fn pristine_with_data(domain: &RwPassDomain, data: Vec<u8>) -> Self {
+    fn pristine_with_data(domain: &RwPassDomain, page_id: PageId, data: Vec<u8>) -> Self {
         Self {
-            data: domain.protect(Some(data)),
+            data: domain.protect_with_id(Some(data), page_id),
         }
     }
 
     /// Creates an empty page.
-    fn pristine_empty(domain: &RwPassDomain) -> Self {
+    fn pristine_empty(domain: &RwPassDomain, page_id: PageId) -> Self {
         Self {
-            data: domain.protect(None),
+            data: domain.protect_with_id(None, page_id),
         }
     }
 
-    /// Read out the node at the given index.
-    fn node(&self, read_pass: &ReadPass, index: usize) -> Node {
+    fn node(&self, read_pass: &ReadPass<impl RegionContains<PageId>>, index: usize) -> Node {
         assert!(index < NODES_PER_PAGE, "index out of bounds");
         let data = self.data.read(read_pass);
         if let Some(data) = &*data {
@@ -63,8 +63,12 @@ impl PageData {
         }
     }
 
-    /// Write the node at the given index.
-    fn set_node(&self, write_pass: &mut WritePass, index: usize, node: Node) {
+    fn set_node(
+        &self,
+        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        index: usize,
+        node: Node,
+    ) {
         assert!(index < NODES_PER_PAGE, "index out of bounds");
         let mut data = self.data.write(write_pass);
         let data = data.get_or_insert_with(|| vec![0; 4096]);
@@ -80,7 +84,7 @@ impl PageData {
 
     fn set_leaf_data(
         &self,
-        write_pass: &mut WritePass,
+        write_pass: &mut WritePass<impl RegionContains<PageId>>,
         children: ChildNodeIndices,
         leaf_data: LeafData,
     ) {
@@ -99,9 +103,14 @@ impl PageData {
         leaf_data.encode_into(&mut data[start..end]);
     }
 
-    fn clear_leaf_data(&self, write_pass: &mut WritePass, children: ChildNodeIndices) {
+    fn clear_leaf_data(
+        &self,
+        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        children: ChildNodeIndices,
+    ) {
         let left_index = children.left();
         assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
+
         let mut data = self.data.write(write_pass);
         let data = data.get_or_insert_with(|| vec![0; 4096]);
         let (overwrite_l, overwrite_r) = {
@@ -169,28 +178,37 @@ pub struct Page {
 
 impl Page {
     /// Read out the node at the given index.
-    pub fn node(&self, read_pass: &ReadPass, index: usize) -> Node {
+    pub fn node(&self, read_pass: &ReadPass<impl RegionContains<PageId>>, index: usize) -> Node {
         self.inner.node(read_pass, index)
     }
 
     /// Write the node at the given index.
-    pub fn set_node(&self, write_pass: &mut WritePass, index: usize, node: Node) {
-        self.inner.set_node(write_pass, index, node)
+    pub fn set_node(
+        &self,
+        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        index: usize,
+        node: Node,
+    ) {
+        self.inner.set_node(write_pass, index, node);
     }
 
     /// Write leaf data at two positions under a leaf node.
     pub fn set_leaf_data(
         &self,
-        write_pass: &mut WritePass,
+        write_pass: &mut WritePass<impl RegionContains<PageId>>,
         children: ChildNodeIndices,
         leaf_data: LeafData,
     ) {
-        self.inner.set_leaf_data(write_pass, children, leaf_data);
+        self.inner.set_leaf_data(write_pass, children, leaf_data)
     }
 
     /// Clear leaf data at two child positions.
-    pub fn clear_leaf_data(&self, write_pass: &mut WritePass, children: ChildNodeIndices) {
-        self.inner.clear_leaf_data(write_pass, children);
+    pub fn clear_leaf_data(
+        &self,
+        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        children: ChildNodeIndices,
+    ) {
+        self.inner.clear_leaf_data(write_pass, children)
     }
 }
 
@@ -325,8 +343,19 @@ impl PageCache {
                         .load_page(page_id.clone())
                         .expect("db load failed") // TODO: handle the error
                         .map_or_else(
-                            || PageData::pristine_empty(&shared.page_rw_pass_domain),
-                            |data| PageData::pristine_with_data(&shared.page_rw_pass_domain, data),
+                            || {
+                                PageData::pristine_empty(
+                                    &shared.page_rw_pass_domain,
+                                    page_id.clone(),
+                                )
+                            },
+                            |data| {
+                                PageData::pristine_with_data(
+                                    &shared.page_rw_pass_domain,
+                                    page_id.clone(),
+                                    data,
+                                )
+                            },
                         );
                     let entry = Arc::new(entry);
 
@@ -368,7 +397,10 @@ impl PageCache {
             let PageState::Inflight(inflight) = page_state else {
                 return;
             };
-            let page_data = Arc::new(PageData::pristine_empty(&self.shared.page_rw_pass_domain));
+            let page_data = Arc::new(PageData::pristine_empty(
+                &self.shared.page_rw_pass_domain,
+                page_id.clone(),
+            ));
             inflight.complete_and_notify(Page {
                 inner: page_data.clone(),
             });
@@ -400,6 +432,7 @@ impl PageCache {
 
                             let page_data = Arc::new(PageData::pristine_empty(
                                 &self.shared.page_rw_pass_domain,
+                                page_id,
                             ));
                             let fresh_page = Page {
                                 inner: page_data.clone(),
@@ -416,8 +449,10 @@ impl PageCache {
             }
             Entry::Vacant(v) => {
                 if hint_fresh {
-                    let page_data =
-                        Arc::new(PageData::pristine_empty(&self.shared.page_rw_pass_domain));
+                    let page_data = Arc::new(PageData::pristine_empty(
+                        &self.shared.page_rw_pass_domain,
+                        page_id,
+                    ));
                     let page = Page {
                         inner: page_data.clone(),
                     };
@@ -440,8 +475,14 @@ impl PageCache {
             .load_page(page_id.clone())
             .expect("db load failed") // TODO: handle the error
             .map_or_else(
-                || PageData::pristine_empty(&self.shared.page_rw_pass_domain),
-                |data| PageData::pristine_with_data(&self.shared.page_rw_pass_domain, data),
+                || PageData::pristine_empty(&self.shared.page_rw_pass_domain, page_id.clone()),
+                |data| {
+                    PageData::pristine_with_data(
+                        &self.shared.page_rw_pass_domain,
+                        page_id.clone(),
+                        data,
+                    )
+                },
             );
         let entry = Arc::new(entry);
 
@@ -467,7 +508,11 @@ impl PageCache {
     }
 
     pub fn new_write_cursor(&self, root: Node) -> PageCacheCursor {
-        let write_pass = self.shared.page_rw_pass_domain.new_write_pass();
+        let write_pass = self
+            .shared
+            .page_rw_pass_domain
+            .new_write_pass()
+            .with_region(PageRegion::universe());
         PageCacheCursor::new_write(root, self.clone(), write_pass)
     }
 

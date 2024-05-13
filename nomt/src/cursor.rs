@@ -2,6 +2,7 @@ use std::{cell::RefCell, collections::HashMap};
 
 use crate::{
     page_cache::{Page, PageCache, PageDiff},
+    page_region::PageRegion,
     rw_pass_cell::{ReadPass, WritePass},
 };
 use nomt_core::{
@@ -14,9 +15,9 @@ use nomt_core::{
 #[allow(unused)]
 // TODO: this wil disappear in follow-up
 enum Mode {
-    Read(ReadPass),
+    Read(ReadPass<PageRegion>),
     Write {
-        write_pass: RefCell<WritePass>,
+        write_pass: RefCell<WritePass<PageRegion>>,
         updated: HashMap<PageId, PageDiff>,
     },
 }
@@ -24,7 +25,7 @@ enum Mode {
 impl Mode {
     fn with_read_pass<R, F>(&self, f: F) -> R
     where
-        F: FnOnce(&ReadPass) -> R,
+        F: FnOnce(&ReadPass<PageRegion>) -> R,
     {
         match self {
             Mode::Read(ref read_pass) => f(read_pass),
@@ -51,7 +52,7 @@ pub struct PageCacheCursor {
 
 impl PageCacheCursor {
     /// Create a new [`PageCacheCursor`] configured for writing.
-    pub fn new_write(root: Node, pages: PageCache, write_pass: WritePass) -> Self {
+    pub fn new_write(root: Node, pages: PageCache, write_pass: WritePass<PageRegion>) -> Self {
         Self::new(
             root,
             pages,
@@ -350,7 +351,7 @@ impl PageCacheCursor {
     }
 
     /// Called when the write is finished.
-    pub fn finish_write(self) -> (HashMap<PageId, PageDiff>, WritePass) {
+    pub fn finish_write(self) -> (HashMap<PageId, PageDiff>, WritePass<PageRegion>) {
         match self.mode {
             Mode::Read(_) => panic!("attempted to call dirtied_pages on a read-only cursor"),
             Mode::Write {
