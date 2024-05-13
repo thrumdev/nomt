@@ -1,7 +1,46 @@
 //! Left-to-right walking and updating the page tree.
 //!
-//! The core usage is to create a [`PageWalker`] and alternate calls to `advance` and
-//! `replace_terminal` repeatedly, followed by a single call to `conclude`.
+//! The core usage is to create a [`PageWalker`] and make repeated called to `advance`,
+//! `advance_and_replace`, and `advance_and_place_node`, followed by a single call to `conclude`.
+//!
+//! The [`PageWalker`], upon concluding, causes the same effect to the trie as a series of
+//! standalone put and delete operations, but with a minimal amount of hashing and revisiting of
+//! nodes.
+//!
+//! ## Multi-Update
+//!
+//! `advance_and_replace` is based off of the observation that a set of put and delete operations
+//! can be partitioned into groups based on which terminal node their keys currently look up to.
+//! Each terminal node is then replaced with the sub-trie resulting from the set of given updates,
+//! and the trie is compacted into its smallest possible form, and hashed.
+//!
+//! For example,
+//!   - Replacing a single leaf node with another leaf node in the case of the previous leaf
+//!     being deleted and a new one with the same key or at least key prefix being put.
+//!   - Replacing a single leaf node with a terminator, in the case of deleting the leaf which was
+//!     there prior.
+//!   - Replacing a terminator with a leaf, in the case of a single put operation with that prefix
+//!   - Replacing a leaf node or terminator with a larger sub-trie in the case of multiple puts for
+//!     keys beginning with that prefix, possibly preserving the initial leaf.
+//!
+//! We refer to this as sub-trie replacement.
+//!
+//! Any newly created terminator nodes must be "compacted" upwards as long as their sibling is a
+//! terminator or a leaf node to create the most tractable representation. We combine this operation
+//! with hashing up towards the root, described in the following paragraph.
+//!
+//! Any changes in the trie must be reflected in the hashes of the nodes above them, all the way
+//! up to the root. When we replace a terminal node with a new sub-trie, we apply the compaction
+//! and hashing operations up to the point where no subsequently altered terminal will affect its
+//! result. The last terminal finishes hashing to the root. We refer to this as partial compaction.
+//!
+//! ## Partial Update
+//!
+//! The PageWalker can also perform a partial update of the trie. By providing a parent page in
+//! [`PageWalker::new`], you can restrict the operation only to trie positions which land in pages
+//! below the parent. In this mode, the changes which _would_ have been made to the parent page
+//! are recorded as part of the output. This is useful for splitting the work of updating pages
+//! across multiple threads.
 
 use bitvec::prelude::*;
 use nomt_core::{
