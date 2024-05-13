@@ -13,6 +13,7 @@
 
 use crate::{page::DEPTH, trie::KeyPath};
 use arrayvec::ArrayVec;
+use bitvec::prelude::*;
 use ruint::Uint;
 
 // The encoded representation of the highest valid page ID: the highest one at layer 42.
@@ -20,6 +21,8 @@ const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
     16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65,
     4, 16, 65, 4, 16, 64,
 ]);
+
+pub const MAX_PAGE_DEPTH: usize = 42;
 
 /// A unique ID for a page.
 ///
@@ -33,7 +36,7 @@ const HIGHEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
 /// This property lets us refer to sub-trees cleanly with simple ordering statements.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageId {
-    path: ArrayVec<u8, 42>,
+    path: ArrayVec<u8, MAX_PAGE_DEPTH>,
 }
 
 /// The root page is the one containing the sub-trie directly descending from the root node.
@@ -42,6 +45,9 @@ pub const ROOT_PAGE_ID: PageId = PageId {
 };
 
 pub const MAX_CHILD_INDEX: u8 = (1 << DEPTH) - 1;
+
+/// The number of children each Page ID has.
+pub const NUM_CHILDREN: usize = MAX_CHILD_INDEX as usize + 1;
 
 /// The index of a children of a page.
 ///
@@ -122,7 +128,7 @@ impl PageId {
     /// Passed PageId must be a valid PageId and be located in a layer below 42 otherwise
     /// `PageIdOverflow` will be returned.
     pub fn child_page_id(&self, child_index: ChildPageIndex) -> Result<Self, ChildPageIdError> {
-        if self.path.len() >= 42 {
+        if self.path.len() >= MAX_PAGE_DEPTH {
             return Err(ChildPageIdError::PageIdOverflow);
         }
 
@@ -153,11 +159,45 @@ impl PageId {
     /// Get the maximum descendant of this page.
     pub fn max_descendant(&self) -> PageId {
         let mut page_id = self.clone();
-        while page_id.path.len() < 42 {
+        while page_id.path.len() < MAX_PAGE_DEPTH {
             page_id.path.push(MAX_CHILD_INDEX);
         }
 
         page_id
+    }
+
+    /// Get the minimum key-path which could land in this page.
+    pub fn min_key_path(&self) -> KeyPath {
+        let mut path = KeyPath::default();
+        for (i, child_index) in self.path.iter().enumerate() {
+            let bit_start = i * 6;
+            let bit_end = bit_start + 6;
+            let child_bits = &child_index.view_bits::<Msb0>()[2..8];
+            path.view_bits_mut::<Msb0>()[bit_start..bit_end].copy_from_bitslice(child_bits);
+        }
+
+        for i in (6 * self.path.len())..256 {
+            path.view_bits_mut::<Msb0>().set(i, false);
+        }
+
+        path
+    }
+
+    /// Get the maximum key-path which could land in this page.
+    pub fn max_key_path(&self) -> KeyPath {
+        let mut path = KeyPath::default();
+        for (i, child_index) in self.path.iter().enumerate() {
+            let bit_start = i * 6;
+            let bit_end = bit_start + 6;
+            let child_bits = &child_index.view_bits::<Msb0>()[2..8];
+            path.view_bits_mut::<Msb0>()[bit_start..bit_end].copy_from_bitslice(child_bits);
+        }
+
+        for i in (6 * self.path.len())..256 {
+            path.view_bits_mut::<Msb0>().set(i, true);
+        }
+
+        path
     }
 }
 
@@ -394,5 +434,45 @@ mod tests {
 
             assert!(right_descendant > sibling_left);
         }
+    }
+
+    #[test]
+    fn root_min_key_path() {
+        assert_eq!(ROOT_PAGE_ID.min_key_path(), [0; 32]);
+    }
+
+    #[test]
+    fn root_max_key_path() {
+        assert_eq!(ROOT_PAGE_ID.max_key_path(), [255; 32]);
+    }
+
+    #[test]
+    fn page_min_key_path() {
+        let min_page = ROOT_PAGE_ID.child_page_id(ChildPageIndex(0)).unwrap();
+        let max_page = ROOT_PAGE_ID
+            .child_page_id(ChildPageIndex(MAX_CHILD_INDEX))
+            .unwrap();
+
+        assert_eq!(min_page.min_key_path(), [0; 32]);
+        let mut key_path = [0; 32];
+        for i in 0..6 {
+            key_path.view_bits_mut::<Msb0>().set(i, true);
+        }
+        assert_eq!(max_page.min_key_path(), key_path);
+    }
+
+    #[test]
+    fn page_max_key_path() {
+        let min_page = ROOT_PAGE_ID.child_page_id(ChildPageIndex(0)).unwrap();
+        let max_page = ROOT_PAGE_ID
+            .child_page_id(ChildPageIndex(MAX_CHILD_INDEX))
+            .unwrap();
+
+        assert_eq!(max_page.max_key_path(), [255; 32]);
+        let mut key_path = [255; 32];
+        for i in 0..6 {
+            key_path.view_bits_mut::<Msb0>().set(i, false);
+        }
+        assert_eq!(min_page.max_key_path(), key_path);
     }
 }
