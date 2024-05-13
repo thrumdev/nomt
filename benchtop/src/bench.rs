@@ -1,4 +1,10 @@
-use crate::{backend::Backend, cli::bench::BenchType, timer::Timer, workload, workload::Workload};
+use crate::{
+    backend::Backend,
+    cli::bench::BenchType,
+    timer::Timer,
+    workload,
+    workload::{Init, Workload},
+};
 use anyhow::Result;
 
 pub fn bench(bench_type: BenchType) -> Result<()> {
@@ -7,7 +13,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
         BenchType::Sequential(ref params) => &params.common_params,
     };
 
-    let workload = workload::parse(
+    let (init, workload) = workload::parse(
         common_params.workload.name.as_str(),
         common_params.workload.size,
         common_params
@@ -26,12 +32,17 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
 
     match bench_type {
         BenchType::Isolate(params) => {
-            bench_isolate(workload, backends, params.iterations, true).map(|_| ())
+            bench_isolate(init, workload, backends, params.iterations, true).map(|_| ())
         }
-        BenchType::Sequential(params) => {
-            bench_sequential(workload, backends, params.op_limit, params.time_limit, true)
-                .map(|_| ())
-        }
+        BenchType::Sequential(params) => bench_sequential(
+            init,
+            workload,
+            backends,
+            params.op_limit,
+            params.time_limit,
+            true,
+        )
+        .map(|_| ()),
     }
 }
 
@@ -41,7 +52,8 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
 // Return the mean execution time of the workloads for each backends
 // in the order the backends are provided
 pub fn bench_isolate(
-    workload: Workload,
+    mut init: Init,
+    mut workload: Box<dyn Workload>,
     backends: Vec<Backend>,
     iterations: u64,
     print: bool,
@@ -49,12 +61,11 @@ pub fn bench_isolate(
     let mut mean_results = vec![];
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
-        let mut backend_instance = backend.instantiate(true);
-
-        workload.init(&mut backend_instance);
 
         for _ in 0..iterations {
-            workload.run(&mut backend_instance, Some(&mut timer), true);
+            let mut db = backend.instantiate(true);
+            db.execute(None, &mut init);
+            db.execute(Some(&mut timer), &mut *workload)
         }
 
         if print {
@@ -73,7 +84,8 @@ pub fn bench_isolate(
 // Return the mean execution time of the workloads for each backends
 // in the order the backends are provided
 pub fn bench_sequential(
-    workload: Workload,
+    mut init: Init,
+    mut workload: Box<dyn Workload>,
     backends: Vec<Backend>,
     op_limit: Option<u64>,
     time_limit: Option<u64>,
@@ -87,15 +99,15 @@ pub fn bench_sequential(
 
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
-        let mut backend_instance = backend.instantiate(true);
+        let mut db = backend.instantiate(true);
 
         let mut elapsed_time = 0;
         let mut op_count = 0;
 
-        workload.init(&mut backend_instance);
+        db.execute(None, &mut init);
 
         loop {
-            workload.run(&mut backend_instance, Some(&mut timer), false);
+            db.execute(Some(&mut timer), &mut *workload);
 
             // check if time limit exceeded
             elapsed_time += timer.get_last_workload_duration()?;
@@ -105,7 +117,7 @@ pub fn bench_sequential(
             };
 
             // check if op limit exceeded
-            op_count += workload.run_actions.len() as u64;
+            op_count += workload.size() as u64;
             match op_limit {
                 Some(limit) if op_count >= limit => break,
                 _ => (),

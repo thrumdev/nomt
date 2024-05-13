@@ -1,13 +1,10 @@
-use crate::{
-    backend::{Action, Db},
-    timer::Timer,
-};
+use crate::{backend::Transaction, timer::Timer, workload::Workload};
 use hash_db::{AsHashDB, HashDB, Hasher as _, Prefix};
 use kvdb::KeyValueDB;
 use kvdb_rocksdb::{Database, DatabaseConfig};
 use sha2::Digest;
 use sp_trie::trie_types::TrieDBMutBuilderV1;
-use sp_trie::DBValue;
+use sp_trie::{DBValue, LayoutV1, TrieDBMut};
 use std::collections::HashMap;
 use std::sync::Arc;
 use trie_db::TrieMut;
@@ -16,7 +13,6 @@ type Hasher = sp_core::Blake2Hasher;
 type Hash = sp_core::H256;
 
 const SP_TRIE_DB_FOLDER: &str = "sp_trie_db";
-const SP_TRIE_DB_FOLDER_COPY: &str = "sp_trie_db_copy";
 
 pub struct SpTrieDB {
     pub kvdb: Arc<dyn KeyValueDB>,
@@ -71,30 +67,8 @@ impl SpTrieDB {
 
         Self { kvdb, root }
     }
-}
 
-impl Db for SpTrieDB {
-    fn open_copy(&self) -> Box<dyn Db> {
-        // Delete any previously existing copy of the db
-        let _ = std::fs::remove_dir_all(SP_TRIE_DB_FOLDER_COPY);
-
-        std::process::Command::new("cp")
-            .args(["-r", SP_TRIE_DB_FOLDER, SP_TRIE_DB_FOLDER_COPY])
-            .output()
-            .expect("Impossible make a copy of the nomt db");
-
-        let db_cfg = DatabaseConfig::with_columns(1);
-        let kvdb = Arc::new(
-            Database::open(&db_cfg, SP_TRIE_DB_FOLDER_COPY).expect("Database backend error"),
-        );
-
-        Box::new(Self {
-            kvdb,
-            root: self.root,
-        })
-    }
-
-    fn apply_actions(&mut self, actions: Vec<Action>, mut timer: Option<&mut Timer>) {
+    pub fn execute(&mut self, mut timer: Option<&mut Timer>, workload: &mut dyn Workload) {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
         let mut new_root = self.root;
@@ -106,39 +80,27 @@ impl Db for SpTrieDB {
         };
 
         let recorder: sp_trie::recorder::Recorder<Hasher> = Default::default();
-        let mut trie_recorder = recorder.as_trie_recorder(new_root);
-        let mut trie_db_mut = TrieDBMutBuilderV1::from_existing(&mut trie, &mut new_root)
-            .with_recorder(&mut trie_recorder)
-            .build();
+        let _timer_guard_commit = {
+            let mut trie_recorder = recorder.as_trie_recorder(new_root);
+            let trie_db_mut = TrieDBMutBuilderV1::from_existing(&mut trie, &mut new_root)
+                .with_recorder(&mut trie_recorder)
+                .build();
 
-        for action in actions.into_iter() {
-            match action {
-                Action::Write { key, value } => {
-                    // sp_trie does not require hashed keys,
-                    // but if keys are not hashed, the comparison does not seem to be efficient.
-                    // Not applying hashing to keys would significantly speed up sp_trie.
-                    let key_path = sha2::Sha256::digest(key);
+            let mut transaction = Tx {
+                trie: trie_db_mut,
+                timer,
+            };
+            workload.run(&mut transaction);
+            let Tx {
+                trie: mut trie_db_mut,
+                mut timer,
+            } = transaction;
 
-                    trie_db_mut
-                        .insert(&key_path, &value.unwrap_or(vec![]))
-                        .expect("Impossible writing into sp-trie db");
-                }
-                Action::Read { key } => {
-                    let key_path = sha2::Sha256::digest(key);
+            let timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
 
-                    let _timer_guard_read = timer.as_mut().map(|t| t.record_span("read"));
-                    trie_db_mut
-                        .get(&key_path)
-                        .expect("Impossible fetching from sp-trie db");
-                }
-            }
-        }
-
-        let _timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
-
-        trie_db_mut.commit();
-        drop(trie_db_mut);
-        drop(trie_recorder);
+            trie_db_mut.commit();
+            timer_guard_commit
+        };
 
         let _proof = recorder.drain_storage_proof().is_empty();
 
@@ -154,6 +116,32 @@ impl Db for SpTrieDB {
             .expect("Failed to write transaction");
 
         self.root = new_root;
+    }
+}
+
+struct Tx<'a> {
+    trie: TrieDBMut<'a, LayoutV1<Hasher>>,
+    timer: Option<&'a mut Timer>,
+}
+
+// sp_trie does not require hashed keys,
+// but if keys are not hashed, the comparison does not seem to be efficient.
+// Not applying hashing to keys would significantly speed up sp_trie.
+impl<'a> Transaction for Tx<'a> {
+    fn read(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        let key_path = sha2::Sha256::digest(key);
+
+        let _timer_guard_read = self.timer.as_mut().map(|t| t.record_span("read"));
+        self.trie
+            .get(&key_path)
+            .expect("Impossible fetching from sp-trie db")
+    }
+    fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
+        let key_path = sha2::Sha256::digest(key);
+
+        self.trie
+            .insert(&key_path, &value.unwrap_or(&[]))
+            .expect("Impossible writing into sp-trie db");
     }
 }
 

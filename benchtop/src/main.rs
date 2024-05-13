@@ -27,27 +27,29 @@ pub fn main() -> Result<()> {
 }
 
 pub fn init(params: WorkloadParams) -> Result<()> {
-    let workload = workload::parse(
+    let (mut init, _) = workload::parse(
         params.name.as_str(),
         params.size,
         params.initial_capacity.map(|s| 1u64 << s).unwrap_or(0),
         params.percentage_cold,
     )?;
 
-    workload.init(&mut Backend::Nomt.instantiate(true));
+    let mut db = Backend::Nomt.instantiate(true);
+    db.execute(None, &mut init);
 
     Ok(())
 }
 
 pub fn run(params: WorkloadParams) -> Result<()> {
-    let workload = workload::parse(
+    let (_, mut workload) = workload::parse(
         params.name.as_str(),
         params.size,
         params.initial_capacity.map(|s| 1u64 << s).unwrap_or(0),
         params.percentage_cold,
     )?;
 
-    workload.run(&mut Backend::Nomt.instantiate(false), None, true);
+    let mut db = Backend::Nomt.instantiate(true);
+    db.execute(None, &mut *workload);
 
     Ok(())
 }

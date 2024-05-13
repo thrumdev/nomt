@@ -1,111 +1,72 @@
-use crate::{
-    backend::{Action, Db},
-    custom_workload::new_custom_workload,
-    timer::Timer,
-    transfer_workload::new_transfer_workload,
-};
+/// Workload abstracts the type of work the DB will have to deal with.
+///
+/// Generally, the operations on a DB could be:
+/// + read
+/// + write
+/// + delete
+/// + update
+///
+/// Each workload will set up the DB differently and reads and writes arbitrarily,
+/// whether the key is not present or already present.
+use crate::{backend::Transaction, custom_workload, transfer_workload};
 use anyhow::Result;
 
-// Workload abstracts the type of work the DB will have to deal with.
-//
-// Generally, the operations on a DB could be:
-// + read
-// + write
-// + delete
-// + update
-//
-// Each workload will set up the DB differently and reads and writes arbitrarily,
-// whether the key is not present or already present.
-#[derive(Clone)]
-pub struct Workload {
-    pub init_actions: Vec<Action>,
-    pub run_actions: Vec<Action>,
+/// An interface for generating new sets of actions.
+pub trait Workload {
+    /// Run the workload against the given database transaction.
+    ///
+    /// Workloads may be run repeatedly and should vary from run to run.
+    fn run(&mut self, transaction: &mut dyn Transaction);
+
+    /// Get the size of the workload.
+    fn size(&self) -> usize;
 }
 
-impl Workload {
-    // The workload initialization will persist in the database
-    pub fn init(&self, backend: &mut Box<dyn Db>) {
-        backend.apply_actions(self.init_actions.clone(), None);
+/// A database initialization workload where a number of keys have the same initial value.
+pub struct Init {
+    pub keys: Vec<Vec<u8>>,
+    pub value: Vec<u8>,
+}
+
+impl Workload for Init {
+    fn run(&mut self, transaction: &mut dyn Transaction) {
+        for key in &self.keys {
+            transaction.write(key, Some(&self.value));
+        }
     }
 
-    // The workload execution is not persistent, any database modifications will be reverted
-    // to the previous state if `revert` is true.
-    // Otherwise, actions are applied to the backend
-    pub fn run(&self, backend: &mut Box<dyn Db>, timer: Option<&mut Timer>, revert: bool) {
-        if revert {
-            backend.apply_and_revert_actions(self.run_actions.clone(), timer);
-        } else {
-            backend.apply_actions(self.run_actions.clone(), timer);
-        }
+    fn size(&self) -> usize {
+        self.keys.len()
     }
 }
 
 pub fn parse(
     name: &str,
-    size: u64,
-    additional_initial_capacity: u64,
+    workload_size: u64,
+    db_size: u64,
     percentage_cold_transfer: Option<u8>,
-) -> Result<Workload> {
+) -> Result<(Init, Box<dyn Workload>)> {
     Ok(match name {
-        "transfer" => new_transfer_workload(
-            size,
-            percentage_cold_transfer.unwrap_or(0),
-            additional_initial_capacity,
+        "transfer" => (
+            transfer_workload::init(db_size),
+            Box::new(transfer_workload::build(
+                db_size,
+                workload_size,
+                percentage_cold_transfer.unwrap_or(0),
+            )),
         ),
-        "randw" => new_custom_workload(
-            0,     // reads
-            100,   // writes
-            0,     // deletes
-            0,     // updates
-            false, // seq
-            size,
-            additional_initial_capacity,
-        )?,
-        "randr" => new_custom_workload(
-            100,   // reads
-            0,     // writes
-            0,     // deletes
-            0,     // updates
-            false, // seq
-            size,
-            additional_initial_capacity,
-        )?,
-        "randrw" => new_custom_workload(
-            50,    // reads
-            50,    // writes
-            0,     // deletes
-            0,     // updates
-            false, // seq
-            size,
-            additional_initial_capacity,
-        )?,
-        "seqw" => new_custom_workload(
-            0,    // reads
-            100,  // writes
-            0,    // deletes
-            0,    // updates
-            true, // seq
-            size,
-            additional_initial_capacity,
-        )?,
-        "seqr" => new_custom_workload(
-            100,  // reads
-            0,    // writes
-            0,    // deletes
-            0,    // updates
-            true, // seq
-            size,
-            additional_initial_capacity,
-        )?,
-        "seqrw" => new_custom_workload(
-            50,   // reads
-            50,   // writes
-            0,    // deletes
-            0,    // updates
-            true, // seq
-            size,
-            additional_initial_capacity,
-        )?,
+        "randw" => (
+            custom_workload::init(db_size),
+            Box::new(custom_workload::build(0, 100, workload_size, db_size)),
+        ),
+        "randr" => (
+            custom_workload::init(db_size),
+            Box::new(custom_workload::build(100, 0, workload_size, db_size)),
+        ),
+        "randrw" => (
+            custom_workload::init(db_size),
+            Box::new(custom_workload::build(50, 50, workload_size, db_size)),
+        ),
         name => anyhow::bail!("invalid workload name: {}", name),
     })
 }
