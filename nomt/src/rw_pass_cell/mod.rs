@@ -134,6 +134,17 @@ impl<R> ReadPass<R> {
     }
 }
 
+impl ReadPass<UniversalRegion> {
+    /// Supply a region type.
+    pub fn with_region<R>(self, region: R) -> ReadPass<R> {
+        ReadPass {
+            domain: self.domain.clone(),
+            region,
+            _guard: self._guard.clone(),
+        }
+    }
+}
+
 struct ParentWritePass<R> {
     parent: Option<Arc<ParentWritePass<R>>>,
     region: R,
@@ -225,6 +236,51 @@ impl<R: Region + Clone> WritePass<R> {
         };
 
         (left_pass, right_pass)
+    }
+
+    /// Split this write pass into N parts encompassing non-overlapping sub-regions.
+    ///
+    /// The result will be a vector corresponding to the input argument regions.
+    ///
+    /// This has O(n^2) complexity as a result of needing to check that each region is mutually
+    /// exclusive with all others.
+    ///
+    /// An empty argument vector just drops `self` and returns an empty vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the regions overlap with each other or are not encompassed by the
+    /// region of this pass.
+    pub fn split_n(mut self, regions: Vec<R>) -> Vec<Self> {
+        if regions.len() == 0 {
+            return Vec::new();
+        }
+
+        for (i, region) in regions.iter().enumerate() {
+            assert!(self.region().encompasses(&region));
+
+            for other_region in regions.iter().skip(i + 1) {
+                assert!(region.excludes_unique(&other_region));
+            }
+        }
+
+        let new_parent = Arc::new(ParentWritePass {
+            parent: self.parent.take(),
+            region: self.region().clone(),
+            remaining_children: AtomicUsize::new(regions.len()),
+        });
+
+        regions
+            .into_iter()
+            .map(|region| WritePass {
+                parent: Some(new_parent.clone()),
+                read_pass: ReadPass {
+                    domain: self.read_pass.domain.clone(),
+                    region,
+                    _guard: self.read_pass._guard.clone(),
+                },
+            })
+            .collect()
     }
 
     /// Consume this regioned write-pass, possibly yielding the parent region back.
@@ -376,7 +432,7 @@ impl<T, Id> RwPassCell<T, Id> {
 //         value is protected by the RwPassDomain, but mutable exclusive access of the value
 //         may occur on multiple threads. The Id is read-only.
 unsafe impl<T: Send, Id: Sync> Send for RwPassCell<T, Id> {}
-// SAFETY: The RwPasscell is Sync if both the inner value the Id are Sync. The underlying
+// SAFETY: The RwPasscell is Sync if both the inner value the Id are Sync.
 //         They may both be read simultaneously from multiple threads if the appropriate passes
 //         are shown. This also requires T to be Send because multiple threads can take mutable
 //         access to the inner type in turn through a shared reference to the cell.
