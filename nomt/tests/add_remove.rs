@@ -34,6 +34,7 @@ fn add_remove_1000() {
             root = t.commit().0;
         }
 
+        assert_eq!(root, common::expected_root(accounts));
         assert_eq!(root, expected_roots[i + 1]);
     }
 
@@ -47,6 +48,8 @@ fn add_remove_1000() {
         {
             root = t.commit().0;
         }
+
+        assert_eq!(root, common::expected_root(accounts));
         assert_eq!(root, expected_roots[10 - i - 1]);
     }
 }
