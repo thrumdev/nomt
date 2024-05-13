@@ -1,5 +1,4 @@
 use crate::{
-    cursor::PageCacheCursor,
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, RegionContains, RwPassCell, RwPassDomain, WritePass},
     store::{Store, Transaction},
@@ -554,11 +553,6 @@ impl PageCache {
             .page_rw_pass_domain
             .new_write_pass()
             .with_region(PageRegion::universe())
-    }
-
-    pub fn new_write_cursor(&self, root: Node) -> PageCacheCursor {
-        let write_pass = self.new_write_pass();
-        PageCacheCursor::new_write(root, self.clone(), write_pass)
     }
 
     /// Flushes all the dirty pages into the underlying store.

@@ -4,7 +4,7 @@ fn test_propagate_writes() {
 
     loom::model(|| {
         let domain = RwPassDomain::new();
-        let cell: Arc<RwPassCell<u8>> = Arc::new(domain.protect(0u8));
+        let cell: Arc<RwPassCell<u8>> = Arc::new(domain.protect_with_id(0u8, ()));
         let (tx, rx) = loom::sync::mpsc::channel();
 
         let sender = loom::thread::spawn({
@@ -45,7 +45,7 @@ fn test_consume_in_two_threads() {
 
     loom::model(|| {
         let domain = RwPassDomain::new();
-        let _cell: RwPassCell<()> = domain.protect(());
+        let _cell: RwPassCell<()> = domain.protect_with_id((), ());
 
         let write_pass = domain.new_write_pass();
 
@@ -62,7 +62,9 @@ fn test_consume_in_two_threads() {
         );
 
         let write_pass = write_pass.with_region::<PageRegion>(PageRegion::universe());
-        let (write_pass_a, write_pass_b) = write_pass.split(region_a, region_b);
+        let mut write_passes = write_pass.split_n(vec![region_a, region_b]);
+        let write_pass_b = write_passes.pop().unwrap();
+        let write_pass_a = write_passes.pop().unwrap();
 
         let write_pass_a = write_pass_a.into_envelope();
         let write_pass_b = write_pass_b.into_envelope();
