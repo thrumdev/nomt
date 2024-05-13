@@ -64,9 +64,11 @@ impl Timer {
     pub fn print(&mut self) {
         println!("{}", self.name);
 
+        let expected_spans = ["workload", "read", "commit_and_prove"];
+
         // print expectd spans in order
-        for span_name in ["workload", "read", "commit_and_prove"] {
-            let h = self.spans.remove(span_name);
+        for span_name in expected_spans {
+            let h = self.spans.get(span_name);
             match h {
                 Some(h) => println!(
                     "  mean {}: {}",
@@ -79,6 +81,10 @@ impl Timer {
 
         // print all other measured spans
         for (span_name, h) in &self.spans {
+            if expected_spans.contains(span_name) {
+                continue;
+            }
+
             println!(
                 "  mean {}: {}",
                 span_name,
