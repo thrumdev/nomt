@@ -139,11 +139,7 @@ impl<H: NodeHasher> PageWalker<H> {
     ///
     /// Panics if this falls in a page which is not a descendant of the parent page, if any.
     /// Panics if this is not greater than the previous trie position.
-    pub fn advance(
-        &mut self,
-        write_pass: &mut WritePass,
-        new_pos: TriePosition,
-    ) {
+    pub fn advance(&mut self, write_pass: &mut WritePass, new_pos: TriePosition) {
         if let Some(ref pos) = self.last_position {
             assert!(new_pos.path() > pos.path());
             self.compact_up(write_pass, Some(new_pos.clone()));
@@ -276,11 +272,7 @@ impl<H: NodeHasher> PageWalker<H> {
         }
     }
 
-    fn compact_up(
-        &mut self,
-        write_pass: &mut WritePass,
-        target_pos: Option<TriePosition>,
-    ) {
+    fn compact_up(&mut self, write_pass: &mut WritePass, target_pos: Option<TriePosition>) {
         // This serves as a check to see if we have anything to compact.
         if self.stack.is_empty() {
             return;
@@ -353,10 +345,7 @@ impl<H: NodeHasher> PageWalker<H> {
         }
     }
 
-    fn compact_step(
-        &mut self,
-        write_pass: &mut WritePass,
-    ) -> (Node, Option<trie::LeafData>) {
+    fn compact_step(&mut self, write_pass: &mut WritePass) -> (Node, Option<trie::LeafData>) {
         let node = self.node(write_pass.downgrade());
         let sibling = self.sibling_node(write_pass.downgrade());
         let bit = self.position.peek_last_bit();
@@ -429,10 +418,7 @@ impl<H: NodeHasher> PageWalker<H> {
     }
 
     // read the leaf children of a node in the current page at the given position.
-    fn read_leaf_children(
-        &self,
-        read_pass: &ReadPass,
-    ) -> trie::LeafData {
+    fn read_leaf_children(&self, read_pass: &ReadPass) -> trie::LeafData {
         let page = self.stack.last().or(self.parent_page.as_ref());
         let (page, _, children) =
             crate::page_cache::locate_leaf_data(&self.position, page, |page_id| {
