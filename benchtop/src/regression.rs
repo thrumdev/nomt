@@ -39,13 +39,6 @@ pub fn regression(params: Params) -> Result<()> {
         toml::from_str(&input).map_err(|e| anyhow!("regression input file wrong format: {}", e))?;
 
     for (workload_name, workload_info) in regr_inputs.workloads {
-        let workload = workload::parse(
-            workload_info.name.as_str(),
-            workload_info.size,
-            1u64 << workload_info.initial_capacity,
-            None, // TODO: support cold percentage
-        )?;
-
         println!("\nExecuting Workload: {}\n", workload_name);
 
         if let Some(Isolate {
@@ -53,9 +46,16 @@ pub fn regression(params: Params) -> Result<()> {
             mean: prev_mean,
         }) = workload_info.isolate
         {
+            let (init, workload) = workload::parse(
+                workload_info.name.as_str(),
+                workload_info.size,
+                1u64 << workload_info.initial_capacity,
+                None, // TODO: support cold percentage
+            )?;
+
             print!("Isolate: -");
             let bench_results =
-                bench::bench_isolate(workload.clone(), vec![Backend::Nomt], iterations, false)?;
+                bench::bench_isolate(init, workload, vec![Backend::Nomt], iterations, false)?;
             let mean = *bench_results.first().expect("There must be nomt results");
             print_results(prev_mean, mean);
         };
@@ -66,8 +66,16 @@ pub fn regression(params: Params) -> Result<()> {
             mean: prev_mean,
         }) = workload_info.sequential
         {
+            let (init, workload) = workload::parse(
+                workload_info.name.as_str(),
+                workload_info.size,
+                1u64 << workload_info.initial_capacity,
+                None, // TODO: support cold percentage
+            )?;
+
             print!("Sequential - ");
             let bench_results = bench::bench_sequential(
+                init,
                 workload,
                 vec![Backend::Nomt],
                 op_limit,

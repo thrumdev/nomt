@@ -80,7 +80,7 @@ pub struct WorkloadParams {
     #[arg(long = "workload-name", short)]
     pub name: String,
 
-    /// Parameters avaiable only with workload "transfer".
+    /// Parameters available only with workload "transfer".
     ///
     /// It is the percentage of transfers to a non-existing account,
     /// the remaining portion of transfers are to existing accounts
@@ -95,10 +95,7 @@ pub struct WorkloadParams {
     #[arg(long = "workload-size", short)]
     pub size: u64,
 
-    /// Additional size of the database before starting the benchmarks.
-    ///
-    /// Some workloads operate over existing keys in the database,
-    /// and this size is additional to those entries.
+    /// The size of the database before starting the benchmarks.
     ///
     /// The provided argument is the power of two exponent of the
     /// number of elements already present in the storage.
