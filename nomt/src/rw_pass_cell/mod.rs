@@ -64,11 +64,6 @@ impl RwPassDomain {
         }
     }
 
-    /// Protects the given inner value with a [`RwPassCell`].
-    pub fn protect<T>(&self, inner: T) -> RwPassCell<T> {
-        RwPassCell::new(Arc::downgrade(&self.shared), inner, ())
-    }
-
     /// Protects the given inner value, along with an immutable identifier inside a [`RwPassCell`].
     ///
     /// This enables you to make use of [`RegionedWritePass`] to mutably access multiple cells
@@ -195,49 +190,6 @@ impl<R> WritePass<R> {
 }
 
 impl<R: Region + Clone> WritePass<R> {
-    /// Split this write pass into two parts encompassing non-overlapping sub-regions.
-    ///
-    /// The result will be a `(left, right)` tuple corresponding to the input argument regions.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the regions overlap with each other or are not encompassed by the region of this
-    /// pass.
-    pub fn split(mut self, left: R, right: R) -> (Self, Self) {
-        assert!(self.region().encompasses(&left));
-        assert!(self.region().encompasses(&right));
-        assert!(
-            left.excludes_unique(&right),
-            "left and right regions overlap"
-        );
-
-        let new_parent = Arc::new(ParentWritePass {
-            parent: self.parent.take(),
-            region: self.region().clone(),
-            remaining_children: AtomicUsize::new(2),
-        });
-
-        let left_pass = WritePass {
-            parent: Some(new_parent.clone()),
-            read_pass: ReadPass {
-                domain: self.read_pass.domain.clone(),
-                region: left,
-                _guard: self.read_pass._guard.clone(),
-            },
-        };
-
-        let right_pass = WritePass {
-            parent: Some(new_parent),
-            read_pass: ReadPass {
-                domain: self.read_pass.domain.clone(),
-                region: right,
-                _guard: self.read_pass._guard.clone(),
-            },
-        };
-
-        (left_pass, right_pass)
-    }
-
     /// Split this write pass into N parts encompassing non-overlapping sub-regions.
     ///
     /// The result will be a vector corresponding to the input argument regions.

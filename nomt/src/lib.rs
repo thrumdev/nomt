@@ -202,8 +202,6 @@ impl Nomt {
             .swap(1, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(prev, 0, "only one session could be active at a time");
         Session {
-            prev_root: self.root(),
-            page_cache: self.page_cache.clone(),
             store: self.store.clone(),
             committer: Some(
                 self.commit_pool
@@ -282,8 +280,6 @@ impl Seek {
 /// and create a [`Witness`] that can be used to prove the correctness of replaying the same
 /// operations.
 pub struct Session {
-    prev_root: Node,
-    page_cache: PageCache,
     store: Store,
     committer: Option<Committer>, // always `Some` during lifecycle.
     session_cnt: Arc<AtomicUsize>,

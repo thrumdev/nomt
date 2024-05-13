@@ -31,102 +31,9 @@
 //! and hashing operations up to the point where no subsequently altered terminal will affect its
 //! result. The last terminal finishes hashing to the root. We refer to this as partial compaction.
 
-use crate::cursor::Cursor;
 use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, ValueHash};
 
 use bitvec::prelude::*;
-
-/// A visited terminal node.
-#[derive(Clone)]
-pub struct VisitedTerminal {
-    /// the path to the terminal node. only the first `depth` bits matter.
-    pub path: KeyPath,
-    /// the depth of the terminal node.
-    pub depth: u8,
-    /// the leaf at the terminal. `None` if it's a terminator.
-    pub leaf: Option<LeafData>,
-}
-
-/// Apply an update, represented as a sequence of operations, to the trie
-/// navigated by the given cursor.
-///
-/// The `ops` provided should be sorted ascending, lexicographically by key. This bails early when
-/// encountering unsorted keys. The `visited_leaves` consists of all of the preimages to leaf nodes
-/// encountered when looking up any of the keys in `ops` and should also be sorted
-/// lexicographically ascending by key.
-///
-/// In short, the API accepts a sorted set of operations, which may be partitioned into contiguous
-/// slices by the terminal nodes that they look up to in the trie.
-pub fn update<H: NodeHasher>(
-    cursor: &mut impl Cursor,
-    ops: &[(KeyPath, Option<ValueHash>)],
-    visited_terminals: &[VisitedTerminal],
-) {
-    if ops.is_empty() {
-        return;
-    }
-
-    cursor.rewind();
-
-    let mut batch_start = 0;
-    let mut visited_terminals = visited_terminals.iter().cloned();
-    while batch_start < ops.len() {
-        let terminal = match visited_terminals.next() {
-            Some(t) => t,
-            None => {
-                // sanity: should never occur in correct API usage.
-                return;
-            }
-        };
-        let leaf_data = terminal.leaf.clone();
-
-        cursor.jump(terminal.path, terminal.depth);
-
-        // note: cursor position does not move during these
-        // comparisons.
-        let batch_len = ops[batch_start..]
-            .iter()
-            .skip(1)
-            .take_while(|op| shares_prefix(&*cursor, op.0))
-            .count();
-
-        let next_batch_start = batch_start + 1 + batch_len;
-        let compact_layers = if next_batch_start < ops.len() {
-            let current_depth = cursor.position().depth() as usize;
-            let shared_depth = shared_with_cursor(&*cursor, ops[next_batch_start].0);
-
-            // shared_depth is guaranteed less than current_depth because the full prefix isn't
-            // shared.
-            // we want to compact up (inclusive) to the depth `shared_depth + 1`
-            current_depth - (shared_depth + 1)
-        } else {
-            // last batch: all the way to root
-            cursor.position().depth() as usize
-        };
-
-        let batch = &ops[batch_start..next_batch_start];
-
-        replace_subtrie::<H>(cursor, leaf_data, batch);
-        for _ in 0..compact_layers {
-            if let Some(internal_data) = cursor.compact_up() {
-                cursor.place_non_leaf(H::hash_internal(&internal_data));
-            }
-        }
-
-        batch_start = next_batch_start;
-    }
-}
-
-fn shares_prefix(cursor: &impl Cursor, key: KeyPath) -> bool {
-    let pos = cursor.position();
-    let bits = pos.depth() as usize;
-    &pos.path() == &key.view_bits::<Msb0>()[..bits as usize]
-}
-
-fn shared_with_cursor(cursor: &impl Cursor, key: KeyPath) -> usize {
-    let pos = cursor.position();
-    shared_bits(&pos.path(), key.view_bits::<Msb0>())
-}
 
 // TODO: feels extremely out of place.
 pub(crate) fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
@@ -155,31 +62,6 @@ pub fn leaf_ops_spliced(
         .chain(preserve_value)
         .chain(ops[splice_index..].into_iter().cloned())
         .filter_map(|(k, o)| o.map(move |value| (k, value)))
-}
-
-// replaces a terminal node with a new sub-trie in place. `None` keys are ignored.
-// cursor is returned at the same point it started at.
-fn replace_subtrie<H: NodeHasher>(
-    cursor: &mut impl Cursor,
-    leaf_data: Option<LeafData>,
-    ops: &[(KeyPath, Option<ValueHash>)],
-) {
-    let start_pos = cursor.position();
-    let skip = start_pos.depth() as usize;
-
-    let ops = leaf_ops_spliced(leaf_data, ops);
-
-    build_trie::<H>(skip, ops, |visit_control, node, leaf_data| {
-        cursor.up(visit_control.up);
-        for bit in visit_control.down.iter().by_vals() {
-            cursor.down(bit, true);
-        }
-
-        match leaf_data {
-            None => cursor.place_non_leaf(node),
-            Some(leaf_data) => cursor.place_leaf(node, leaf_data),
-        }
-    });
 }
 
 /// Indicates the relative position of the next node.

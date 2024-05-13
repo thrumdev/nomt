@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap};
+#![allow(unused)] // TODO: remove altogether?
 
 use crate::{
     page_cache::{Page, PageCache, PageDiff},
@@ -12,34 +12,7 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 
-#[allow(unused)]
-// TODO: this wil disappear in follow-up
-enum Mode {
-    Read(ReadPass<PageRegion>),
-    Write {
-        write_pass: RefCell<WritePass<PageRegion>>,
-        updated: HashMap<PageId, PageDiff>,
-    },
-}
-
-impl Mode {
-    fn with_read_pass<R, F>(&self, f: F) -> R
-    where
-        F: FnOnce(&ReadPass<PageRegion>) -> R,
-    {
-        match self {
-            Mode::Read(ref read_pass) => f(read_pass),
-            Mode::Write { write_pass, .. } => {
-                let mut write_pass = write_pass.borrow_mut();
-                f(write_pass.downgrade())
-            }
-        }
-    }
-}
-
-/// A cursor wrapping a [`PageCache`].
-///
-/// This performs I/O internally.
+/// A cursor wrapping a [`PageCache`] for read-only access to the page tree.
 pub struct PageCacheCursor {
     pages: PageCache,
     root: Node,
@@ -47,30 +20,18 @@ pub struct PageCacheCursor {
     // Invariant: this is always set when not at the root and never
     // set at the root.
     cached_page: Option<(PageId, Page)>,
-    mode: Mode,
+    read_pass: ReadPass<PageRegion>,
 }
 
 impl PageCacheCursor {
-    /// Create a new [`PageCacheCursor`] configured for writing.
-    pub fn new_write(root: Node, pages: PageCache, write_pass: WritePass<PageRegion>) -> Self {
-        Self::new(
-            root,
-            pages,
-            Mode::Write {
-                write_pass: RefCell::new(write_pass),
-                updated: HashMap::new(),
-            },
-        )
-    }
-
     /// Creates the cursor pointing at the given root of the trie.
-    fn new(root: Node, pages: PageCache, mode: Mode) -> Self {
+    fn new(root: Node, pages: PageCache, read_pass: ReadPass<PageRegion>) -> Self {
         Self {
             root,
             pos: TriePosition::new(),
             pages,
             cached_page: None,
-            mode,
+            read_pass,
         }
     }
 
@@ -163,11 +124,10 @@ impl PageCacheCursor {
 
     /// Returns the node at the current location of the cursor.
     pub fn node(&self) -> Node {
-        self.mode
-            .with_read_pass(|read_pass| match self.cached_page {
-                None => self.root,
-                Some((_, ref page)) => page.node(&read_pass, self.pos.node_index()),
-            })
+        match self.cached_page {
+            None => self.root,
+            Some((_, ref page)) => page.node(&self.read_pass, self.pos.node_index()),
+        }
     }
 
     fn read_leaf_children(&self) -> trie::LeafData {
@@ -176,234 +136,22 @@ impl PageCacheCursor {
                 self.pages.retrieve_sync(page_id, false)
             });
 
-        self.mode.with_read_pass(|read_pass| trie::LeafData {
-            key_path: page.node(&read_pass, children.left()),
-            value_hash: page.node(&read_pass, children.right()),
-        })
-    }
-
-    fn write_leaf_children(&mut self, leaf_data: Option<trie::LeafData>, hint_fresh: bool) {
-        let (page, page_id, children) =
-            crate::page_cache::locate_leaf_data(&self.pos, self.cached_page.as_ref(), |page_id| {
-                self.pages.retrieve_sync(page_id, hint_fresh)
-            });
-
-        let (write_pass, updated) = match self.mode {
-            Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
-            Mode::Write {
-                ref mut write_pass,
-                ref mut updated,
-            } => (write_pass, updated),
-        };
-
-        match leaf_data {
-            None => {
-                page.clear_leaf_data(&mut *write_pass.borrow_mut(), children);
-            }
-            Some(leaf) => {
-                page.set_leaf_data(&mut *write_pass.borrow_mut(), children, leaf);
-            }
-        }
-
-        let diff = updated.entry(page_id.clone()).or_default();
-        diff.set_changed(children.left());
-        diff.set_changed(children.right());
-        diff.set_changed(crate::page_cache::LEAF_META_BITFIELD_SLOT);
-    }
-
-    /// Place a non-leaf node at the current location.
-    pub fn place_non_leaf(&mut self, node: Node) {
-        assert!(!trie::is_leaf(&node));
-
-        if trie::is_leaf(&self.node()) {
-            self.write_leaf_children(None, false);
-        }
-
-        let (write_pass, updated) = match self.mode {
-            Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
-            Mode::Write {
-                ref mut write_pass,
-                ref mut updated,
-            } => (write_pass, updated),
-        };
-        match self.cached_page {
-            None => {
-                self.root = node;
-            }
-            Some((ref page_id, ref mut page)) => {
-                page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                updated
-                    .entry(page_id.clone())
-                    .or_default()
-                    .set_changed(self.pos.node_index());
-            }
-        }
-    }
-
-    /// Place a leaf node at the current location.
-    pub fn place_leaf(&mut self, node: Node, leaf: trie::LeafData) {
-        assert!(trie::is_leaf(&node));
-
-        self.write_leaf_children(Some(leaf), true);
-
-        let (write_pass, updated) = match self.mode {
-            Mode::Read(_) => panic!("attempted to call modify on a read-only cursor"),
-            Mode::Write {
-                ref mut write_pass,
-                ref mut updated,
-            } => (write_pass, updated),
-        };
-        match self.cached_page {
-            None => {
-                self.root = node;
-            }
-            Some((ref page_id, ref mut page)) => {
-                page.set_node(&mut *write_pass.borrow_mut(), self.pos.node_index(), node);
-                updated
-                    .entry(page_id.clone())
-                    .or_default()
-                    .set_changed(self.pos.node_index());
-            }
-        }
-    }
-
-    /// Attempt to compact this node with its sibling. There are four possible outcomes.
-    ///
-    /// 1. If both this and the sibling are terminators, this moves the cursor up one position
-    ///    and replaces the parent with a terminator.
-    /// 2. If one of this and the sibling is a leaf, and the other is a terminator, this deletes
-    ///    the leaf, moves the cursor up one position, and replaces the parent with the deleted
-    ///    leaf.
-    /// 3. If either or both is an internal node, this moves the cursor up one position and
-    ///    return an internal node data structure comprised of this and this sibling.
-    /// 4. This is the root - return.
-    pub fn compact_up(&mut self) -> Option<trie::InternalData> {
-        if self.pos.depth() == 0 {
-            return None;
-        }
-
-        let node = self.node();
-        let sibling = self.peek_sibling();
-
-        let bit = self.pos.peek_last_bit();
-
-        match (NodeKind::of(&node), NodeKind::of(&sibling)) {
-            (NodeKind::Terminator, NodeKind::Terminator) => {
-                // compact terminators.
-                self.up(1);
-                self.place_non_leaf(trie::TERMINATOR);
-                None
-            }
-            (NodeKind::Leaf, NodeKind::Terminator) => {
-                // compact: clear this node, move leaf up.
-
-                let prev = self.read_leaf_children();
-                self.write_leaf_children(None, false);
-                self.place_non_leaf(trie::TERMINATOR);
-                self.up(1);
-                self.place_leaf(node, prev);
-
-                None
-            }
-            (NodeKind::Terminator, NodeKind::Leaf) => {
-                // compact: clear sibling node, move leaf up.
-                self.sibling();
-
-                let prev = self.read_leaf_children();
-                self.write_leaf_children(None, false);
-                self.place_non_leaf(trie::TERMINATOR);
-                self.up(1);
-                self.place_leaf(sibling, prev);
-
-                None
-            }
-            _ => {
-                // otherwise, internal
-                let node_data = if bit {
-                    trie::InternalData {
-                        left: sibling,
-                        right: node,
-                    }
-                } else {
-                    trie::InternalData {
-                        left: node,
-                        right: sibling,
-                    }
-                };
-                self.up(1);
-                Some(node_data)
-            }
+        trie::LeafData {
+            key_path: page.node(&self.read_pass, children.left()),
+            value_hash: page.node(&self.read_pass, children.right()),
         }
     }
 
     /// Peek at the sibling node of the current position without moving the cursor. At the root,
     /// gives the terminator.
     pub fn peek_sibling(&self) -> Node {
-        self.mode
-            .with_read_pass(|read_pass| match self.cached_page {
-                None => trie::TERMINATOR,
-                Some((_, ref page)) => page.node(&read_pass, self.pos.sibling_index()),
-            })
+        match self.cached_page {
+            None => trie::TERMINATOR,
+            Some((_, ref page)) => page.node(&self.read_pass, self.pos.sibling_index()),
+        }
     }
 
     fn retrieve(&mut self, page_id: PageId) -> Page {
         self.pages.retrieve_sync(page_id, false)
-    }
-
-    /// Called when the write is finished.
-    pub fn finish_write(self) -> (HashMap<PageId, PageDiff>, WritePass<PageRegion>) {
-        match self.mode {
-            Mode::Read(_) => panic!("attempted to call dirtied_pages on a read-only cursor"),
-            Mode::Write {
-                updated,
-                write_pass,
-            } => (updated, write_pass.into_inner()),
-        }
-    }
-}
-
-impl nomt_core::Cursor for PageCacheCursor {
-    fn position(&self) -> TriePosition {
-        PageCacheCursor::position(self)
-    }
-
-    fn node(&self) -> Node {
-        PageCacheCursor::node(self)
-    }
-
-    fn peek_sibling(&self) -> Node {
-        PageCacheCursor::peek_sibling(self)
-    }
-
-    fn rewind(&mut self) {
-        PageCacheCursor::rewind(self)
-    }
-
-    fn jump(&mut self, path: KeyPath, depth: u8) {
-        PageCacheCursor::jump(self, path, depth)
-    }
-
-    fn sibling(&mut self) {
-        PageCacheCursor::sibling(self)
-    }
-
-    fn down(&mut self, bit: bool, hint_fresh: bool) {
-        PageCacheCursor::down(self, bit, hint_fresh)
-    }
-
-    fn up(&mut self, d: u8) {
-        PageCacheCursor::up(self, d)
-    }
-
-    fn place_non_leaf(&mut self, node: Node) {
-        PageCacheCursor::place_non_leaf(self, node)
-    }
-
-    fn place_leaf(&mut self, node: Node, leaf: trie::LeafData) {
-        PageCacheCursor::place_leaf(self, node, leaf)
-    }
-
-    fn compact_up(&mut self) -> Option<trie::InternalData> {
-        PageCacheCursor::compact_up(self)
     }
 }

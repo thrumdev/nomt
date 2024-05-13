@@ -40,13 +40,6 @@ pub struct Seek {
     pub page_id: Option<PageId>,
 }
 
-impl Seek {
-    /// Get the depth of the terminal node.
-    pub fn depth(&self) -> usize {
-        self.position.depth() as usize
-    }
-}
-
 /// A [`Seeker`] can be used to seek for keys in the trie.
 pub struct Seeker {
     cache: PageCache,
