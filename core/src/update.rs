@@ -244,16 +244,38 @@ pub fn build_trie<H: NodeHasher>(
     let mut b = leaf_ops.next();
     let mut c = leaf_ops.next();
 
-    if b.is_none() {
-        visit(
-            VisitControl {
-                up: 0,
-                down: BitSlice::empty(),
-            },
-            trie::TERMINATOR,
-            None,
-        );
-        return trie::TERMINATOR;
+    match (b, c) {
+        (None, _) => {
+            // fast path: delete single node.
+            visit(
+                VisitControl {
+                    up: 0,
+                    down: BitSlice::empty(),
+                },
+                trie::TERMINATOR,
+                None,
+            );
+            return trie::TERMINATOR;
+        }
+        (Some((ref k, ref v)), None) => {
+            // fast path: place single leaf.
+            let leaf_data = trie::LeafData {
+                key_path: *k,
+                value_hash: *v,
+            };
+            let leaf = H::hash_leaf(&leaf_data);
+
+            visit(
+                VisitControl {
+                    up: 0,
+                    down: BitSlice::empty(),
+                },
+                leaf,
+                Some(leaf_data),
+            );
+            return leaf;
+        }
+        _ => {}
     }
 
     let common_after_prefix = |k1: &KeyPath, k2: &KeyPath| {
