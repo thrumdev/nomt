@@ -46,6 +46,13 @@ impl TriePosition {
         }
     }
 
+    /// Create a new `TriePosition` based on a bitslice.
+    pub fn from_bitslice(slice: &BitSlice<u8, Msb0>) -> Self {
+        let mut path = [0; 32];
+        path.view_bits_mut::<Msb0>()[..slice.len()].copy_from_bitslice(slice);
+        Self::from_path_and_depth(path, slice.len() as u8)
+    }
+
     /// Parse a `TriePosition` from a bit string.
     #[cfg(test)]
     pub fn from_str(s: &str) -> Self {
