@@ -285,6 +285,22 @@ impl InflightFetch {
     }
 }
 
+enum PageStore {
+    Real(Store),
+    #[cfg(test)]
+    Mock(DashMap<PageId, Vec<u8>>),
+}
+
+impl PageStore {
+    fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
+        match self {
+            PageStore::Real(s) => s.load_page(page_id),
+            #[cfg(test)]
+            PageStore::Mock(map) => Ok(map.get(&page_id).map(|x| x.clone())),
+        }
+    }
+}
+
 /// The page-cache provides an in-memory layer between the user and the underlying DB.
 /// It stores full pages and can be shared between threads.
 #[derive(Clone)]
@@ -294,7 +310,7 @@ pub struct PageCache {
 
 struct Shared {
     page_rw_pass_domain: RwPassDomain,
-    store: Store,
+    store: PageStore,
     /// The thread pool used for fetching pages from the store.
     ///
     /// Used for limiting the number of concurrent page fetches.
@@ -314,7 +330,25 @@ impl PageCache {
             shared: Arc::new(Shared {
                 page_rw_pass_domain: RwPassDomain::new(),
                 cached: DashMap::with_hasher(FxBuildHasher::default()),
-                store,
+                store: PageStore::Real(store),
+                fetch_tp,
+            }),
+        }
+    }
+
+    /// Create a new `PageCache` with a mocked store for testing.
+    #[cfg(test)]
+    pub fn new_mocked(o: &Options) -> Self {
+        let fetch_tp = threadpool::Builder::new()
+            .num_threads(o.fetch_concurrency)
+            .thread_name("nomt-page-fetch".to_string())
+            .build();
+
+        Self {
+            shared: Arc::new(Shared {
+                page_rw_pass_domain: RwPassDomain::new(),
+                cached: DashMap::with_hasher(FxBuildHasher::default()),
+                store: PageStore::Mock(DashMap::new()),
                 fetch_tp,
             }),
         }

@@ -148,6 +148,9 @@ impl<H: NodeHasher> PageWalker<H> {
             assert!(new_pos.path() > pos.path());
             self.compact_up(write_pass, Some(new_pos.clone()));
         }
+
+        let page_id = new_pos.page_id();
+        self.assert_page_in_scope(page_id.as_ref());
         self.last_position = Some(new_pos);
     }
 
@@ -469,20 +472,27 @@ impl<H: NodeHasher> PageWalker<H> {
         diff.set_changed(crate::page_cache::LEAF_META_BITFIELD_SLOT);
     }
 
+    fn assert_page_in_scope(&self, page_id: Option<&PageId>) {
+        match page_id {
+            Some(page_id) => {
+                if let Some(ref parent_page) = self.parent_page {
+                    assert!(page_id != &parent_page.0);
+                    assert!(page_id.is_descendant_of(&parent_page.0));
+                }
+            }
+            None => assert!(self.parent_page.is_none()),
+        }
+    }
+
     // Build the stack to target a particular position.
     //
     // Precondition: the stack is either empty or contains an ancestor of the page ID the position
     // lands in.
     fn build_stack(&mut self, position: TriePosition) {
         let new_page_id = position.page_id();
+        self.assert_page_in_scope(new_page_id.as_ref());
+
         self.position = position;
-        if let Some(ref parent_page) = self.parent_page {
-            assert!(new_page_id.is_some());
-            assert!(new_page_id
-                .as_ref()
-                .unwrap()
-                .is_descendant_of(&parent_page.0));
-        }
         let Some(page_id) = new_page_id else {
             self.stack.clear();
             return;
@@ -516,5 +526,328 @@ impl<H: NodeHasher> PageWalker<H> {
         // we pushed onto the stack in descending, so now reverse everything we just pushed to
         // make it ascending.
         self.stack[start_len..start_len + push_count].reverse();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Blake3Hasher;
+    use nomt_core::page_id::ChildPageIndex;
+
+    macro_rules! trie_pos {
+        ($($t:tt)+) => {
+            TriePosition::from_bitslice(bits![u8, Msb0; $($t)+])
+        }
+    }
+
+    macro_rules! key_path {
+        ($($t:tt)+) => {{
+            let mut path = [0u8; 32];
+            let slice = bits![u8, Msb0; $($t)+];
+            path.view_bits_mut::<Msb0>()[..slice.len()].copy_from_bitslice(&slice);
+            path
+        }}
+    }
+
+    fn val(i: u8) -> [u8; 32] {
+        [i; 32]
+    }
+
+    #[test]
+    #[should_panic]
+    fn advance_backwards_panics() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new_mocked(&crate::Options {
+            path: "".into(),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        });
+
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+        let mut write_pass = page_cache.new_write_pass();
+        let trie_pos_a = trie_pos![1];
+        let trie_pos_b = trie_pos![0];
+        walker.advance(&mut write_pass, trie_pos_a);
+        walker.advance(&mut write_pass, trie_pos_b);
+    }
+
+    #[test]
+    #[should_panic]
+    fn advance_same_panics() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new_mocked(&crate::Options {
+            path: "".into(),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        });
+
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+        let mut write_pass = page_cache.new_write_pass();
+        let trie_pos_a = trie_pos![0];
+        walker.advance(&mut write_pass, trie_pos_a.clone());
+        walker.advance(&mut write_pass, trie_pos_a);
+    }
+
+    #[test]
+    #[should_panic]
+    fn advance_to_parent_page_panics() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new_mocked(&crate::Options {
+            path: "".into(),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        });
+
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
+        let mut write_pass = page_cache.new_write_pass();
+        let trie_pos_a = trie_pos![0, 0, 0, 0, 0, 0];
+        walker.advance(&mut write_pass, trie_pos_a);
+    }
+
+    #[test]
+    #[should_panic]
+    fn advance_to_root_with_parent_page_panics() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new_mocked(&crate::Options {
+            path: "".into(),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        });
+
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
+        let mut write_pass = page_cache.new_write_pass();
+        walker.advance(&mut write_pass, TriePosition::new());
+    }
+
+    #[test]
+    fn compacts_and_updates_root() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new_mocked(&crate::Options {
+            path: "".into(),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        });
+
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+        let mut write_pass = page_cache.new_write_pass();
+        let trie_pos_a = trie_pos![0, 0];
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_a,
+            vec![
+                (key_path![0, 0, 1, 0], val(1)),
+                (key_path![0, 0, 1, 1], val(2)),
+            ],
+        );
+
+        let trie_pos_b = trie_pos![0, 1];
+        walker.advance(&mut write_pass, trie_pos_b);
+
+        let trie_pos_c = trie_pos![1];
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_c,
+            vec![(key_path![1, 0], val(3)), (key_path![1, 1], val(4))],
+        );
+
+        match walker.conclude(&mut write_pass) {
+            Output::Root(new_root, diffs) => {
+                assert_eq!(
+                    new_root,
+                    nomt_core::update::build_trie::<Blake3Hasher>(
+                        0,
+                        vec![
+                            (key_path![0, 0, 1, 0], val(1)),
+                            (key_path![0, 0, 1, 1], val(2)),
+                            (key_path![1, 0], val(3)),
+                            (key_path![1, 1], val(4))
+                        ],
+                        |_, _, _| {}
+                    )
+                );
+                assert_eq!(diffs.len(), 1);
+                assert!(diffs.contains_key(&ROOT_PAGE_ID));
+            }
+            Output::ChildPageRoots(_, _) => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn sets_child_page_roots() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new_mocked(&crate::Options {
+            path: "".into(),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        });
+
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
+        let mut write_pass = page_cache.new_write_pass();
+        let trie_pos_a = trie_pos![0, 0, 0, 0, 0, 0, 0];
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_a.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 0, 0], val(1))],
+        );
+        let trie_pos_b = trie_pos![0, 0, 0, 0, 0, 0, 1];
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_b.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 0, 1], val(2))],
+        );
+
+        let trie_pos_c = trie_pos![0, 0, 0, 0, 0, 1, 0];
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_c.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 1, 0], val(3))],
+        );
+        let trie_pos_d = trie_pos![0, 0, 0, 0, 0, 1, 1];
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_d.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 1, 1], val(4))],
+        );
+
+        match walker.conclude(&mut write_pass) {
+            Output::Root(_new_root, _diffs) => unreachable!(),
+            Output::ChildPageRoots(page_roots, diffs) => {
+                assert_eq!(page_roots.len(), 2);
+                assert_eq!(diffs.len(), 2);
+                let left_page_id = ROOT_PAGE_ID
+                    .child_page_id(ChildPageIndex::new(0).unwrap())
+                    .unwrap();
+                let right_page_id = ROOT_PAGE_ID
+                    .child_page_id(ChildPageIndex::new(1).unwrap())
+                    .unwrap();
+
+                assert!(diffs.contains_key(&left_page_id));
+                assert!(diffs.contains_key(&right_page_id));
+                assert_eq!(page_roots[0].0, trie_pos![0, 0, 0, 0, 0, 0]);
+                assert_eq!(page_roots[1].0, trie_pos![0, 0, 0, 0, 0, 1]);
+
+                assert_eq!(
+                    page_roots[0].1,
+                    nomt_core::update::build_trie::<Blake3Hasher>(
+                        6,
+                        vec![
+                            (key_path![0, 0, 0, 0, 0, 0, 0], val(1)),
+                            (key_path![0, 0, 0, 0, 0, 0, 1], val(2)),
+                        ],
+                        |_, _, _| {}
+                    )
+                );
+
+                assert_eq!(
+                    page_roots[1].1,
+                    nomt_core::update::build_trie::<Blake3Hasher>(
+                        6,
+                        vec![
+                            (key_path![0, 0, 0, 0, 0, 1, 0], val(3)),
+                            (key_path![0, 0, 0, 0, 0, 1, 1], val(4)),
+                        ],
+                        |_, _, _| {}
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tracks_sibling_prev_values() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new_mocked(&crate::Options {
+            path: "".into(),
+            fetch_concurrency: 1,
+            traversal_concurrency: 1,
+        });
+        let mut write_pass = page_cache.new_write_pass();
+
+        let path_1 = key_path![0, 0, 0, 0];
+        let path_2 = key_path![1, 0, 0, 0];
+        let path_3 = key_path![1, 1, 0, 0];
+        let path_4 = key_path![1, 1, 1, 0];
+        let path_5 = key_path![1, 1, 1, 1];
+
+        // first build a trie with these 5 key-value pairs. it happens to have the property that
+        // all the "left" nodes are leaves.
+        let root = {
+            let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+            walker.advance_and_replace(
+                &mut write_pass,
+                TriePosition::new(),
+                vec![
+                    (path_1, val(1)),
+                    (path_2, val(2)),
+                    (path_3, val(3)),
+                    (path_4, val(4)),
+                    (path_5, val(5)),
+                ],
+            );
+
+            match walker.conclude(&mut write_pass) {
+                Output::Root(new_root, _) => new_root,
+                _ => unreachable!(),
+            }
+        };
+
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+
+        let node_hash = |key_path, val| {
+            Blake3Hasher::hash_leaf(&trie::LeafData {
+                key_path,
+                value_hash: val,
+            })
+        };
+
+        let expected_siblings = vec![
+            (node_hash(path_1, val(1)), 1),
+            (node_hash(path_2, val(2)), 2),
+            (node_hash(path_3, val(3)), 3),
+            (node_hash(path_4, val(4)), 4),
+        ];
+
+        // replace those leaf nodes one at a time.
+        // the sibling stack will be populated as we go.
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_1, 4),
+            vec![(path_1, val(11))],
+        );
+        assert_eq!(walker.siblings(), &expected_siblings[..0]);
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_2, 4),
+            vec![(path_2, val(12))],
+        );
+        assert_eq!(walker.siblings(), &expected_siblings[..1]);
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_3, 4),
+            vec![(path_3, val(13))],
+        );
+        assert_eq!(walker.siblings(), &expected_siblings[..2]);
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_4, 4),
+            vec![(path_4, val(14))],
+        );
+        assert_eq!(walker.siblings(), &expected_siblings[..3]);
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_5, 4),
+            vec![(path_5, val(15))],
+        );
+        assert_eq!(walker.siblings(), &expected_siblings[..4]);
     }
 }
