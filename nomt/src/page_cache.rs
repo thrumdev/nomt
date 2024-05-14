@@ -22,12 +22,6 @@ use threadpool::ThreadPool;
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
-/// Within the page, we also store a bitfield indicating whether leaf data is stored at a particular
-/// location. This bitfield has '1' bits set for leaf data and '0' bits set for nodes.
-pub const LEAF_META_BITFIELD_SLOT: usize = NODES_PER_PAGE;
-/// This is the offset of the leaf meta bitfield in the page data.
-pub const LEAF_DATA_BITFIELD_OFF: usize = LEAF_META_BITFIELD_SLOT * 32;
-
 struct PageData {
     data: RwPassCell<Option<Vec<u8>>, PageId>,
 }
@@ -73,11 +67,6 @@ impl PageData {
         let start = index * 32;
         let end = start + 32;
         data[start..end].copy_from_slice(&node);
-
-        // clobbering the leaf data bit here means that if a user is building a tree
-        // upwards (most algorithms do), they can overwrite the leaf children and then overwrite
-        // the leaf without worrying about deleting the node they've just written.
-        leaf_data_bits(data).set(index, false);
     }
 
     fn set_leaf_data(
@@ -90,11 +79,6 @@ impl PageData {
         assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
         let mut data = self.data.write(write_pass);
         let data = data.get_or_insert_with(|| vec![0; 4096]);
-        {
-            let leaf_meta = leaf_data_bits(data);
-            leaf_meta.set(left_index, true);
-            leaf_meta.set(left_index + 1, true);
-        }
         let start = left_index * 32;
         let end = start + 64;
 
@@ -111,29 +95,14 @@ impl PageData {
 
         let mut data = self.data.write(write_pass);
         let data = data.get_or_insert_with(|| vec![0; 4096]);
-        let (overwrite_l, overwrite_r) = {
-            let leaf_meta = leaf_data_bits(data);
-            (
-                leaf_meta.replace(left_index, false),
-                leaf_meta.replace(left_index + 1, false),
-            )
-        };
 
         let start = left_index * 32;
         let l_end = start + 32;
         let r_end = l_end + 32;
 
-        if overwrite_l {
-            data[start..l_end].copy_from_slice(&[0u8; 32]);
-        }
-        if overwrite_r {
-            data[l_end..r_end].copy_from_slice(&[0u8; 32]);
-        }
+        data[start..l_end].copy_from_slice(&[0u8; 32]);
+        data[l_end..r_end].copy_from_slice(&[0u8; 32]);
     }
-}
-
-fn leaf_data_bits(page: &mut [u8]) -> &mut BitSlice<u8, Msb0> {
-    page[LEAF_DATA_BITFIELD_OFF..][..32].view_bits_mut::<Msb0>()
 }
 
 /// Checks whether a page is empty.
@@ -154,9 +123,9 @@ pub struct PageDiff {
 
 impl PageDiff {
     /// Note that some 32-byte slot in the page data has changed.
-    /// The acceptable range is 0..=LEAF_META_BITFIELD_SLOT
+    /// The acceptable range is 0..NODES_PER_PAGE
     pub fn set_changed(&mut self, slot_index: usize) {
-        assert!(slot_index <= LEAF_META_BITFIELD_SLOT);
+        assert!(slot_index < NODES_PER_PAGE);
         self.updated_slots.set(slot_index, true);
     }
 }

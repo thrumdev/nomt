@@ -508,7 +508,6 @@ impl<H: NodeHasher> PageWalker<H> {
         let diff = self.diffs.entry(page_id.clone()).or_default();
         diff.set_changed(children.left());
         diff.set_changed(children.right());
-        diff.set_changed(crate::page_cache::LEAF_META_BITFIELD_SLOT);
     }
 
     fn assert_page_in_scope(&self, page_id: Option<&PageId>) {
