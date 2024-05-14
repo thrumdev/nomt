@@ -37,8 +37,6 @@ pub struct PageId {
 }
 
 /// The root page is the one containing the sub-trie directly descending from the root node.
-///
-/// It has an ID consisting of all zeros.
 pub const ROOT_PAGE_ID: PageId = PageId {
     path: ArrayVec::new_const(),
 };
