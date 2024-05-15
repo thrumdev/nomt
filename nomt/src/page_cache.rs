@@ -1,8 +1,8 @@
 use crate::{
     cursor::PageCacheCursor,
     rw_pass_cell::{ReadPass, RwPassCell, RwPassDomain, WritePass},
-    store::{Store, Transaction},
     seek::Seeker,
+    store::{Store, Transaction},
     Options,
 };
 use bitvec::prelude::*;
@@ -309,12 +309,18 @@ impl PageCache {
     /// page from the underlying store and caches it.
     pub fn prepopulate(&self, page_id: PageId) {
         if let Entry::Vacant(v) = self.shared.cached.entry(page_id.clone()) {
+            #[cfg(feature = "stats")]
+            crate::counter!("page-cache misses");
+
             // Nope, then we need to fetch the page from the store.
             let inflight = Arc::new(InflightFetch::new());
             v.insert(PageState::Inflight(inflight.clone()));
             let task = {
                 let shared = self.shared.clone();
                 move || {
+                    #[cfg(feature = "stats")]
+                    let _page_fetch_guard = crate::record!("page-fetch");
+
                     // the page fetch has been pre-empted in the meantime. avoid querying.
                     if Arc::strong_count(&inflight) == 1 {
                         return;

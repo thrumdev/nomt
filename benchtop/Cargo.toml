@@ -39,3 +39,6 @@ array-bytes = "6.1"
 
 # nomt
 nomt = { path = "../nomt" }
+
+[features]
+stats = ["nomt/stats"]

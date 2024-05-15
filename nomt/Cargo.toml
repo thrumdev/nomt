@@ -20,6 +20,7 @@ bitvec = { version = "1" }
 blake3 = "1.5.1"
 fxhash = "0.2.1"
 dashmap = "5.5.3"
+hdrhistogram = { version = "7.5.4", optional = true }
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }
@@ -28,3 +29,6 @@ loom = { version = "0.7", features = ["checkpoint"] }
 rand = "0.8.5"
 rand_pcg = "0.3.1"
 hex-literal = "0.4"
+
+[features]
+stats = ["dep:hdrhistogram"]

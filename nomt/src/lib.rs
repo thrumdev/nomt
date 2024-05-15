@@ -33,6 +33,8 @@ mod page_cache;
 mod page_region;
 mod rw_pass_cell;
 mod seek;
+#[cfg(feature = "stats")]
+mod stats;
 mod store;
 
 /// A full value stored within the trie.
@@ -160,6 +162,9 @@ pub struct Nomt {
 impl Nomt {
     /// Open the database with the given options.
     pub fn open(o: Options) -> anyhow::Result<Self> {
+        #[cfg(feature = "stats")]
+        crate::stats::init();
+
         let store = Store::open(&o)?;
         let page_cache = PageCache::new(store.clone(), &o);
         let root = store.load_root()?;
@@ -255,7 +260,15 @@ impl Nomt {
 
         self.page_cache.commit(cursor, &mut tx);
         self.store.commit(tx)?;
+
         Ok((new_root, witness, witnessed))
+    }
+}
+
+#[cfg(feature = "stats")]
+impl Drop for Nomt {
+    fn drop(&mut self) {
+        crate::print_metrics!();
     }
 }
 
@@ -280,6 +293,10 @@ impl Session {
     /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
     pub fn tentative_read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         self.warmup(path, false);
+
+        #[cfg(feature = "stats")]
+        let _value_fetch_guard = crate::record!("value-fetch");
+
         let value = self.store.load_value(path)?.map(Rc::new);
         Ok(value)
     }

@@ -2087,6 +2087,8 @@ dependencies = [
  "blake3",
  "dashmap",
  "fxhash",
+ "hdrhistogram",
+ "lazy_static",
  "loom",
  "nomt-core",
  "parking_lot",
