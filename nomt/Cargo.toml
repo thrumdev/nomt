@@ -21,6 +21,7 @@ blake3 = "1.5.1"
 fxhash = "0.2.1"
 dashmap = "5.5.3"
 crossbeam = "0.8.4"
+crossbeam-queue = "0.3.11"
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }

@@ -2127,6 +2127,7 @@ dependencies = [
  "bitvec",
  "blake3",
  "crossbeam",
+ "crossbeam-queue",
  "dashmap",
  "fxhash",
  "loom",

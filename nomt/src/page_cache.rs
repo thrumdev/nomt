@@ -5,6 +5,7 @@ use crate::{
     Options,
 };
 use bitvec::prelude::*;
+use crossbeam_queue::SegQueue;
 use dashmap::{mapref::entry::Entry, DashMap};
 use fxhash::FxBuildHasher;
 use nomt_core::{
@@ -13,9 +14,14 @@ use nomt_core::{
     trie::{LeafData, Node},
     trie_pos::{ChildNodeIndices, TriePosition},
 };
-use parking_lot::{Condvar, Mutex};
-use std::{fmt, mem, sync::Arc};
+use parking_lot::{Condvar, Mutex, RwLock};
+use std::{cell::RefCell, fmt, mem, sync::Arc};
 use threadpool::ThreadPool;
+
+use self::cache_advisor::CacheAdvisor;
+
+mod cache_advisor;
+mod dll;
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
 // of the rootless sub-binary tree stored in a page following this formula:
@@ -27,6 +33,8 @@ pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 pub const LEAF_META_BITFIELD_SLOT: usize = NODES_PER_PAGE;
 /// This is the offset of the leaf meta bitfield in the page data.
 pub const LEAF_DATA_BITFIELD_OFF: usize = LEAF_META_BITFIELD_SLOT * 32;
+
+const PAGE_CACHE_SZ: usize = 1024 * 1024;
 
 struct PageData {
     data: RwPassCell<Option<Vec<u8>>, PageId>,
@@ -305,6 +313,15 @@ impl PageStore {
 #[derive(Clone)]
 pub struct PageCache {
     shared: Arc<Shared>,
+    /// The cache advisor. Tracks which pages are accessed and suggests pages for eviction.
+    ///
+    /// This structure is deliberately not placed in the shared state, as every handle has its own
+    /// advisor. This is because the advisor has some thread-local state as optimization, although
+    /// the most of its state is shared.
+    ///
+    /// The justification for the refcell is that we don't want to propagate mutability to the
+    /// users of the cache.
+    ev: RefCell<CacheAdvisor>,
 }
 
 struct Shared {
@@ -316,6 +333,13 @@ struct Shared {
     fetch_tp: ThreadPool,
     /// The pages loaded from the store, possibly dirty.
     cached: DashMap<PageId, PageState, FxBuildHasher>,
+    /// This lock must be held during the update phase. This is a simple way to ensure that eviction
+    /// can only happen not during the update phase.
+    update_rwl: RwLock<()>,
+    /// The eviction queue.
+    ///
+    /// This is a queue of pages that are candidates for eviction.
+    evict_queue: SegQueue<PageId>,
 }
 
 impl PageCache {
@@ -331,7 +355,10 @@ impl PageCache {
                 cached: DashMap::with_hasher(FxBuildHasher::default()),
                 store: PageStore::Real(store),
                 fetch_tp,
+                update_rwl: RwLock::new(()),
+                evict_queue: SegQueue::new(),
             }),
+            ev: RefCell::new(CacheAdvisor::new(PAGE_CACHE_SZ, 20)),
         }
     }
 
@@ -349,7 +376,10 @@ impl PageCache {
                 cached: DashMap::with_hasher(FxBuildHasher::default()),
                 store: PageStore::Mock(DashMap::new()),
                 fetch_tp,
+                update_rwl: RwLock::new(()),
+                evict_queue: SegQueue::new(),
             }),
+            ev: RefCell::new(CacheAdvisor::new(PAGE_CACHE_SZ, 20)),
         }
     }
 
@@ -358,6 +388,7 @@ impl PageCache {
     /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
     /// page from the underlying store and caches it.
     pub fn prepopulate(&self, page_id: PageId) {
+        self.accessed(&page_id);
         if let Entry::Vacant(v) = self.shared.cached.entry(page_id.clone()) {
             // Nope, then we need to fetch the page from the store.
             let inflight = Arc::new(InflightFetch::new());
@@ -449,6 +480,7 @@ impl PageCache {
     ///
     /// This method is blocking, but doesn't suffer from the channel overhead.
     pub fn retrieve_sync(&self, page_id: PageId, hint_fresh: bool) -> Page {
+        self.accessed(&page_id);
         let maybe_inflight = match self.shared.cached.entry(page_id.clone()) {
             Entry::Occupied(mut o) => {
                 let page = o.get_mut();
@@ -539,6 +571,31 @@ impl PageCache {
         Page { inner: entry }
     }
 
+    fn accessed(&self, page_id: &PageId) {
+        self.ev.borrow_mut().accessed(page_id.clone(), &self.shared.evict_queue);
+        self.try_perform_evict();
+    }
+
+    fn try_perform_evict(&self) {
+        // If we succeed in acquiring the READ lock, we are not in the update phase. That means
+        // we can perform eviction safely.
+        if let Some(_) = self.shared.update_rwl.try_read() {
+            // Limit the amount of work here. We don't want to evict too many pages at once.
+            let to_evict = std::cmp::max(128, self.shared.evict_queue.len());
+            for _ in 0..to_evict {
+                if let Some(page_id) = self.shared.evict_queue.pop() {
+                    let Some((_, evicted)) = self.shared.cached.remove(&page_id) else { continue; };
+                    match evicted {
+                        PageState::Cached(_) => (),
+                        PageState::Inflight(_) => {
+                            panic!();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Acquire a read pass for all pages in the cache.
     pub fn new_read_pass(&self) -> ReadPass<PageRegion> {
         self.shared
@@ -565,6 +622,8 @@ impl PageCache {
         tx: &mut Transaction,
     ) {
         const FULL_PAGE_THRESHOLD: usize = 32;
+
+        let update_rwl = self.shared.update_rwl.write();
 
         let read_pass = self.new_read_pass();
         for (page_id, page_diff) in page_diffs {
@@ -601,5 +660,8 @@ impl PageCache {
                 }
             }
         }
+        drop(read_pass);
+        drop(update_rwl);
+        self.try_perform_evict();
     }
 }
