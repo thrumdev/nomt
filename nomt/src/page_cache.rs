@@ -14,7 +14,7 @@ use nomt_core::{
     trie::{LeafData, Node},
     trie_pos::{ChildNodeIndices, TriePosition},
 };
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 use std::{cell::RefCell, fmt, mem, sync::Arc};
 use threadpool::ThreadPool;
 
@@ -612,6 +612,14 @@ impl PageCache {
             .with_region(PageRegion::universe())
     }
 
+    pub fn start_update_phase<'a>(&'a self) -> impl Drop + 'a {
+        let update_rwl = self.shared.update_rwl.write();
+        CommitGuard {
+            cache: self,
+            update_rwl,
+        }
+    }
+
     /// Flushes all the dirty pages into the underlying store.
     /// This takes a read pass.
     ///
@@ -622,8 +630,6 @@ impl PageCache {
         tx: &mut Transaction,
     ) {
         const FULL_PAGE_THRESHOLD: usize = 32;
-
-        let update_rwl = self.shared.update_rwl.write();
 
         let read_pass = self.new_read_pass();
         for (page_id, page_diff) in page_diffs {
@@ -661,7 +667,16 @@ impl PageCache {
             }
         }
         drop(read_pass);
-        drop(update_rwl);
-        self.try_perform_evict();
+    }
+}
+
+struct CommitGuard<'a> {
+    cache: &'a PageCache,
+    update_rwl: RwLockWriteGuard<'a, ()>,
+}
+
+impl<'a> Drop for CommitGuard<'a> {
+    fn drop(&mut self) {
+        self.cache.try_perform_evict();
     }
 }

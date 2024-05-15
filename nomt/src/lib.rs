@@ -228,6 +228,8 @@ impl Nomt {
             compact_actuals.push((path.clone(), read_write.to_compact()));
         }
 
+        let update_phase_guard = self.page_cache.start_update_phase();
+
         // UNWRAP: committer always `Some` during lifecycle.
         let commit_handle = session.committer.take().unwrap().commit(compact_actuals);
 
@@ -249,6 +251,9 @@ impl Nomt {
         tx.write_root(new_root);
 
         self.store.commit(tx)?;
+
+        drop(update_phase_guard);
+
         Ok((new_root, commit.witness, commit.witnessed_operations))
     }
 }
