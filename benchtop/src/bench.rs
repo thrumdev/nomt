@@ -23,6 +23,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             .unwrap_or(0),
         common_params.workload.percentage_cold,
     )?;
+    let fetch_concurrency = common_params.workload.fetch_concurrency;
 
     let backends = if common_params.backends.is_empty() {
         Backend::all_backends()
@@ -31,9 +32,15 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
     };
 
     match bench_type {
-        BenchType::Isolate(params) => {
-            bench_isolate(init, workload, backends, params.iterations, true).map(|_| ())
-        }
+        BenchType::Isolate(params) => bench_isolate(
+            init,
+            workload,
+            backends,
+            params.iterations,
+            true,
+            fetch_concurrency,
+        )
+        .map(|_| ()),
         BenchType::Sequential(params) => bench_sequential(
             init,
             workload,
@@ -41,6 +48,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             params.op_limit,
             params.time_limit,
             true,
+            fetch_concurrency,
         )
         .map(|_| ()),
     }
@@ -57,13 +65,14 @@ pub fn bench_isolate(
     backends: Vec<Backend>,
     iterations: u64,
     print: bool,
+    fetch_concurrency: usize,
 ) -> Result<Vec<u64>> {
     let mut mean_results = vec![];
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
 
         for _ in 0..iterations {
-            let mut db = backend.instantiate(true);
+            let mut db = backend.instantiate(true, fetch_concurrency);
             db.execute(None, &mut init);
             db.execute(Some(&mut timer), &mut *workload)
         }
@@ -90,6 +99,7 @@ pub fn bench_sequential(
     op_limit: Option<u64>,
     time_limit: Option<u64>,
     print: bool,
+    fetch_concurrency: usize,
 ) -> Result<Vec<u64>> {
     if let (None, None) = (op_limit, time_limit) {
         anyhow::bail!("You need to specify at least one limiter between operations and time")
@@ -99,7 +109,7 @@ pub fn bench_sequential(
 
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
-        let mut db = backend.instantiate(true);
+        let mut db = backend.instantiate(true, fetch_concurrency);
 
         let mut elapsed_time = 0;
         let mut op_count = 0;
