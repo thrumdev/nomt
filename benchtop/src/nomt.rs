@@ -36,7 +36,7 @@ impl NomtDB {
             timer,
         };
 
-        workload.run(&mut transaction);
+        workload.run_step(&mut transaction);
 
         let Tx {
             session,

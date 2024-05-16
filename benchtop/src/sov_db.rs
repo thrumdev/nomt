@@ -77,7 +77,7 @@ impl SovDB {
             jmt,
             version: self.version,
         };
-        workload.run(&mut transaction);
+        workload.run_step(&mut transaction);
         let Tx {
             mut timer,
             mut access,
