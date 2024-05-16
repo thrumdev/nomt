@@ -1,4 +1,5 @@
 use crate::{backend::Transaction, workload::Workload};
+use rand::Rng;
 
 #[derive(Clone)]
 pub struct TransferInit {
@@ -87,23 +88,20 @@ pub struct TransferWorkload {
 
 impl Workload for TransferWorkload {
     fn run_step(&mut self, transaction: &mut dyn Transaction) {
-        let old_num_accounts = self.num_accounts as usize;
-
         let cold_sends =
-            (old_num_accounts as f64 * (self.percentage_cold_transfer as f64 / 100.0)) as u64;
+            (self.num_accounts as f64 * (self.percentage_cold_transfer as f64 / 100.0)) as u64;
         let warm_sends = self.workload_size - cold_sends;
 
-        let mut start_offset = (self.runs * self.workload_size as usize) % old_num_accounts;
+        let mut start_offset =
+            (self.runs * self.workload_size as usize) % self.num_accounts as usize;
 
         for i in 0..self.workload_size {
             // totally arbitrary choice.
             let send_account = start_offset as u64;
             let recv_account = if i < warm_sends {
-                (old_num_accounts - start_offset) as u64
+                self.num_accounts - start_offset as u64
             } else {
-                let a = self.num_accounts;
-                self.num_accounts += 1;
-                a
+                rand::thread_rng().gen_range(self.num_accounts * 2..u64::max_value())
             };
 
             let send_balance = decode_balance(
@@ -131,7 +129,7 @@ impl Workload for TransferWorkload {
                 Some(&encode_balance(new_recv_balance)),
             );
 
-            start_offset = (start_offset + 1) % old_num_accounts;
+            start_offset = (start_offset + 1) % self.num_accounts as usize;
         }
 
         self.ops_remaining = self.ops_remaining.saturating_sub(self.workload_size);
