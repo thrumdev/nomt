@@ -20,6 +20,7 @@ impl NomtDB {
         let mut opts = Options::new();
         opts.path(NOMT_DB_FOLDER);
         opts.fetch_concurrency(fetch_concurrency);
+        opts.metrics(true);
 
         let nomt = Nomt::open(opts).unwrap();
         Self { nomt }
@@ -46,6 +47,10 @@ impl NomtDB {
         let mut actual_access: Vec<_> = access.into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
         self.nomt.commit_and_prove(session, actual_access).unwrap();
+    }
+
+    pub fn print_metrics(&self) {
+        self.nomt.print_metrics()
     }
 }
 

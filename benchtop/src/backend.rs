@@ -72,4 +72,11 @@ impl DB {
             }
         }
     }
+
+    pub fn print_metrics(&self) {
+        match self {
+            DB::Nomt(db) => db.print_metrics(),
+            _ => (),
+        }
+    }
 }

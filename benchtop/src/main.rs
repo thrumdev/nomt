@@ -71,6 +71,7 @@ pub fn run(params: RunParams) -> Result<()> {
         db.execute(Some(&mut timer), &mut *workload);
     }
 
+    db.print_metrics();
     timer.print();
 
     Ok(())
