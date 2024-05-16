@@ -6,7 +6,7 @@ use crossbeam::channel::{self, Receiver, Sender};
 use parking_lot::Mutex;
 
 use nomt_core::{
-    page_id::{ChildPageIndex, PageId, NUM_CHILDREN, ROOT_PAGE_ID},
+    page_id::PageId,
     trie::{self, KeyPath, Node, NodeHasher, ValueHash},
     trie_pos::TriePosition,
 };
@@ -17,15 +17,12 @@ use std::sync::{Arc, Barrier};
 use threadpool::ThreadPool;
 
 use crate::{
-    page_cache::{PageCache, PageDiff},
-    page_region::PageRegion,
+    page_cache::{PageCache, PageDiff, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
     Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 
 mod worker;
-
-const MAX_WORKERS: usize = 64;
 
 /// Whether a key was read or written.
 #[derive(Debug, Clone)]
@@ -78,14 +75,10 @@ pub struct CommitPool {
 impl CommitPool {
     /// Create a new `CommitPool`.
     ///
-    /// If `num_workers` is greater than 64, 64 workers will be used.
-    ///
     /// # Panics
     ///
     /// Panics if `num_workers` is zero.
     pub fn new(num_workers: usize) -> Self {
-        let num_workers = std::cmp::min(MAX_WORKERS, num_workers);
-
         CommitPool {
             worker_tp: threadpool::Builder::new()
                 .num_threads(num_workers)
@@ -102,9 +95,10 @@ impl CommitPool {
     /// are outstanding read passes, write passes, or threads waiting on write passes,
     /// deadlocks are practically guaranteed at some point during the lifecycle of the Committer.
     pub fn begin<H: NodeHasher>(&self, page_cache: PageCache, root: Node) -> Committer {
-        let num_workers = self.worker_tp.max_count();
+        let num_workers = page_cache.shard_count();
 
         let barrier = Arc::new(Barrier::new(num_workers + 1));
+
         let workers: Vec<WorkerHandle> = (0..num_workers)
             .map(|_| {
                 let params = worker::Params {
@@ -161,32 +155,15 @@ impl Committer {
             root_page_pending: Mutex::new(Vec::with_capacity(64)),
         });
 
-        // We apply a simple strategy that assumes keys are uniformly distributed, and give
-        // each worker an approximately even number of root child pages. This scales well up to
-        // 64 worker threads.
-        // The first `remainder` workers get `part + 1` children and the rest get `part`.
-        let part = NUM_CHILDREN / self.workers.len();
-        let remainder = NUM_CHILDREN % self.workers.len();
-
-        let mut regions = Vec::with_capacity(self.workers.len());
-        for (worker_index, worker) in self.workers.iter().enumerate() {
+        for worker in &self.workers {
             let _ = worker.commit_tx.send(ToWorker::Prepare);
-
-            let (start, count) = if worker_index >= remainder {
-                (part * worker_index + remainder, part)
-            } else {
-                (part * worker_index + worker_index, part + 1)
-            };
-
-            // UNWRAP: start / start + count are both less than the number of children.
-            let start_child = ChildPageIndex::new(start as u8).unwrap();
-            let end_child = ChildPageIndex::new((start + count - 1) as u8).unwrap();
-            let region = PageRegion::from_page_id_descendants(ROOT_PAGE_ID, start_child, end_child);
-            regions.push(region);
         }
 
         let write_pass = self.page_cache.new_write_pass();
-        let worker_passes = write_pass.split_n(regions);
+        let shard_regions = (0..self.workers.len())
+            .map(ShardIndex::Shard)
+            .collect::<Vec<_>>();
+        let worker_passes = write_pass.split_n(shard_regions);
 
         for (worker, write_pass) in self.workers.iter().zip(worker_passes) {
             // TODO: handle error better
@@ -323,7 +300,7 @@ enum ToWorker {
 
 struct CommitCommand {
     shared: Arc<CommitShared>,
-    write_pass: WritePassEnvelope<PageRegion>,
+    write_pass: WritePassEnvelope<ShardIndex>,
 }
 
 struct WarmUpCommand {
