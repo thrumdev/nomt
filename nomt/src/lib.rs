@@ -32,6 +32,8 @@ mod rw_pass_cell;
 mod seek;
 mod store;
 
+const MAX_FETCH_CONCURRENCY: usize = 64;
+
 /// A full value stored within the trie.
 pub type Value = Rc<Vec<u8>>;
 
@@ -39,7 +41,8 @@ pub type Value = Rc<Vec<u8>>;
 pub struct Options {
     /// The path to the directory where the trie is stored.
     pub path: PathBuf,
-    /// The maximum number of concurrent page fetches.
+    /// The maximum number of concurrent page fetches. Values over 64 will be rounded down to 64.
+    /// May not be zero.
     pub fetch_concurrency: usize,
     /// The maximum number of concurrent background page fetches.
     pub traversal_concurrency: usize,
@@ -167,9 +170,17 @@ pub struct Nomt {
 
 impl Nomt {
     /// Open the database with the given options.
-    pub fn open(o: Options) -> anyhow::Result<Self> {
+    pub fn open(mut o: Options) -> anyhow::Result<Self> {
+        if o.fetch_concurrency == 0 {
+            anyhow::bail!("fetch concurrency must be greater than zero".to_string());
+        }
+
+        if o.fetch_concurrency > MAX_FETCH_CONCURRENCY {
+            o.fetch_concurrency = MAX_FETCH_CONCURRENCY;
+        }
+
         let store = Store::open(&o)?;
-        let page_cache = PageCache::new(store.clone(), &o);
+        let page_cache = PageCache::new(store.clone(), &o)?;
         let root = store.load_root()?;
         Ok(Self {
             commit_pool: CommitPool::new(o.fetch_concurrency),

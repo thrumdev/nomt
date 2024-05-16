@@ -52,7 +52,7 @@ use nomt_core::{
 use std::collections::HashMap;
 
 use crate::{
-    page_cache::{Page, PageCache, PageDiff},
+    page_cache::{Page, PageCache, PageDiff, ShardIndex},
     rw_pass_cell::{ReadPass, RegionContains, WritePass},
 };
 
@@ -127,7 +127,7 @@ impl<H: NodeHasher> PageWalker<H> {
     /// Panics if this is not greater than the previous trie position.
     pub fn advance_and_replace(
         &mut self,
-        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         new_pos: TriePosition,
         ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
     ) {
@@ -159,7 +159,7 @@ impl<H: NodeHasher> PageWalker<H> {
     /// Panics if this is not greater than the previous trie position.
     pub fn advance_and_place_node(
         &mut self,
-        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         new_pos: TriePosition,
         node: Node,
     ) {
@@ -180,7 +180,7 @@ impl<H: NodeHasher> PageWalker<H> {
     /// Panics if this is not greater than the previous trie position.
     pub fn advance(
         &mut self,
-        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         new_pos: TriePosition,
     ) {
         if let Some(ref pos) = self.last_position {
@@ -193,7 +193,11 @@ impl<H: NodeHasher> PageWalker<H> {
         self.last_position = Some(new_pos);
     }
 
-    fn place_node(&mut self, write_pass: &mut WritePass<impl RegionContains<PageId>>, node: Node) {
+    fn place_node(
+        &mut self,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
+        node: Node,
+    ) {
         if self.position.is_root() {
             self.prev_node = Some(self.root);
             self.root = node;
@@ -205,7 +209,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
     fn replace_terminal(
         &mut self,
-        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
     ) {
         let node = if self.position.is_root() {
@@ -309,7 +313,10 @@ impl<H: NodeHasher> PageWalker<H> {
 
     /// Conclude walking and updating and return an output - either a new root, or a list
     /// of node changes to apply to the parent page.
-    pub fn conclude(mut self, write_pass: &mut WritePass<impl RegionContains<PageId>>) -> Output {
+    pub fn conclude(
+        mut self,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
+    ) -> Output {
         self.compact_up(write_pass, None);
         if self.parent_page.is_none() {
             Output::Root(self.root, self.diffs)
@@ -320,7 +327,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
     fn compact_up(
         &mut self,
-        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         target_pos: Option<TriePosition>,
     ) {
         // This serves as a check to see if we have anything to compact.
@@ -397,7 +404,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
     fn compact_step(
         &mut self,
-        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
     ) -> (Node, Option<trie::LeafData>) {
         let node = self.node(write_pass.downgrade());
         let sibling = self.sibling_node(write_pass.downgrade());
@@ -445,21 +452,25 @@ impl<H: NodeHasher> PageWalker<H> {
     }
 
     // read the node at the current position. panics if no current page.
-    fn node(&self, read_pass: &ReadPass<impl RegionContains<PageId>>) -> Node {
+    fn node(&self, read_pass: &ReadPass<impl RegionContains<ShardIndex>>) -> Node {
         let node_index = self.position.node_index();
         let page = self.stack.last().unwrap();
         page.1.node(read_pass, node_index)
     }
 
     // read the sibling node at the current position. panics if no current page.
-    fn sibling_node(&self, read_pass: &ReadPass<impl RegionContains<PageId>>) -> Node {
+    fn sibling_node(&self, read_pass: &ReadPass<impl RegionContains<ShardIndex>>) -> Node {
         let node_index = self.position.sibling_index();
         let page = self.stack.last().unwrap();
         page.1.node(read_pass, node_index)
     }
 
     // set a node in the current page at the given index. panics if no current page.
-    fn set_node(&mut self, write_pass: &mut WritePass<impl RegionContains<PageId>>, node: Node) {
+    fn set_node(
+        &mut self,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
+        node: Node,
+    ) {
         let node_index = self.position.node_index();
         let page = self.stack.last().unwrap();
         page.1.set_node(write_pass, node_index, node);
@@ -473,7 +484,7 @@ impl<H: NodeHasher> PageWalker<H> {
     // read the leaf children of a node in the current page at the given position.
     fn read_leaf_children(
         &self,
-        read_pass: &ReadPass<impl RegionContains<PageId>>,
+        read_pass: &ReadPass<impl RegionContains<ShardIndex>>,
     ) -> trie::LeafData {
         let page = self.stack.last().or(self.parent_page.as_ref());
         let (page, _, children) =
@@ -490,7 +501,7 @@ impl<H: NodeHasher> PageWalker<H> {
     // write the leaf children of a node in the current page at the given index.
     fn write_leaf_children(
         &mut self,
-        write_pass: &mut WritePass<impl RegionContains<PageId>>,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         leaf_data: Option<trie::LeafData>,
         hint_fresh: bool,
     ) {
