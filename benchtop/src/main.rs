@@ -34,7 +34,7 @@ pub fn init(params: WorkloadParams) -> Result<()> {
         params.percentage_cold,
     )?;
 
-    let mut db = Backend::Nomt.instantiate(true);
+    let mut db = Backend::Nomt.instantiate(true, params.fetch_concurrency);
     db.execute(None, &mut init);
 
     Ok(())
@@ -48,7 +48,7 @@ pub fn run(params: WorkloadParams) -> Result<()> {
         params.percentage_cold,
     )?;
 
-    let mut db = Backend::Nomt.instantiate(true);
+    let mut db = Backend::Nomt.instantiate(true, params.fetch_concurrency);
     db.execute(None, &mut *workload);
 
     Ok(())

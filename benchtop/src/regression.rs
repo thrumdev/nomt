@@ -12,6 +12,7 @@ struct WorkloadInfo {
     name: String,
     size: u64,
     initial_capacity: u64,
+    fetch_concurrency: u64,
     isolate: Option<Isolate>,
     sequential: Option<Sequential>,
 }
@@ -54,8 +55,14 @@ pub fn regression(params: Params) -> Result<()> {
             )?;
 
             print!("Isolate: -");
-            let bench_results =
-                bench::bench_isolate(init, workload, vec![Backend::Nomt], iterations, false)?;
+            let bench_results = bench::bench_isolate(
+                init,
+                workload,
+                vec![Backend::Nomt],
+                iterations,
+                false,
+                workload_info.fetch_concurrency as usize,
+            )?;
             let mean = *bench_results.first().expect("There must be nomt results");
             print_results(prev_mean, mean);
         };
@@ -81,6 +88,7 @@ pub fn regression(params: Params) -> Result<()> {
                 op_limit,
                 time_limit,
                 false,
+                workload_info.fetch_concurrency as usize,
             )?;
             let mean = *bench_results.first().expect("There must be nomt results");
             print_results(prev_mean, mean);

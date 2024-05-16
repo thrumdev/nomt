@@ -11,7 +11,7 @@ pub struct NomtDB {
 }
 
 impl NomtDB {
-    pub fn open(reset: bool) -> Self {
+    pub fn open(reset: bool, fetch_concurrency: usize) -> Self {
         if reset {
             // Delete previously existing db
             let _ = std::fs::remove_dir_all(NOMT_DB_FOLDER);
@@ -19,7 +19,7 @@ impl NomtDB {
 
         let opts = Options {
             path: PathBuf::from(NOMT_DB_FOLDER),
-            fetch_concurrency: 1,
+            fetch_concurrency,
             traversal_concurrency: 1,
         };
 
