@@ -20,6 +20,7 @@ pub struct Store {
 
 struct Shared {
     db: DB,
+    pages: dashmap::DashMap<PageId, Vec<u8>, fxhash::FxBuildHasher>,
 }
 
 impl Store {
@@ -44,7 +45,7 @@ impl Store {
         ];
         let db = DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
         Ok(Self {
-            shared: Arc::new(Shared { db }),
+            shared: Arc::new(Shared { db, pages: Default::default() }),
         })
     }
 
@@ -73,11 +74,12 @@ impl Store {
 
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
-        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
-        let value = self
-            .shared
-            .db
-            .get_cf(&cf, page_id.length_dependent_encoding())?;
+        //let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
+        // let value = self
+        //     .shared
+        //     .db
+        //     .get_cf(&cf, page_id.length_dependent_encoding())?;
+        let value = self.shared.pages.get(&page_id).map(|v| v.clone());
         Ok(value)
     }
 
@@ -86,6 +88,7 @@ impl Store {
         Transaction {
             shared: self.shared.clone(),
             batch: WriteBatch::default(),
+            pages: Vec::new(),
         }
     }
 
@@ -95,13 +98,39 @@ impl Store {
     /// updated values.
     pub fn commit(&self, tx: Transaction) -> anyhow::Result<()> {
         self.shared.db.write(tx.batch)?;
+        for (page_id, page_update) in tx.pages {
+            match page_update {
+                PageUpdate::FullPage(page) => {
+                    self.shared.pages.insert(page_id, page);
+                }
+                PageUpdate::Diff(nodes) => {
+                    // UNWRAP: diffed pages must exist.
+                    let mutate_page = |page: &mut [u8]| {
+                        for chunk in nodes.chunks(33) {
+                            let node_index = chunk[0] as usize;
+                            let start = node_index * 32;
+                            let end = start + 32;
+                            page[start..end].copy_from_slice(&chunk[1..]);
+                        }
+                    };
+                    let mut page = self.shared.pages.entry(page_id).or_insert_with(|| vec![0; 4096]);
+                    mutate_page(&mut page);
+                }
+            }
+        }
         Ok(())
     }
+}
+
+enum PageUpdate {
+    FullPage(Vec<u8>),
+    Diff(Vec<u8>),
 }
 
 /// An atomic transaction to be applied against th estore with [`Store::commit`].
 pub struct Transaction {
     shared: Arc<Shared>,
+    pages: Vec<(PageId, PageUpdate)>,
     batch: WriteBatch,
 }
 
@@ -125,6 +154,7 @@ impl Transaction {
     ///
     /// This does not sanity-check slot number.
     pub fn write_page_nodes(&mut self, page_id: PageId, tagged_nodes: Vec<u8>) {
+        self.pages.push((page_id.clone(), PageUpdate::Diff(tagged_nodes.clone())));
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
         self.batch
             .merge_cf(&cf, page_id.length_dependent_encoding(), tagged_nodes);
@@ -133,6 +163,7 @@ impl Transaction {
     /// Write a page to storage in its entirety.
     pub fn write_page<V: AsRef<[u8]>>(&mut self, page_id: PageId, value: V) {
         let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
+        self.pages.push((page_id.clone(), PageUpdate::FullPage(value.as_ref().to_vec())));
         self.batch
             .put_cf(&cf, page_id.length_dependent_encoding(), value);
     }
