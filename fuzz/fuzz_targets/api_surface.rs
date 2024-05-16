@@ -248,6 +248,7 @@ fn open_db(fetch_concurrency: usize, traversal_concurrency: usize) -> Nomt {
         path: db_path,
         fetch_concurrency,
         traversal_concurrency,
+        metrics: false,
     };
     Nomt::open(options).unwrap()
 }

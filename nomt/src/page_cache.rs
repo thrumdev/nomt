@@ -1,4 +1,5 @@
 use crate::{
+    metrics::Metrics,
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, Region, RegionContains, RwPassCell, RwPassDomain, WritePass},
     store::{Store, Transaction},
@@ -305,6 +306,7 @@ struct Shared {
     ///
     /// Used for limiting the number of concurrent page fetches.
     fetch_tp: ThreadPool,
+    metrics: Metrics,
 }
 
 fn shard_regions(num_shards: usize) -> Vec<(PageRegion, usize)> {
@@ -369,7 +371,7 @@ pub struct PageCache {
 
 impl PageCache {
     /// Create a new `PageCache` atop the provided [`Store`].
-    pub fn new(store: Store, o: &Options) -> anyhow::Result<Self> {
+    pub fn new(store: Store, o: &Options, metrics: Metrics) -> anyhow::Result<Self> {
         let fetch_tp = threadpool::Builder::new()
             .num_threads(o.fetch_concurrency)
             .thread_name("nomt-page-fetch".to_string())
@@ -388,6 +390,7 @@ impl PageCache {
                 page_rw_pass_domain: domain,
                 store: PageStore::Real(store),
                 fetch_tp,
+                metrics,
             }),
         })
     }
@@ -410,6 +413,7 @@ impl PageCache {
                 page_rw_pass_domain: domain,
                 store: PageStore::Mock(DashMap::new()),
                 fetch_tp,
+                metrics: Metrics::Inactive,
             }),
         }
     }
@@ -435,6 +439,12 @@ impl PageCache {
     /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
     /// page from the underlying store and caches it.
     pub fn prepopulate(&self, page_id: PageId) {
+        if let Metrics::Active(metrics) = &self.shared.metrics {
+            metrics
+                .page_requests_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         let shard_index = match self.shard_index_for(&page_id) {
             None => return, // root is always populated.
             Some(index) => index,
@@ -448,12 +458,23 @@ impl PageCache {
                 Entry::Occupied(_) => return, // fetch in-flight already.
             };
 
+            if let Metrics::Active(metrics) = &self.shared.metrics {
+                metrics
+                    .page_cache_misses_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
             // Nope, then we need to fetch the page from the store.
             let inflight = Arc::new(InflightFetch::new());
             v.insert(inflight.clone());
             let task = {
                 let shared = self.shared.clone();
                 move || {
+                    let _maybe_guard = match shared.metrics {
+                        Metrics::Active(ref metrics) => Some(metrics.page_fetch_time.record()),
+                        Metrics::Inactive => None,
+                    };
+
                     // the page fetch has been pre-empted in the meantime. avoid querying.
                     if Arc::strong_count(&inflight) == 1 {
                         return;

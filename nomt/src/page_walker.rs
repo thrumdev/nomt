@@ -611,6 +611,7 @@ mod tests {
             path: "".into(),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
+            metrics: false,
         });
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
@@ -629,6 +630,7 @@ mod tests {
             path: "".into(),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
+            metrics: false,
         });
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
@@ -646,6 +648,8 @@ mod tests {
             path: "".into(),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
+
+            metrics: false,
         });
 
         let mut walker =
@@ -663,6 +667,8 @@ mod tests {
             path: "".into(),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
+
+            metrics: false,
         });
 
         let mut walker =
@@ -678,6 +684,8 @@ mod tests {
             path: "".into(),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
+
+            metrics: false,
         });
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
@@ -731,6 +739,8 @@ mod tests {
             path: "".into(),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
+
+            metrics: false,
         });
 
         let mut walker =
@@ -814,6 +824,7 @@ mod tests {
             path: "".into(),
             fetch_concurrency: 1,
             traversal_concurrency: 1,
+            metrics: false,
         });
         let mut write_pass = page_cache.new_write_pass();
 

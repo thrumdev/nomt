@@ -3,6 +3,7 @@
 //! A Nearly-Optimal Merkle Trie Database.
 
 use bitvec::prelude::*;
+use metrics::Metrics;
 use std::{
     mem,
     path::PathBuf,
@@ -25,6 +26,7 @@ pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
 
 mod commit;
+mod metrics;
 mod page_cache;
 mod page_region;
 mod page_walker;
@@ -46,6 +48,8 @@ pub struct Options {
     pub fetch_concurrency: usize,
     /// The maximum number of concurrent background page fetches.
     pub traversal_concurrency: usize,
+    /// Enable or disable metrics collection.
+    pub metrics: bool,
 }
 
 struct Shared {
@@ -166,6 +170,7 @@ pub struct Nomt {
     shared: Arc<Mutex<Shared>>,
     /// The number of active sessions. Expected to be either 0 or 1.
     session_cnt: Arc<AtomicUsize>,
+    metrics: Metrics,
 }
 
 impl Nomt {
@@ -179,8 +184,10 @@ impl Nomt {
             o.fetch_concurrency = MAX_FETCH_CONCURRENCY;
         }
 
+        let metrics = Metrics::new(o.metrics);
+
         let store = Store::open(&o)?;
-        let page_cache = PageCache::new(store.clone(), &o)?;
+        let page_cache = PageCache::new(store.clone(), &o, metrics.clone())?;
         let root = store.load_root()?;
         Ok(Self {
             commit_pool: CommitPool::new(o.fetch_concurrency),
@@ -188,6 +195,7 @@ impl Nomt {
             store,
             shared: Arc::new(Mutex::new(Shared { root })),
             session_cnt: Arc::new(AtomicUsize::new(0)),
+            metrics,
         })
     }
 
@@ -218,6 +226,7 @@ impl Nomt {
                     .begin::<Blake3Hasher>(self.page_cache.clone(), self.root()),
             ),
             session_cnt: self.session_cnt.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 
@@ -260,7 +269,13 @@ impl Nomt {
         tx.write_root(new_root);
 
         self.store.commit(tx)?;
+
         Ok((new_root, commit.witness, commit.witnessed_operations))
+    }
+
+    /// Print collected Metrics if [`Nomt`] created with them active
+    pub fn print_metrics(&self) {
+        self.metrics.print()
     }
 }
 
@@ -293,6 +308,7 @@ pub struct Session {
     store: Store,
     committer: Option<Committer>, // always `Some` during lifecycle.
     session_cnt: Arc<AtomicUsize>,
+    metrics: Metrics,
 }
 
 impl Session {
@@ -302,6 +318,12 @@ impl Session {
     pub fn tentative_read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         // UNWRAP: committer always `Some` during lifecycle.
         self.committer.as_mut().unwrap().warm_up(path, false);
+
+        let _maybe_guard = match self.metrics {
+            Metrics::Active(ref metrics) => Some(metrics.value_fetch_time.record()),
+            Metrics::Inactive => None,
+        };
+
         let value = self.store.load_value(path)?.map(Rc::new);
         Ok(value)
     }

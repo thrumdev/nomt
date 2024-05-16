@@ -11,6 +11,7 @@ fn main() -> Result<()> {
         path: PathBuf::from(NOMT_DB_FOLDER),
         fetch_concurrency: 1,
         traversal_concurrency: 1,
+        metrics: false,
     };
 
     // Open nomt database, it will create the folder if it does not exist

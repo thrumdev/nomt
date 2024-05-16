@@ -74,7 +74,8 @@ pub fn bench_isolate(
         for _ in 0..iterations {
             let mut db = backend.instantiate(true, fetch_concurrency);
             db.execute(None, &mut init);
-            db.execute(Some(&mut timer), &mut *workload)
+            db.execute(Some(&mut timer), &mut *workload);
+            db.print_metrics();
         }
 
         if print {
@@ -133,6 +134,8 @@ pub fn bench_sequential(
                 _ => (),
             };
         }
+
+        db.print_metrics();
 
         if print {
             timer.print();

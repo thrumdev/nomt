@@ -34,6 +34,7 @@ fn opts(path: PathBuf) -> Options {
         path,
         fetch_concurrency: 1,
         traversal_concurrency: 1,
+        metrics: false,
     }
 }
 

@@ -21,6 +21,7 @@ impl NomtDB {
             path: PathBuf::from(NOMT_DB_FOLDER),
             fetch_concurrency,
             traversal_concurrency: 1,
+            metrics: true,
         };
 
         let nomt = Nomt::open(opts).unwrap();
@@ -48,6 +49,10 @@ impl NomtDB {
         let mut actual_access: Vec<_> = access.into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
         self.nomt.commit_and_prove(session, actual_access).unwrap();
+    }
+
+    pub fn print_metrics(&self) {
+        self.nomt.print_metrics()
     }
 }
 
