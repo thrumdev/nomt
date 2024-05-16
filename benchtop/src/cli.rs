@@ -106,6 +106,13 @@ pub struct WorkloadParams {
     #[arg(long = "workload-capacity", short = 'c')]
     #[clap(value_parser=clap::value_parser!(u8).range(0..64))]
     pub initial_capacity: Option<u8>,
+
+    /// Number of concurrent fetches to perform. Only used with Nomt backend.
+    ///
+    /// Default value is 1
+    #[arg(long = "fetch-concurrency", short)]
+    #[clap(default_value = "1")]
+    pub fetch_concurrency: usize,
 }
 
 pub mod bench {
