@@ -1,9 +1,7 @@
 mod backend;
-mod bench;
 mod cli;
 mod custom_workload;
 mod nomt;
-mod regression;
 mod sov_db;
 mod sp_trie;
 mod timer;
@@ -11,45 +9,69 @@ mod transfer_workload;
 mod workload;
 
 use anyhow::Result;
-use backend::Backend;
 use clap::Parser;
-use cli::{Cli, Commands, WorkloadParams};
+use cli::{Cli, Commands, InitParams, RunParams};
+use timer::Timer;
 
 pub fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Bench(params) => bench::bench(params),
         Commands::Init(params) => init(params),
         Commands::Run(params) => run(params),
-        Commands::Regression(params) => regression::regression(params),
     }
 }
 
-pub fn init(params: WorkloadParams) -> Result<()> {
+pub fn init(params: InitParams) -> Result<()> {
+    let workload_params = params.workload;
     let (mut init, _) = workload::parse(
-        params.name.as_str(),
-        params.size,
-        params.initial_capacity.map(|s| 1u64 << s).unwrap_or(0),
-        params.percentage_cold,
+        workload_params.name.as_str(),
+        workload_params.size,
+        workload_params
+            .initial_capacity
+            .map(|s| 1u64 << s)
+            .unwrap_or(0),
+        workload_params.percentage_cold,
+        u64::max_value(),
     )?;
 
-    let mut db = Backend::Nomt.instantiate(true, params.fetch_concurrency);
-    db.execute(None, &mut init);
+    let mut db = params
+        .backend
+        .instantiate(true, workload_params.fetch_concurrency);
+    db.execute(None, &mut *init);
 
     Ok(())
 }
 
-pub fn run(params: WorkloadParams) -> Result<()> {
-    let (_, mut workload) = workload::parse(
-        params.name.as_str(),
-        params.size,
-        params.initial_capacity.map(|s| 1u64 << s).unwrap_or(0),
-        params.percentage_cold,
+pub fn run(params: RunParams) -> Result<()> {
+    let workload_params = params.workload;
+    let (mut init, mut workload) = workload::parse(
+        workload_params.name.as_str(),
+        workload_params.size,
+        workload_params
+            .initial_capacity
+            .map(|s| 1u64 << s)
+            .unwrap_or(0),
+        workload_params.percentage_cold,
+        params.limits.ops.unwrap_or(u64::max_value()),
     )?;
 
-    let mut db = Backend::Nomt.instantiate(true, params.fetch_concurrency);
-    db.execute(None, &mut *workload);
+    let mut db = params
+        .backend
+        .instantiate(params.reset, workload_params.fetch_concurrency);
+    if params.reset {
+        db.execute(None, &mut *init);
+    }
+
+    let mut timer = Timer::new(format!("{}", params.backend));
+    if let Some(time_limit) = params.limits.time {
+        let timeout = std::time::Instant::now() + time_limit.into();
+        db.execute_with_timeout(Some(&mut timer), &mut *workload, timeout);
+    } else {
+        db.execute(Some(&mut timer), &mut *workload);
+    }
+
+    timer.print();
 
     Ok(())
 }

@@ -11,45 +11,15 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Benchmark different workloads against different backends
-    ///
-    /// It is a combination of Init and Exec with the ability to specify the stopping
-    /// parameters of the execution of workloads over multiple backends.
-    #[command(subcommand)]
-    Bench(bench::BenchType),
     /// Initialize NOMT backend for the specified workload.
     ///
     /// The backend will be initialized with all the data required
     /// to execute the workload.
-    Init(WorkloadParams),
-    /// Execute a workload once over NOMT.
+    Init(InitParams),
+    /// Execute a workload over the given backend.
     ///
-    /// If the NOMT's database is not there, it will start with an empty database;
-    /// otherwise, it will use the already present one.
-    Run(WorkloadParams),
-
-    /// Check regression over multiple workloads
-    ///
-    /// Load a TOML file containing multiple workloads specifications
-    /// and their mean execution time, re-execute all the workloads,
-    /// and compare the results.
-    ///
-    /// Example of entry in the toml file:
-    ///
-    /// [workloads.<name_of_workload>] {n}
-    /// name = "randr" {n}
-    /// size = 25000 {n}
-    /// initial_capacity = 20 {n}
-    /// # then you can specify isolate {n}
-    /// [workloads.random_read_20.isolate] {n}
-    /// iterations = 10 {n}
-    /// mean = 909901824 # mean in ns to be compared with {n}
-    /// # or sequential (or both){n}
-    /// [workloads.random_read_20.sequential] {n}
-    /// time_limit = 100000 # in nanoseconds {n}
-    /// op_limit = 100 {n}
-    /// mean = 909901824 {n}
-    Regression(regression::Params),
+    /// This will reset the database unless `--no-reset` is provided.
+    Run(RunParams),
 }
 
 impl Display for Backend {
@@ -63,21 +33,51 @@ impl Display for Backend {
     }
 }
 
+/// Parameters to the init command.
+#[derive(Debug, Args)]
+pub struct InitParams {
+    #[clap(flatten)]
+    pub workload: WorkloadParams,
+
+    /// The backend to run the workload against.
+    #[arg(required = true, long, short)]
+    pub backend: Backend,
+}
+
+/// Parameters to the run command.
+#[derive(Debug, Args)]
+pub struct RunParams {
+    #[clap(flatten)]
+    pub workload: WorkloadParams,
+
+    #[clap(flatten)]
+    pub limits: RunLimits,
+
+    /// The backend to run the workload against.
+    #[arg(required = true, long, short)]
+    pub backend: Backend,
+
+    /// Whether to reset the database.
+    ///
+    /// If this is false, no initialization logic will be run and the database is assumed to
+    /// be initialized for the workload.
+    #[clap(default_value = "false")]
+    #[arg(long, short)]
+    pub reset: bool,
+}
+
 #[derive(Clone, Debug, Args)]
 pub struct WorkloadParams {
     /// Workload used by benchmarks.
     ///
-    /// Possible values are: transfer, randr, randw, seqr and seqw
+    /// Possible values are: transfer, randr, randw, randrw
     ///
     /// `transfer` workload involves balancing transfer between two different accounts.
     ///
     /// `randr` and `randw` will perform randomly uniformly distributed reads and writes,
     /// respectively, over the key space.
-    ///
-    /// `seqr` and `seqw` will perform sequential reads and writes, respectively,
-    /// starting from a random key.
     #[clap(default_value = "transfer")]
-    #[arg(long = "workload-name", short)]
+    #[arg(long = "workload-name", short = 'w')]
     pub name: String,
 
     /// Parameters available only with workload "transfer".
@@ -90,7 +90,7 @@ pub struct WorkloadParams {
     #[arg(long = "workload-percentage-cold", short)]
     pub percentage_cold: Option<u8>,
 
-    /// Amount of operations performed in the workload
+    /// Amount of operations performed in the workload per iteration.
     #[clap(default_value = "1000")]
     #[arg(long = "workload-size", short)]
     pub size: u64,
@@ -115,69 +115,14 @@ pub struct WorkloadParams {
     pub fetch_concurrency: usize,
 }
 
-pub mod bench {
-    use super::{Args, Backend, WorkloadParams};
+#[derive(Debug, Clone, Args)]
+#[group(required = true)]
+pub struct RunLimits {
+    /// The run is limited by having completed this total number of operations.
+    #[arg(long = "op-limit")]
+    pub ops: Option<u64>,
 
-    #[derive(clap::Subcommand, Debug)]
-    pub enum BenchType {
-        /// Each Workload execution will be performed on a copy of the initialized backend
-        Isolate(IsolateParams),
-
-        /// All workloads will be performed on the same backend after being initialized
-        Sequential(SequentialParams),
-    }
-
-    #[derive(Debug, Args)]
-    pub struct CommonParams {
-        /// Possible Backends to run benchmarks against
-        ///
-        /// Leave this flag empty to run benchmarks against all avaiable backends
-        ///
-        /// Use ',' to separate backends
-        #[clap(default_values_t = Vec::<Backend>::new(), value_delimiter = ',')]
-        #[arg(long, short)]
-        pub backends: Vec<Backend>,
-
-        // TODO: Change this argument to a vector to allow for specifying multiple workloads
-        #[clap(flatten)]
-        pub workload: WorkloadParams,
-    }
-
-    #[derive(Debug, Args)]
-    pub struct SequentialParams {
-        #[clap(flatten)]
-        pub common_params: CommonParams,
-
-        // TODO: better descriptions
-        /// Repeat the Workload on the same backends until the total amount of
-        /// operations performed by all workloads reach the specified amount.
-        #[arg(long)]
-        pub op_limit: Option<u64>,
-
-        /// Repeat the Workload on the same backends until the specified duration is exeeded [ms]
-        #[arg(long)]
-        pub time_limit: Option<u64>,
-    }
-
-    #[derive(Debug, Args)]
-    pub struct IsolateParams {
-        #[clap(flatten)]
-        pub common_params: CommonParams,
-
-        /// Number of time the benchmark will be repeated on the same backend
-        #[clap(default_value = "10")]
-        #[arg(long, short)]
-        pub iterations: u64,
-    }
-}
-
-pub mod regression {
-    use super::Args;
-
-    #[derive(Debug, Args)]
-    pub struct Params {
-        /// Path to the toml file
-        #[arg(long, short)]
-        pub input_file: String,
-    }
+    /// The run is limited by the given duration.
+    #[arg(long = "time-limit")]
+    pub time: Option<humantime::Duration>,
 }

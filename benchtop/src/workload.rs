@@ -13,31 +13,13 @@ use anyhow::Result;
 
 /// An interface for generating new sets of actions.
 pub trait Workload {
-    /// Run the workload against the given database transaction.
+    /// Run a step of the workload against the given database transaction.
     ///
     /// Workloads may be run repeatedly and should vary from run to run.
-    fn run(&mut self, transaction: &mut dyn Transaction);
+    fn run_step(&mut self, transaction: &mut dyn Transaction);
 
-    /// Get the size of the workload.
-    fn size(&self) -> usize;
-}
-
-/// A database initialization workload where a number of keys have the same initial value.
-pub struct Init {
-    pub keys: Vec<Vec<u8>>,
-    pub value: Vec<u8>,
-}
-
-impl Workload for Init {
-    fn run(&mut self, transaction: &mut dyn Transaction) {
-        for key in &self.keys {
-            transaction.write(key, Some(&self.value));
-        }
-    }
-
-    fn size(&self) -> usize {
-        self.keys.len()
-    }
+    /// Whether the workload is done.
+    fn is_done(&self) -> bool;
 }
 
 pub fn parse(
@@ -45,27 +27,47 @@ pub fn parse(
     workload_size: u64,
     db_size: u64,
     percentage_cold_transfer: Option<u8>,
-) -> Result<(Init, Box<dyn Workload>)> {
+    op_limit: u64,
+) -> Result<(Box<dyn Workload>, Box<dyn Workload>)> {
     Ok(match name {
         "transfer" => (
-            transfer_workload::init(db_size),
+            Box::new(transfer_workload::init(db_size)),
             Box::new(transfer_workload::build(
                 db_size,
                 workload_size,
                 percentage_cold_transfer.unwrap_or(0),
+                op_limit,
             )),
         ),
         "randw" => (
-            custom_workload::init(db_size),
-            Box::new(custom_workload::build(0, 100, workload_size, db_size)),
+            Box::new(custom_workload::init(db_size)),
+            Box::new(custom_workload::build(
+                0,
+                100,
+                workload_size,
+                db_size,
+                op_limit,
+            )),
         ),
         "randr" => (
-            custom_workload::init(db_size),
-            Box::new(custom_workload::build(100, 0, workload_size, db_size)),
+            Box::new(custom_workload::init(db_size)),
+            Box::new(custom_workload::build(
+                100,
+                0,
+                workload_size,
+                db_size,
+                op_limit,
+            )),
         ),
         "randrw" => (
-            custom_workload::init(db_size),
-            Box::new(custom_workload::build(50, 50, workload_size, db_size)),
+            Box::new(custom_workload::init(db_size)),
+            Box::new(custom_workload::build(
+                50,
+                50,
+                workload_size,
+                db_size,
+                op_limit,
+            )),
         ),
         name => anyhow::bail!("invalid workload name: {}", name),
     })

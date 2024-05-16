@@ -90,7 +90,7 @@ impl SpTrieDB {
                 trie: trie_db_mut,
                 timer,
             };
-            workload.run(&mut transaction);
+            workload.run_step(&mut transaction);
             let Tx {
                 trie: mut trie_db_mut,
                 mut timer,

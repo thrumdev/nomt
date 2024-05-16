@@ -41,12 +41,35 @@ pub enum DB {
 }
 
 impl DB {
-    /// Execute some code against the DB using the given closure.
-    pub fn execute(&mut self, timer: Option<&mut Timer>, workload: &mut dyn Workload) {
-        match self {
-            DB::Sov(db) => db.execute(timer, workload),
-            DB::SpTrie(db) => db.execute(timer, workload),
-            DB::Nomt(db) => db.execute(timer, workload),
+    /// Execute a workload repeatedly until done.
+    pub fn execute(&mut self, mut timer: Option<&mut Timer>, workload: &mut dyn Workload) {
+        while !workload.is_done() {
+            let timer = timer.as_mut().map(|x| &mut **x);
+            match self {
+                DB::Sov(db) => db.execute(timer, workload),
+                DB::SpTrie(db) => db.execute(timer, workload),
+                DB::Nomt(db) => db.execute(timer, workload),
+            }
+        }
+    }
+
+    /// Execute a workload repeatedly until done or a time limit is reached.
+    pub fn execute_with_timeout(
+        &mut self,
+        mut timer: Option<&mut Timer>,
+        workload: &mut dyn Workload,
+        timeout: std::time::Instant,
+    ) {
+        while !workload.is_done() {
+            if std::time::Instant::now() > timeout {
+                break;
+            }
+            let timer = timer.as_mut().map(|x| &mut **x);
+            match self {
+                DB::Sov(db) => db.execute(timer, workload),
+                DB::SpTrie(db) => db.execute(timer, workload),
+                DB::Nomt(db) => db.execute(timer, workload),
+            }
         }
     }
 }

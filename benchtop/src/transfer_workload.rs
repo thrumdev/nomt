@@ -1,13 +1,38 @@
-use crate::{
-    backend::Transaction,
-    workload::{Init, Workload},
-};
+use crate::{backend::Transaction, workload::Workload};
 
-/// Create an initialization command for this.
-pub fn init(num_accounts: u64) -> Init {
-    Init {
-        keys: (0..num_accounts).map(|id| encode_id(id).to_vec()).collect(),
-        value: encode_balance(1000).to_vec(),
+#[derive(Clone)]
+pub struct TransferInit {
+    cur_account: u64,
+    num_accounts: u64,
+}
+
+impl Workload for TransferInit {
+    fn run_step(&mut self, transaction: &mut dyn Transaction) {
+        const MAX_INIT_PER_ITERATION: u64 = 2 * 1024 * 1024;
+
+        if self.num_accounts == 0 { return }
+
+        let count = std::cmp::min(self.num_accounts - self.cur_account, MAX_INIT_PER_ITERATION);
+        for _ in 0..count {
+            transaction.write(&encode_id(self.cur_account), Some(&encode_balance(1000)));
+            self.cur_account += 1;
+        }
+        println!(
+            "populating {:.1}%",
+            100.0 * (self.cur_account as f64) / (self.num_accounts as f64)
+        );
+    }
+
+    fn is_done(&self) -> bool {
+        self.cur_account == self.num_accounts
+    }
+}
+
+/// Create an initialization command for a transfer database.
+pub fn init(num_accounts: u64) -> TransferInit {
+    TransferInit {
+        cur_account: 0,
+        num_accounts,
     }
 }
 
@@ -35,12 +60,14 @@ pub fn build(
     num_accounts: u64,
     workload_size: u64,
     percentage_cold_transfer: u8,
+    op_limit: u64,
 ) -> TransferWorkload {
     TransferWorkload {
         num_accounts,
         workload_size,
         runs: 0,
         percentage_cold_transfer,
+        ops_remaining: op_limit,
     }
 }
 
@@ -54,10 +81,12 @@ pub struct TransferWorkload {
     pub runs: usize,
     /// The percentage of transfers to make to fresh accounts.
     pub percentage_cold_transfer: u8,
+    /// The number of remaining operations before being considered 'done'.
+    pub ops_remaining: u64,
 }
 
 impl Workload for TransferWorkload {
-    fn run(&mut self, transaction: &mut dyn Transaction) {
+    fn run_step(&mut self, transaction: &mut dyn Transaction) {
         let old_num_accounts = self.num_accounts as usize;
 
         let cold_sends =
@@ -105,10 +134,11 @@ impl Workload for TransferWorkload {
             start_offset = (start_offset + 1) % old_num_accounts;
         }
 
+        self.ops_remaining = self.ops_remaining.saturating_sub(self.workload_size);
         self.runs += 1;
     }
 
-    fn size(&self) -> usize {
-        self.workload_size as usize
+    fn is_done(&self) -> bool {
+        self.ops_remaining == 0
     }
 }
