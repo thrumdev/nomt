@@ -1,8 +1,7 @@
 //! Seek for a path in the trie, pre-fetching pages as necessary.
 
 use crate::{
-    page_cache::{self, Page, PageCache},
-    page_region::PageRegion,
+    page_cache::{self, Page, PageCache, ShardIndex},
     rw_pass_cell::ReadPass,
 };
 use bitvec::prelude::*;
@@ -56,7 +55,7 @@ impl Seeker {
         &self,
         trie_pos: &TriePosition,
         current_page: Option<&(PageId, Page)>,
-        read_pass: &ReadPass<PageRegion>,
+        read_pass: &ReadPass<ShardIndex>,
     ) -> trie::LeafData {
         let (page, _, children) = page_cache::locate_leaf_data(trie_pos, current_page, |page_id| {
             self.cache.retrieve_sync(page_id, false)
@@ -72,7 +71,7 @@ impl Seeker {
         bit: bool,
         pos: &mut TriePosition,
         cur_page: &mut Option<(PageId, Page)>,
-        read_pass: &ReadPass<PageRegion>,
+        read_pass: &ReadPass<ShardIndex>,
     ) -> (Node, Node) {
         if pos.depth() as usize % DEPTH == 0 {
             // attempt to load next page if we are at the end of our previous page or the root.
@@ -105,7 +104,7 @@ impl Seeker {
         &self,
         dest: KeyPath,
         options: SeekOptions,
-        read_pass: &ReadPass<PageRegion>,
+        read_pass: &ReadPass<ShardIndex>,
     ) -> Seek {
         /// The breadth of the prefetch request.
         ///

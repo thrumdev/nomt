@@ -27,7 +27,7 @@ use super::{
 };
 
 use crate::{
-    page_cache::PageCache,
+    page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
     page_walker::{Output, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
@@ -92,7 +92,7 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
 }
 
 fn warm_up(
-    read_pass: &ReadPass<PageRegion>,
+    read_pass: &ReadPass<ShardIndex>,
     root: Node,
     page_cache: PageCache,
     command: WarmUpCommand,
@@ -174,7 +174,8 @@ fn commit<H: NodeHasher>(
 struct RangeCommitter<H> {
     root: Node,
     shared: Arc<CommitShared>,
-    write_pass: WritePass<PageRegion>,
+    write_pass: WritePass<ShardIndex>,
+    region: PageRegion,
     page_walker: PageWalker<H>,
     page_cache: PageCache,
     range_start: usize,
@@ -186,11 +187,15 @@ impl<H: NodeHasher> RangeCommitter<H> {
     fn new(
         root: Node,
         shared: Arc<CommitShared>,
-        write_pass: WritePass<PageRegion>,
+        write_pass: WritePass<ShardIndex>,
         page_cache: PageCache,
     ) -> Self {
-        let key_range_start = write_pass.region().exclusive_min().min_key_path();
-        let key_range_end = write_pass.region().exclusive_max().max_key_path();
+        let region = match write_pass.region() {
+            ShardIndex::Root => PageRegion::universe(),
+            ShardIndex::Shard(i) => page_cache.shard_region(*i),
+        };
+        let key_range_start = region.exclusive_min().min_key_path();
+        let key_range_end = region.exclusive_max().max_key_path();
 
         let range_start = shared
             .read_write
@@ -206,6 +211,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
             root,
             shared,
             write_pass,
+            region,
             page_walker: PageWalker::<H>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID)),
             page_cache,
             range_start,
@@ -271,9 +277,10 @@ impl<H: NodeHasher> RangeCommitter<H> {
             return;
         }
 
-        let is_non_exclusive = seek_result.page_id.as_ref().map_or(true, |p_id| {
-            !self.write_pass.region().contains_exclusive(p_id)
-        });
+        let is_non_exclusive = seek_result
+            .page_id
+            .as_ref()
+            .map_or(true, |p_id| !self.region.contains_exclusive(p_id));
 
         let siblings = if is_non_exclusive {
             self.shared.push_pending_subtrie(
@@ -320,7 +327,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
             .push((path, seek_result.terminal, batch_size));
     }
 
-    fn conclude(mut self, output: &mut WorkerOutput) -> Option<WritePass<PageRegion>> {
+    fn conclude(mut self, output: &mut WorkerOutput) -> Option<WritePass<ShardIndex>> {
         // PANIC: walker was configured with a parent page.
         let (new_nodes, diffs) = match self.page_walker.conclude(&mut self.write_pass) {
             Output::Root(_, _) => unreachable!(),
