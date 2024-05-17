@@ -1,7 +1,6 @@
 use anyhow::Result;
 use nomt::{KeyReadWrite, Node, Nomt, Options, Witness, WitnessedOperations};
 use sha2::Digest;
-use std::path::PathBuf;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
 
@@ -10,11 +9,9 @@ pub struct NomtDB;
 impl NomtDB {
     pub fn commit_batch() -> Result<(Node, Node, Witness, WitnessedOperations)> {
         // Define the options used to open NOMT
-        let opts = Options {
-            path: PathBuf::from(NOMT_DB_FOLDER),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        };
+        let mut opts = Options::new();
+        opts.path(NOMT_DB_FOLDER);
+        opts.fetch_concurrency(1);
 
         // Open NOMT database, it will create the folder if it does not exist
         let nomt = Nomt::open(opts)?;

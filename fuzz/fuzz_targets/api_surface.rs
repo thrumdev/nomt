@@ -8,7 +8,7 @@ use libfuzzer_sys::fuzz_target;
 use nomt::{KeyPath, KeyReadWrite, Nomt, Options, Value};
 
 fuzz_target!(|run: Run| {
-    let db = open_db(run.traversal_concurrency, run.fetch_concurrency);
+    let db = open_db(run.fetch_concurrency);
 
     for call in run.calls.calls {
         match call {
@@ -90,7 +90,6 @@ impl Context {
 
 #[derive(Debug)]
 struct Run {
-    traversal_concurrency: usize,
     fetch_concurrency: usize,
     calls: NomtCalls,
 }
@@ -98,7 +97,6 @@ struct Run {
 impl<'a> Arbitrary<'a> for Run {
     fn arbitrary(input: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let run = Run {
-            traversal_concurrency: input.int_in_range(1..=4)?,
             fetch_concurrency: input.int_in_range(1..=4)?,
             calls: input.arbitrary()?,
         };
@@ -241,13 +239,11 @@ impl<'a> Arbitrary<'a> for NomtCalls {
     }
 }
 
-fn open_db(fetch_concurrency: usize, traversal_concurrency: usize) -> Nomt {
+fn open_db(fetch_concurrency: usize) -> Nomt {
     let tempfile = tempfile::tempdir().unwrap();
     let db_path = tempfile.path().join("db");
-    let options = Options {
-        path: db_path,
-        fetch_concurrency,
-        traversal_concurrency,
-    };
+    let mut options = Options::default();
+    options.path(db_path);
+    options.fetch_concurrency(fetch_concurrency);
     Nomt::open(options).unwrap()
 }

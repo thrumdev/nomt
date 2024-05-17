@@ -30,11 +30,10 @@ pub fn expected_root(accounts: u64) -> Node {
 }
 
 fn opts(path: PathBuf) -> Options {
-    Options {
-        path,
-        fetch_concurrency: 1,
-        traversal_concurrency: 1,
-    }
+    let mut opts = Options::new();
+    opts.path(path);
+    opts.fetch_concurrency(1);
+    opts
 }
 
 pub struct Test {

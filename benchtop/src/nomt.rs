@@ -2,7 +2,7 @@ use crate::{backend::Transaction, timer::Timer, workload::Workload};
 use fxhash::FxHashMap;
 use nomt::{KeyPath, KeyReadWrite, Nomt, Options, Session};
 use sha2::Digest;
-use std::{collections::hash_map::Entry, path::PathBuf};
+use std::collections::hash_map::Entry;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
 
@@ -17,11 +17,9 @@ impl NomtDB {
             let _ = std::fs::remove_dir_all(NOMT_DB_FOLDER);
         }
 
-        let opts = Options {
-            path: PathBuf::from(NOMT_DB_FOLDER),
-            fetch_concurrency,
-            traversal_concurrency: 1,
-        };
+        let mut opts = Options::new();
+        opts.path(NOMT_DB_FOLDER);
+        opts.fetch_concurrency(fetch_concurrency);
 
         let nomt = Nomt::open(opts).unwrap();
         Self { nomt }

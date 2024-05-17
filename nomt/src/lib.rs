@@ -5,7 +5,6 @@
 use bitvec::prelude::*;
 use std::{
     mem,
-    path::PathBuf,
     rc::Rc,
     sync::{atomic::AtomicUsize, Arc},
 };
@@ -23,8 +22,10 @@ use store::Store;
 
 pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
+pub use options::Options;
 
 mod commit;
+mod options;
 mod page_cache;
 mod page_region;
 mod page_walker;
@@ -36,17 +37,6 @@ const MAX_FETCH_CONCURRENCY: usize = 64;
 
 /// A full value stored within the trie.
 pub type Value = Rc<Vec<u8>>;
-
-/// Options when opening a [`Nomt`] instance.
-pub struct Options {
-    /// The path to the directory where the trie is stored.
-    pub path: PathBuf,
-    /// The maximum number of concurrent page fetches. Values over 64 will be rounded down to 64.
-    /// May not be zero.
-    pub fetch_concurrency: usize,
-    /// The maximum number of concurrent background page fetches.
-    pub traversal_concurrency: usize,
-}
 
 struct Shared {
     /// The current root of the trie.
