@@ -64,7 +64,7 @@ impl DB {
             if std::time::Instant::now() > timeout {
                 break;
             }
-            let timer = timer.as_mut().map(|x| &mut **x);
+            let timer = timer.as_deref_mut();
             match self {
                 DB::Sov(db) => db.execute(timer, workload),
                 DB::SpTrie(db) => db.execute(timer, workload),
