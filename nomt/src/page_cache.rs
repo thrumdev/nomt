@@ -1,6 +1,8 @@
 use crate::{
+    increase_count, increase_tot,
     metrics::Metrics,
     page_region::PageRegion,
+    record,
     rw_pass_cell::{ReadPass, Region, RegionContains, RwPassCell, RwPassDomain, WritePass},
     store::{Store, Transaction},
     Options,
@@ -439,11 +441,7 @@ impl PageCache {
     /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
     /// page from the underlying store and caches it.
     pub fn prepopulate(&self, page_id: PageId) {
-        if let Metrics::Active(metrics) = &self.shared.metrics {
-            metrics
-                .page_requests_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        increase_tot!(self.shared.metrics, page_cache_misses);
 
         let shard_index = match self.shard_index_for(&page_id) {
             None => return, // root is always populated.
@@ -458,11 +456,7 @@ impl PageCache {
                 Entry::Occupied(_) => return, // fetch in-flight already.
             };
 
-            if let Metrics::Active(metrics) = &self.shared.metrics {
-                metrics
-                    .page_cache_misses_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+            increase_count!(self.shared.metrics, page_cache_misses);
 
             // Nope, then we need to fetch the page from the store.
             let inflight = Arc::new(InflightFetch::new());
@@ -470,10 +464,7 @@ impl PageCache {
             let task = {
                 let shared = self.shared.clone();
                 move || {
-                    let _maybe_guard = match shared.metrics {
-                        Metrics::Active(ref metrics) => Some(metrics.page_fetch_time.record()),
-                        Metrics::Inactive => None,
-                    };
+                    record!(shared.metrics, page_fetch_time);
 
                     // the page fetch has been pre-empted in the meantime. avoid querying.
                     if Arc::strong_count(&inflight) == 1 {

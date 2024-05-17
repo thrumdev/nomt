@@ -15,8 +15,7 @@ impl Metrics {
     pub fn new(metrics: bool) -> Self {
         if metrics {
             Metrics::Active(Arc::new(ActiveMetrics {
-                page_requests_count: AtomicU64::new(0),
-                page_cache_misses_count: AtomicU64::new(0),
+                page_cache_misses: RelativeCounter::new(),
                 page_fetch_time: Timer::new(),
                 value_fetch_time: Timer::new(),
             }))
@@ -31,16 +30,16 @@ impl Metrics {
             Metrics::Active(metrics) => {
                 println!("metrics");
 
-                let tot_page_requests = metrics.page_requests_count.load(Ordering::Relaxed);
+                let tot_page_requests = metrics.page_cache_misses.tot();
                 println!("  page requests         {}", tot_page_requests);
 
                 if tot_page_requests != 0 {
-                    let cache_misses = metrics.page_cache_misses_count.load(Ordering::Relaxed);
+                    let cache_misses = metrics.page_cache_misses.count();
                     let percentage_cache_misses =
                         (cache_misses as f64 / tot_page_requests as f64) * 100.0;
 
                     println!(
-                        "  page cache misses     {} - {:.2}% of page requests",
+                        "  page cache misses     {}  [ {:.2}% ] ",
                         cache_misses, percentage_cache_misses
                     );
                 }
@@ -49,7 +48,6 @@ impl Metrics {
                     "  page fetch mean       {}",
                     pretty_display_ns(metrics.page_fetch_time.mean())
                 );
-
                 println!(
                     "  value fetch mean      {}",
                     pretty_display_ns(metrics.value_fetch_time.mean())
@@ -64,8 +62,7 @@ impl Metrics {
 
 /// Active metrics that can be collected during execution.
 pub struct ActiveMetrics {
-    pub page_requests_count: AtomicU64,
-    pub page_cache_misses_count: AtomicU64,
+    pub page_cache_misses: RelativeCounter,
     pub page_fetch_time: Timer,
     pub value_fetch_time: Timer,
 }
@@ -128,4 +125,71 @@ impl Timer {
             sum: &self.sum,
         })
     }
+}
+
+/// Relative Counter used in [`ActiveMetrics`]
+pub struct RelativeCounter {
+    tot: AtomicU64,
+    counter: AtomicU64,
+}
+
+impl RelativeCounter {
+    fn new() -> Self {
+        Self {
+            tot: AtomicU64::new(0),
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Increase the inner counter of Relative Counter
+    pub fn increase_count(&self) {
+        self.counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increase the total counter of Relative Counter
+    pub fn increase_tot(&self) {
+        self.tot.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn tot(&self) -> u64 {
+        self.tot.load(Ordering::Relaxed)
+    }
+
+    fn count(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
+}
+
+/// Starts a time record given the [`Metrics`] object reference
+/// and the [`Timer`] we want to start
+#[macro_export]
+macro_rules! record {
+    ($metrics: expr, $name: ident) => {
+        let _maybe_guard = match $metrics {
+            Metrics::Active(ref metrics) => Some(metrics.$name.record()),
+            Metrics::Inactive => None,
+        };
+    };
+}
+
+/// Increase the total counter of a [`RelativeTimer`] given the [`Metrics`] object
+/// reference and the idetifier of the counter
+#[macro_export]
+macro_rules! increase_tot {
+    ($metrics: expr, $name: ident) => {
+        if let Metrics::Active(metrics) = &$metrics {
+            metrics.$name.increase_tot()
+        }
+    };
+}
+
+/// Increase the counter of a [`RelativeTimer`] given the [`Metrics`] object
+/// reference and the idetifier of the counter
+#[macro_export]
+macro_rules! increase_count {
+    ($metrics: expr, $name: ident) => {
+        if let Metrics::Active(metrics) = &$metrics {
+            metrics.$name.increase_count()
+        }
+    };
 }

@@ -319,10 +319,7 @@ impl Session {
         // UNWRAP: committer always `Some` during lifecycle.
         self.committer.as_mut().unwrap().warm_up(path, false);
 
-        let _maybe_guard = match self.metrics {
-            Metrics::Active(ref metrics) => Some(metrics.value_fetch_time.record()),
-            Metrics::Inactive => None,
-        };
+        crate::record!(self.metrics, value_fetch_time);
 
         let value = self.store.load_value(path)?.map(Rc::new);
         Ok(value)
