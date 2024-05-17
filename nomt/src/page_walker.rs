@@ -607,11 +607,7 @@ mod tests {
     #[should_panic]
     fn advance_backwards_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options {
-            path: "".into(),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        });
+        let page_cache = PageCache::new_mocked(&crate::Options::new());
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
@@ -625,11 +621,7 @@ mod tests {
     #[should_panic]
     fn advance_same_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options {
-            path: "".into(),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        });
+        let page_cache = PageCache::new_mocked(&crate::Options::new());
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
@@ -642,11 +634,7 @@ mod tests {
     #[should_panic]
     fn advance_to_parent_page_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options {
-            path: "".into(),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        });
+        let page_cache = PageCache::new_mocked(&crate::Options::new());
 
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
@@ -659,11 +647,7 @@ mod tests {
     #[should_panic]
     fn advance_to_root_with_parent_page_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options {
-            path: "".into(),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        });
+        let page_cache = PageCache::new_mocked(&crate::Options::new());
 
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
@@ -674,11 +658,7 @@ mod tests {
     #[test]
     fn compacts_and_updates_root() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options {
-            path: "".into(),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        });
+        let page_cache = PageCache::new_mocked(&crate::Options::new());
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
@@ -727,11 +707,7 @@ mod tests {
     #[test]
     fn sets_child_page_roots() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options {
-            path: "".into(),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        });
+        let page_cache = PageCache::new_mocked(&crate::Options::new());
 
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
@@ -810,11 +786,7 @@ mod tests {
     #[test]
     fn tracks_sibling_prev_values() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options {
-            path: "".into(),
-            fetch_concurrency: 1,
-            traversal_concurrency: 1,
-        });
+        let page_cache = PageCache::new_mocked(&crate::Options::new());
         let mut write_pass = page_cache.new_write_pass();
 
         let path_1 = key_path![0, 0, 0, 0];
