@@ -11,7 +11,9 @@ impl Workload for TransferInit {
     fn run_step(&mut self, transaction: &mut dyn Transaction) {
         const MAX_INIT_PER_ITERATION: u64 = 2 * 1024 * 1024;
 
-        if self.num_accounts == 0 { return }
+        if self.num_accounts == 0 {
+            return;
+        }
 
         let count = std::cmp::min(self.num_accounts - self.cur_account, MAX_INIT_PER_ITERATION);
         for _ in 0..count {
