@@ -16,7 +16,6 @@ const SOV_DB_FOLDER: &str = "sov_db";
 
 pub struct SovDB {
     state_db: StateDB<SnapshotManager>,
-    version: Version,
 }
 
 impl SovDB {
@@ -34,16 +33,15 @@ impl SovDB {
         let state_db_snapshot = DbSnapshot::<SnapshotManager>::new(0, state_db_sm.into());
         let state_db = StateDB::with_db_snapshot(state_db_snapshot).unwrap();
 
-        Self {
-            state_db,
-            version: 1,
-        }
+        Self { state_db }
     }
 
     pub fn execute(&mut self, mut timer: Option<&mut Timer>, workload: &mut dyn Workload) {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
-        self.state_db.inc_next_version();
+        let write_version = self.state_db.get_next_version();
+        assert!(write_version > 0);
+        let read_version = write_version - 1;
 
         // Actions are applied to jmt and then applied to the backend
         let jmt = JellyfishMerkleTree::<_, sha2::Sha256>::new(&self.state_db);
@@ -75,7 +73,7 @@ impl SovDB {
             timer,
             access: FxHashMap::default(),
             jmt,
-            version: self.version,
+            version: read_version,
         };
         workload.run_step(&mut transaction);
         let Tx {
@@ -93,7 +91,7 @@ impl SovDB {
                 .iter_mut()
                 .map(|(k, v)| (k.clone(), v.as_mut().map(|v| std::mem::take(&mut v.value))));
             let (_new_root, _proof, tree_update) = jmt
-                .put_value_set_with_proof(value_set, self.version)
+                .put_value_set_with_proof(value_set, write_version)
                 .expect("JMT update must succeed");
 
             tree_update
@@ -108,7 +106,7 @@ impl SovDB {
             .write_node_batch(&tree_update.node_batch)
             .unwrap();
 
-        self.version += 1;
+        self.state_db.inc_next_version();
     }
 }
 
