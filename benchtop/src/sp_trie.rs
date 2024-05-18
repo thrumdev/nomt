@@ -4,8 +4,7 @@ use kvdb::KeyValueDB;
 use kvdb_rocksdb::{Database, DatabaseConfig};
 use sha2::Digest;
 use sp_trie::trie_types::TrieDBMutBuilderV1;
-use sp_trie::{DBValue, LayoutV1, TrieDBMut};
-use std::collections::HashMap;
+use sp_trie::{DBValue, LayoutV1, PrefixedMemoryDB, TrieDBMut, TrieLayout};
 use std::sync::Arc;
 use trie_db::TrieMut;
 
@@ -14,6 +13,12 @@ type Hash = sp_core::H256;
 
 const SP_TRIE_DB_FOLDER: &str = "sp_trie_db";
 
+const NUM_COLUMNS: u32 = 2;
+const COL_TRIE: u32 = 0;
+const COL_ROOT: u32 = 1;
+
+const ROOT_KEY: &[u8] = b"root";
+
 pub struct SpTrieDB {
     pub kvdb: Arc<dyn KeyValueDB>,
     pub root: Hash,
@@ -21,7 +26,7 @@ pub struct SpTrieDB {
 
 pub struct Trie<'a> {
     pub db: Arc<dyn KeyValueDB>,
-    pub overlay: &'a mut HashMap<Vec<u8>, Option<Vec<u8>>>,
+    pub overlay: &'a mut PrefixedMemoryDB<Hasher>,
 }
 
 impl SpTrieDB {
@@ -31,39 +36,14 @@ impl SpTrieDB {
             let _ = std::fs::remove_dir_all(SP_TRIE_DB_FOLDER);
         }
 
-        let db_cfg = DatabaseConfig::with_columns(1);
+        let db_cfg = DatabaseConfig::with_columns(NUM_COLUMNS);
         let kvdb =
             Arc::new(Database::open(&db_cfg, SP_TRIE_DB_FOLDER).expect("Database backend error"));
 
-        let mut root = Hash::default();
-        let mut overlay = HashMap::new();
-        overlay.insert(
-            array_bytes::hex2bytes(
-                "03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314",
-            )
-            .expect("null key is valid"),
-            Some(vec![0]),
-        );
-
-        {
-            let mut trie = Trie {
-                db: kvdb.clone(),
-                overlay: &mut overlay,
-            };
-            TrieDBMutBuilderV1::<Hasher>::new(&mut trie, &mut root)
-                .build()
-                .commit();
-        }
-
-        let mut transaction = kvdb.transaction();
-        for (key, value) in overlay.into_iter() {
-            match value {
-                Some(value) => transaction.put(0, &key[..], &value[..]),
-                None => transaction.delete(0, &key[..]),
-            }
-        }
-        kvdb.write(transaction)
-            .expect("Failed to write transaction");
+        let root = match kvdb.get(COL_ROOT, ROOT_KEY).unwrap() {
+            None => Hash::default(),
+            Some(r) => Hash::from_slice(&r[..32]),
+        };
 
         Self { kvdb, root }
     }
@@ -72,7 +52,7 @@ impl SpTrieDB {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
         let mut new_root = self.root;
-        let mut overlay: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
+        let mut overlay = PrefixedMemoryDB::default();
 
         let mut trie = Trie {
             db: self.kvdb.clone(),
@@ -82,9 +62,16 @@ impl SpTrieDB {
         let recorder: sp_trie::recorder::Recorder<Hasher> = Default::default();
         let _timer_guard_commit = {
             let mut trie_recorder = recorder.as_trie_recorder(new_root);
-            let trie_db_mut = TrieDBMutBuilderV1::from_existing(&mut trie, &mut new_root)
-                .with_recorder(&mut trie_recorder)
-                .build();
+
+            let trie_db_mut = if self.root == Hash::default() {
+                TrieDBMutBuilderV1::new(&mut trie, &mut new_root)
+                    .with_recorder(&mut trie_recorder)
+                    .build()
+            } else {
+                TrieDBMutBuilderV1::from_existing(&mut trie, &mut new_root)
+                    .with_recorder(&mut trie_recorder)
+                    .build()
+            };
 
             let mut transaction = Tx {
                 trie: trie_db_mut,
@@ -105,12 +92,14 @@ impl SpTrieDB {
         let _proof = recorder.drain_storage_proof().is_empty();
 
         let mut transaction = self.kvdb.transaction();
-        for (key, value) in overlay.into_iter() {
-            match value {
-                Some(value) => transaction.put(0, &key[..], &value[..]),
-                None => transaction.delete(0, &key[..]),
+        for (key, (value, ref_count)) in overlay.drain() {
+            if ref_count > 0 {
+                transaction.put(COL_TRIE, &key[..], &value[..])
+            } else if ref_count < 0 {
+                transaction.delete(COL_TRIE, &key[..])
             }
         }
+        transaction.put(COL_ROOT, ROOT_KEY, new_root.as_bytes());
         self.kvdb
             .write(transaction)
             .expect("Failed to write transaction");
@@ -157,10 +146,11 @@ impl<'a> AsHashDB<Hasher, DBValue> for Trie<'a> {
 
 impl<'a> HashDB<Hasher, DBValue> for Trie<'a> {
     fn get(&self, key: &Hash, prefix: Prefix) -> Option<DBValue> {
-        let key = sp_trie::prefixed_key::<Hasher>(key, prefix);
-        if let Some(value) = self.overlay.get(&key) {
-            return value.clone();
+        if let Some(value) = self.overlay.get(key, prefix) {
+            return Some(value);
         }
+
+        let key = sp_trie::prefixed_key::<Hasher>(key, prefix);
         self.db.get(0, &key).expect("Database backend error")
     }
 
@@ -169,18 +159,14 @@ impl<'a> HashDB<Hasher, DBValue> for Trie<'a> {
     }
 
     fn insert(&mut self, prefix: Prefix, value: &[u8]) -> Hash {
-        let key = Hasher::hash(value);
-        self.emplace(key, prefix, value.to_vec());
-        key
+        self.overlay.insert(prefix, value)
     }
 
     fn emplace(&mut self, key: Hash, prefix: Prefix, value: DBValue) {
-        let key = sp_trie::prefixed_key::<Hasher>(&key, prefix);
-        self.overlay.insert(key, Some(value));
+        self.overlay.emplace(key, prefix, value);
     }
 
     fn remove(&mut self, key: &Hash, prefix: Prefix) {
-        let key = sp_trie::prefixed_key::<Hasher>(key, prefix);
-        self.overlay.insert(key, None);
+        self.overlay.remove(key, prefix)
     }
 }
