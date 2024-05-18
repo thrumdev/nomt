@@ -132,9 +132,7 @@ impl SovDB {
         // We are not interested in storing the witness, but we want to measure
         // the time required to create the proof
         {
-            let value_set = writes
-                .iter()
-                .map(|(k, v)| (k.clone(), v.value()));
+            let value_set = writes.iter().map(|(k, v)| (k.clone(), v.value()));
 
             let (_new_root, _proof, tree_update) = jmt
                 .put_value_set_with_proof(value_set, write_version)
