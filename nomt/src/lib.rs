@@ -261,9 +261,10 @@ impl Nomt {
         Ok((new_root, commit.witness, commit.witnessed_operations))
     }
 
-    /// Print collected Metrics if [`Nomt`] created with them active
-    pub fn print_metrics(&self) {
-        self.metrics.print()
+    /// Return Nomt's metrics.
+    /// To collect them, they need to be activated at [`Nomt`] creation
+    pub fn metrics(&self) -> Metrics {
+        self.metrics.clone()
     }
 }
 

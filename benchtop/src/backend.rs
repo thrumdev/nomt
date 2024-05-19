@@ -73,6 +73,7 @@ impl DB {
         }
     }
 
+    /// Print metrics collected by the Backend if it supports metrics collection
     pub fn print_metrics(&self) {
         match self {
             DB::Nomt(db) => db.print_metrics(),
