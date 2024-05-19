@@ -3,7 +3,7 @@
 //! A Nearly-Optimal Merkle Trie Database.
 
 use bitvec::prelude::*;
-use metrics::Metrics;
+use metrics::{Metric, Metrics};
 use std::{
     mem,
     rc::Rc,
@@ -308,10 +308,7 @@ impl Session {
         // UNWRAP: committer always `Some` during lifecycle.
         self.committer.as_mut().unwrap().warm_up(path, false);
 
-        let _maybe_guard = match self.metrics {
-            Metrics::Active(ref metrics) => Some(metrics.value_fetch_time.record()),
-            Metrics::Inactive => None,
-        };
+        let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
 
         let value = self.store.load_value(path)?.map(Rc::new);
         Ok(value)
