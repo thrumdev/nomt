@@ -50,7 +50,7 @@ impl NomtDB {
     }
 
     pub fn print_metrics(&self) {
-        self.nomt.print_metrics()
+        self.nomt.metrics().print()
     }
 }
 

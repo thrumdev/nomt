@@ -64,9 +64,13 @@ impl Metrics {
 
 /// Active metrics that can be collected during execution.
 pub struct ActiveMetrics {
+    /// Counter of total page requests
     pub page_requests_count: AtomicU64,
+    /// Counter of page requests cache misses
     pub page_cache_misses_count: AtomicU64,
+    /// Timer used to record average page fetch time from the database
     pub page_fetch_time: Timer,
+    /// Timer used to record average value fetch time from the flat-kv
     pub value_fetch_time: Timer,
 }
 
