@@ -18,7 +18,7 @@ pub enum Commands {
     Init(InitParams),
     /// Execute a workload over the given backend.
     ///
-    /// This will reset the database unless `--no-reset` is provided.
+    /// This will not reset the database unless `--reset` is provided.
     Run(RunParams),
 }
 
