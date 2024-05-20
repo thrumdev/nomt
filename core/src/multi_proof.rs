@@ -29,6 +29,104 @@ pub struct MultiProof {
     external_siblings: Vec<Node>,
 }
 
+// Given a vector of PathProofs ordered by the key_path,
+// `PathProofRange` represent a range of that vector
+// with key_paths that have common bits up to path_bit_index
+struct PathProofRange {
+    // lower bound of the range
+    lower: usize,
+    // upper bound of the range
+    upper: usize,
+    // bit index in the key path where this struct is pointing at,
+    // this index will be increased or used to create a new bisection
+    path_bit_index: usize,
+}
+
+enum PathProofRangeStep {
+    Bisect {
+        left: PathProofRange,
+        right: PathProofRange,
+    },
+    Advance {
+        sibling: Node,
+    },
+}
+
+impl PathProofRange {
+    fn prove_unique_path_remainder(&self, path_proofs: &Vec<PathProof>) -> Option<SubPathProof> {
+        // If there is no longer a common prefix, there is only one key in the PathProofRange,
+        // and then all remaining siblings are required for the multiproof
+        if self.lower == self.upper - 1 {
+            let path_proof = &path_proofs[self.lower];
+            Some(SubPathProof {
+                terminal: path_proof.terminal.clone(),
+                // The depth at which the terminal starts not sharing any siblings
+                depth: self.path_bit_index,
+                inner_siblings: path_proof
+                    .siblings
+                    .iter()
+                    .skip(self.path_bit_index)
+                    .copied()
+                    .collect(),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn step(&mut self, path_proofs: &Vec<PathProof>) -> PathProofRangeStep {
+        // check if at least two key_path in the path_proofs range
+        // has two different bits in position path_index
+        //
+        // they are ordered and all the bits up to path_index
+        // are shared so we can just check if the first and the last one differs
+        let path_lower = path_proofs[self.lower].terminal.path();
+        let path_upper = path_proofs[self.upper - 1].terminal.path();
+
+        if path_lower[self.path_bit_index] != path_upper[self.path_bit_index] {
+            // if they differ we can skip their siblings but we need to bisect the slice
+            //
+            // binary search between key_paths in the slice to see where to
+            // perform the bisection
+            //
+            // UNWRAP: We have just checked that path_lower and path_upper differ at path_bit_index.
+            // Therefore, with the vector of path_proofs ordered, we can be sure that there is at least
+            // one path with its key_path containing a value of 1 at path_bit_index.
+            // Since there is at least one 1 bit and std::cmp::Ordering::Equal is never returned,
+            // the method binary_search_by will always return an Error containing the index
+            // of the first occurrence of one in the key_path.
+            let mid = self.lower
+                + path_proofs[self.lower..self.upper]
+                    .binary_search_by(|path_proof| {
+                        if !path_proof.terminal.path()[self.path_bit_index] {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Greater
+                        }
+                    })
+                    .unwrap_err();
+
+            let left = PathProofRange {
+                path_bit_index: self.path_bit_index + 1,
+                lower: self.lower,
+                upper: mid,
+            };
+
+            let right = PathProofRange {
+                path_bit_index: self.path_bit_index + 1,
+                lower: mid,
+                upper: self.upper,
+            };
+
+            PathProofRangeStep::Bisect { left, right }
+        } else {
+            let sibling = path_proofs[self.lower].siblings[self.path_bit_index];
+            self.path_bit_index += 1;
+            PathProofRangeStep::Advance { sibling }
+        }
+    }
+}
+
 impl MultiProof {
     /// Construct a MultiProof from a vector of *ordered* PathProof
     pub fn from_path_proofs(path_proofs: Vec<PathProof>) -> Self {
@@ -37,8 +135,6 @@ impl MultiProof {
         // followed by all necessary siblings that are not derivable from
         // the previously mentioned siblings. Those siblings will be called
         // `external_siblings`.
-        let mut sub_paths: Vec<SubPathProof> = vec![];
-        let mut external_siblings: Vec<Node> = vec![];
 
         // The goal is to traverse the entire tree
         // formed by all path proofs and only collect the siblings
@@ -69,128 +165,69 @@ impl MultiProof {
         // `external_siblings` will follow this structure for each bisection
         // |common siblings| ext siblings in the right bisection | ext siblings in the left bisection |
 
-        // Given `path_proofs` as the vector of all proofs. `TraverseInfo` represent
-        // a slice (with inclusive bounds) of that vector, used to traverse all bisections
-        // generated by the previous algorithm
-        struct TraverseInfo {
-            // lower bound of the slice, index of `path_proofs`
-            lower: usize,
-            // inclusive upper bound of the slice, index of `path_proofs`
-            upper: usize,
-            // bit index in the key path where this struct is pointing at,
-            // this index will be increased or used to create a new bisection
-            //
-            // each TraverseInfo covers a slice of `path_proofs`
-            // with key_paths that have common bits up to path_bit_index
-            path_bit_index: usize,
-            // TODO
-            ext_sibling_index: usize,
-        }
-        let mut stack_traverse_info: Vec<TraverseInfo> = vec![];
+        let mut sub_paths: Vec<SubPathProof> = vec![];
+        let mut external_siblings: Vec<Node> = vec![];
 
-        // External siblings encountered during a subtree traversal
-        let mut ext_sibling_in_sub_tree: Vec<Node> = vec![];
-
-        // initially we're looking at all the key_paths
-        let mut curr_traverse_info = TraverseInfo {
+        // initially we're looking at all the path_proofs
+        let mut proof_range = PathProofRange {
             path_bit_index: 0,
             lower: 0,
-            upper: path_proofs.len() - 1,
-            ext_sibling_index: 0,
+            upper: path_proofs.len(),
         };
+        // index used to insert external sibling in sub_path to respect the
+        // structure previously explained
+        let mut external_sibling_index = 0;
+
+        // Common siblings encountered while stepping through PathProofRange
+        let mut common_siblings: Vec<Node> = vec![];
+
+        // stack used to handle bfs through PathProofRanges.
+        // The second item in the tuple is the external sibling index
+        // associated with that PathProofRange, used to respect the previously
+        // mentioned structure of the `external_siblings` vector
+        let mut stack: Vec<(PathProofRange, usize)> = vec![];
 
         loop {
-            // If there is no longer a common prefix, there is only one key in the TraverseInfo,
-            // and then all remaining siblings are required for the multiproof.
-            if curr_traverse_info.lower == curr_traverse_info.upper {
-                let path_proof = &path_proofs[curr_traverse_info.lower];
-                let sub_path_proof = SubPathProof {
-                    terminal: path_proof.terminal.clone(),
-                    // The depth at which the terminal starts not sharing any siblings
-                    depth: curr_traverse_info.path_bit_index,
-                    inner_siblings: path_proof
-                        .siblings
-                        .iter()
-                        .skip(curr_traverse_info.path_bit_index)
-                        .copied()
-                        .collect(),
-                };
+            // check if proof_range represents a unique path proof
+            if let Some(sub_path_proof) = proof_range.prove_unique_path_remainder(&path_proofs) {
                 sub_paths.push(sub_path_proof);
 
-                // terminal always immediately follows a bisection in a well-formed trie.
-                assert!(ext_sibling_in_sub_tree.is_empty());
+                // sub_path_proof always immediately follows a bisection in a well-formed trie
+                assert!(common_siblings.is_empty());
 
                 // skip to the next bisection in the stack, if empty we're finished
-                curr_traverse_info = match stack_traverse_info.pop() {
-                    Some(i) => i,
+                (proof_range, external_sibling_index) = match stack.pop() {
+                    Some(v) => v,
                     None => break,
                 };
                 continue;
             }
 
-            // check if at least two key_path in the key_paths slice
-            // has two different bits in position path_index
-            //
-            // they are ordered and all the bits up to path_index
-            // are shared so we can just check the first and the last one differs
-            let path_lower = path_proofs[curr_traverse_info.lower].terminal.key_path();
-            let path_upper = path_proofs[curr_traverse_info.upper].terminal.key_path();
+            // Step through the proof_range, it could result in a bisection,
+            // or the index of the key_path is moved forward producing a new
+            // external sibling of the current sub tree
+            match proof_range.step(&path_proofs) {
+                PathProofRangeStep::Bisect { left, right } => {
+                    // insert all collected common siblings
+                    //
+                    // revert them because they need to be inserted in a way that,
+                    // during verification, the last one in the vector is the first
+                    // external sibling encountered
+                    let common_siblings_len = common_siblings.len();
+                    for sibling in common_siblings.drain(..).rev() {
+                        external_siblings.insert(external_sibling_index, sibling);
+                    }
 
-            if path_lower[curr_traverse_info.path_bit_index]
-                != path_upper[curr_traverse_info.path_bit_index]
-            {
-                // if they differ we can skip their siblings but we need to bisect the slice
-                //
-                // binary search between key_paths in the slice to see where to
-                // perform the bisection
+                    // update external_sibling_index based on thee amount of inserted
+                    // common siblings
+                    external_sibling_index += common_siblings_len;
 
-                // path_slice_upper and path_slice_lower will never be the same otherwise
-                // bits at path_index would have been the same
-
-                // We have just checked that path_lower and path_upper differ at path_bit_index,
-                // thus, with the vector of path_proofs ordered, we're sure there is at least one
-                // path with its key_path containing a value of 1 at path_bit_index
-                let mid = curr_traverse_info.lower
-                    + path_proofs[curr_traverse_info.lower..=curr_traverse_info.upper]
-                        .binary_search_by(|path_proof| {
-                            if !path_proof.terminal.key_path()[curr_traverse_info.path_bit_index] {
-                                std::cmp::Ordering::Less
-                            } else {
-                                std::cmp::Ordering::Greater
-                            }
-                        })
-                        .expect_err("There must be at least one bit set to 1");
-
-                // insert all collected siblings (those are the shared ones)
-                // in this sub tree in ext_sibling at the position this bisection is pointing at
-                let collected_siblings = ext_sibling_in_sub_tree.len();
-                for sibling in ext_sibling_in_sub_tree.drain(..).rev() {
-                    external_siblings.insert(curr_traverse_info.ext_sibling_index, sibling);
+                    // push into the stack the right Bisection and work on the left one
+                    proof_range = left;
+                    stack.push((right, external_sibling_index));
                 }
-
-                // push into the stack the right Bisection and work on the left one
-                stack_traverse_info.push(TraverseInfo {
-                    path_bit_index: curr_traverse_info.path_bit_index + 1,
-                    lower: mid,
-                    upper: curr_traverse_info.upper,
-                    ext_sibling_index: curr_traverse_info.ext_sibling_index + collected_siblings,
-                });
-
-                curr_traverse_info = TraverseInfo {
-                    path_bit_index: curr_traverse_info.path_bit_index + 1,
-                    lower: curr_traverse_info.lower,
-                    upper: mid - 1,
-                    ext_sibling_index: curr_traverse_info.ext_sibling_index + collected_siblings,
-                };
-            } else {
-                // if they are the same then a sibling must be inserted in the external node list
-                let sibling = path_proofs[curr_traverse_info.lower].siblings
-                    [curr_traverse_info.path_bit_index];
-
-                ext_sibling_in_sub_tree.push(sibling);
-
-                curr_traverse_info.path_bit_index += 1;
-            }
+                PathProofRangeStep::Advance { sibling } => common_siblings.push(sibling),
+            };
         }
 
         Self {

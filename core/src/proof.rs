@@ -15,8 +15,8 @@ pub enum PathProofTerminal {
 }
 
 impl PathProofTerminal {
-    /// Return the KeyPath of the Terminal Node
-    pub fn key_path(&self) -> &BitSlice<u8, Msb0> {
+    /// Return the bit-path to the Terminal Node
+    pub fn path(&self) -> &BitSlice<u8, Msb0> {
         match self {
             Self::Leaf(leaf_data) => &leaf_data.key_path.view_bits(),
             Self::Terminator(key_path) => key_path,
