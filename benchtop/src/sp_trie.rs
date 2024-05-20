@@ -1,10 +1,10 @@
 use crate::{backend::Transaction, timer::Timer, workload::Workload};
-use hash_db::{AsHashDB, HashDB, Hasher as _, Prefix};
+use hash_db::{AsHashDB, HashDB, Prefix};
 use kvdb::KeyValueDB;
 use kvdb_rocksdb::{Database, DatabaseConfig};
 use sha2::Digest;
 use sp_trie::trie_types::TrieDBMutBuilderV1;
-use sp_trie::{DBValue, LayoutV1, PrefixedMemoryDB, TrieDBMut, TrieLayout};
+use sp_trie::{DBValue, LayoutV1, PrefixedMemoryDB, TrieDBMut};
 use std::sync::Arc;
 use trie_db::TrieMut;
 
