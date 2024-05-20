@@ -36,8 +36,7 @@ impl VerifiedMultiProof {
     /// Runtime is O(log(n)) in the number of paths this multi-proof contains.
     pub fn find_index_for(&self, key_path: &KeyPath) -> Result<usize, KeyOutOfScope> {
         let search_result = self.inner.binary_search_by(|v| {
-            v.terminal.key_path()[..v.depth]
-                .cmp(&key_path.view_bits::<Msb0>()[..v.depth])
+            v.terminal.path()[..v.depth].cmp(&key_path.view_bits::<Msb0>()[..v.depth])
         });
 
         search_result.map_err(|_| KeyOutOfScope)
@@ -86,8 +85,7 @@ impl VerifiedMultiProof {
     ) -> Result<bool, KeyOutOfScope> {
         let path = &self.inner[index];
         let depth = path.depth;
-        let in_scope = path.terminal.key_path()[..depth]
-            == key_path.view_bits::<Msb0>()[..depth];
+        let in_scope = path.terminal.path()[..depth] == key_path.view_bits::<Msb0>()[..depth];
 
         if in_scope {
             Ok(self.confirm_nonexistence_inner(key_path, index))
@@ -115,8 +113,8 @@ impl VerifiedMultiProof {
     ) -> Result<bool, KeyOutOfScope> {
         let path = &self.inner[index];
         let depth = path.depth;
-        let in_scope = path.terminal.key_path()[..depth]
-            == expected_leaf.key_path.view_bits::<Msb0>()[..depth];
+        let in_scope =
+            path.terminal.path()[..depth] == expected_leaf.key_path.view_bits::<Msb0>()[..depth];
 
         if in_scope {
             Ok(self.confirm_value_inner(&expected_leaf, index))
@@ -188,7 +186,7 @@ fn verify_range<H: NodeHasher>(
 
         let node = hash_path::<H>(
             terminal_path.terminal.node::<H>(),
-            &terminal_path.terminal.key_path()[start_depth..unique_len],
+            &terminal_path.terminal.path()[start_depth..unique_len],
             terminal_path.inner_siblings.iter().rev().copied(),
         );
 
@@ -199,8 +197,8 @@ fn verify_range<H: NodeHasher>(
     let end_path = &sub_paths[sub_paths.len() - 1];
 
     let common_bits = crate::proof::shared_bits(
-        &start_path.terminal.key_path()[start_depth..],
-        &end_path.terminal.key_path()[start_depth..],
+        &start_path.terminal.path()[start_depth..],
+        &end_path.terminal.path()[start_depth..],
     );
 
     let common_len = start_depth + common_bits;
@@ -210,7 +208,7 @@ fn verify_range<H: NodeHasher>(
 
     // bisect `sub_paths` by finding the first sub-path which starts with the right bit set.
     let search_result = sub_paths.binary_search_by(|item| {
-        if !item.terminal.key_path()[uncommon_start_len - 1] {
+        if !item.terminal.path()[uncommon_start_len - 1] {
             Ordering::Less
         } else {
             Ordering::Greater
@@ -244,7 +242,7 @@ fn verify_range<H: NodeHasher>(
             left: left_node,
             right: right_node,
         }),
-        &start_path.terminal.key_path()[start_depth..common_len], // == last_path.same...
+        &start_path.terminal.path()[start_depth..common_len], // == last_path.same...
         external_siblings[..common_bits].iter().rev().copied(),
     );
     Ok((node, total_siblings_used))
