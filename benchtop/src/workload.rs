@@ -26,7 +26,7 @@ pub fn parse(
     name: &str,
     workload_size: u64,
     db_size: u64,
-    percentage_cold_transfer: Option<u8>,
+    fresh: Option<u8>,
     op_limit: u64,
 ) -> Result<(Box<dyn Workload>, Box<dyn Workload>)> {
     Ok(match name {
@@ -35,7 +35,7 @@ pub fn parse(
             Box::new(transfer_workload::build(
                 db_size,
                 workload_size,
-                percentage_cold_transfer.unwrap_or(0),
+                fresh.unwrap_or(0),
                 op_limit,
             )),
         ),
@@ -45,6 +45,7 @@ pub fn parse(
                 0,
                 100,
                 workload_size,
+                fresh.unwrap_or(0),
                 db_size,
                 op_limit,
             )),
@@ -55,6 +56,7 @@ pub fn parse(
                 100,
                 0,
                 workload_size,
+                fresh.unwrap_or(0),
                 db_size,
                 op_limit,
             )),
@@ -65,6 +67,7 @@ pub fn parse(
                 50,
                 50,
                 workload_size,
+                fresh.unwrap_or(0),
                 db_size,
                 op_limit,
             )),
