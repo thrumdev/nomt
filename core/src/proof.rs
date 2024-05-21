@@ -22,6 +22,13 @@ impl PathProofTerminal {
             Self::Terminator(key_path) => key_path,
         }
     }
+
+    pub fn node<H: NodeHasher>(&self) -> Node {
+        match self {
+            Self::Leaf(leaf_data) => H::hash_leaf(leaf_data),
+            Self::Terminator(_key_path) => TERMINATOR,
+        }
+    }
 }
 
 /// A proof of some particular path through the trie.
@@ -49,10 +56,7 @@ impl PathProof {
         }
         let relevant_path = &key_path[..self.siblings.len()];
 
-        let cur_node = match &self.terminal {
-            PathProofTerminal::Terminator(_) => TERMINATOR,
-            PathProofTerminal::Leaf(leaf_data) => H::hash_leaf(&leaf_data),
-        };
+        let cur_node = self.terminal.node::<H>();
 
         let new_root = hash_path::<H>(cur_node, relevant_path, self.siblings.iter().rev().cloned());
 
@@ -148,7 +152,7 @@ impl VerifiedPathProof {
     /// Check whether this path resolves to the given leaf.
     ///
     /// A return value of `Ok(true)` confirms that the key indeed has this value in the trie.
-    /// `Ok(false)` confirms that this key has a different value.
+    /// `Ok(false)` confirms that this key has a different value or does not exist.
     ///
     /// Fails if the key is out of the scope of this path.
     pub fn confirm_value(&self, expected_leaf: &LeafData) -> Result<bool, KeyOutOfScope> {
@@ -307,6 +311,6 @@ pub fn verify_update<H: NodeHasher>(
 }
 
 // TODO: dedup, this appears in `update` as well.
-fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
+pub fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
     a.iter().zip(b.iter()).take_while(|(a, b)| a == b).count()
 }
