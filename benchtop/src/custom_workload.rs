@@ -45,11 +45,19 @@ fn encode_id(id: u64) -> [u8; 8] {
 }
 
 /// Build a RwWorkload.
-pub fn build(reads: u8, writes: u8, workload_size: u64, db_size: u64, op_limit: u64) -> RwWorkload {
+pub fn build(
+    reads: u8,
+    writes: u8,
+    workload_size: u64,
+    fresh: u8,
+    db_size: u64,
+    op_limit: u64,
+) -> RwWorkload {
     RwWorkload {
         reads,
         writes,
         workload_size,
+        fresh,
         db_size,
         ops_remaining: op_limit,
     }
@@ -60,10 +68,13 @@ pub fn build(reads: u8, writes: u8, workload_size: u64, db_size: u64, op_limit: 
 // 2. The DB size indicates the number of entries in the database.
 // 3. The workload size represents the total number of operations, where reads and writes
 //     are numbers that need to sum to 100 and represent a percentage of the total size.
+// 4. Fresh indicates the percentage of reads and writes that will be performed on non
+//     non-existing keys
 pub struct RwWorkload {
     pub reads: u8,
     pub writes: u8,
     pub workload_size: u64,
+    pub fresh: u8,
     pub db_size: u64,
     pub ops_remaining: u64,
 }
@@ -71,8 +82,14 @@ pub struct RwWorkload {
 impl Workload for RwWorkload {
     fn run_step(&mut self, transaction: &mut dyn Transaction) {
         let from_percentage = |p: u8| (self.workload_size as f64 * p as f64 / 100.0) as u64;
+        let fresh = |size: u64| (size as f64 * self.fresh as f64 / 100.0) as u64;
+
+        // total reads and writes
         let n_reads = from_percentage(self.reads);
         let n_writes = from_percentage(self.writes);
+        // fresh reads and writes
+        let n_reads_fresh = fresh(n_reads);
+        let n_writes_fresh = fresh(n_writes);
 
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -85,16 +102,29 @@ impl Workload for RwWorkload {
         let mut rng = rand_pcg::Lcg64Xsh32::from_seed(seed);
 
         let key_range = std::cmp::max(self.db_size, 1);
-        for _ in 0..n_reads {
-            let key = rng.gen_range(0..key_range);
-            let _ = transaction.read(&encode_id(key));
+        for i in 0..n_reads {
+            let _ = if i < n_reads_fresh {
+                // fresh read, technically there is a chance to generate
+                // a random key that is already present in the database,
+                // but it is very unlikely
+                transaction.read(&rand_key(&mut rng))
+            } else {
+                // read already existing key
+                let key = rng.gen_range(0..key_range);
+                transaction.read(&encode_id(key))
+            };
         }
 
-        for _ in 0..n_writes {
-            let key = rng.gen_range(0..key_range);
+        for i in 0..n_writes {
             let value = rand_key(&mut rng);
-
-            transaction.write(&encode_id(key), Some(&value));
+            if i < n_writes_fresh {
+                // fresh write
+                transaction.write(&rand_key(&mut rng), Some(&value));
+            } else {
+                // substitute key
+                let key = rng.gen_range(0..key_range);
+                transaction.write(&encode_id(key), Some(&value));
+            };
         }
 
         self.ops_remaining = self.ops_remaining.saturating_sub(self.workload_size);

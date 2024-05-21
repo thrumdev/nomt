@@ -80,20 +80,21 @@ pub struct WorkloadParams {
     #[arg(long = "workload-name", short = 'w')]
     pub name: String,
 
-    /// Parameters available only with workload "transfer".
-    ///
-    /// It is the percentage of transfers to a non-existing account,
-    /// the remaining portion of transfers are to existing accounts
-    ///
-    /// Accepted values are in the range of 0 to 100
-    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "workload-percentage-cold", short)]
-    pub percentage_cold: Option<u8>,
-
     /// Amount of operations performed in the workload per iteration.
     #[clap(default_value = "1000")]
     #[arg(long = "workload-size", short)]
     pub size: u64,
+
+    /// Percentage of workload-size operations performed on non-existing keys.
+    ///
+    /// For workload "transfer", it is the percentage of transfers
+    /// to a non-existing account, the remaining portion of transfers
+    /// are to existing accounts
+    ///
+    /// Accepted values are in the range of 0 to 100
+    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
+    #[arg(long = "workload-fresh")]
+    pub fresh: Option<u8>,
 
     /// The size of the database before starting the benchmarks.
     ///

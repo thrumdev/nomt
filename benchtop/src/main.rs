@@ -31,7 +31,7 @@ pub fn init(params: InitParams) -> Result<()> {
             .initial_capacity
             .map(|s| 1u64 << s)
             .unwrap_or(0),
-        workload_params.percentage_cold,
+        workload_params.fresh,
         u64::max_value(),
     )?;
 
@@ -52,7 +52,7 @@ pub fn run(params: RunParams) -> Result<()> {
             .initial_capacity
             .map(|s| 1u64 << s)
             .unwrap_or(0),
-        workload_params.percentage_cold,
+        workload_params.fresh,
         params.limits.ops.unwrap_or(u64::max_value()),
     )?;
 
