@@ -229,8 +229,6 @@ impl Nomt {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
-        // Wait for all warmup tasks to finish. That way, we can be sure that all terminal
-        // information is available and that `terminals` would be the only reference.
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
             compact_actuals.push((path.clone(), read_write.to_compact()));
