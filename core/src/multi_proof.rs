@@ -7,39 +7,35 @@ use crate::{
     trie::Node,
 };
 
-/// Each terminal node may have a unique set of sibling nodes
-/// that are exclusively used in its verification process.
-/// This struct includes the terminal node, the depth from which
-/// the siblings are uniquely associated with that terminal,
-/// and the siblings themselves.
+/// This struct includes the terminal node and its depth
 #[derive(Debug, Clone)]
-pub struct SubPathProof {
+pub struct MultiPathProof {
     /// Terminal node
     pub terminal: PathProofTerminal,
-    /// Depth after which sibligns are collected
+    /// Depth of the terminal node
     pub depth: usize,
-    /// Siblings uniquely associated with the terminal node,
-    /// stored in the order in which they are encountered.
-    pub inner_siblings: Vec<Node>,
 }
 
 /// A proof of multiple paths through the trie.
 #[derive(Debug, Clone)]
 pub struct MultiProof {
-    /// All subpaths related to a single terminal node. These are sorted, ascending, by bit-path.
-    pub sub_paths: Vec<SubPathProof>,
+    /// List of all provable paths. These are sorted in ascending order by bit-path
+    pub paths: Vec<MultiPathProof>,
     /// Vector containing the minimum number of nodes required
     /// to reconstruct all other nodes later.
     ///
     /// The format is a recursive bisection:
-    /// [common_siblings ++ left_siblings ++ right_siblings]
+    /// [upper_siblings ++ left_siblings ++ right_siblings]
     ///
-    /// common_siblings are the siblings shared among all paths in each bisection or all path proofs
-    /// at the root.
+    /// upper_siblings could be:
+    /// + siblings shared among all paths in each bisection
+    /// + unique siblings associated with a terminal node
+    ///
+    /// In the latter case, both left and right bisections will be empty
     ///
     /// left_siblings is the same format, but applied to all the nodes in the left bisection.
     /// right_siblings is the same format, but applied to all the nodes in the right bisection.
-    pub external_siblings: Vec<Node>,
+    pub siblings: Vec<Node>,
 }
 
 // Given a vector of PathProofs ordered by the key_path,
@@ -66,26 +62,31 @@ enum PathProofRangeStep {
 }
 
 impl PathProofRange {
-    fn prove_unique_path_remainder(&self, path_proofs: &[PathProof]) -> Option<SubPathProof> {
+    fn prove_unique_path_remainder(
+        &self,
+        path_proofs: &[PathProof],
+    ) -> Option<(MultiPathProof, Vec<Node>)> {
         // If PathProofRange contains only one path_proofs
-        // then all remaining siblings are required for the multiproof
-
+        // return a MultiPathProof with all its unique siblings
         if self.lower != self.upper - 1 {
             return None;
         }
 
         let path_proof = &path_proofs[self.lower];
-        Some(SubPathProof {
-            terminal: path_proof.terminal.clone(),
-            // The depth at which the terminal starts not sharing any siblings
-            depth: self.path_bit_index,
-            inner_siblings: path_proof
-                .siblings
-                .iter()
-                .skip(self.path_bit_index)
-                .copied()
-                .collect(),
-        })
+        let unique_siblings: Vec<Node> = path_proof
+            .siblings
+            .iter()
+            .skip(self.path_bit_index)
+            .copied()
+            .collect();
+
+        Some((
+            MultiPathProof {
+                terminal: path_proof.terminal.clone(),
+                depth: self.path_bit_index + unique_siblings.len(),
+            },
+            unique_siblings,
+        ))
     }
 
     fn step(&mut self, path_proofs: &[PathProof]) -> PathProofRangeStep {
@@ -148,8 +149,7 @@ impl MultiProof {
         // A multi-proof can be viewed by associating each terminal node
         // with its first n uniquely related siblings from its path proof,
         // followed by all necessary siblings that are not derivable from
-        // the previously mentioned siblings. Those siblings will be called
-        // `external_siblings`.
+        // the previously mentioned siblings.
 
         // The goal is to traverse the entire tree
         // formed by all path proofs and only collect the siblings
@@ -171,17 +171,17 @@ impl MultiProof {
         // based on the value at that index.
         //
         // If all key_paths share a bit at an index, that sibling is required and it is one
-        // of the `external_siblings` mentioned earlier.
+        // of the siblings mentioned earlier.
         // If at least two key_paths differ, no sibling is needed, but the key_paths must be divided
         // based on having bit 0 or 1 at that index.
         //
         // Iterate this algorithm on the bisection to determine the minimum necessary siblings.
         //
-        // `external_siblings` will follow this structure for each bisection
+        // `siblings` will follow this structure for each bisection
         // |common siblings| ext siblings in the left bisection | ext siblings in the right bisection |
 
-        let mut sub_paths: Vec<SubPathProof> = vec![];
-        let mut external_siblings: Vec<Node> = vec![];
+        let mut paths: Vec<MultiPathProof> = vec![];
+        let mut siblings: Vec<Node> = vec![];
 
         // initially we're looking at all the path_proofs
         let mut proof_range = PathProofRange {
@@ -198,8 +198,11 @@ impl MultiProof {
 
         loop {
             // check if proof_range represents a unique path proof
-            if let Some(sub_path_proof) = proof_range.prove_unique_path_remainder(&path_proofs) {
-                sub_paths.push(sub_path_proof);
+            if let Some((sub_path_proof, unique_siblings)) =
+                proof_range.prove_unique_path_remainder(&path_proofs)
+            {
+                paths.push(sub_path_proof);
+                siblings.extend(unique_siblings);
 
                 // sub_path_proof always immediately follows a bisection in a well-formed trie
                 assert!(common_siblings.is_empty());
@@ -214,11 +217,11 @@ impl MultiProof {
 
             // Step through the proof_range, it could result in a bisection,
             // or the index of the key_path is moved forward producing a new
-            // external sibling of the current sub tree
+            // sibling of the current sub tree
             match proof_range.step(&path_proofs) {
                 PathProofRangeStep::Bisect { left, right } => {
                     // insert collected common siblings
-                    external_siblings.extend(common_siblings.drain(..));
+                    siblings.extend(common_siblings.drain(..));
 
                     // push into the stack the right Bisection and work on the left one
                     proof_range = left;
@@ -228,10 +231,7 @@ impl MultiProof {
             };
         }
 
-        Self {
-            sub_paths,
-            external_siblings,
-        }
+        Self { paths, siblings }
     }
 }
 
@@ -254,17 +254,14 @@ mod tests {
         };
 
         let multi_proof = MultiProof::from_path_proofs(vec![path_proof]);
-        assert_eq!(multi_proof.sub_paths.len(), 1);
-        assert_eq!(multi_proof.external_siblings.len(), 0);
+        assert_eq!(multi_proof.paths.len(), 1);
         assert_eq!(
-            multi_proof.sub_paths[0].terminal,
+            multi_proof.paths[0].terminal,
             PathProofTerminal::Terminator(key_path.view_bits::<Msb0>().into())
         );
-        assert_eq!(
-            multi_proof.sub_paths[0].inner_siblings,
-            vec![sibling1, sibling2]
-        );
-        assert_eq!(multi_proof.sub_paths[0].depth, 0);
+        assert_eq!(multi_proof.paths[0].depth, 2);
+        assert_eq!(multi_proof.siblings.len(), 2);
+        assert_eq!(multi_proof.siblings, vec![sibling1, sibling2]);
     }
 
     #[test]
@@ -295,31 +292,25 @@ mod tests {
 
         let multi_proof = MultiProof::from_path_proofs(vec![path_proof_1, path_proof_2]);
 
-        assert_eq!(multi_proof.sub_paths.len(), 2);
-        assert_eq!(multi_proof.external_siblings.len(), 2);
+        assert_eq!(multi_proof.paths.len(), 2);
+        assert_eq!(multi_proof.siblings.len(), 6);
 
         assert_eq!(
-            multi_proof.sub_paths[0].terminal,
+            multi_proof.paths[0].terminal,
             PathProofTerminal::Terminator(key_path_1.view_bits::<Msb0>().into())
         );
         assert_eq!(
-            multi_proof.sub_paths[1].terminal,
+            multi_proof.paths[1].terminal,
             PathProofTerminal::Terminator(key_path_2.view_bits::<Msb0>().into())
         );
 
-        assert_eq!(
-            multi_proof.sub_paths[0].inner_siblings,
-            vec![sibling3, sibling4]
-        );
-        assert_eq!(
-            multi_proof.sub_paths[1].inner_siblings,
-            vec![sibling5, sibling6]
-        );
+        assert_eq!(multi_proof.paths[0].depth, 5);
+        assert_eq!(multi_proof.paths[1].depth, 5);
 
-        assert_eq!(multi_proof.sub_paths[0].depth, 3);
-        assert_eq!(multi_proof.sub_paths[1].depth, 3);
-
-        assert_eq!(multi_proof.external_siblings, vec![sibling1, sibling2]);
+        assert_eq!(
+            multi_proof.siblings,
+            vec![sibling1, sibling2, sibling3, sibling4, sibling5, sibling6]
+        );
     }
 
     #[test]
@@ -346,26 +337,23 @@ mod tests {
 
         let multi_proof = MultiProof::from_path_proofs(vec![path_proof_1, path_proof_2]);
 
-        assert_eq!(multi_proof.sub_paths.len(), 2);
-        assert_eq!(multi_proof.external_siblings.len(), 255);
+        assert_eq!(multi_proof.paths.len(), 2);
+        assert_eq!(multi_proof.siblings.len(), 255);
 
         assert_eq!(
-            multi_proof.sub_paths[0].terminal,
+            multi_proof.paths[0].terminal,
             PathProofTerminal::Terminator(key_path_1.view_bits::<Msb0>().into())
         );
         assert_eq!(
-            multi_proof.sub_paths[1].terminal,
+            multi_proof.paths[1].terminal,
             PathProofTerminal::Terminator(key_path_2.view_bits::<Msb0>().into())
         );
 
-        assert!(multi_proof.sub_paths[0].inner_siblings.is_empty());
-        assert!(multi_proof.sub_paths[1].inner_siblings.is_empty());
-
-        assert_eq!(multi_proof.sub_paths[0].depth, 256);
-        assert_eq!(multi_proof.sub_paths[1].depth, 256);
+        assert_eq!(multi_proof.paths[0].depth, 256);
+        assert_eq!(multi_proof.paths[1].depth, 256);
 
         siblings_1.pop();
-        assert_eq!(multi_proof.external_siblings, siblings_1);
+        assert_eq!(multi_proof.siblings, siblings_1);
     }
 
     #[test]
@@ -451,60 +439,47 @@ mod tests {
             path_proof_6,
         ]);
 
-        assert_eq!(multi_proof.sub_paths.len(), 6);
-        assert_eq!(multi_proof.external_siblings.len(), 4);
+        assert_eq!(multi_proof.paths.len(), 6);
+        assert_eq!(multi_proof.siblings.len(), 9);
 
         assert_eq!(
-            multi_proof.sub_paths[0].terminal,
+            multi_proof.paths[0].terminal,
             PathProofTerminal::Terminator(key_path_1.view_bits::<Msb0>().into())
         );
         assert_eq!(
-            multi_proof.sub_paths[1].terminal,
+            multi_proof.paths[1].terminal,
             PathProofTerminal::Terminator(key_path_2.view_bits::<Msb0>().into())
         );
         assert_eq!(
-            multi_proof.sub_paths[2].terminal,
+            multi_proof.paths[2].terminal,
             PathProofTerminal::Terminator(key_path_3.view_bits::<Msb0>().into())
         );
         assert_eq!(
-            multi_proof.sub_paths[3].terminal,
+            multi_proof.paths[3].terminal,
             PathProofTerminal::Terminator(key_path_4.view_bits::<Msb0>().into())
         );
         assert_eq!(
-            multi_proof.sub_paths[4].terminal,
+            multi_proof.paths[4].terminal,
             PathProofTerminal::Terminator(key_path_5.view_bits::<Msb0>().into())
         );
         assert_eq!(
-            multi_proof.sub_paths[5].terminal,
+            multi_proof.paths[5].terminal,
             PathProofTerminal::Terminator(key_path_6.view_bits::<Msb0>().into())
         );
 
-        assert_eq!(
-            multi_proof.sub_paths[0].inner_siblings,
-            Vec::<[u8; 32]>::new()
-        );
-        assert_eq!(multi_proof.sub_paths[1].inner_siblings, vec![sibling7]);
-        assert_eq!(multi_proof.sub_paths[2].inner_siblings, vec![sibling9]);
-        assert_eq!(
-            multi_proof.sub_paths[3].inner_siblings,
-            vec![sibling14, sibling15]
-        );
-        assert_eq!(multi_proof.sub_paths[4].inner_siblings, vec![sibling18]);
-        assert_eq!(
-            multi_proof.sub_paths[5].inner_siblings,
-            Vec::<[u8; 32]>::new()
-        );
-
-        assert_eq!(multi_proof.sub_paths[0].depth, 2);
-        assert_eq!(multi_proof.sub_paths[1].depth, 5);
-        assert_eq!(multi_proof.sub_paths[2].depth, 5);
-        assert_eq!(multi_proof.sub_paths[3].depth, 4);
-        assert_eq!(multi_proof.sub_paths[4].depth, 5);
-        assert_eq!(multi_proof.sub_paths[5].depth, 5);
+        assert_eq!(multi_proof.paths[0].depth, 2);
+        assert_eq!(multi_proof.paths[1].depth, 6);
+        assert_eq!(multi_proof.paths[2].depth, 6);
+        assert_eq!(multi_proof.paths[3].depth, 6);
+        assert_eq!(multi_proof.paths[4].depth, 6);
+        assert_eq!(multi_proof.paths[5].depth, 5);
 
         assert_eq!(
-            multi_proof.external_siblings,
-            vec![sibling4, sibling5, sibling11, sibling12]
+            multi_proof.siblings,
+            vec![
+                sibling4, sibling5, sibling7, sibling9, sibling11, sibling12, sibling14, sibling15,
+                sibling18
+            ]
         );
     }
 
@@ -603,13 +578,14 @@ mod tests {
             path_proof_5,
         ]);
 
-        assert_eq!(multi_proof.sub_paths.len(), 6);
-        assert_eq!(multi_proof.external_siblings.len(), 8);
+        assert_eq!(multi_proof.paths.len(), 6);
+        assert_eq!(multi_proof.siblings.len(), 14);
 
         assert_eq!(
-            multi_proof.external_siblings,
+            multi_proof.siblings,
             vec![
-                sibling2, sibling3, sibling9, sibling10, sibling12, sibling13, sibling19, sibling20
+                sibling2, sibling3, sibling5, sibling7, sibling9, sibling10, sibling12, sibling13,
+                sibling15, sibling17, sibling19, sibling20, sibling22, sibling24
             ]
         );
     }

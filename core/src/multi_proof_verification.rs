@@ -1,5 +1,5 @@
 use crate::{
-    multi_proof::{MultiProof, SubPathProof},
+    multi_proof::{MultiPathProof, MultiProof},
     proof::{hash_path, KeyOutOfScope, PathProofTerminal},
     trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, TERMINATOR},
 };
@@ -11,10 +11,8 @@ use std::cmp::Ordering;
 pub enum MultiProofVerificationError {
     /// Root hash mismatched at the end of the verification.
     RootMismatch,
-    /// Amount of provided siblings is impossible for the expected trie depth.
+    /// Extra siblings were provided.
     TooManySiblings,
-    /// Extra external siblings were provided.
-    TooManyExternalSiblings,
 }
 
 #[derive(Debug, Clone)]
@@ -145,56 +143,56 @@ pub fn verify<H: NodeHasher>(
     multi_proof: &MultiProof,
     root: Node,
 ) -> Result<VerifiedMultiProof, MultiProofVerificationError> {
-    let (new_root, external_siblings_used) =
-        verify_range::<H>(0, &multi_proof.sub_paths, &multi_proof.external_siblings)?;
+    let (new_root, siblings_used) =
+        verify_range::<H>(0, &multi_proof.paths, &multi_proof.siblings)?;
 
     if root != new_root {
         return Err(MultiProofVerificationError::RootMismatch);
     }
 
-    if external_siblings_used != multi_proof.external_siblings.len() {
-        return Err(MultiProofVerificationError::TooManyExternalSiblings);
+    if siblings_used != multi_proof.siblings.len() {
+        return Err(MultiProofVerificationError::TooManySiblings);
     }
 
     let paths = multi_proof
-        .sub_paths
+        .paths
         .iter()
-        .map(|sub_path| VerifiedMultiPath {
-            terminal: sub_path.terminal.clone(),
-            depth: sub_path.depth + sub_path.inner_siblings.len(),
+        .map(|path| VerifiedMultiPath {
+            terminal: path.terminal.clone(),
+            depth: path.depth,
         })
         .collect::<Vec<_>>();
     Ok(VerifiedMultiProof { inner: paths })
 }
 
-// returns the the node made by verifying this range along with the number of external siblings used.
+// returns the the node made by verifying this range along with the number of siblings used.
 fn verify_range<H: NodeHasher>(
     start_depth: usize,
-    sub_paths: &[SubPathProof],
-    external_siblings: &[Node],
+    paths: &[MultiPathProof],
+    siblings: &[Node],
 ) -> Result<(Node, usize), MultiProofVerificationError> {
     // the range should never be empty except in the first call, if the entire multi-proof is
     // empty.
-    if sub_paths.is_empty() {
+    if paths.is_empty() {
         return Ok((TERMINATOR, 0));
     }
-    if sub_paths.len() == 1 {
-        // note: at a terminal node, 'external_siblings' is guaranteed to be empty.
-        // hash up with the unique nodes and return that.
-        let terminal_path = &sub_paths[0];
-        let unique_len = terminal_path.inner_siblings.len() + start_depth;
+    if paths.len() == 1 {
+        // at a terminal node, 'siblings' will contain all unique
+        // nodes, hash them up, and return that
+        let terminal_path = &paths[0];
+        let unique_len = terminal_path.depth - start_depth;
 
         let node = hash_path::<H>(
             terminal_path.terminal.node::<H>(),
-            &terminal_path.terminal.path()[start_depth..unique_len],
-            terminal_path.inner_siblings.iter().rev().copied(),
+            &terminal_path.terminal.path()[start_depth..start_depth + unique_len],
+            siblings[..unique_len].iter().rev().copied(),
         );
 
-        return Ok((node, 0));
+        return Ok((node, unique_len));
     }
 
-    let start_path = &sub_paths[0];
-    let end_path = &sub_paths[sub_paths.len() - 1];
+    let start_path = &paths[0];
+    let end_path = &paths[paths.len() - 1];
 
     let common_bits = crate::proof::shared_bits(
         &start_path.terminal.path()[start_depth..],
@@ -206,8 +204,8 @@ fn verify_range<H: NodeHasher>(
 
     let uncommon_start_len = common_len + 1;
 
-    // bisect `sub_paths` by finding the first sub-path which starts with the right bit set.
-    let search_result = sub_paths.binary_search_by(|item| {
+    // bisect `paths` by finding the first path which starts with the right bit set.
+    let search_result = paths.binary_search_by(|item| {
         if !item.terminal.path()[uncommon_start_len - 1] {
             Ordering::Less
         } else {
@@ -224,15 +222,15 @@ fn verify_range<H: NodeHasher>(
     // recurse into the left bisection.
     let (left_node, left_siblings_used) = verify_range::<H>(
         uncommon_start_len,
-        &sub_paths[..bisect_idx],
-        &external_siblings[common_bits..],
+        &paths[..bisect_idx],
+        &siblings[common_bits..],
     )?;
 
     // now that we know how many siblings were used on the left, we can recurse into the right.
     let (right_node, right_siblings_used) = verify_range::<H>(
         uncommon_start_len,
-        &sub_paths[bisect_idx..],
-        &external_siblings[common_bits + left_siblings_used..],
+        &paths[bisect_idx..],
+        &siblings[common_bits + left_siblings_used..],
     )?;
 
     let total_siblings_used = common_bits + left_siblings_used + right_siblings_used;
@@ -243,7 +241,7 @@ fn verify_range<H: NodeHasher>(
             right: right_node,
         }),
         &start_path.terminal.path()[start_depth..common_len], // == last_path.same...
-        external_siblings[..common_bits].iter().rev().copied(),
+        siblings[..common_bits].iter().rev().copied(),
     );
     Ok((node, total_siblings_used))
 }
@@ -406,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_verify_multiproof_external_siblings_structure() {
+    pub fn test_verify_multiproof_siblings_structure() {
         //                           root
         //                     /            \
         //                    v0           i10
@@ -491,10 +489,7 @@ mod tests {
             path_proof_4.clone(),
         ]);
 
-        assert_eq!(
-            multi_proof.external_siblings,
-            vec![v0, e7, e6, e3, e2, e1, e5, e4]
-        );
+        assert_eq!(multi_proof.siblings, vec![v0, e7, e6, e3, e2, e1, e5, e4]);
 
         let verified = verify::<Blake3Hasher>(&multi_proof, root).unwrap();
         assert!(verified.confirm_value(&l1).unwrap());
