@@ -163,7 +163,7 @@ impl MultiProof {
         // Iterate this algorithm on the bisection to determine the minimum necessary siblings.
         //
         // `external_siblings` will follow this structure for each bisection
-        // |common siblings| ext siblings in the right bisection | ext siblings in the left bisection |
+        // |common siblings| ext siblings in the left bisection | ext siblings in the right bisection |
 
         let mut sub_paths: Vec<SubPathProof> = vec![];
         let mut external_siblings: Vec<Node> = vec![];
@@ -174,18 +174,12 @@ impl MultiProof {
             lower: 0,
             upper: path_proofs.len(),
         };
-        // index used to insert external sibling in sub_path to respect the
-        // structure previously explained
-        let mut external_sibling_index = 0;
 
         // Common siblings encountered while stepping through PathProofRange
         let mut common_siblings: Vec<Node> = vec![];
 
-        // stack used to handle bfs through PathProofRanges.
-        // The second item in the tuple is the external sibling index
-        // associated with that PathProofRange, used to respect the previously
-        // mentioned structure of the `external_siblings` vector
-        let mut stack: Vec<(PathProofRange, usize)> = vec![];
+        // stack used to handle bfs through PathProofRanges
+        let mut stack: Vec<PathProofRange> = vec![];
 
         loop {
             // check if proof_range represents a unique path proof
@@ -196,7 +190,7 @@ impl MultiProof {
                 assert!(common_siblings.is_empty());
 
                 // skip to the next bisection in the stack, if empty we're finished
-                (proof_range, external_sibling_index) = match stack.pop() {
+                proof_range = match stack.pop() {
                     Some(v) => v,
                     None => break,
                 };
@@ -208,23 +202,12 @@ impl MultiProof {
             // external sibling of the current sub tree
             match proof_range.step(&path_proofs) {
                 PathProofRangeStep::Bisect { left, right } => {
-                    // insert all collected common siblings
-                    //
-                    // revert them because they need to be inserted in a way that,
-                    // during verification, the last one in the vector is the first
-                    // external sibling encountered
-                    let common_siblings_len = common_siblings.len();
-                    for sibling in common_siblings.drain(..).rev() {
-                        external_siblings.insert(external_sibling_index, sibling);
-                    }
-
-                    // update external_sibling_index based on thee amount of inserted
-                    // common siblings
-                    external_sibling_index += common_siblings_len;
+                    // insert collected common siblings
+                    external_siblings.extend(common_siblings.drain(..));
 
                     // push into the stack the right Bisection and work on the left one
                     proof_range = left;
-                    stack.push((right, external_sibling_index));
+                    stack.push(right);
                 }
                 PathProofRangeStep::Advance { sibling } => common_siblings.push(sibling),
             };
@@ -506,7 +489,7 @@ mod tests {
 
         assert_eq!(
             multi_proof.external_siblings,
-            vec![sibling11, sibling12, sibling4, sibling5]
+            vec![sibling4, sibling5, sibling11, sibling12]
         );
     }
 
@@ -611,7 +594,7 @@ mod tests {
         assert_eq!(
             multi_proof.external_siblings,
             vec![
-                sibling9, sibling10, sibling19, sibling20, sibling12, sibling13, sibling2, sibling3
+                sibling2, sibling3, sibling9, sibling10, sibling12, sibling13, sibling19, sibling20
             ]
         );
     }
