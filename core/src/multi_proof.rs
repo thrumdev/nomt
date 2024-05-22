@@ -13,20 +13,20 @@ use crate::{
 // the depth at which the siblings start to be uniquely associated to that terminal,
 // and the siblings themselves.
 #[derive(Debug, Clone)]
-struct SubPathProof {
-    terminal: PathProofTerminal,
-    depth: usize,
-    inner_siblings: Vec<Node>,
+pub struct SubPathProof {
+    pub terminal: PathProofTerminal,
+    pub depth: usize,
+    pub inner_siblings: Vec<Node>,
 }
 
 /// A proof of multiple path through the trie.
 #[derive(Debug, Clone)]
 pub struct MultiProof {
     // All subpaths related to a single terminal node
-    sub_paths: Vec<SubPathProof>,
+    pub sub_paths: Vec<SubPathProof>,
     // Vector containing the minimum number of nodes required
     // to reconstruct all other nodes later.
-    external_siblings: Vec<Node>,
+    pub external_siblings: Vec<Node>,
 }
 
 // Given a vector of PathProofs ordered by the key_path,
