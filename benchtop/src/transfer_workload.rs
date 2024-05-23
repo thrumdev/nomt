@@ -71,6 +71,7 @@ pub fn build(
         runs: 0,
         percentage_cold_transfer,
         ops_remaining: op_limit,
+        rng: rand_pcg::Pcg64::new(0xcafef00dd15ea5e5, 0xa02bdbf7bb3c0a7ac28fa16a64abf96),
     }
 }
 
@@ -86,6 +87,7 @@ pub struct TransferWorkload {
     pub percentage_cold_transfer: u8,
     /// The number of remaining operations before being considered 'done'.
     pub ops_remaining: u64,
+    rng: rand_pcg::Pcg64,
 }
 
 impl Workload for TransferWorkload {
@@ -103,7 +105,7 @@ impl Workload for TransferWorkload {
             let recv_account = if i < warm_sends {
                 self.num_accounts - start_offset as u64
             } else {
-                rand::thread_rng().gen_range(self.num_accounts * 2..u64::max_value())
+                self.rng.gen_range(self.num_accounts * 2..u64::max_value())
             };
 
             let send_balance = decode_balance(

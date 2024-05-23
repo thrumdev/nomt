@@ -683,10 +683,8 @@ impl PageCache {
         page_diffs: impl IntoIterator<Item = (PageId, PageDiff)>,
         tx: &mut Transaction,
     ) {
-        const FULL_PAGE_THRESHOLD: usize = 32;
-
         let read_pass = self.new_read_pass();
-        let mut apply_page = |page_id, page_data: Option<&Vec<u8>>, page_diff: PageDiff| {
+        let mut apply_page = |page_id, page_data: Option<&Vec<u8>>, _page_diff: PageDiff| {
             if page_data.map_or(true, |p| page_is_empty(&p[..])) {
                 tx.delete_page(page_id);
                 return;
@@ -696,19 +694,7 @@ impl PageCache {
                 return;
             };
 
-            let updated_count = page_diff.updated_slots.count_ones();
-            if updated_count >= FULL_PAGE_THRESHOLD {
-                tx.write_page(page_id, page_data);
-                return;
-            }
-
-            let mut tagged_nodes = Vec::with_capacity(33 * updated_count);
-            for slot_index in page_diff.updated_slots.iter_ones() {
-                tagged_nodes.push(slot_index as u8);
-
-                tagged_nodes.extend(&page_data[slot_index * 32..][..32]);
-            }
-            tx.write_page_nodes(page_id, tagged_nodes);
+            tx.write_page(page_id, page_data);
         };
 
         // helper for exploiting locality effects in the diffs to avoid searching through
