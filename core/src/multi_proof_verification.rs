@@ -221,21 +221,21 @@ fn verify_range<H: NodeHasher>(
     // bisection is based off of them.
     let bisect_idx = search_result.unwrap_err();
 
-    // recurse into the right bisection.
-    let (right_node, right_siblings_used) = verify_range::<H>(
-        uncommon_start_len,
-        &sub_paths[bisect_idx..],
-        &external_siblings[common_bits..],
-    )?;
-
-    // now that we know how many siblings were used on the right, we can recurse into the left.
+    // recurse into the left bisection.
     let (left_node, left_siblings_used) = verify_range::<H>(
         uncommon_start_len,
         &sub_paths[..bisect_idx],
-        &external_siblings[common_bits + right_siblings_used..],
+        &external_siblings[common_bits..],
     )?;
 
-    let total_siblings_used = common_bits + right_siblings_used + left_siblings_used;
+    // now that we know how many siblings were used on the left, we can recurse into the right.
+    let (right_node, right_siblings_used) = verify_range::<H>(
+        uncommon_start_len,
+        &sub_paths[bisect_idx..],
+        &external_siblings[common_bits + left_siblings_used..],
+    )?;
+
+    let total_siblings_used = common_bits + left_siblings_used + right_siblings_used;
     // hash up the internal node composed of left/right, then repeatedly apply common siblings.
     let node = hash_path::<H>(
         H::hash_internal(&InternalData {
@@ -403,5 +403,103 @@ mod tests {
         assert!(verified.confirm_value(&l3).unwrap());
         assert!(verified.confirm_value(&l4).unwrap());
         assert!(verified.confirm_value(&l5).unwrap());
+    }
+
+    #[test]
+    pub fn test_verify_multiproof_external_siblings_structure() {
+        //                           root
+        //                     /            \
+        //                    v0           i10
+        //                               /     \
+        //                              i9     e7
+        //                            /     \
+        //                           i8     e6
+        //                       /        \
+        //                      i4        i7
+        //                     /  \      /  \
+        //                    i3   e3   e5   i6
+        //                   /  \           /  \
+        //                  i2   e2        e4   i5
+        //                 /  \               /  \
+        //                i1   e1            v3   v4
+        //               /  \
+        //              v1  v2
+
+        let path = |byte| [byte; 32];
+
+        let k0 = path(0b00000000);
+        let k1 = path(0b10000000);
+        let k2 = path(0b10000001);
+        let k3 = path(0b10011100);
+        let k4 = path(0b10011110);
+
+        let make_leaf = |key_path| {
+            let leaf_data = LeafData {
+                key_path,
+                value_hash: [key_path[0]; 32],
+            };
+
+            let hash = Blake3Hasher::hash_leaf(&leaf_data);
+            (leaf_data, hash)
+        };
+        let internal_hash =
+            |left, right| Blake3Hasher::hash_internal(&InternalData { left, right });
+
+        let (_l0, v0) = make_leaf(k0);
+        let (l1, v1) = make_leaf(k1);
+        let (l2, v2) = make_leaf(k2);
+        let (l3, v3) = make_leaf(k3);
+        let (l4, v4) = make_leaf(k4);
+
+        let e1 = [1; 32];
+        let e2 = [2; 32];
+        let e3 = [3; 32];
+        let e4 = [4; 32];
+        let e5 = [5; 32];
+        let e6 = [6; 32];
+        let e7 = TERMINATOR;
+
+        let i1 = internal_hash(v1, v2);
+        let i2 = internal_hash(i1, e1);
+        let i3 = internal_hash(i2, e2);
+        let i4 = internal_hash(i3, e3);
+
+        let i5 = internal_hash(v3, v4);
+        let i6 = internal_hash(e4, i5);
+        let i7 = internal_hash(e5, i6);
+
+        let i8 = internal_hash(i4, i7);
+        let i9 = internal_hash(i8, e6);
+        let i10 = internal_hash(i9, e7);
+
+        let root = internal_hash(v0, i10);
+
+        let leaf_proof = |leaf, siblings| PathProof {
+            terminal: PathProofTerminal::Leaf(leaf),
+            siblings,
+        };
+
+        let path_proof_1 = leaf_proof(l1.clone(), vec![v0, e7, e6, i7, e3, e2, e1, v2]);
+        let path_proof_2 = leaf_proof(l2.clone(), vec![v0, e7, e6, i7, e3, e2, e1, v1]);
+        let path_proof_3 = leaf_proof(l3.clone(), vec![v0, e7, e6, i4, e5, e4, v4]);
+        let path_proof_4 = leaf_proof(l4.clone(), vec![v0, e7, e6, i4, e5, e4, v3]);
+
+        let multi_proof = MultiProof::from_path_proofs(vec![
+            path_proof_1.clone(),
+            path_proof_2.clone(),
+            path_proof_3.clone(),
+            path_proof_4.clone(),
+        ]);
+
+        assert_eq!(
+            multi_proof.external_siblings,
+            vec![v0, e7, e6, e3, e2, e1, e5, e4]
+        );
+
+        let verified = verify::<Blake3Hasher>(&multi_proof, root).unwrap();
+        assert!(verified.confirm_value(&l1).unwrap());
+        assert!(verified.confirm_value(&l2).unwrap());
+        assert!(verified.confirm_value(&l3).unwrap());
+        assert!(verified.confirm_value(&l4).unwrap());
     }
 }
