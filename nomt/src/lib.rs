@@ -218,6 +218,24 @@ impl Nomt {
         }
     }
 
+    /// Commit the transaction and returns the new root.
+    ///
+    /// The actuals are a list of key paths and the corresponding read/write operations. The list
+    /// must be sorted by the key paths in ascending order. The key paths must be unique. For every
+    /// key in the actuals, the function [`Session::tentative_read_slot`] or
+    /// [`Session::tentative_write_slot`] must be called before committing.
+    pub fn commit(
+        &self,
+        session: Session,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
+    ) -> anyhow::Result<Node> {
+        match self.commit_inner(session, actuals, false)? {
+            (node, None, None) => Ok(node),
+            // UNWRAP: witness specified to false
+            _ => unreachable!(),
+        }
+    }
+
     /// Commit the transaction and create a proof for the given session. Also, returns the new root.
     ///
     /// The actuals are a list of key paths and the corresponding read/write operations. The list
@@ -226,16 +244,38 @@ impl Nomt {
     /// [`Session::tentative_write_slot`] must be called before committing.
     pub fn commit_and_prove(
         &self,
-        mut session: Session,
+        session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
+        match self.commit_inner(session, actuals, true)? {
+            (node, Some(witness), Some(witnessed_ops)) => Ok((node, witness, witnessed_ops)),
+            // UNWRAP: witness specified to true
+            _ => unreachable!(),
+        }
+    }
+
+    // Effectively commit the transaction.
+    // If 'witness' is set to true, it collects the witness and
+    // returns `(Node, Some(Witness), Some(WitnessedOperations))`
+    // Otherwise, it solely returns the new root node, returning
+    // `(Node, None, None)`
+    fn commit_inner(
+        &self,
+        mut session: Session,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
+        witness: bool,
+    ) -> anyhow::Result<(Node, Option<Witness>, Option<WitnessedOperations>)> {
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
             compact_actuals.push((path.clone(), read_write.to_compact()));
         }
 
         // UNWRAP: committer always `Some` during lifecycle.
-        let commit_handle = session.committer.take().unwrap().commit(compact_actuals);
+        let commit_handle = session
+            .committer
+            .take()
+            .unwrap()
+            .commit(compact_actuals, witness);
 
         let mut tx = self.store.new_tx();
         for (path, read_write) in actuals {
