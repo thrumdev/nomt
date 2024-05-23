@@ -148,9 +148,15 @@ impl Committer {
     }
 
     /// Commit the given key-value read/write operations. Key-paths should be in sorted order
-    /// and should appear at most once within the vector.
-    pub fn commit(mut self, read_write: Vec<(KeyPath, KeyReadWrite)>) -> CommitHandle {
+    /// and should appear at most once within the vector. Witness specify whether or not
+    /// collecting the witness of the commit operation.
+    pub fn commit(
+        mut self,
+        read_write: Vec<(KeyPath, KeyReadWrite)>,
+        witness: bool,
+    ) -> CommitHandle {
         let shared = Arc::new(CommitShared {
+            witness,
             read_write,
             root_page_pending: Mutex::new(Vec::with_capacity(64)),
         });
@@ -208,13 +214,16 @@ impl CommitHandle {
     /// Wait on the results of the commit operation.
     pub fn join(self) -> Output {
         let mut new_root = None;
-        let mut witness = Witness {
+
+        let mut maybe_witness = self.shared.witness.then_some(Witness {
             path_proofs: Vec::new(),
-        };
-        let mut witnessed_ops = WitnessedOperations {
+        });
+
+        let mut maybe_witnessed_ops = self.shared.witness.then_some(WitnessedOperations {
             reads: Vec::new(),
             writes: Vec::new(),
-        };
+        });
+
         let mut page_diffs = Vec::new();
 
         let mut path_proof_offset = 0;
@@ -232,49 +241,60 @@ impl CommitHandle {
 
             page_diffs.push(output.page_diffs);
 
-            let path_proof_count = output.witnessed_paths.len();
-            witness.path_proofs.reserve(output.witnessed_paths.len());
-            for (path_index, (path, leaf_data, batch_size)) in
-                output.witnessed_paths.into_iter().enumerate()
-            {
-                witness.path_proofs.push(path);
-                let witnessed_end = witnessed_start + batch_size;
-                for (k, v) in &self.shared.read_write[witnessed_start..witnessed_end] {
-                    if v.is_read() {
-                        let value_hash = leaf_data.as_ref().and_then(|leaf_data| {
-                            if &leaf_data.key_path == k {
-                                Some(leaf_data.value_hash)
-                            } else {
-                                None
-                            }
-                        });
+            // if the Commit worker collected the witnessed paths
+            // then we need to aggregate them
+            if let Some(witnessed_paths) = output.witnessed_paths {
+                // UNWRAP: the same `CommitShared` object is used to decide whether
+                // to collect witnesses or not. If the commit worker did so,
+                // `maybe_witness` and `maybe_witnessed_ops` must be initialized to contain
+                // all witnesses from all workers.
+                let witness = maybe_witness.as_mut().unwrap();
+                let witnessed_ops = maybe_witnessed_ops.as_mut().unwrap();
 
-                        witnessed_ops.reads.push(WitnessedRead {
-                            key: *k,
-                            value: value_hash,
-                            path_index: path_index + path_proof_offset,
-                        });
+                let path_proof_count = witnessed_paths.len();
+                witness.path_proofs.reserve(witnessed_paths.len());
+                for (path_index, (path, leaf_data, batch_size)) in
+                    witnessed_paths.into_iter().enumerate()
+                {
+                    witness.path_proofs.push(path);
+                    let witnessed_end = witnessed_start + batch_size;
+                    for (k, v) in &self.shared.read_write[witnessed_start..witnessed_end] {
+                        if v.is_read() {
+                            let value_hash = leaf_data.as_ref().and_then(|leaf_data| {
+                                if &leaf_data.key_path == k {
+                                    Some(leaf_data.value_hash)
+                                } else {
+                                    None
+                                }
+                            });
+
+                            witnessed_ops.reads.push(WitnessedRead {
+                                key: *k,
+                                value: value_hash,
+                                path_index: path_index + path_proof_offset,
+                            });
+                        }
+                        if let Some(written) = v.written_value() {
+                            witnessed_ops.writes.push(WitnessedWrite {
+                                key: *k,
+                                value: written,
+                                path_index: path_index + path_proof_offset,
+                            });
+                        }
                     }
-                    if let Some(written) = v.written_value() {
-                        witnessed_ops.writes.push(WitnessedWrite {
-                            key: *k,
-                            value: written,
-                            path_index: path_index + path_proof_offset,
-                        });
-                    }
+                    witnessed_start = witnessed_end;
                 }
-                witnessed_start = witnessed_end;
-            }
 
-            path_proof_offset += path_proof_count;
+                path_proof_offset += path_proof_count;
+            }
         }
 
         // UNWRAP: one thread always produces the root.
         Output {
             root: new_root.unwrap(),
             page_diffs,
-            witness,
-            witnessed_operations: witnessed_ops,
+            witness: maybe_witness,
+            witnessed_operations: maybe_witnessed_ops,
         }
     }
 }
@@ -285,10 +305,10 @@ pub struct Output {
     pub root: Node,
     /// All page-diffs from all worker threads. The covered sets of pages are disjoint.
     pub page_diffs: Vec<HashMap<PageId, PageDiff>>,
-    /// The witness.
-    pub witness: Witness,
-    /// All witnessed operations.
-    pub witnessed_operations: WitnessedOperations,
+    /// Optional witness
+    pub witness: Option<Witness>,
+    /// Optional list of all witnessed operations.
+    pub witnessed_operations: Option<WitnessedOperations>,
 }
 
 enum ToWorker {
@@ -319,15 +339,15 @@ enum RootPagePending {
 
 struct WorkerOutput {
     root: Option<Node>,
-    witnessed_paths: Vec<(WitnessedPath, Option<trie::LeafData>, usize)>,
+    witnessed_paths: Option<Vec<(WitnessedPath, Option<trie::LeafData>, usize)>>,
     page_diffs: HashMap<PageId, PageDiff>,
 }
 
-impl Default for WorkerOutput {
-    fn default() -> Self {
+impl WorkerOutput {
+    fn new(witness: bool) -> Self {
         WorkerOutput {
             root: None,
-            witnessed_paths: Vec::new(),
+            witnessed_paths: if witness { Some(Vec::new()) } else { None },
             page_diffs: HashMap::new(),
         }
     }
@@ -338,6 +358,7 @@ struct CommitShared {
     read_write: Vec<(KeyPath, KeyReadWrite)>,
     // nodes needing to be written to pages above a shard.
     root_page_pending: Mutex<Vec<(TriePosition, RootPagePending)>>,
+    witness: bool,
 }
 
 impl CommitShared {

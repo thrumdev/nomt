@@ -119,7 +119,7 @@ fn commit<H: NodeHasher>(
     let CommitCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
 
-    let mut output = WorkerOutput::default();
+    let mut output = WorkerOutput::new(shared.witness);
 
     let mut committer =
         RangeCommitter::<H>::new(root, shared.clone(), write_pass, page_cache.clone());
@@ -283,17 +283,13 @@ impl<H: NodeHasher> RangeCommitter<H> {
             .as_ref()
             .map_or(true, |p_id| !self.region.contains_exclusive(p_id));
 
-        let siblings = if is_non_exclusive {
+        if is_non_exclusive {
             self.shared.push_pending_subtrie(
                 seek_result.position.clone(),
                 start_index,
                 next_index,
                 seek_result.terminal.clone(),
             );
-
-            // if the terminal lands in the non-exclusive area, then the path to it is guaranteed
-            // not to have been altered by anything we've done so far.
-            seek_result.siblings
         } else {
             if !has_writes {
                 self.page_walker
@@ -307,28 +303,36 @@ impl<H: NodeHasher> RangeCommitter<H> {
                     ops,
                 );
             }
-
-            // nodes may have been altered prior to seeking - the page walker tracks which ones.
-            let mut siblings = seek_result.siblings;
-            for (actual_sibling, depth) in self.page_walker.siblings() {
-                siblings[*depth - 1] = *actual_sibling;
-            }
-            siblings
         };
 
-        let path = WitnessedPath {
-            inner: PathProof {
-                siblings,
-                terminal: match seek_result.terminal.clone() {
-                    Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
-                    None => PathProofTerminal::Terminator(seek_result.position.path().to_bitvec()),
+        if let Some(ref mut witnessed_paths) = output.witnessed_paths {
+            let siblings = if is_non_exclusive {
+                // if the terminal lands in the non-exclusive area, then the path to it is guaranteed
+                // not to have been altered by anything we've done so far.
+                seek_result.siblings
+            } else {
+                // nodes may have been altered prior to seeking - the page walker tracks which ones.
+                let mut siblings = seek_result.siblings;
+                for (actual_sibling, depth) in self.page_walker.siblings() {
+                    siblings[*depth - 1] = *actual_sibling;
+                }
+                siblings
+            };
+
+            let path = WitnessedPath {
+                inner: PathProof {
+                    siblings,
+                    terminal: match seek_result.terminal.clone() {
+                        Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
+                        None => {
+                            PathProofTerminal::Terminator(seek_result.position.path().to_bitvec())
+                        }
+                    },
                 },
-            },
-            path: seek_result.position.path().to_bitvec(),
-        };
-        output
-            .witnessed_paths
-            .push((path, seek_result.terminal, batch_size));
+                path: seek_result.position.path().to_bitvec(),
+            };
+            witnessed_paths.push((path, seek_result.terminal, batch_size));
+        }
     }
 
     fn conclude(mut self, output: &mut WorkerOutput) -> Option<WritePass<ShardIndex>> {
