@@ -7,6 +7,9 @@ use crate::{
     trie::Node,
 };
 
+#[cfg(not(features = "std"))]
+use alloc::{vec, vec::Vec};
+
 /// This struct includes the terminal node and its depth
 #[derive(Debug, Clone)]
 pub struct MultiPathProof {
@@ -107,16 +110,16 @@ impl PathProofRange {
             // UNWRAP: We have just checked that path_lower and path_upper differ at path_bit_index.
             // Therefore, with the vector of path_proofs ordered, we can be sure that there is at least
             // one path with its key_path containing a value of 1 at path_bit_index.
-            // Since there is at least one 1 bit and std::cmp::Ordering::Equal is never returned,
+            // Since there is at least one 1 bit and Ordering::Equal is never returned,
             // the method binary_search_by will always return an Error containing the index
             // of the first occurrence of one in the key_path.
             let mid = self.lower
                 + path_proofs[self.lower..self.upper]
                     .binary_search_by(|path_proof| {
                         if !path_proof.terminal.path()[self.path_bit_index] {
-                            std::cmp::Ordering::Less
+                            core::cmp::Ordering::Less
                         } else {
-                            std::cmp::Ordering::Greater
+                            core::cmp::Ordering::Greater
                         }
                     })
                     .unwrap_err();

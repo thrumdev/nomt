@@ -6,6 +6,9 @@ use crate::trie::{
 
 use bitvec::prelude::*;
 
+#[cfg(not(features = "std"))]
+use alloc::vec::Vec;
+
 /// Wrapper for a terminal node, it will store the LeafData if it is a leaf node,
 /// and just the KeyPath to that terminal if it is a terminator node
 #[derive(Debug, Clone, PartialEq, Eq)]

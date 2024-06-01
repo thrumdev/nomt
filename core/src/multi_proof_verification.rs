@@ -4,7 +4,10 @@ use crate::{
     trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, TERMINATOR},
 };
 use bitvec::prelude::*;
-use std::cmp::Ordering;
+use core::cmp::Ordering;
+
+#[cfg(not(features = "std"))]
+use alloc::vec::Vec;
 
 /// Errors in multi-proof verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
