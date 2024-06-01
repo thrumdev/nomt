@@ -4,6 +4,9 @@ use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, Valu
 
 use bitvec::prelude::*;
 
+#[cfg(not(features = "std"))]
+use alloc::vec::Vec;
+
 // TODO: feels extremely out of place.
 pub(crate) fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usize {
     a.iter().zip(b.iter()).take_while(|(a, b)| a == b).count()
