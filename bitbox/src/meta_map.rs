@@ -1,0 +1,63 @@
+//! in-memory metadata for each bucket. this is also persisted on disk.
+
+const EMPTY: u8 = 0b0000_0000;
+const TOMBSTONE: u8 = 0b0111_1111;
+const FULL_MASK: u8 = 0b1000_0000;
+
+fn full_entry(hash: u64) -> u8 {
+    (hash >> 58) as u8 ^ FULL_MASK
+}
+
+pub struct MetaMap {
+    bitvec: Vec<u8>,
+}
+
+impl MetaMap {
+    // Create a new meta-map. Buckets must be a multiple of 4096.
+    pub fn new(buckets: usize) -> Self {
+        assert_eq!(buckets % 4096, 0);
+
+        MetaMap {
+            bitvec: vec![0u8; buckets],
+        }
+    }
+
+    pub fn set_full(&mut self, bucket: usize, hash: u64) {
+        self.bitvec[bucket] = full_entry(hash);
+    }
+
+    pub fn set_empty(&mut self, bucket: usize) {
+        self.bitvec[bucket] = EMPTY;
+    }
+
+    pub fn set_tombstone(&mut self, bucket: usize) {
+        self.bitvec[bucket] = TOMBSTONE;
+    }
+
+    // true means definitely empty.
+    pub fn hint_empty(&self, bucket: usize) -> bool {
+        self.bitvec[bucket] == EMPTY
+    }
+
+    // true means definitely a tombstone.
+    pub fn hint_tombstone(&self, bucket: usize) -> bool {
+        self.bitvec[bucket] == TOMBSTONE
+    }
+
+    // returns true if it's definitely not a match.
+    pub fn hint_not_match(&self, bucket: usize, raw_hash: u64) -> bool {
+        self.bitvec[bucket] != full_entry(raw_hash)
+    }
+
+    // get the page index of a bucket in the meta-map.
+    pub fn page_index(&self, bucket: usize) -> usize {
+        bucket - bucket % 4096
+    }
+
+    // get a page-sized slice of the metamap. This is guaranteed to have len 4096
+    pub fn page_slice(&self, page_index: usize) -> &[u8] {
+        let start = page_index * 4096;
+        let end = start + 4096;
+        &self.bitvec[start..end]
+    }
+}
