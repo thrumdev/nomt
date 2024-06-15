@@ -67,7 +67,6 @@ fn run_worker(
         if !pending.is_empty() {
             // block on completions if at capacity.
             if pending.len() == SLAB_CAPACITY && complete_queue.is_empty() {
-
                 // TODO: handle error
                 submitter.submit_and_wait(1).unwrap();
                 complete_queue.sync();
