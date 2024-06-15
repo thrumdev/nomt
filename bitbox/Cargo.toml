@@ -10,3 +10,6 @@ io-uring = "0.6.4"
 crossbeam-channel = "0.5.13"
 slab = "0.4.9"
 libc = "0.2.155"
+clap = { version = "4.5.7", features = ["derive"] }
+rand = "0.8.5"
+anyhow = "1.0.86"
