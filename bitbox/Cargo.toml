@@ -8,3 +8,5 @@ edition = "2021"
 [dependencies]
 io-uring = "0.6.4"
 crossbeam-channel = "0.5.13"
+slab = "0.4.9"
+libc = "0.2.155"
