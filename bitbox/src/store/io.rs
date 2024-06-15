@@ -5,10 +5,12 @@ use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
 use std::{os::fd::AsRawFd, path::PathBuf, sync::Arc};
 
-const RING_CAPACITY: u32 = 128;
-const SLAB_CAPACITY: usize = 256;
+const RING_CAPACITY: u32 = 64;
 
-pub type WorkerIndex = usize;
+// max number of inflight requests is bounded by the slab.
+const SLAB_CAPACITY: usize = 64;
+
+pub type HandleIndex = usize;
 
 #[derive(Clone, Copy)]
 pub enum IoKind {
@@ -18,7 +20,7 @@ pub enum IoKind {
 
 pub struct IoCommand {
     pub kind: IoKind,
-    pub worker: WorkerIndex,
+    pub handle: HandleIndex,
     pub page_id: u64,
     pub buf: Box<Page>,
 }
@@ -28,23 +30,25 @@ pub struct CompleteIo {
     result: std::io::Result<()>,
 }
 
+/// Create an I/O worker managing an io_uring and sending responses back via channels to a number
+/// of handles.
 pub fn start_io_worker(
     store: Arc<Store>,
-    num_workers: usize,
+    num_handles: usize,
 ) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::bounded(1);
-    let (worker_txs, worker_rxs) = (0..num_workers)
+    let (handle_txs, handle_rxs) = (0..num_handles)
         .map(|_| crossbeam_channel::bounded(32))
         .unzip();
-    std::thread::spawn(move || run_worker(store, command_rx, worker_txs));
-    (command_tx, worker_rxs)
+    std::thread::spawn(move || run_worker(store, command_rx, handle_txs));
+    (command_tx, handle_rxs)
 }
 
 fn run_worker(
     store: Arc<Store>,
     command_rx: Receiver<IoCommand>,
-    worker_tx: Vec<Sender<CompleteIo>>,
+    handle_tx: Vec<Sender<CompleteIo>>,
 ) {
     let mut pending: Slab<IoCommand> = Slab::with_capacity(SLAB_CAPACITY);
 
@@ -56,21 +60,29 @@ fn run_worker(
         .expect("Error building io_uring");
 
     loop {
-        // note: dropping the queues each loop iteration performs `sync`.
-        let (submitter, mut submit_queue, complete_queue) = ring.split();
+        // note: dropping the queues at the end of loop iteration performs `sync` implicitly
+        let (submitter, mut submit_queue, mut complete_queue) = ring.split();
 
         // 1. process completions.
         if !pending.is_empty() {
+            // block on completions if at capacity.
+            if pending.len() == SLAB_CAPACITY && complete_queue.is_empty() {
+
+                // TODO: handle error
+                submitter.submit_and_wait(1).unwrap();
+                complete_queue.sync();
+            }
+
             for completion_event in complete_queue {
                 let command = pending.remove(completion_event.user_data() as usize);
-                let worker_idx = command.worker;
+                let handle_idx = command.handle;
                 let result = if completion_event.result() != 0 {
                     Err(std::io::Error::from_raw_os_error(completion_event.result()))
                 } else {
                     Ok(())
                 };
                 let complete = CompleteIo { command, result };
-                if let Err(_) = worker_tx[worker_idx].send(complete) {
+                if let Err(_) = handle_tx[handle_idx].send(complete) {
                     // TODO: handle?
                     break;
                 }
@@ -82,6 +94,7 @@ fn run_worker(
         submit_queue.sync();
         while pending.len() < SLAB_CAPACITY && !submit_queue.is_full() {
             let mut next_io = if pending.is_empty() {
+                // block on new I/O if nothing in-flight.
                 match command_rx.recv() {
                     Ok(command) => command,
                     Err(_) => break, // disconnected
@@ -104,14 +117,12 @@ fn run_worker(
             unsafe { submit_queue.push(&entry).unwrap() };
         }
 
-        // 3. submit all together, waiting for at least one completion if full
-        let pending_is_full = pending.len() == SLAB_CAPACITY;
-        if to_submit || pending_is_full {
+        // 3. submit all together.
+        if to_submit {
             submit_queue.sync();
-            let wait_amount = if pending_is_full { 1 } else { 0 };
 
             // TODO: handle this error properly.
-            submitter.submit_and_wait(wait_amount).unwrap();
+            submitter.submit().unwrap();
         }
     }
 }
