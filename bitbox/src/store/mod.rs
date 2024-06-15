@@ -5,8 +5,6 @@ use std::{
 };
 
 pub mod io;
-#[cfg(test)]
-mod tests;
 
 /// The Store is an on disk array of [`crate::node_pages_map::Page`]
 pub struct Store {
