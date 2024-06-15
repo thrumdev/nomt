@@ -45,6 +45,9 @@ pub fn start_io_worker(
     (command_tx, handle_rxs)
 }
 
+// hack: this is not exposed from the io_uring or libc libraries.
+const IORING_ENTER_GETEVENTS: u32 = 1;
+
 fn run_worker(
     store: Arc<Store>,
     command_rx: Receiver<IoCommand>,
@@ -65,10 +68,19 @@ fn run_worker(
 
         // 1. process completions.
         if !pending.is_empty() {
-            // block on completions if at capacity.
+            // block on next completion if at capacity.
             if pending.len() == SLAB_CAPACITY && complete_queue.is_empty() {
                 // TODO: handle error
-                submitter.submit_and_wait(1).unwrap();
+                unsafe {
+                    submitter
+                        .enter::<libc::sigset_t>(
+                            0, // submit
+                            1, // complete
+                            IORING_ENTER_GETEVENTS,
+                            None,
+                        )
+                        .unwrap();
+                }
                 complete_queue.sync();
             }
 
