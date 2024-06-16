@@ -100,7 +100,7 @@ fn run_worker(
             }
         }
 
-        // 2. accept new I/O requests when slab has space & submission queue is non-empty.
+        // 2. accept new I/O requests when slab has space & submission queue is not full.
         let mut to_submit = false;
         submit_queue.sync();
         while pending.len() < SLAB_CAPACITY && !submit_queue.is_full() {
