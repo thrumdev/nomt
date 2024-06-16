@@ -8,7 +8,7 @@ use std::{os::fd::AsRawFd, path::PathBuf, sync::Arc};
 const RING_CAPACITY: u32 = 64;
 
 // max number of inflight requests is bounded by the slab.
-const SLAB_CAPACITY: usize = 64;
+const MAX_IN_FLIGHT: usize = 64;
 
 pub type HandleIndex = usize;
 
@@ -45,15 +45,12 @@ pub fn start_io_worker(
     (command_tx, handle_rxs)
 }
 
-// hack: this is not exposed from the io_uring or libc libraries.
-const IORING_ENTER_GETEVENTS: u32 = 1;
-
 fn run_worker(
     store: Arc<Store>,
     command_rx: Receiver<IoCommand>,
     handle_tx: Vec<Sender<CompleteIo>>,
 ) {
-    let mut pending: Slab<IoCommand> = Slab::with_capacity(SLAB_CAPACITY);
+    let mut pending: Slab<IoCommand> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
         .setup_single_issuer()
@@ -69,7 +66,11 @@ fn run_worker(
         // 1. process completions.
         if !pending.is_empty() {
             // block on next completion if at capacity.
-            if pending.len() == SLAB_CAPACITY && complete_queue.is_empty() {
+            if pending.len() == MAX_IN_FLIGHT && complete_queue.is_empty() {
+                // hack: this is not exposed from the io_uring or libc libraries.
+                const IORING_ENTER_GETEVENTS: u32 = 1;
+
+                // we just get events here, not submit.
                 // TODO: handle error
                 unsafe {
                     submitter
@@ -102,8 +103,7 @@ fn run_worker(
 
         // 2. accept new I/O requests when slab has space & submission queue is not full.
         let mut to_submit = false;
-        submit_queue.sync();
-        while pending.len() < SLAB_CAPACITY && !submit_queue.is_full() {
+        while pending.len() < MAX_IN_FLIGHT && !submit_queue.is_full() {
             let mut next_io = if pending.is_empty() {
                 // block on new I/O if nothing in-flight.
                 match command_rx.recv() {
