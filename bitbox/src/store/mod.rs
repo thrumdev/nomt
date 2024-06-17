@@ -85,11 +85,11 @@ impl MetaPage {
     }
 
     fn expected_file_len(&self) -> u64 {
-        (1 + self.num_meta_byte_pages() as u64 + self.num_pages) * PAGE_SIZE
+        (1 + self.num_meta_byte_pages() as u64 + self.num_pages) * PAGE_SIZE as u64
     }
 
     fn num_meta_byte_pages(&self) -> usize {
-        ((self.num_pages + 4095) / PAGE_SIZE) as usize
+        ((self.num_pages + 4095) / PAGE_SIZE as u64) as usize
     }
 
     fn from_page(page: &[u8]) -> Self {
