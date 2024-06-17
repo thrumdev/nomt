@@ -17,10 +17,27 @@ pub enum IoKind {
     Write,
 }
 
+#[derive(Clone, Copy)]
+pub enum PageIndex {
+    Data(u64),
+    MetaBytes(u64),
+    Meta,
+}
+
+impl PageIndex {
+    fn index_in_store(self, store: &Store) -> u64 {
+        match self {
+            PageIndex::Data(i) => store.data_page_offset() + i,
+            PageIndex::MetaBytes(i) => 1 + i,
+            PageIndex::Meta => 0,
+        }
+    }
+}
+
 pub struct IoCommand {
     pub kind: IoKind,
     pub handle: HandleIndex,
-    pub page_id: u64,
+    pub page_id: PageIndex,
     pub buf: Box<Page>,
 }
 
@@ -139,18 +156,19 @@ fn run_worker(
 
 fn submission_entry(
     buf_ptr: *mut u8,
-    page_id: u64,
+    page_index: PageIndex,
     kind: IoKind,
     store: &Store,
     index: usize,
 ) -> squeue::Entry {
+    let page_offset = page_index.index_in_store(store) * PAGE_SIZE as u64;
     match kind {
         IoKind::Read => opcode::Read::new(
             types::Fd(store.store_file.as_raw_fd()),
             buf_ptr,
             PAGE_SIZE as u32,
         )
-        .offset((store.data_page_offset + page_id) * PAGE_SIZE as u64)
+        .offset(page_offset)
         .build()
         .user_data(index as u64),
         IoKind::Write => opcode::Write::new(
@@ -158,7 +176,7 @@ fn submission_entry(
             buf_ptr as *const u8,
             PAGE_SIZE as u32,
         )
-        .offset((store.data_page_offset + page_id) * PAGE_SIZE as u64)
+        .offset(page_offset)
         .build()
         .user_data(index as u64),
     }

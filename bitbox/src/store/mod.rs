@@ -54,6 +54,10 @@ impl Store {
             meta_bytes,
         ))
     }
+
+    pub fn data_page_offset(&self) -> u64 {
+        self.data_page_offset
+    }
 }
 
 const CURRENT_VERSION: u32 = 1;
