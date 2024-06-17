@@ -25,8 +25,8 @@ pub struct IoCommand {
 }
 
 pub struct CompleteIo {
-    command: IoCommand,
-    result: std::io::Result<()>,
+    pub command: IoCommand,
+    pub result: std::io::Result<()>,
 }
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
@@ -87,7 +87,7 @@ fn run_worker(
             for completion_event in complete_queue {
                 let command = pending.remove(completion_event.user_data() as usize);
                 let handle_idx = command.handle;
-                let result = if completion_event.result() != 0 {
+                let result = if completion_event.result() == -1 {
                     Err(std::io::Error::from_raw_os_error(completion_event.result()))
                 } else {
                     Ok(())
@@ -150,7 +150,7 @@ fn submission_entry(
             buf_ptr,
             PAGE_SIZE as u32,
         )
-        .offset(page_id * PAGE_SIZE as u64)
+        .offset((store.data_page_offset + page_id) * PAGE_SIZE as u64)
         .build()
         .user_data(index as u64),
         IoKind::Write => opcode::Write::new(
@@ -158,7 +158,7 @@ fn submission_entry(
             buf_ptr as *const u8,
             PAGE_SIZE as u32,
         )
-        .offset(page_id * PAGE_SIZE as u64)
+        .offset((store.data_page_offset + page_id) * PAGE_SIZE as u64)
         .build()
         .user_data(index as u64),
     }
