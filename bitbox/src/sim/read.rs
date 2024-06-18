@@ -198,7 +198,7 @@ fn read_phase(
                 *item.state_mut(params.preload_count) = match map.search(&meta_map, probe) {
                     None => PageState::Received {
                         location: None,
-                        page: Box::new([0; PAGE_SIZE]),
+                        page: Box::new(Page::zeroed()),
                     },
                     Some(probe) => PageState::Pending { probe },
                 };
@@ -265,7 +265,7 @@ fn handle_complete(
         match map.search(&meta_map, *probe) {
             None => PageState::Received {
                 location: None,
-                page: Box::new([0; PAGE_SIZE]),
+                page: Box::new(Page::zeroed()),
             },
             Some(probe) => PageState::Pending { probe },
         }
@@ -286,7 +286,7 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
     'a: for batch in in_flight.iter_mut() {
         while let Some((i, probe)) = batch.next_pending() {
             let command = IoCommand {
-                kind: IoKind::Read(PageIndex::Data(probe.bucket), Box::new([0; PAGE_SIZE])),
+                kind: IoKind::Read(PageIndex::Data(probe.bucket), Box::new(Page::zeroed())),
                 handle: io_handle_index,
                 user_data: pack_user_data(batch.job, i),
             };
@@ -341,7 +341,7 @@ fn add_inflight(
                 let state = match map.search(&meta_map, probe) {
                     None => PageState::Received {
                         location: None,
-                        page: Box::new([0; PAGE_SIZE]),
+                        page: Box::new(Page::zeroed()),
                     },
                     Some(probe) => PageState::Pending { probe },
                 };

@@ -254,7 +254,7 @@ fn write(
     }
 
     for changed_meta_page in changed_meta_pages {
-        let mut buf = Box::new([0; 4096]);
+        let mut buf = Box::new(Page::zeroed());
         buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
         let command = IoCommand {
             kind: IoKind::Write(PageIndex::MetaBytes(changed_meta_page as u64), buf),
