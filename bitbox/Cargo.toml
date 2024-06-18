@@ -13,3 +13,6 @@ libc = "0.2.155"
 clap = { version = "4.5.7", features = ["derive"] }
 rand = "0.8.5"
 anyhow = "1.0.86"
+blake3 = "1.5.1"
+ahash = "0.8.11"
+bitvec = "1.0.1"
