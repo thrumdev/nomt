@@ -70,8 +70,6 @@ fn run_worker(
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
         .setup_single_issuer()
-        .setup_sqpoll(100)
-        // .setup_iopoll
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 
