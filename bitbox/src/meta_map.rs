@@ -23,6 +23,13 @@ impl MetaMap {
         }
     }
 
+    pub fn full_count(&self) -> usize {
+        self.bitvec
+            .iter()
+            .filter(|&&byte| byte & FULL_MASK != 0)
+            .count()
+    }
+
     pub fn len(&self) -> usize {
         self.buckets
     }

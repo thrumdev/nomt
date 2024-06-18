@@ -80,12 +80,12 @@ fn make_hasher(seed: [u8; 32]) -> RandomState {
     )
 }
 
-static IO_OPS: AtomicUsize = AtomicUsize::new(0);
-
 pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) {
     params.num_pages /= params.num_workers;
     params.workload_size /= params.num_workers;
 
+    let mut full_count = meta_map.full_count();
+    println!("loaded map with {} buckets occupied", full_count);
     let meta_map = Arc::new(RwLock::new(meta_map));
     let (io_sender, mut io_receivers) =
         store_io::start_io_worker(store.clone(), params.num_workers + 1);
@@ -103,9 +103,12 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         let meta_map = meta_map.clone();
         let page_changes_tx = page_changes_tx.clone();
         let (start_work_tx, start_work_rx) = crossbeam_channel::bounded(1);
-        std::thread::spawn(move || {
-            read::run_worker(i, params, map, meta_map, page_changes_tx, start_work_rx)
-        });
+        let _ = std::thread::Builder::new()
+            .name("read_worker".to_string())
+            .spawn(move || {
+                read::run_worker(i, params, map, meta_map, page_changes_tx, start_work_rx)
+            })
+            .unwrap();
         start_work_txs.push(start_work_tx);
     }
 
@@ -120,7 +123,7 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         println!("starting read phase on {} workers", params.num_workers);
 
         let mut start = std::time::Instant::now();
-        IO_OPS.store(0, Ordering::Release);
+        let mut start_io_ops = store_io::total_io_ops();
 
         let barrier = Arc::new(Barrier::new(params.num_workers + 1));
         for tx in &start_work_txs {
@@ -129,8 +132,10 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
 
         // wait for reading to be done.
         let _ = barrier.wait();
+        let end_io_ops = store_io::total_io_ops();
+        let read_io_ops = end_io_ops - start_io_ops;
+        start_io_ops = end_io_ops;
 
-        let io_ops = IO_OPS.swap(0, Ordering::AcqRel);
         // ms = s * 1000
         // s = ms / 1000
         // iops = ios / s
@@ -138,21 +143,24 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         println!(
             "Finished read phase in {}ms, {} ios, {} IOPS",
             start.elapsed().as_millis(),
-            io_ops,
-            1000.0 * io_ops as f64 / (start.elapsed().as_millis() as f64)
+            read_io_ops,
+            1000.0 * read_io_ops as f64 / (start.elapsed().as_millis() as f64)
         );
 
         let mut meta_map = meta_map.write().unwrap();
 
         start = std::time::Instant::now();
-        write(io_handle_index, &map, &page_changes_rx, &mut meta_map);
+        full_count += write(io_handle_index, &map, &page_changes_rx, &mut meta_map);
 
-        let io_ops = IO_OPS.swap(0, Ordering::AcqRel);
+        let end_io_ops = store_io::total_io_ops();
+        let write_io_ops = end_io_ops - start_io_ops;
+
         println!(
-            "Finished write phase in {}ms, {} ios, {} IOPS",
+            "Finished write phase in {}ms, {} ios, {} IOPS, {} buckets occupied",
             start.elapsed().as_millis(),
-            io_ops,
-            1000.0 * io_ops as f64 / (start.elapsed().as_millis() as f64)
+            write_io_ops,
+            1000.0 * write_io_ops as f64 / (start.elapsed().as_millis() as f64),
+            full_count,
         );
     }
 }
@@ -226,8 +234,9 @@ fn write(
     map: &Map,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
-) {
+) -> usize {
     let mut changed_meta_pages = HashSet::new();
+    let mut fresh_pages = HashSet::new();
 
     let mut submitted = 0;
     let mut completed = 0;
@@ -235,6 +244,9 @@ fn write(
         let bucket = match changed.bucket {
             Some(b) => b,
             None => {
+                if !fresh_pages.insert(changed.page_id) {
+                    continue;
+                }
                 let probe = map.begin_probe(&changed.page_id, &*meta_map);
                 let bucket = map.search_free(&*meta_map, probe);
                 changed_meta_pages.insert(meta_map.page_index(bucket as usize));
@@ -278,6 +290,8 @@ fn write(
 
     submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     await_completion(&map.io_receiver, &mut completed);
+
+    fresh_pages.len()
 }
 
 fn submit_write(
@@ -286,7 +300,6 @@ fn submit_write(
     command: IoCommand,
     completed: &mut usize,
 ) {
-    IO_OPS.fetch_add(1, Ordering::Relaxed);
     let mut command = Some(command);
     while let Some(c) = command.take() {
         match io_sender.try_send(c) {
