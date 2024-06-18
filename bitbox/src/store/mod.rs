@@ -2,6 +2,7 @@ use rand::Rng;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
+    ops::{Deref, DerefMut},
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
 };
@@ -11,9 +12,31 @@ use crate::meta_map::MetaMap;
 pub mod io;
 
 pub const PAGE_SIZE: usize = 4096;
-pub type Page = [u8; PAGE_SIZE];
 
-/// The Store is an on disk array of [`crate::node_pages_map::Page`]
+#[derive(Clone)]
+#[repr(align(4096))]
+pub struct Page([u8; PAGE_SIZE]);
+
+impl Deref for Page {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Page {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Page {
+    pub fn zeroed() -> Self {
+        Self([0; PAGE_SIZE])
+    }
+}
+
+/// The Store is an on disk array of [`Page`]
 pub struct Store {
     store_file: File,
     // the number of pages to add to a page number to find its real location in the file,
@@ -33,7 +56,7 @@ impl Store {
             .custom_flags(libc::O_DIRECT)
             .open(path)?;
 
-        let mut meta_page_buf = [0u8; PAGE_SIZE];
+        let mut meta_page_buf = Page::zeroed();
         store_file.read_exact(&mut meta_page_buf)?;
 
         let meta_page = MetaPage::from_page(&meta_page_buf[..]);
@@ -42,8 +65,23 @@ impl Store {
             anyhow::bail!("Store corrupted; unexpected file length");
         }
 
-        let mut meta_bytes = vec![0u8; meta_page.num_meta_byte_pages() * PAGE_SIZE];
-        store_file.read_exact(&mut meta_bytes)?;
+        // Read the extra meta pages. Note that due to O_DIRECT we are only allowed to read into
+        // aligned buffers. You cannot really conjure a Vec from raw parts because the Vec doesn't
+        // store alignment but deducts it from T before deallocation and the allocator might not
+        // like that.
+        //
+        // We could try to be smart about this sure, but there is always a risk to outsmart yourself
+        // pooping your own pants on the way.
+        let mut extra_meta_pages: Vec<Page> = Vec::with_capacity(meta_page.num_meta_byte_pages());
+        for _ in 0..meta_page.num_meta_byte_pages() {
+            let mut buf = Page::zeroed();
+            store_file.read_exact(&mut buf)?;
+            extra_meta_pages.push(buf);
+        }
+        let mut meta_bytes = Vec::with_capacity(meta_page.num_meta_byte_pages() * PAGE_SIZE);
+        for extra_meta_page in extra_meta_pages {
+            meta_bytes.extend_from_slice(&*extra_meta_page);
+        }
 
         let data_page_offset = 1 + meta_page.num_meta_byte_pages() as u64;
 
