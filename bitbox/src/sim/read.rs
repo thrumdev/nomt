@@ -8,7 +8,7 @@ use std::sync::{Arc, Barrier, RwLock};
 use crate::meta_map::MetaMap;
 use crate::store::{
     io::{CompleteIo, IoCommand, IoKind, PageIndex},
-    Page,
+    Page, Store,
 };
 
 use super::{
@@ -75,6 +75,7 @@ pub(crate) fn run_worker(
     worker_index: usize,
     params: Params,
     map: Map,
+    store: Arc<Store>,
     meta_map: Arc<RwLock<MetaMap>>,
     changed_page_tx: Sender<ChangedPage>,
     start_work_rx: Receiver<Arc<Barrier>>,
@@ -91,6 +92,7 @@ pub(crate) fn run_worker(
             worker_index,
             &params,
             &map,
+            &store,
             &meta_map,
             workload,
             &changed_page_tx,
@@ -107,6 +109,7 @@ fn read_phase(
     io_handle_index: usize,
     params: &Params,
     map: &Map,
+    store: &Store,
     meta_map: &Arc<RwLock<MetaMap>>,
     mut workload: Vec<WorkItem>,
     changed_page_tx: &Sender<ChangedPage>,
@@ -222,7 +225,7 @@ fn read_phase(
 
         while let Some((bucket, buf, user_data)) = extra_fetches.pop_front() {
             let command = IoCommand {
-                kind: IoKind::Read(PageIndex::Data(bucket), buf),
+                kind: IoKind::Read(store.store_fd(), PageIndex::Data(bucket), buf),
                 handle: io_handle_index,
                 user_data,
             };
@@ -254,7 +257,11 @@ fn read_phase(
                         let buf = fetch.buf.take().unwrap();
                         let user_data = pack_user_data(preload_item, cur_preload.requested);
                         let command = IoCommand {
-                            kind: IoKind::Read(PageIndex::Data(probe.bucket), buf),
+                            kind: IoKind::Read(
+                                store.store_fd(),
+                                PageIndex::Data(probe.bucket),
+                                buf,
+                            ),
                             handle: io_handle_index,
                             user_data,
                         };

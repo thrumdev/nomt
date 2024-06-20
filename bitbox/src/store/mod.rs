@@ -3,7 +3,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     ops::{Deref, DerefMut},
-    os::unix::fs::OpenOptionsExt,
+    os::{fd::{AsRawFd, RawFd}, unix::fs::OpenOptionsExt},
     path::PathBuf,
 };
 
@@ -103,6 +103,10 @@ impl Store {
     /// Get the data page offset.
     pub fn data_page_offset(&self) -> u64 {
         self.data_page_offset
+    }
+
+    pub fn store_fd(&self) -> RawFd {
+        self.store_file.as_raw_fd()
     }
 }
 

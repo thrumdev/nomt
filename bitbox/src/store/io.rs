@@ -4,7 +4,7 @@ use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use rand::{prelude::SliceRandom, Rng};
 use slab::Slab;
 use std::{
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, RawFd},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -18,16 +18,16 @@ pub type HandleIndex = usize;
 
 #[derive(Clone)]
 pub enum IoKind {
-    Read(PageIndex, Box<Page>),
-    Write(PageIndex, Box<Page>),
-    Fsync,
+    Read(RawFd, PageIndex, Box<Page>),
+    Write(RawFd, PageIndex, Box<Page>),
+    Fsync(RawFd),
 }
 
 impl IoKind {
     pub fn unwrap_buf(self) -> Box<Page> {
         match self {
-            IoKind::Read(_, buf) | IoKind::Write(_, buf) => buf,
-            IoKind::Fsync => panic!("attempted to extract buf from fsync"),
+            IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
+            IoKind::Fsync(_) => panic!("attempted to extract buf from fsync"),
         }
     }
 }
@@ -292,21 +292,21 @@ impl Stats {
 
 fn submission_entry(command: &mut IoCommand, store: &Store) -> squeue::Entry {
     match command.kind {
-        IoKind::Read(page_index, ref mut buf) => opcode::Read::new(
-            types::Fd(store.store_file.as_raw_fd()),
+        IoKind::Read(fd, page_index, ref mut buf) => opcode::Read::new(
+            types::Fd(fd),
             buf.as_mut_ptr(),
             PAGE_SIZE as u32,
         )
         .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
         .build(),
-        IoKind::Write(page_index, ref buf) => opcode::Write::new(
-            types::Fd(store.store_file.as_raw_fd()),
+        IoKind::Write(fd, page_index, ref buf) => opcode::Write::new(
+            types::Fd(fd),
             buf.as_ptr(),
             PAGE_SIZE as u32,
         )
         .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
         .build(),
-        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd())).build(),
+        IoKind::Fsync(fd) => opcode::Fsync::new(types::Fd(fd)).build(),
     }
 }
 

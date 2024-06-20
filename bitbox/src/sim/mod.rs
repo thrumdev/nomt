@@ -102,13 +102,22 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
             io_receiver,
             hasher: make_hasher(store.seed()),
         };
+        let store = store.clone();
         let meta_map = meta_map.clone();
         let page_changes_tx = page_changes_tx.clone();
         let (start_work_tx, start_work_rx) = crossbeam_channel::bounded(1);
         let _ = std::thread::Builder::new()
             .name("read_worker".to_string())
             .spawn(move || {
-                read::run_worker(i, params, map, meta_map, page_changes_tx, start_work_rx)
+                read::run_worker(
+                    i,
+                    params,
+                    map,
+                    store,
+                    meta_map,
+                    page_changes_tx,
+                    start_work_rx,
+                )
             })
             .unwrap();
         start_work_txs.push(start_work_tx);
@@ -134,6 +143,7 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         write(
             io_handle_index,
             &map,
+            &store,
             &page_changes_rx,
             &mut meta_map,
             &mut full_count,
@@ -208,6 +218,7 @@ impl Map {
 fn write(
     io_handle_index: usize,
     map: &Map,
+    store: &Store,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
     full_count: &mut usize,
@@ -235,7 +246,7 @@ fn write(
         };
 
         let command = IoCommand {
-            kind: IoKind::Write(PageIndex::Data(bucket), changed.buf),
+            kind: IoKind::Write(store.store_fd(), PageIndex::Data(bucket), changed.buf),
             handle: io_handle_index,
             user_data: 0, // unimportant.
         };
@@ -249,7 +260,11 @@ fn write(
         let mut buf = Box::new(Page::zeroed());
         buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
         let command = IoCommand {
-            kind: IoKind::Write(PageIndex::MetaBytes(changed_meta_page as u64), buf),
+            kind: IoKind::Write(
+                store.store_fd(),
+                PageIndex::MetaBytes(changed_meta_page as u64),
+                buf,
+            ),
             handle: io_handle_index,
             user_data: 0, // unimportant
         };
@@ -264,7 +279,7 @@ fn write(
     }
 
     let command = IoCommand {
-        kind: IoKind::Fsync,
+        kind: IoKind::Fsync(store.store_fd()),
         handle: io_handle_index,
         user_data: 0, // unimportant
     };
