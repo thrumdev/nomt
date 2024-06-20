@@ -3,18 +3,73 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 use rand::Rng;
 
 use std::collections::VecDeque;
-use std::sync::{atomic::Ordering, Arc, Barrier, RwLock};
+use std::sync::{Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
     io::{CompleteIo, IoCommand, IoKind, PageIndex},
-    Page, PAGE_SIZE,
+    Page,
 };
 
 use super::{
     slot_range, BucketIndex, ChangedPage, Map, PageDiff, PageId, Params, ProbeSequence,
     SLOTS_PER_PAGE,
 };
+
+struct WorkItem {
+    pages: Vec<Fetch>,
+    requested: usize,
+    received: usize,
+}
+
+struct Fetch {
+    page_id: PageId,
+    probe: Option<ProbeSequence>,
+    buf: Option<Box<Page>>,
+}
+
+fn make_workload(worker_index: usize, params: &Params) -> Vec<WorkItem> {
+    // create workload - (preload_count + 1) * workload_size random "page IDs"
+    (0..params.workload_size)
+        .map(|_| {
+            let mut rng = rand::thread_rng();
+
+            // sample from typical range if not cold, out of range if cold
+            let range = if rng.gen::<f32>() < params.cold_rate {
+                params.num_pages..usize::max_value()
+            } else {
+                0..params.num_pages
+            };
+
+            // turn each sample into a random hash, set a unique byte per worker to discriminate.
+            let pages = (0..params.preload_count + 1)
+                .map(move |_| rand::thread_rng().gen_range(range.clone()))
+                .map(|sample| {
+                    // partition the page set across workers so it's the same regardless
+                    // of num workers with no overlaps.
+                    let sample = sample * params.num_workers + worker_index;
+                    blake3::hash(sample.to_le_bytes().as_slice())
+                })
+                .map(|hash| {
+                    let mut page_id = [0; 16];
+                    page_id.copy_from_slice(&hash.as_bytes()[..16]);
+                    page_id
+                })
+                .map(|page_id| Fetch {
+                    page_id,
+                    probe: None,
+                    buf: Some(Box::new(Page::zeroed())),
+                })
+                .collect::<Vec<_>>();
+
+            WorkItem {
+                pages,
+                requested: 0,
+                received: 0,
+            }
+        })
+        .collect::<Vec<_>>()
+}
 
 pub(crate) fn run_worker(
     worker_index: usize,
@@ -24,40 +79,12 @@ pub(crate) fn run_worker(
     changed_page_tx: Sender<ChangedPage>,
     start_work_rx: Receiver<Arc<Barrier>>,
 ) {
+    let mut workload = make_workload(worker_index, &params);
     loop {
         let barrier = match start_work_rx.recv() {
             Err(_) => break,
             Ok(b) => b,
         };
-
-        // create workload - (preload_count + 1) * workload_size random "page IDs"
-        let workload_pages = (0..params.workload_size)
-            .flat_map(|_| {
-                let mut rng = rand::thread_rng();
-
-                // sample from typical range if not cold, out of range if cold
-                let range = if rng.gen::<f32>() < params.cold_rate {
-                    params.num_pages..usize::max_value()
-                } else {
-                    0..params.num_pages
-                };
-
-                // turn each sample into a random hash, set a unique byte per worker to discriminate.
-                (0..params.preload_count + 1)
-                    .map(move |_| rand::thread_rng().gen_range(range.clone()))
-                    .map(|sample| {
-                        // partition the page set across workers so it's the same regardless
-                        // of num workers with no overlaps.
-                        let sample = sample * params.num_workers + worker_index;
-                        blake3::hash(sample.to_le_bytes().as_slice())
-                    })
-                    .map(|hash| {
-                        let mut page_id = [0; 16];
-                        page_id.copy_from_slice(&hash.as_bytes()[..16]);
-                        page_id
-                    })
-            })
-            .collect::<Vec<_>>();
 
         // read
         read_phase(
@@ -65,74 +92,14 @@ pub(crate) fn run_worker(
             &params,
             &map,
             &meta_map,
-            workload_pages,
+            workload,
             &changed_page_tx,
         );
 
         let _ = barrier.wait();
-    }
-}
 
-enum PageState {
-    Unneeded,
-    Pending {
-        probe: ProbeSequence,
-    },
-    Submitted {
-        probe: ProbeSequence,
-    },
-    Received {
-        location: Option<BucketIndex>, // `None` if fresh
-        page: Box<Page>,
-    },
-}
-
-impl PageState {
-    fn is_unneeded(&self) -> bool {
-        match self {
-            PageState::Unneeded => true,
-            _ => false,
-        }
-    }
-}
-
-struct ReadJob {
-    pages: Vec<(PageId, PageState)>,
-    job: usize,
-}
-
-impl ReadJob {
-    fn all_ready(&self) -> bool {
-        self.pages.iter().all(|(_, state)| match state {
-            PageState::Unneeded | PageState::Received { .. } => true,
-            _ => false,
-        })
-    }
-
-    fn waiting_on_io(&self) -> bool {
-        self.pages.iter().any(|(_, state)| match state {
-            PageState::Submitted { .. } => true,
-            _ => false,
-        })
-    }
-
-    fn next_pending(&mut self) -> Option<(usize, ProbeSequence)> {
-        self.pages
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (_, state))| match state {
-                PageState::Pending { probe } => Some((i, *probe)),
-                _ => None,
-            })
-            .next()
-    }
-
-    fn state_mut(&mut self, index: usize) -> &mut PageState {
-        &mut self.pages[index].1
-    }
-
-    fn page_id(&self, index: usize) -> PageId {
-        self.pages[index].0
+        // make next workload while write phase is ongoing.
+        workload = make_workload(worker_index, &params);
     }
 }
 
@@ -141,102 +108,12 @@ fn read_phase(
     params: &Params,
     map: &Map,
     meta_map: &Arc<RwLock<MetaMap>>,
-    workload: Vec<PageId>,
+    mut workload: Vec<WorkItem>,
     changed_page_tx: &Sender<ChangedPage>,
 ) {
-    const MAX_IN_FLIGHT: usize = 16;
+    let pack_user_data =
+        |item_index: usize, page_index: usize| ((item_index as u64) << 32) + page_index as u64;
 
-    let meta_map = meta_map.read().unwrap();
-    let mut rng = rand::thread_rng();
-    let mut misprobes = 0;
-    let mut page_queries = params.workload_size * params.preload_count;
-
-    // contains jobs we are actively waiting on I/O for.
-    let mut in_flight: VecDeque<ReadJob> = VecDeque::with_capacity(MAX_IN_FLIGHT);
-
-    // we process our workload sequentially but look forward and attempt to keep the I/O saturated.
-    // this index tracks the index of the job at the front of the in_flight queue, or a new unique
-    // index if the queue is empty.
-    let mut job_head = 0;
-    loop {
-        // handle complete I/O
-        for complete_io in map.io_receiver.try_iter() {
-            if handle_complete(complete_io, &mut in_flight, map, &*meta_map) {
-                misprobes += 1;
-            }
-        }
-
-        // submit requests from in-flight batches.
-        let can_add_inflight = submit_pending(&mut in_flight, map, io_handle_index);
-
-        // if submit queue appears to have space, add to our in-flight set.
-        if can_add_inflight && in_flight.len() < MAX_IN_FLIGHT {
-            let all_done = add_inflight(
-                &mut in_flight,
-                job_head,
-                &params,
-                map,
-                &*meta_map,
-                &workload,
-            );
-            if all_done {
-                println!("finished querying {page_queries} pages with {misprobes} misprobes");
-                break;
-            }
-        }
-
-        // process ready batches from the front.
-        while in_flight.front().map_or(false, |state| state.all_ready()) {
-            let mut item = in_flight.pop_front().unwrap();
-
-            // randomly force another round-trip sometimes.
-            if item.pages.last().unwrap().1.is_unneeded()
-                && rng.gen::<f32>() < params.load_extra_rate
-            {
-                page_queries += 1;
-                let page_id = item.page_id(params.preload_count);
-
-                // probe and set as pending.
-                let probe = map.begin_probe(&page_id, &meta_map);
-                *item.state_mut(params.preload_count) = match map.search(&meta_map, probe) {
-                    None => PageState::Received {
-                        location: None,
-                        page: Box::new(Page::zeroed()),
-                    },
-                    Some(probe) => PageState::Pending { probe },
-                };
-                in_flight.push_front(item);
-                break;
-            }
-
-            job_head += 1;
-
-            // update fetched pages randomly, record changes.
-            for (page_id, page_state) in item.pages {
-                if let PageState::Unneeded = page_state {
-                    continue;
-                }
-                let PageState::Received { location, mut page } = page_state else {
-                    panic!("all pages must be received at this point")
-                };
-                let diff = update_page(&mut page, page_id, &params, location.is_none());
-                let _ = changed_page_tx.send(ChangedPage {
-                    page_id,
-                    bucket: location,
-                    buf: page,
-                    diff,
-                });
-            }
-        }
-    }
-}
-
-fn handle_complete(
-    complete_io: CompleteIo,
-    in_flight: &mut VecDeque<ReadJob>,
-    map: &Map,
-    meta_map: &MetaMap,
-) -> bool {
     let unpack_user_data = |user_data: u64| {
         (
             (user_data >> 32) as usize,
@@ -244,128 +121,172 @@ fn handle_complete(
         )
     };
 
-    complete_io.result.expect("I/O failed");
-    let command = complete_io.command;
+    let start = std::time::Instant::now();
 
-    let (job_idx, index_in_job) = unpack_user_data(command.user_data);
-    let front_job = in_flight[0].job;
-    let job = &mut in_flight[job_idx - front_job];
-    let expected_id = job.page_id(index_in_job);
+    let meta_map = meta_map.read().unwrap();
+    let mut rng = rand::thread_rng();
 
-    let PageState::Submitted { probe } = job.state_mut(index_in_job) else {
-        panic!("received I/O for unsubmitted request");
-    };
+    // for extra fetches + misprobes
+    let mut extra_fetches: VecDeque<(BucketIndex, Box<Page>, u64)> = VecDeque::new();
+    let mut preload_item = 0;
+    let mut processed = 0;
+    let mut seek_extra = 0;
+    let mut io_completions = 0;
+    'a: while processed < workload.len() {
+        let process_seek_extra = seek_extra < workload.len() && {
+            let seek_front = &workload[seek_extra];
+            seek_front.received == seek_front.requested
+                && seek_front.requested == params.preload_count
+        };
 
-    // check that page idx matches the fetched page.
-    let page = command.kind.unwrap_buf();
-    let mut misprobe = false;
-    *job.state_mut(index_in_job) = if page_id_matches(&*page, &expected_id) {
-        PageState::Received {
-            location: Some(probe.bucket),
-            page,
+        if process_seek_extra {
+            let seek_front = &mut workload[seek_extra];
+            if rng.gen::<f32>() < params.load_extra_rate {
+                let extra_page_index = params.preload_count;
+                let fetch = &mut seek_front.pages[extra_page_index];
+                let probe = map.begin_probe(&fetch.page_id, &meta_map);
+                seek_front.requested += 1;
+
+                match map.search(&meta_map, probe) {
+                    None => {
+                        seek_front.received += 1;
+                        fetch.probe = None;
+                    }
+                    Some(probe) => {
+                        let buf = fetch.buf.take().unwrap();
+                        fetch.probe = Some(probe);
+                        let user_data = pack_user_data(seek_extra, extra_page_index);
+                        extra_fetches.push_front((probe.bucket, buf, user_data));
+                    }
+                }
+            }
+
+            seek_extra += 1;
         }
-    } else {
-        // probe failure. continue searching.
-        misprobe = true;
-        match map.search(&meta_map, *probe) {
-            None => PageState::Received {
-                location: None,
-                page: Box::new(Page::zeroed()),
-            },
-            Some(probe) => PageState::Pending { probe },
+
+        let process_front = {
+            let front = &workload[processed];
+            seek_extra > processed && front.received == front.requested
+        };
+
+        if process_front {
+            let front = &mut workload[processed];
+            processed += 1;
+
+            for i in 0..front.received {
+                let fetch = &mut front.pages[i];
+                let mut buf = fetch.buf.take().unwrap();
+                let diff = update_page(&mut buf, fetch.page_id, params);
+                let _ = changed_page_tx.send(ChangedPage {
+                    page_id: fetch.page_id,
+                    bucket: fetch.probe.map(|p| p.bucket),
+                    buf,
+                    diff,
+                });
+            }
         }
-    };
 
-    misprobe
-}
+        if let Ok(complete_io) = map.io_receiver.try_recv() {
+            let CompleteIo { command, result } = complete_io;
+            assert!(result.is_ok());
 
-// returns true if it's likely we can push another job to `in_flight`.
-fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index: usize) -> bool {
-    let pack_user_data = |job: usize, index: usize| ((job as u64) << 32) + index as u64;
+            let (item_index, page_index) = unpack_user_data(command.user_data);
+            let cur_complete = &mut workload[item_index];
+            let fetch = &mut cur_complete.pages[page_index];
 
-    let job_head = match in_flight.front() {
-        None => return true,
-        Some(j) => j.job,
-    };
+            io_completions += 1;
 
-    let mut can_submit = true;
+            let mut buf = command.kind.unwrap_buf();
+            if !page_id_matches(&*buf, &fetch.page_id) {
+                // misprobe.
 
-    'a: for batch in in_flight.iter_mut() {
-        while let Some((i, probe)) = batch.next_pending() {
+                // unwrap: probe is always set.
+                let probe = fetch.probe.unwrap();
+                match map.search(&meta_map, probe) {
+                    None => {
+                        *buf = Page::zeroed();
+                        cur_complete.received += 1;
+                        fetch.buf = Some(buf);
+                        fetch.probe = None;
+                    }
+                    Some(probe) => {
+                        fetch.probe = Some(probe);
+                        extra_fetches.push_back((probe.bucket, buf, command.user_data));
+                    }
+                }
+            } else {
+                fetch.buf = Some(buf);
+                cur_complete.received += 1;
+            }
+        }
+
+        while let Some((bucket, buf, user_data)) = extra_fetches.pop_front() {
             let command = IoCommand {
-                kind: IoKind::Read(PageIndex::Data(probe.bucket), Box::new(Page::zeroed())),
+                kind: IoKind::Read(PageIndex::Data(bucket), buf),
                 handle: io_handle_index,
-                user_data: pack_user_data(batch.job, i),
+                user_data,
             };
-
             match map.io_sender.try_send(command) {
-                Ok(()) => {
-                    *batch.state_mut(i) = PageState::Submitted { probe };
+                Ok(()) => {}
+                Err(TrySendError::Disconnected(_)) => panic!(),
+                Err(TrySendError::Full(command)) => {
+                    let buf = command.kind.unwrap_buf();
+                    extra_fetches.push_front((bucket, buf, user_data));
+                    continue 'a;
                 }
-                Err(TrySendError::Full(_)) => {
-                    can_submit = false;
-                    break 'a;
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    panic!("I/O worker dropped");
+            }
+        }
+
+        while preload_item < workload.len() {
+            let cur_preload = &mut workload[preload_item];
+            if cur_preload.requested >= params.preload_count {
+                preload_item += 1;
+                continue;
+            } else {
+                let fetch = &mut cur_preload.pages[cur_preload.requested];
+                let probe = map.begin_probe(&fetch.page_id, &meta_map);
+                match map.search(&meta_map, probe) {
+                    None => {
+                        cur_preload.requested += 1;
+                        cur_preload.received += 1;
+                    }
+                    Some(probe) => {
+                        let buf = fetch.buf.take().unwrap();
+                        let user_data = pack_user_data(preload_item, cur_preload.requested);
+                        let command = IoCommand {
+                            kind: IoKind::Read(PageIndex::Data(probe.bucket), buf),
+                            handle: io_handle_index,
+                            user_data,
+                        };
+                        fetch.probe = Some(probe);
+
+                        cur_preload.requested += 1;
+                        match map.io_sender.try_send(command) {
+                            Ok(()) => {}
+                            Err(TrySendError::Disconnected(_)) => panic!(),
+                            Err(TrySendError::Full(command)) => {
+                                let buf = command.kind.unwrap_buf();
+                                extra_fetches.push_back((probe.bucket, buf, user_data));
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    can_submit
+    println!(
+        "finished read phase (w#{io_handle_index}) in {}ms, {}ios, {} IOPS",
+        start.elapsed().as_millis(),
+        io_completions,
+        1000.0 * io_completions as f64 / (start.elapsed().as_millis() as f64)
+    );
 }
 
-// returns true if all work is done.
-fn add_inflight(
-    in_flight: &mut VecDeque<ReadJob>,
-    job_head: usize,
-    params: &Params,
-    map: &Map,
-    meta_map: &MetaMap,
-    workload: &[PageId],
-) -> bool {
-    let start = job_head * (params.preload_count + 1);
-    let end = start + params.preload_count + 1;
-
-    if end > workload.len() {
-        return in_flight.is_empty();
-    }
-
-    let job_idx = job_head + in_flight.len();
-    in_flight.push_back(ReadJob {
-        pages: workload[start..end]
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, page_id)| {
-                if i == params.preload_count {
-                    return (page_id, PageState::Unneeded);
-                }
-
-                let probe = map.begin_probe(&page_id, &meta_map);
-                let state = match map.search(&meta_map, probe) {
-                    None => PageState::Received {
-                        location: None,
-                        page: Box::new(Page::zeroed()),
-                    },
-                    Some(probe) => PageState::Pending { probe },
-                };
-
-                (page_id, state)
-            })
-            .collect(),
-        job: job_idx,
-    });
-
-    false
-}
-
-fn update_page(page: &mut Page, page_id: PageId, params: &Params, fresh: bool) -> PageDiff {
+fn update_page(page: &mut Page, page_id: PageId, params: &Params) -> PageDiff {
     let mut diff = [0u8; 16];
-    if fresh {
-        page[..page_id.len()].copy_from_slice(page_id.as_slice());
-    }
+    page[..page_id.len()].copy_from_slice(page_id.as_slice());
 
     let mut rng = rand::thread_rng();
 

@@ -22,14 +22,11 @@ use ahash::RandomState;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use std::collections::HashSet;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Barrier, RwLock,
-};
+use std::sync::{Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
-    io::{self as store_io, CompleteIo, IoCommand, IoKind, PageIndex},
+    io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode, PageIndex},
     Page, Store,
 };
 
@@ -88,7 +85,7 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
     println!("loaded map with {} buckets occupied", full_count);
     let meta_map = Arc::new(RwLock::new(meta_map));
     let (io_sender, mut io_receivers) =
-        store_io::start_io_worker(store.clone(), params.num_workers + 1);
+        store_io::start_io_worker(store.clone(), params.num_workers + 1, IoMode::Real);
     let (page_changes_tx, page_changes_rx) = crossbeam_channel::unbounded();
 
     let write_io_receiver = io_receivers.pop().unwrap();
@@ -120,11 +117,6 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         hasher: make_hasher(store.seed()),
     };
     loop {
-        println!("starting read phase on {} workers", params.num_workers);
-
-        let mut start = std::time::Instant::now();
-        let mut start_io_ops = store_io::total_io_ops();
-
         let barrier = Arc::new(Barrier::new(params.num_workers + 1));
         for tx in &start_work_txs {
             let _ = tx.send(barrier.clone());
@@ -132,35 +124,14 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
 
         // wait for reading to be done.
         let _ = barrier.wait();
-        let end_io_ops = store_io::total_io_ops();
-        let read_io_ops = end_io_ops - start_io_ops;
-        start_io_ops = end_io_ops;
-
-        // ms = s * 1000
-        // s = ms / 1000
-        // iops = ios / s
-        // iops = ios / (ms / 1000)
-        println!(
-            "Finished read phase in {}ms, {} ios, {} IOPS",
-            start.elapsed().as_millis(),
-            read_io_ops,
-            1000.0 * read_io_ops as f64 / (start.elapsed().as_millis() as f64)
-        );
 
         let mut meta_map = meta_map.write().unwrap();
-
-        start = std::time::Instant::now();
-        full_count += write(io_handle_index, &map, &page_changes_rx, &mut meta_map);
-
-        let end_io_ops = store_io::total_io_ops();
-        let write_io_ops = end_io_ops - start_io_ops;
-
-        println!(
-            "Finished write phase in {}ms, {} ios, {} IOPS, {} buckets occupied",
-            start.elapsed().as_millis(),
-            write_io_ops,
-            1000.0 * write_io_ops as f64 / (start.elapsed().as_millis() as f64),
-            full_count,
+        write(
+            io_handle_index,
+            &map,
+            &page_changes_rx,
+            &mut meta_map,
+            &mut full_count,
         );
     }
 }
@@ -234,9 +205,12 @@ fn write(
     map: &Map,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
-) -> usize {
+    full_count: &mut usize,
+) {
     let mut changed_meta_pages = HashSet::new();
     let mut fresh_pages = HashSet::new();
+
+    let start = std::time::Instant::now();
 
     let mut submitted = 0;
     let mut completed = 0;
@@ -262,6 +236,7 @@ fn write(
         };
 
         submitted += 1;
+
         submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     }
 
@@ -275,6 +250,7 @@ fn write(
         };
 
         submitted += 1;
+
         submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     }
 
@@ -289,9 +265,21 @@ fn write(
     };
 
     submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
-    await_completion(&map.io_receiver, &mut completed);
 
-    fresh_pages.len()
+    submitted += 1;
+    while completed < submitted {
+        await_completion(&map.io_receiver, &mut completed);
+    }
+
+    *full_count += fresh_pages.len();
+
+    println!(
+        "finished write phase in {}ms, {}ios, {} IOPS, {} buckets full",
+        start.elapsed().as_millis(),
+        completed,
+        1000.0 * completed as f64 / (start.elapsed().as_millis() as f64),
+        full_count,
+    );
 }
 
 fn submit_write(
