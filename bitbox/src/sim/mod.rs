@@ -26,7 +26,7 @@ use std::sync::{Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
-    io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode, PageIndex},
+    io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode},
     Page, Store,
 };
 
@@ -85,7 +85,6 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
     println!("loaded map with {} buckets occupied", full_count);
     let meta_map = Arc::new(RwLock::new(meta_map));
     let (io_sender, mut io_receivers) = store_io::start_io_worker(
-        store.clone(),
         params.num_workers + 1,
         IoMode::Real {
             num_rings: params.num_rings,
@@ -246,7 +245,7 @@ fn write(
         };
 
         let command = IoCommand {
-            kind: IoKind::Write(store.store_fd(), PageIndex::Data(bucket), changed.buf),
+            kind: IoKind::Write(store.store_fd(), store.data_page_index(bucket), changed.buf),
             handle: io_handle_index,
             user_data: 0, // unimportant.
         };
@@ -262,7 +261,7 @@ fn write(
         let command = IoCommand {
             kind: IoKind::Write(
                 store.store_fd(),
-                PageIndex::MetaBytes(changed_meta_page as u64),
+                store.meta_bytes_index(changed_meta_page as u64),
                 buf,
             ),
             handle: io_handle_index,

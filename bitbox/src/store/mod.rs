@@ -3,7 +3,10 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     ops::{Deref, DerefMut},
-    os::{fd::{AsRawFd, RawFd}, unix::fs::OpenOptionsExt},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::fs::OpenOptionsExt,
+    },
     path::PathBuf,
 };
 
@@ -103,6 +106,16 @@ impl Store {
     /// Get the data page offset.
     pub fn data_page_offset(&self) -> u64 {
         self.data_page_offset
+    }
+
+    /// Returns the page number of the `ix`th item in the data section of the store.
+    pub fn data_page_index(&self, ix: u64) -> u64 {
+        self.data_page_offset + ix
+    }
+
+    /// Returns the page number of the `ix`th item in the meta bytes section of the store.
+    pub fn meta_bytes_index(&self, ix: u64) -> u64 {
+        1 + ix
     }
 
     pub fn store_fd(&self) -> RawFd {

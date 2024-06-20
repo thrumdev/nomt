@@ -1,11 +1,10 @@
-use super::{Page, Store, PAGE_SIZE};
+use super::{Page, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
-use rand::{prelude::SliceRandom, Rng};
+use rand::prelude::SliceRandom;
 use slab::Slab;
 use std::{
-    os::fd::{AsRawFd, RawFd},
-    sync::Arc,
+    os::fd::RawFd,
     time::{Duration, Instant},
 };
 
@@ -18,8 +17,8 @@ pub type HandleIndex = usize;
 
 #[derive(Clone)]
 pub enum IoKind {
-    Read(RawFd, PageIndex, Box<Page>),
-    Write(RawFd, PageIndex, Box<Page>),
+    Read(RawFd, u64, Box<Page>),
+    Write(RawFd, u64, Box<Page>),
     Fsync(RawFd),
 }
 
@@ -28,23 +27,6 @@ impl IoKind {
         match self {
             IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
             IoKind::Fsync(_) => panic!("attempted to extract buf from fsync"),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum PageIndex {
-    Data(u64),
-    MetaBytes(u64),
-    Meta,
-}
-
-impl PageIndex {
-    fn index_in_store(self, store: &Store) -> u64 {
-        match self {
-            PageIndex::Data(i) => store.data_page_offset() + i,
-            PageIndex::MetaBytes(i) => 1 + i,
-            PageIndex::Meta => 0,
         }
     }
 }
@@ -80,7 +62,6 @@ pub enum Mode {
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
 pub fn start_io_worker(
-    store: Arc<Store>,
     num_handles: usize,
     mode: Mode,
 ) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
@@ -94,7 +75,7 @@ pub fn start_io_worker(
         Mode::Real { num_rings } => {
             let _ = std::thread::Builder::new()
                 .name("io_ingress".to_string())
-                .spawn(move || run_ingress(store, command_rx, handle_txs, num_rings))
+                .spawn(move || run_ingress(command_rx, handle_txs, num_rings))
                 .unwrap();
         }
         Mode::Fake => {
@@ -109,24 +90,22 @@ pub fn start_io_worker(
 }
 
 fn run_ingress(
-    store: Arc<Store>,
     command_rx: Receiver<IoCommand>,
     handle_txs: Vec<Sender<CompleteIo>>,
     num_rings: usize,
 ) {
     if num_rings == 1 {
-        run_worker(store, command_rx, handle_txs);
+        run_worker(command_rx, handle_txs);
         return;
     }
 
     let mut worker_command_txs = Vec::with_capacity(num_rings);
     for i in 0..num_rings {
-        let store = store.clone();
         let handle_txs = handle_txs.clone();
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let _ = std::thread::Builder::new()
             .name(format!("io_worker-{i}"))
-            .spawn(move || run_worker(store, command_rx, handle_txs))
+            .spawn(move || run_worker(command_rx, handle_txs))
             .unwrap();
         worker_command_txs.push(command_tx);
     }
@@ -143,11 +122,7 @@ fn run_ingress(
     }
 }
 
-fn run_worker(
-    store: Arc<Store>,
-    command_rx: Receiver<IoCommand>,
-    handle_tx: Vec<Sender<CompleteIo>>,
-) {
+fn run_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>>) {
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
@@ -213,11 +188,8 @@ fn run_worker(
                 start: Instant::now(),
             });
 
-            let entry = submission_entry(
-                &mut pending.get_mut(pending_index).unwrap().command,
-                &*store,
-            )
-            .user_data(pending_index as u64);
+            let entry = submission_entry(&mut pending.get_mut(pending_index).unwrap().command)
+                .user_data(pending_index as u64);
 
             // unwrap: known not full
             unsafe { submit_queue.push(&entry).unwrap() };
@@ -290,22 +262,18 @@ impl Stats {
     }
 }
 
-fn submission_entry(command: &mut IoCommand, store: &Store) -> squeue::Entry {
+fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
     match command.kind {
-        IoKind::Read(fd, page_index, ref mut buf) => opcode::Read::new(
-            types::Fd(fd),
-            buf.as_mut_ptr(),
-            PAGE_SIZE as u32,
-        )
-        .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
-        .build(),
-        IoKind::Write(fd, page_index, ref buf) => opcode::Write::new(
-            types::Fd(fd),
-            buf.as_ptr(),
-            PAGE_SIZE as u32,
-        )
-        .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
-        .build(),
+        IoKind::Read(fd, page_index, ref mut buf) => {
+            opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), PAGE_SIZE as u32)
+                .offset(page_index * PAGE_SIZE as u64)
+                .build()
+        }
+        IoKind::Write(fd, page_index, ref buf) => {
+            opcode::Write::new(types::Fd(fd), buf.as_ptr(), PAGE_SIZE as u32)
+                .offset(page_index * PAGE_SIZE as u64)
+                .build()
+        }
         IoKind::Fsync(fd) => opcode::Fsync::new(types::Fd(fd)).build(),
     }
 }

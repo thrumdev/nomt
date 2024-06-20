@@ -7,7 +7,7 @@ use std::sync::{Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
-    io::{CompleteIo, IoCommand, IoKind, PageIndex},
+    io::{CompleteIo, IoCommand, IoKind},
     Page, Store,
 };
 
@@ -225,7 +225,7 @@ fn read_phase(
 
         while let Some((bucket, buf, user_data)) = extra_fetches.pop_front() {
             let command = IoCommand {
-                kind: IoKind::Read(store.store_fd(), PageIndex::Data(bucket), buf),
+                kind: IoKind::Read(store.store_fd(), store.data_page_index(bucket), buf),
                 handle: io_handle_index,
                 user_data,
             };
@@ -259,7 +259,7 @@ fn read_phase(
                         let command = IoCommand {
                             kind: IoKind::Read(
                                 store.store_fd(),
-                                PageIndex::Data(probe.bucket),
+                                store.data_page_index(probe.bucket),
                                 buf,
                             ),
                             handle: io_handle_index,
