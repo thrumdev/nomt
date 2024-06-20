@@ -69,7 +69,10 @@ struct PendingIo {
 #[derive(Clone, Copy)]
 pub enum Mode {
     /// actually use io_uring
-    Real,
+    Real {
+        /// The number of rings to maintain.
+        num_rings: usize,
+    },
     /// complete io_requests after a random latency.
     Fake,
 }
@@ -88,10 +91,10 @@ pub fn start_io_worker(
         .unzip();
 
     match mode {
-        Mode::Real => {
+        Mode::Real { num_rings } => {
             let _ = std::thread::Builder::new()
-                .name("io_worker".to_string())
-                .spawn(move || run_worker(store, command_rx, handle_txs))
+                .name("io_ingress".to_string())
+                .spawn(move || run_ingress(store, command_rx, handle_txs, num_rings))
                 .unwrap();
         }
         Mode::Fake => {
@@ -105,6 +108,41 @@ pub fn start_io_worker(
     (command_tx, handle_rxs)
 }
 
+fn run_ingress(
+    store: Arc<Store>,
+    command_rx: Receiver<IoCommand>,
+    handle_txs: Vec<Sender<CompleteIo>>,
+    num_rings: usize,
+) {
+    if num_rings == 1 {
+        run_worker(store, command_rx, handle_txs);
+        return;
+    }
+
+    let mut worker_command_txs = Vec::with_capacity(num_rings);
+    for i in 0..num_rings {
+        let store = store.clone();
+        let handle_txs = handle_txs.clone();
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let _ = std::thread::Builder::new()
+            .name(format!("io_worker-{i}"))
+            .spawn(move || run_worker(store, command_rx, handle_txs))
+            .unwrap();
+        worker_command_txs.push(command_tx);
+    }
+
+    let mut next_worker_ix = 0;
+    loop {
+        match command_rx.recv() {
+            Ok(command) => {
+                let _ = worker_command_txs[next_worker_ix].send(command);
+                next_worker_ix = (next_worker_ix + 1) % num_rings;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
 fn run_worker(
     store: Arc<Store>,
     command_rx: Receiver<IoCommand>,
@@ -113,6 +151,7 @@ fn run_worker(
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
+        .setup_iopoll()
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 

@@ -35,7 +35,7 @@ mod read;
 #[derive(Clone, Copy)]
 pub struct Params {
     pub num_workers: usize,
-    // TODO: num ioring workers
+    pub num_rings: usize,
     pub num_pages: usize,
     pub workload_size: usize,
     pub cold_rate: f32,
@@ -84,8 +84,13 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
     let mut full_count = meta_map.full_count();
     println!("loaded map with {} buckets occupied", full_count);
     let meta_map = Arc::new(RwLock::new(meta_map));
-    let (io_sender, mut io_receivers) =
-        store_io::start_io_worker(store.clone(), params.num_workers + 1, IoMode::Real);
+    let (io_sender, mut io_receivers) = store_io::start_io_worker(
+        store.clone(),
+        params.num_workers + 1,
+        IoMode::Real {
+            num_rings: params.num_rings,
+        },
+    );
     let (page_changes_tx, page_changes_rx) = crossbeam_channel::unbounded();
 
     let write_io_receiver = io_receivers.pop().unwrap();
