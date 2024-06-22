@@ -52,7 +52,7 @@ pub struct Store {
 impl Store {
     /// Create a new Store given the StoreOptions. Returns a handle to the store file plus the
     /// loaded meta-bits.
-    pub fn open(path: PathBuf) -> anyhow::Result<(Self, MetaMap)> {
+    pub fn open(path: PathBuf) -> anyhow::Result<(Self, MetaPage, MetaMap)> {
         let mut store_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -88,13 +88,15 @@ impl Store {
 
         let data_page_offset = 1 + meta_page.num_meta_byte_pages() as u64;
 
+        let num_pages = meta_page.num_pages as usize;
         Ok((
             Store {
                 store_file,
                 data_page_offset,
                 seed: meta_page.seed,
             },
-            MetaMap::from_bytes(meta_bytes, meta_page.num_pages as usize),
+            meta_page,
+            MetaMap::from_bytes(meta_bytes, num_pages),
         ))
     }
 
@@ -136,15 +138,25 @@ pub struct MetaPage {
     // x = ceil((4096/4097)(y-1) - (4095/4097))
     num_pages: u64,
     seed: [u8; 32],
+    sequence_number: u64,
 }
 
 impl MetaPage {
-    fn to_page(&self) -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
+    pub fn to_page(&self) -> Page {
+        let mut page = Page::zeroed();
         page[0..4].copy_from_slice(&self.version.to_le_bytes());
         page[4..12].copy_from_slice(&self.num_pages.to_le_bytes());
         page[12..44].copy_from_slice(&self.seed);
+        page[44..52].copy_from_slice(&self.sequence_number.to_le_bytes());
         page
+    }
+
+    pub fn sequence_number(&self) -> u64 {
+        self.sequence_number
+    }
+
+    pub fn set_sequence_number(&mut self, s: u64) {
+        self.sequence_number = s;
     }
 
     fn num_pages(&self) -> usize {
@@ -179,10 +191,16 @@ impl MetaPage {
         );
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&page[12..44]);
+        let sequence_number = {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&page[44..52]);
+            u64::from_le_bytes(buf)
+        };
         MetaPage {
             version,
             num_pages,
             seed,
+            sequence_number,
         }
     }
 }
@@ -207,12 +225,13 @@ pub fn create(path: PathBuf, num_pages: usize) -> std::io::Result<()> {
             rand::thread_rng().fill(&mut seed);
             seed
         },
+        sequence_number: 0,
     };
 
     // number of pages + pages required for meta bits.
     let page_count = meta_page.num_pages() + meta_page.num_meta_byte_pages();
 
-    file.write_all(meta_page.to_page().as_slice())?;
+    file.write_all(meta_page.to_page().0.as_slice())?;
 
     let mut pages_remaining = page_count;
     let zero_buf = vec![0u8; PAGE_SIZE * WRITE_BATCH_SIZE];

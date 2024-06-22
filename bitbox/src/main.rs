@@ -69,7 +69,7 @@ fn main() {
             load_extra_rate,
             update_rate,
         } => {
-            let (store, meta_map) = match store::Store::open(file) {
+            let (store, meta_page, meta_map) = match store::Store::open(file) {
                 Ok(x) => x,
                 Err(e) => {
                     println!("encountered error in opening store: {e:?}");
@@ -100,7 +100,7 @@ fn main() {
                 page_item_update_rate: update_rate,
             };
 
-            sim::run_simulation(Arc::new(store), wal, sim_params, meta_map);
+            sim::run_simulation(Arc::new(store), meta_page, wal, sim_params, meta_map);
         }
     }
 }

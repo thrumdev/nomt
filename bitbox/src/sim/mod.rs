@@ -28,7 +28,7 @@ use std::sync::{Arc, Barrier, RwLock};
 use crate::meta_map::MetaMap;
 use crate::store::{
     io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode},
-    Page, Store,
+    MetaPage, Page, Store,
 };
 use crate::wal::{Batch as WalBatch, Entry as WalEntry, Wal};
 
@@ -93,7 +93,13 @@ fn make_hasher(seed: [u8; 32]) -> RandomState {
     )
 }
 
-pub fn run_simulation(store: Arc<Store>, mut wal: Wal, mut params: Params, meta_map: MetaMap) {
+pub fn run_simulation(
+    store: Arc<Store>,
+    mut meta_page: MetaPage,
+    mut wal: Wal,
+    mut params: Params,
+    meta_map: MetaMap,
+) {
     params.num_pages /= params.num_workers;
     params.workload_size /= params.num_workers;
 
@@ -160,6 +166,7 @@ pub fn run_simulation(store: Arc<Store>, mut wal: Wal, mut params: Params, meta_
             &map,
             &store,
             &mut wal,
+            &mut meta_page,
             &page_changes_rx,
             &mut meta_map,
             &mut full_count,
@@ -236,20 +243,22 @@ fn write(
     map: &Map,
     store: &Store,
     wal: &mut Wal,
+    store_meta_page: &mut MetaPage,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
     full_count: &mut usize,
 ) {
-    // TODO: Prepare a Batch, write it to the wal
-    // then apply the last batch to storage
-
     let mut changed_meta_pages = HashSet::new();
     let mut fresh_pages = HashSet::new();
     let mut bucket_writes = Vec::new();
-    let mut wal_batch = WalBatch::new(0); // TODO: use real sequence number.
+
+    let next_sequence_number = store_meta_page.sequence_number() + 1;
+    let mut wal_batch = WalBatch::new(next_sequence_number);
 
     let mut submitted = 0;
     let mut completed = 0;
+
+    let start = std::time::Instant::now();
     for changed in changed_pages.try_iter() {
         let bucket = match changed.bucket {
             Some(b) => b,
@@ -274,6 +283,7 @@ fn write(
 
         bucket_writes.push((bucket, changed.buf));
     }
+    let build_batch_millis = start.elapsed().as_millis();
 
     {
         let start = std::time::Instant::now();
@@ -316,28 +326,61 @@ fn write(
         await_completion(&map.io_receiver, &mut completed);
     }
 
+    // sync all writes
+    submit_and_wait_one(
+        &map.io_sender,
+        &map.io_receiver,
+        IoCommand {
+            kind: IoKind::Fsync(store.store_fd()),
+            handle: io_handle_index,
+            user_data: 0, // unimportant
+        },
+    );
+
+    store_meta_page.set_sequence_number(next_sequence_number);
+
+    // update meta page.
+    let mut buf = Box::new(store_meta_page.to_page());
     let command = IoCommand {
-        kind: IoKind::Fsync(store.store_fd()),
+        kind: IoKind::Write(store.store_fd(), 0, buf),
         handle: io_handle_index,
         user_data: 0, // unimportant
     };
 
-    submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
+    submit_and_wait_one(&map.io_sender, &map.io_receiver, command);
 
-    submitted += 1;
-    while completed < submitted {
-        await_completion(&map.io_receiver, &mut completed);
-    }
+    // sync meta page change.
+    submit_and_wait_one(
+        &map.io_sender,
+        &map.io_receiver,
+        IoCommand {
+            kind: IoKind::Fsync(store.store_fd()),
+            handle: io_handle_index,
+            user_data: 0, // unimportant
+        },
+    );
 
+    submitted += 3;
     *full_count += fresh_pages.len();
 
     println!(
-        "finished write phase in {}ms, {}ios, {} IOPS, {} buckets full",
+        "finished write phase in {}(+{})ms, {}ios, {} IOPS, {} buckets full",
         start.elapsed().as_millis(),
+        build_batch_millis,
         completed,
         1000.0 * completed as f64 / (start.elapsed().as_millis() as f64),
         full_count,
     );
+}
+
+// call only when I/O queue is totally empty.
+fn submit_and_wait_one(
+    io_sender: &Sender<IoCommand>,
+    io_receiver: &Receiver<CompleteIo>,
+    command: IoCommand,
+) {
+    let _ = io_sender.send(command);
+    let _ = io_receiver.recv();
 }
 
 fn submit_write(
