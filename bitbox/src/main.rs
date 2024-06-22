@@ -5,6 +5,7 @@ use std::sync::Arc;
 mod meta_map;
 mod sim;
 mod store;
+mod wal;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -25,6 +26,8 @@ enum Command {
     Run {
         #[arg(short, long, value_name = "FILE")]
         file: PathBuf,
+        #[arg(short, long, value_name = "WAL_FILE")]
+        wal_file: PathBuf,
         #[arg(long, default_value_t = 3)]
         num_readers: usize,
         #[arg(long)]
@@ -56,6 +59,7 @@ fn main() {
         }
         Command::Run {
             file,
+            wal_file,
             num_readers,
             num_rings,
             pages_to_use,
@@ -73,6 +77,18 @@ fn main() {
                 }
             };
 
+            let wal = match wal::Wal::open(wal_file) {
+                Ok(x) => x,
+                Err(e) => {
+                    println!("encountered error in opening wal: {e:?}");
+                    return;
+                }
+            };
+
+            // Check for store consistency with just opened WAL.
+            // TODO
+
+            // run simulation
             let sim_params = sim::Params {
                 num_workers: num_readers,
                 num_pages: pages_to_use,
@@ -84,7 +100,7 @@ fn main() {
                 page_item_update_rate: update_rate,
             };
 
-            sim::run_simulation(Arc::new(store), sim_params, meta_map);
+            sim::run_simulation(Arc::new(store), wal, sim_params, meta_map);
         }
     }
 }

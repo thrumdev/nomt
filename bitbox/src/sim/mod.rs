@@ -19,6 +19,7 @@
 //! randomly updated at a rate of `page_item_update_rate`.
 
 use ahash::RandomState;
+use bitvec::prelude::*;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use std::collections::HashSet;
@@ -29,6 +30,7 @@ use crate::store::{
     io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode},
     Page, Store,
 };
+use crate::wal::{Batch as WalBatch, Entry as WalEntry, Wal};
 
 mod read;
 
@@ -44,14 +46,28 @@ pub struct Params {
     pub page_item_update_rate: f32,
 }
 
-type PageId = [u8; 16];
-type PageDiff = [u8; 16];
+pub type PageId = [u8; 16];
+pub type PageDiff = [u8; 16];
 
 struct ChangedPage {
     page_id: PageId,
     bucket: Option<BucketIndex>,
     buf: Box<Page>,
     diff: PageDiff,
+}
+
+impl ChangedPage {
+    fn changed_parts(&self) -> Vec<[u8; 32]> {
+        self.diff
+            .view_bits::<Msb0>()
+            .iter_ones()
+            .map(|i| {
+                let mut buf = [0u8; 32];
+                buf.copy_from_slice(&self.buf[slot_range(i)]);
+                buf
+            })
+            .collect()
+    }
 }
 
 const SLOTS_PER_PAGE: usize = 126;
@@ -77,7 +93,7 @@ fn make_hasher(seed: [u8; 32]) -> RandomState {
     )
 }
 
-pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) {
+pub fn run_simulation(store: Arc<Store>, mut wal: Wal, mut params: Params, meta_map: MetaMap) {
     params.num_pages /= params.num_workers;
     params.workload_size /= params.num_workers;
 
@@ -143,6 +159,7 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
             io_handle_index,
             &map,
             &store,
+            &mut wal,
             &page_changes_rx,
             &mut meta_map,
             &mut full_count,
@@ -218,14 +235,18 @@ fn write(
     io_handle_index: usize,
     map: &Map,
     store: &Store,
+    wal: &mut Wal,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
     full_count: &mut usize,
 ) {
+    // TODO: Prepare a Batch, write it to the wal
+    // then apply the last batch to storage
+
     let mut changed_meta_pages = HashSet::new();
     let mut fresh_pages = HashSet::new();
-
-    let start = std::time::Instant::now();
+    let mut bucket_writes = Vec::new();
+    let mut wal_batch = WalBatch::new(0); // TODO: use real sequence number.
 
     let mut submitted = 0;
     let mut completed = 0;
@@ -244,8 +265,26 @@ fn write(
             }
         };
 
+        wal_batch.append_entry(WalEntry::Update {
+            page_id: changed.page_id,
+            page_diff: changed.diff,
+            changed: changed.changed_parts(),
+            bucket_index: bucket,
+        });
+
+        bucket_writes.push((bucket, changed.buf));
+    }
+
+    {
+        let start = std::time::Instant::now();
+        wal.apply_batch(&wal_batch).unwrap();
+        println!("Finished WAL write in {}ms", start.elapsed().as_millis());
+    }
+
+    let start = std::time::Instant::now();
+    for (bucket, buf) in bucket_writes {
         let command = IoCommand {
-            kind: IoKind::Write(store.store_fd(), store.data_page_index(bucket), changed.buf),
+            kind: IoKind::Write(store.store_fd(), store.data_page_index(bucket), buf),
             handle: io_handle_index,
             user_data: 0, // unimportant.
         };
