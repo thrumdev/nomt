@@ -179,12 +179,13 @@ fn read_phase(
             for i in 0..front.received {
                 let fetch = &mut front.pages[i];
                 let mut buf = fetch.buf.take().unwrap();
-                let diff = update_page(&mut buf, fetch.page_id, params);
+                let (diff, new_entries) = update_page(&mut buf, fetch.page_id, params);
                 let _ = changed_page_tx.send(ChangedPage {
                     page_id: fetch.page_id,
                     bucket: fetch.probe.map(|p| p.bucket),
                     buf,
                     diff,
+                    new_entries,
                 });
             }
         }
@@ -291,11 +292,12 @@ fn read_phase(
     );
 }
 
-fn update_page(page: &mut Page, page_id: PageId, params: &Params) -> PageDiff {
+fn update_page(page: &mut Page, page_id: PageId, params: &Params) -> (PageDiff, Vec<[u8; 32]>) {
     let mut diff = [0u8; 16];
     page[..page_id.len()].copy_from_slice(page_id.as_slice());
 
     let mut rng = rand::thread_rng();
+    let mut updates = Vec::new();
 
     for i in 0..SLOTS_PER_PAGE {
         if rng.gen::<f32>() > params.page_item_update_rate {
@@ -303,9 +305,12 @@ fn update_page(page: &mut Page, page_id: PageId, params: &Params) -> PageDiff {
         }
         diff.view_bits_mut::<Msb0>().set(i, true);
         rng.fill(&mut page[slot_range(i)]);
+        let mut buf = [0; 32];
+        buf.copy_from_slice(&page[slot_range(i)]);
+        updates.push(buf);
     }
 
-    diff
+    (diff, updates)
 }
 
 fn page_id_matches(page: &Page, expected_page_id: &PageId) -> bool {

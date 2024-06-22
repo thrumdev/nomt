@@ -54,20 +54,7 @@ struct ChangedPage {
     bucket: Option<BucketIndex>,
     buf: Box<Page>,
     diff: PageDiff,
-}
-
-impl ChangedPage {
-    fn changed_parts(&self) -> Vec<[u8; 32]> {
-        self.diff
-            .view_bits::<Msb0>()
-            .iter_ones()
-            .map(|i| {
-                let mut buf = [0u8; 32];
-                buf.copy_from_slice(&self.buf[slot_range(i)]);
-                buf
-            })
-            .collect()
-    }
+    new_entries: Vec<[u8; 32]>,
 }
 
 const SLOTS_PER_PAGE: usize = 126;
@@ -277,7 +264,7 @@ fn write(
         wal_batch.append_entry(WalEntry::Update {
             page_id: changed.page_id,
             page_diff: changed.diff,
-            changed: changed.changed_parts(),
+            changed: changed.new_entries,
             bucket_index: bucket,
         });
 
