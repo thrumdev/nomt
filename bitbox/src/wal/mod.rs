@@ -77,6 +77,7 @@ impl Wal {
             .create(true)
             .read(true)
             .write(true)
+            .append(true)
             .open(&path)?;
 
         // if the wal file is empty no integrity check needs to be done
