@@ -3,6 +3,7 @@ use anyhow::bail;
 use std::{
     fs::{File, OpenOptions},
     io::Write,
+    os::fd::AsRawFd,
     path::PathBuf,
 };
 
@@ -89,6 +90,27 @@ impl Wal {
         }
 
         Ok(Self { wal_file })
+    }
+
+    /// Get the current length of the file.
+    pub fn file_size(&self) -> u64 {
+        self.wal_file.metadata().unwrap().len()
+    }
+
+    /// Clean up the first n bytes of the file.
+    pub fn prune_front(&self, n: u64) {
+        unsafe {
+            let res = libc::fallocate(
+                self.wal_file.as_raw_fd(),
+                libc::FALLOC_FL_COLLAPSE_RANGE,
+                0,
+                n as libc::off_t,
+            );
+
+            assert!(res == 0, "WAL Collapse Range Failed");
+        }
+
+        self.wal_file.sync_all().unwrap();
     }
 
     // apply a batch of changes to the WAL file. returns only after FSYNC has completed.

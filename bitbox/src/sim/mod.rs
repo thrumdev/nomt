@@ -272,6 +272,7 @@ fn write(
     }
     let build_batch_millis = start.elapsed().as_millis();
 
+    let prev_wal_size = wal.file_size();
     {
         let start = std::time::Instant::now();
         wal.apply_batch(&wal_batch).unwrap();
@@ -346,6 +347,9 @@ fn write(
             user_data: 0, // unimportant
         },
     );
+
+    // clear the WAL.
+    wal.prune_front(prev_wal_size);
 
     submitted += 3;
     *full_count += fresh_pages.len();
