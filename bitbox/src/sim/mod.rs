@@ -25,16 +25,16 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier, RwLock};
 
-use crate::meta_map::MetaMap;
+use crate::meta_map::{self, MetaMap};
 use crate::store::{
     io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode},
     MetaPage, Page, Store,
 };
-use crate::wal::{Batch as WalBatch, Entry as WalEntry, Wal};
+use crate::wal::{Batch as WalBatch, Entry as WalEntry, WalWriter};
 
 mod read;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Params {
     pub num_workers: usize,
     pub num_rings: usize,
@@ -44,6 +44,7 @@ pub struct Params {
     pub preload_count: usize,
     pub load_extra_rate: f32,
     pub page_item_update_rate: f32,
+    pub pending_batch: Option<WalBatch>,
 }
 
 pub type PageId = [u8; 16];
@@ -83,7 +84,7 @@ fn make_hasher(seed: [u8; 32]) -> RandomState {
 pub fn run_simulation(
     store: Arc<Store>,
     mut meta_page: MetaPage,
-    mut wal: Wal,
+    mut wal: WalWriter,
     mut params: Params,
     meta_map: MetaMap,
 ) {
@@ -116,16 +117,19 @@ pub fn run_simulation(
         let (start_work_tx, start_work_rx) = crossbeam_channel::bounded(1);
         let _ = std::thread::Builder::new()
             .name("read_worker".to_string())
-            .spawn(move || {
-                read::run_worker(
-                    i,
-                    params,
-                    map,
-                    store,
-                    meta_map,
-                    page_changes_tx,
-                    start_work_rx,
-                )
+            .spawn({
+                let params = params.clone();
+                move || {
+                    read::run_worker(
+                        i,
+                        params,
+                        map,
+                        store,
+                        meta_map,
+                        page_changes_tx,
+                        start_work_rx,
+                    )
+                }
             })
             .unwrap();
         start_work_txs.push(start_work_tx);
@@ -138,6 +142,20 @@ pub fn run_simulation(
         io_receiver: write_io_receiver,
         hasher: make_hasher(store.seed()),
     };
+
+    // Apply the pending batch if some
+    if let Some(batch) = &params.pending_batch.clone() {
+        let mut meta_map = meta_map.write().unwrap();
+        apply_wal_batch(
+            io_handle_index,
+            &map,
+            &store,
+            &mut meta_page,
+            &mut meta_map,
+            batch.clone(),
+        )
+    }
+
     loop {
         let barrier = Arc::new(Barrier::new(params.num_workers + 1));
         for tx in &start_work_txs {
@@ -229,7 +247,7 @@ fn write(
     io_handle_index: usize,
     map: &Map,
     store: &Store,
-    wal: &mut Wal,
+    wal: &mut WalWriter,
     store_meta_page: &mut MetaPage,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
@@ -361,6 +379,143 @@ fn write(
         completed,
         1000.0 * completed as f64 / (start.elapsed().as_millis() as f64),
         full_count,
+    );
+}
+
+fn apply_wal_batch(
+    io_handle_index: usize,
+    map: &Map,
+    store: &Store,
+    store_meta_page: &mut MetaPage,
+    meta_map: &mut MetaMap,
+    batch: WalBatch,
+) {
+    let sequence_number = batch.sequence_number();
+    let mut changed_meta_pages = HashSet::new();
+
+    let mut submitted = 0;
+    let mut completed = 0;
+
+    for entry in batch.data() {
+        match entry {
+            WalEntry::Clear { bucket_index } => {
+                meta_map.set_empty(bucket_index as usize);
+                changed_meta_pages.insert(meta_map.page_index(bucket_index as usize));
+            }
+            WalEntry::Update {
+                page_id,
+                page_diff,
+                changed,
+                bucket_index,
+            } => {
+                let hash = map.begin_probe(&page_id, meta_map).hash;
+                meta_map.set_full(bucket_index as usize, hash);
+                changed_meta_pages.insert(meta_map.page_index(bucket_index as usize));
+
+                // fetch page from store
+                let command = IoCommand {
+                    kind: IoKind::Read(
+                        store.store_fd(),
+                        store.data_page_index(bucket_index),
+                        Box::new(Page::zeroed()),
+                    ),
+                    handle: io_handle_index,
+                    user_data: 0,
+                };
+
+                let _ = map.io_sender.send(command);
+                let mut page = map
+                    .io_receiver
+                    .recv()
+                    .expect("Error reading page during recovery")
+                    .command
+                    .kind
+                    .unwrap_buf();
+
+                // update it given the page diff
+                let mut changed_iter = changed.into_iter();
+                for (i, diff_bit) in page_diff.view_bits::<Msb0>().iter().enumerate() {
+                    if *diff_bit {
+                        page[slot_range(i)].copy_from_slice(&changed_iter.next().unwrap());
+                    }
+                }
+
+                // save the updated page to store
+                let command = IoCommand {
+                    kind: IoKind::Write(
+                        store.store_fd(),
+                        store.data_page_index(bucket_index),
+                        page,
+                    ),
+                    handle: io_handle_index,
+                    user_data: 0,
+                };
+
+                submitted += 1;
+
+                submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
+            }
+        }
+    }
+
+    // apply changed meta pages
+    for changed_meta_page in changed_meta_pages {
+        let mut buf = Box::new(Page::zeroed());
+        buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
+        let command = IoCommand {
+            kind: IoKind::Write(
+                store.store_fd(),
+                store.meta_bytes_index(changed_meta_page as u64),
+                buf,
+            ),
+            handle: io_handle_index,
+            user_data: 0, // unimportant
+        };
+
+        submitted += 1;
+
+        submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
+    }
+
+    // wait for all pages and meta_bytes pages to be recovered
+    while completed < submitted {
+        await_completion(&map.io_receiver, &mut completed);
+    }
+
+    // sync all writes
+    submit_and_wait_one(
+        &map.io_sender,
+        &map.io_receiver,
+        IoCommand {
+            kind: IoKind::Fsync(store.store_fd()),
+            handle: io_handle_index,
+            user_data: 0, // unimportant
+        },
+    );
+
+    // update meta page
+    store_meta_page.set_sequence_number(sequence_number);
+
+    // wait for the sequence number to be written
+    submit_and_wait_one(
+        &map.io_sender,
+        &map.io_receiver,
+        IoCommand {
+            kind: IoKind::Write(store.store_fd(), 0, Box::new(store_meta_page.to_page())),
+            handle: io_handle_index,
+            user_data: 0, // unimportant
+        },
+    );
+
+    // sync all writes
+    submit_and_wait_one(
+        &map.io_sender,
+        &map.io_receiver,
+        IoCommand {
+            kind: IoKind::Fsync(store.store_fd()),
+            handle: io_handle_index,
+            user_data: 0, // unimportant
+        },
     );
 }
 

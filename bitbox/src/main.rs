@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
+use wal::ConsistencyError;
 
 mod meta_map;
 mod sim;
@@ -77,16 +78,47 @@ fn main() {
                 }
             };
 
-            let wal = match wal::Wal::open(wal_file) {
+            // Open the WAL, check its integrity and make sure the store is consistent with it
+            let wal = wal::WalChecker::open_and_recover(wal_file.clone());
+            let pending_batch = match wal.check_consistency(meta_page.sequence_number()) {
+                Ok(()) => {
+                    println!(
+                        "Wal and Store are consistent, last sequence number: {}",
+                        meta_page.sequence_number()
+                    );
+                    None
+                }
+                Err(ConsistencyError::LastBatchCrashed(crashed_batch)) => {
+                    println!(
+                        "Wal and Store are not consistent, pending sequence number: {}",
+                        meta_page.sequence_number() + 1
+                    );
+                    Some(crashed_batch)
+                }
+                Err(ConsistencyError::NotConsistent(wal_seqn)) => {
+                    // This is useful for testing. If the WAL sequence number is zero, it means the WAL is empty.
+                    // For example, it could have been deleted, and it's okay to continue working on the store
+                    // by appending new batches to the new WAL
+                    if wal_seqn == 0 {
+                        None
+                    } else {
+                        panic!(
+                            "Store and Wal have two inconsistent serial numbers. wal: {}, store: {}",
+                            wal_seqn,
+                            meta_page.sequence_number()
+                        );
+                    }
+                }
+            };
+
+            // Create a WalWriter, able to append new batch and prune older ones
+            let wal = match wal::WalWriter::open(wal_file) {
                 Ok(x) => x,
                 Err(e) => {
                     println!("encountered error in opening wal: {e:?}");
                     return;
                 }
             };
-
-            // Check for store consistency with just opened WAL.
-            // TODO
 
             // run simulation
             let sim_params = sim::Params {
@@ -98,6 +130,7 @@ fn main() {
                 preload_count,
                 load_extra_rate,
                 page_item_update_rate: update_rate,
+                pending_batch,
             };
 
             sim::run_simulation(Arc::new(store), meta_page, wal, sim_params, meta_map);

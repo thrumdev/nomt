@@ -1,8 +1,9 @@
 use anyhow::bail;
+use bitvec::ptr::read;
 
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{self, Read, Seek, Write},
     os::fd::AsRawFd,
     path::PathBuf,
 };
@@ -11,7 +12,10 @@ mod batch;
 mod entry;
 mod record;
 
+use crate::store::Store;
 pub use crate::wal::{batch::Batch, entry::Entry};
+
+use self::record::Record;
 
 // WAL format:
 //
@@ -46,33 +50,25 @@ pub use crate::wal::{batch::Batch, entry::Entry};
 // determine which WAL entries need to be reapplied.
 //
 // WAL entries imply writing buckets and the meta-map. when recovering from a crash, do both.
-//
-//
-// ASSUMPTIONS, TO BE DISCUSSED:
-// + the file is expected to be contiguous in memory, so the last record starts at position
-//   file.len() - WAL_RECORD_SIZE
-// + All records must have a sequence number equal to the previous one or the previous one increased by 1,
-//   the first record in the file defines the start.
-//   (if we decide to use a ring wall, then the start could be somewhere else)
-//   No gaps are accepted between records; otherwise, integrity is not maintained
-// + We exect that the entries in the Records are locically correct
 
 const WAL_RECORD_SIZE: usize = 256 * 1024;
 // walawala
 const WAL_CHECKSUM_MAGIC: u32 = 0x00a10a1a;
 
-pub struct Wal {
+// Open a WAL file and append encoded batch of writes to the end,
+// and prune previous ones if the current succeeded.
+//
+// It does not perform any check on the state of the WAL file
+pub struct WalWriter {
     wal_file: File,
 }
 
-impl Wal {
+impl WalWriter {
     /// Open a WAL file if it exists, otherwise, create a new empty one.
     ///
-    /// If it already exists, all records will be parsed to verify the
-    /// WAL's integrity. If not satisfied, an error will be returned.
-    ///
-    /// NOTE: This does not perform any checks on the database's consistency (yet),
-    /// it needs to be done after creating the WAL and once we are sure it is correct.
+    /// No check with be performed if the file exists,
+    /// it will only happend new batch to the end of the file
+    /// and purge from the front
     pub fn open(path: PathBuf) -> anyhow::Result<Self> {
         let wal_file = OpenOptions::new()
             .create(true)
@@ -80,14 +76,6 @@ impl Wal {
             .write(true)
             .append(true)
             .open(&path)?;
-
-        // if the wal file is empty no integrity check needs to be done
-        let wal_file_len = wal_file.metadata()?.len();
-
-        // remove when we handle corruption.
-        if wal_file_len % WAL_RECORD_SIZE as u64 != 0 {
-            bail!("WAL corrupted - delete and restart");
-        }
 
         Ok(Self { wal_file })
     }
@@ -99,6 +87,12 @@ impl Wal {
 
     /// Clean up the first n bytes of the file.
     pub fn prune_front(&self, n: u64) {
+        // fallocate call with flag FALLOC_FL_COLLAPSE_RANGE
+        // returns an error if you're trying to collapse 0 bytes
+        if n == 0 {
+            return;
+        }
+
         unsafe {
             let res = libc::fallocate(
                 self.wal_file.as_raw_fd(),
@@ -128,4 +122,137 @@ impl Wal {
 
         Ok(())
     }
+}
+
+/// Open a WAL file and check the integrity of the file, it decodes
+/// all records and make sure they are coherent with the WAL format.
+pub struct WalChecker {
+    last_batch: Option<Batch>,
+}
+
+pub enum ConsistencyError {
+    LastBatchCrashed(Batch),
+    NotConsistent(u64),
+}
+
+impl WalChecker {
+    /// Open a WAL file and check its integrity, if a problem is found then the
+    /// wal is restored to its last valid state, thus it updates the WAL file
+    /// by removing everything after the last valid record.
+    ///
+    /// NOTE: Even though currently in the simulation each batch is pruned right after
+    /// the success of the next one, the following method needs to be able to handle multiple
+    /// records of different batches and validate them
+    pub fn open_and_recover(path: PathBuf) -> Self {
+        let mut wal_file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(wal_file) => wal_file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // a non-existing WAL is considered valid, with the assumed sequence number being zero
+                return Self { last_batch: None };
+            }
+            Err(_) => {
+                panic!("Error opening or creating the wal file ")
+            }
+        };
+
+        let (last_records, last_records_position) = validate_records(&mut wal_file);
+
+        // If not all the WAL was parsed correctly, then the recovery procedure means to remove
+        // all incorrect records from the last valid one
+
+        let wal_file_len = wal_file
+            .metadata()
+            .expect("Error extracting wal file len")
+            .len();
+
+        if last_records_position as u64 != wal_file_len {
+            // cannot use fallocate + FALLOC_FL_COLLAPSE_RANGE
+            // because it requires offset and len to be multiple of the
+            // filesystem block size, and len could be different from a multiple of a record size
+            unsafe {
+                let res =
+                    libc::ftruncate(wal_file.as_raw_fd(), last_records_position as libc::off_t);
+                assert!(res == 0, "WAL Recovery: ftruncate failed");
+            }
+
+            wal_file.sync_all().unwrap();
+        }
+
+        Self {
+            last_batch: Some(Batch::from_records(last_records)),
+        }
+    }
+
+    pub fn check_consistency(self, store_sequence_number: u64) -> Result<(), ConsistencyError> {
+        let wal_sequence_number = self
+            .last_batch
+            .as_ref()
+            .map(|batch| batch.sequence_number())
+            .unwrap_or(0);
+
+        if wal_sequence_number == store_sequence_number {
+            Ok(())
+        } else if wal_sequence_number == store_sequence_number + 1 {
+            Err(ConsistencyError::LastBatchCrashed(self.last_batch.unwrap()))
+        } else {
+            Err(ConsistencyError::NotConsistent(wal_sequence_number))
+        }
+    }
+}
+
+fn validate_records(wal_file: &mut File) -> (Vec<Record>, usize) {
+    // contains the last set of valid records
+    let mut last_records = vec![];
+    // offset in the WAL file to the byte right after the end of the last parsed valid record
+    let mut last_records_position = 0;
+
+    let mut curr_records = vec![];
+    let mut sequence_number = None;
+
+    // Rules to be respected:
+    //  1. all records must stored in chunks of WAL_RECORD_SIZE bytes
+    //  2. all records must be well formatted
+    //  3. each record sequence number must be equal to the previous one or equal to previous +1
+    //  4. only the last record in a batch must have the 'last' flag to 0xFF, others 0x00
+
+    let record_iter = std::iter::from_fn(|| {
+        let mut buf = [0; WAL_RECORD_SIZE];
+
+        let read_bytes = wal_file
+            .read(&mut buf)
+            .expect("Error reading from wal file");
+
+        match read_bytes {
+            // ends the iterator if the read bytes are not exactly the expected
+            // size of a record entry or if it was not properly encoded
+            WAL_RECORD_SIZE => Some(Record::from_bytes(buf).ok()?),
+            _ => None,
+        }
+    });
+
+    for (record_index, record) in record_iter.enumerate() {
+        let is_last = record.last();
+        let seq_num = record.sequence_number();
+        curr_records.push(record);
+
+        // first record
+        let Some(expected_seqn) = sequence_number else {
+            sequence_number = Some(seq_num);
+            continue;
+        };
+
+        if expected_seqn != seq_num {
+            break;
+        }
+
+        if is_last {
+            // sequence_number is expected to be increased from the next record
+            sequence_number = Some(seq_num + 1);
+            last_records = std::mem::replace(&mut curr_records, vec![]);
+            last_records_position = WAL_RECORD_SIZE * (record_index + 1);
+            continue;
+        }
+    }
+
+    (last_records, last_records_position)
 }
