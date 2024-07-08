@@ -42,6 +42,7 @@ impl MetaMap {
         self.bitvec[bucket] = EMPTY;
     }
 
+    #[allow(unused)]
     pub fn set_tombstone(&mut self, bucket: usize) {
         self.bitvec[bucket] = TOMBSTONE;
     }

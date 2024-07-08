@@ -1,9 +1,6 @@
-use anyhow::bail;
-use bitvec::ptr::read;
-
 use std::{
     fs::{File, OpenOptions},
-    io::{self, Read, Seek, Write},
+    io::{Read, Write},
     os::fd::AsRawFd,
     path::PathBuf,
 };
@@ -12,7 +9,6 @@ mod batch;
 mod entry;
 mod record;
 
-use crate::store::Store;
 pub use crate::wal::{batch::Batch, entry::Entry};
 
 use self::record::Record;

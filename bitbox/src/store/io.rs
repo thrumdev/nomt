@@ -56,6 +56,7 @@ pub enum Mode {
         num_rings: usize,
     },
     /// complete io_requests after a random latency.
+    #[allow(unused)]
     Fake,
 }
 

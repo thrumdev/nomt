@@ -106,6 +106,7 @@ impl Store {
     }
 
     /// Get the data page offset.
+    #[allow(unused)]
     pub fn data_page_offset(&self) -> u64 {
         self.data_page_offset
     }

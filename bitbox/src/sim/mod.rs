@@ -25,7 +25,7 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier, RwLock};
 
-use crate::meta_map::{self, MetaMap};
+use crate::meta_map::MetaMap;
 use crate::store::{
     io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode},
     MetaPage, Page, Store,
@@ -346,7 +346,7 @@ fn write(
     store_meta_page.set_sequence_number(next_sequence_number);
 
     // update meta page.
-    let mut buf = Box::new(store_meta_page.to_page());
+    let buf = Box::new(store_meta_page.to_page());
     let command = IoCommand {
         kind: IoKind::Write(store.store_fd(), 0, buf),
         handle: io_handle_index,
@@ -370,6 +370,7 @@ fn write(
     wal.prune_front(prev_wal_size);
 
     submitted += 3;
+    let _ = submitted;
     *full_count += fresh_pages.len();
 
     println!(

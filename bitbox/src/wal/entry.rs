@@ -18,13 +18,6 @@ pub enum Entry {
 }
 
 impl Entry {
-    fn id(&self) -> u8 {
-        match self {
-            Entry::Update { .. } => 1,
-            Entry::Clear { .. } => 0,
-        }
-    }
-
     pub fn len(&self) -> usize {
         match self {
             Entry::Update { changed, .. } => 1 + 16 + 16 + changed.len() * 32 + 8,

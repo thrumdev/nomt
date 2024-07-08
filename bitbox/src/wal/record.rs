@@ -45,7 +45,7 @@ impl Record {
         8 + 4 + 2 + 1
     }
 
-    pub fn from_bytes(mut raw_record: [u8; WAL_RECORD_SIZE]) -> anyhow::Result<Self> {
+    pub fn from_bytes(raw_record: [u8; WAL_RECORD_SIZE]) -> anyhow::Result<Self> {
         let sequence_number = {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&raw_record[..8]);
