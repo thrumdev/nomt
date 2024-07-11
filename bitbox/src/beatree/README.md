@@ -164,9 +164,9 @@ prefix_len: u8         // bits
 separator_len: u8      // bits
 prefix: var_bits
 padding                // to next whole byte
-separators: [var_bits] // n * separator_len
+separators: [var_bits] // (n + 1) * separator_len
 padding                // to next whole byte
-node_pointers: [LNPN or BNID]   // (n + 1) * 32
+node_pointers: [LNPN or BNID]   // n * 32
 ```
 
 > NOTE: bbn_seqn, commit_seqn, bbn_pn are only relevant to the BBNs. However, because the branch node format is shared between the bottom-level branch nodes and upper-level branch nodes, 16 bytes of memory are wasted for every upper-level branch node. With the expected index size of 10 GiB, this wastage would amount to 40 MiB, which seems to be bearable. As future optimization, we could adjust the in-memory format of UBN in such a way, that those fields could be used for separators and node pointers, by e.g. borrowing a bit from bbn_seqn or reserving a niche value for commit_seqn.

@@ -37,7 +37,7 @@ impl LeafStore {
 }
 
 pub struct LeafStoreTx {
-    
+
 }
 
 impl LeafStoreTx {
