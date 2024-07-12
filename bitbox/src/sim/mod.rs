@@ -25,11 +25,9 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier, RwLock};
 
+use crate::io::{self, CompleteIo, IoCommand, IoKind, Mode as IoMode};
 use crate::meta_map::MetaMap;
-use crate::store::{
-    io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode},
-    MetaPage, Page, Store,
-};
+use crate::store::{MetaPage, Page, Store};
 use crate::wal::{Batch as WalBatch, Entry as WalEntry, WalWriter};
 
 mod read;
@@ -94,7 +92,7 @@ pub fn run_simulation(
     let mut full_count = meta_map.full_count();
     println!("loaded map with {} buckets occupied", full_count);
     let meta_map = Arc::new(RwLock::new(meta_map));
-    let (io_sender, mut io_receivers) = store_io::start_io_worker(
+    let (io_sender, mut io_receivers) = io::start_io_worker(
         params.num_workers + 1,
         IoMode::Real {
             num_rings: params.num_rings,

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wal::ConsistencyError;
 
+mod beatree;
+mod io;
 mod meta_map;
 mod sim;
 mod store;
 mod wal;
-mod beatree;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]

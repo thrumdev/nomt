@@ -5,11 +5,9 @@ use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::{Arc, Barrier, RwLock};
 
+use crate::io::{CompleteIo, IoCommand, IoKind};
 use crate::meta_map::MetaMap;
-use crate::store::{
-    io::{CompleteIo, IoCommand, IoKind},
-    Page, Store,
-};
+use crate::store::{Page, Store};
 
 use super::{
     slot_range, BucketIndex, ChangedPage, Map, PageDiff, PageId, Params, ProbeSequence,

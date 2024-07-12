@@ -1,4 +1,3 @@
-use super::{Page, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use rand::prelude::SliceRandom;
@@ -7,6 +6,8 @@ use std::{
     os::fd::RawFd,
     time::{Duration, Instant},
 };
+
+use crate::store::{Page, PAGE_SIZE};
 
 const RING_CAPACITY: u32 = 128;
 

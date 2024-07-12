@@ -12,8 +12,6 @@ use std::{
 
 use crate::meta_map::MetaMap;
 
-pub mod io;
-
 pub const PAGE_SIZE: usize = 4096;
 
 #[derive(Clone)]
