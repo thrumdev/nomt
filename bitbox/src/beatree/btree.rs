@@ -15,7 +15,7 @@ pub fn lookup(
     key: Key,
     root: BranchId,
     branch_node_pool: &branch::BranchNodePool,
-    leaf_store: &leaf::LeafStore,
+    leaf_store: &leaf::store::LeafStore,
 ) -> Result<Option<Vec<u8>>> {
     let mut branch_id = root;
     let leaf_pn = loop {
@@ -42,7 +42,7 @@ pub fn update(
     changeset: BTreeMap<Key, Option<Vec<u8>>>,
     root: BranchId,
     bnp: &mut branch::BranchNodePool,
-    leaf_store: &mut leaf::LeafStoreTx,
+    leaf_store: &mut leaf::store::LeafStoreTx,
 ) -> Result<BranchId> {
     let _ = (commit_seqn, changeset, root, bnp, leaf_store);
     todo!();
