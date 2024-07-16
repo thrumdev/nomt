@@ -1,10 +1,10 @@
 use anyhow::Result;
 use bitvec::prelude::*;
-use std::{cmp::Ordering, collections::BTreeMap, fs::File};
+use std::{collections::BTreeMap, fs::File};
 
 use super::{
     branch::{self, BranchId},
-    leaf::{self, LeafPn},
+    leaf,
 };
 
 // TODO: this should be [u8; 32] or (even better) [u8; KEY_LEN] but leaving as-is for now.
@@ -19,12 +19,14 @@ pub fn lookup(
 ) -> Result<Option<Vec<u8>>> {
     let mut branch_id = root;
     let leaf_pn = loop {
-        let branch = branch_node_pool.checkout(branch_id).expect("missing branch node in pool");
+        let branch = branch_node_pool
+            .checkout(branch_id)
+            .expect("missing branch node in pool");
         match search_branch(&branch, key.clone()) {
             None => return Ok(None),
             Some(NodePointer::Branch(id)) => {
                 branch_id = id;
-                continue
+                continue;
             }
             Some(NodePointer::Leaf(leaf_pn)) => break leaf_pn,
         }
@@ -57,7 +59,7 @@ pub fn reconstruct(bn_fd: File, bnp: &mut branch::BranchNodePool) -> Result<Bran
 
 enum NodePointer {
     Branch(BranchId),
-    Leaf(LeafPn),
+    Leaf(leaf::PageNumber),
 }
 
 /// Binary search a branch node for the child node containing the key.

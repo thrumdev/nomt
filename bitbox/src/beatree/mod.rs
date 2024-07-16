@@ -14,6 +14,8 @@ mod leaf;
 mod meta;
 mod sync;
 
+pub type Key = [u8; 32];
+
 pub struct Tree {
     inner: Arc<Mutex<Inner>>,
 }
@@ -22,8 +24,8 @@ struct Inner {
     root: Option<BranchId>,
     leaf_store: leaf::store::LeafStore,
     branch_node_pool: branch::BranchNodePool,
-    primary_staging: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    secondary_staging: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    primary_staging: BTreeMap<Key, Option<Vec<u8>>>,
+    secondary_staging: BTreeMap<Key, Option<Vec<u8>>>,
     commit_seqn: u32,
 }
 
@@ -40,7 +42,7 @@ impl Tree {
     }
 
     /// Lookup a key in the btree.
-    pub fn lookup(&self, key: Vec<u8>) -> Option<Vec<u8>> {
+    pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let inner = self.inner.lock().unwrap();
         let Some(ref root) = inner.root else {
             return None;
@@ -52,7 +54,7 @@ impl Tree {
     ///
     /// The changeset is a list of key value pairs to be added or removed from the btree.
     /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
-    pub fn commit(&self, changeset: Vec<(Vec<u8>, Option<Vec<u8>>)>) {
+    pub fn commit(&self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
         if changeset.is_empty() {
             return;
         }
@@ -130,8 +132,9 @@ impl Tree {
 pub fn test_btree() {
     let tree = Tree::open("test.store");
     let mut changeset = Vec::new();
-    changeset.push((b"key1".to_vec(), Some(b"value1".to_vec())));
+    let key = [1u8; 32];
+    changeset.push((key.clone(), Some(b"value1".to_vec())));
     tree.commit(changeset);
-    assert_eq!(tree.lookup(b"key1".to_vec()), Some(b"value1".to_vec()));
+    assert_eq!(tree.lookup(key), Some(b"value1".to_vec()));
     tree.sync();
 }

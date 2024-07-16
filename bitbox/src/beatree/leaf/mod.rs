@@ -12,11 +12,8 @@
 use crate::store::Page;
 
 mod free_list;
+pub mod node;
 pub mod store;
-
-pub struct LeafPage {
-    pub inner: Box<Page>,
-}
 
 pub struct FreeListPage {
     pub inner: Box<Page>,
