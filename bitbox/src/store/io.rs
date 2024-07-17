@@ -19,6 +19,7 @@ pub type HandleIndex = usize;
 pub enum IoKind {
     Read(RawFd, u64, Box<Page>),
     Write(RawFd, u64, Box<Page>),
+    WriteRaw(RawFd, u64, *const u8, usize),
     Fsync(RawFd),
 }
 
@@ -26,10 +27,13 @@ impl IoKind {
     pub fn unwrap_buf(self) -> Box<Page> {
         match self {
             IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
-            _ => panic!("attempted to extract buf from fsync"),
+            IoKind::WriteRaw(_, _, _, _) => panic!("attempted to extract buf from write_raw"),
+            IoKind::Fsync(_) => panic!("attempted to extract buf from fsync"),
         }
     }
 }
+
+unsafe impl Send for IoKind {}
 
 pub struct IoCommand {
     pub kind: IoKind,
@@ -277,6 +281,11 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .build()
         }
         IoKind::Fsync(fd) => opcode::Fsync::new(types::Fd(fd)).build(),
+        IoKind::WriteRaw(fd, page_index, ptr, size) => {
+            opcode::Write::new(types::Fd(fd), ptr, size as u32)
+                .offset(page_index * PAGE_SIZE as u64)
+                .build()
+        }, 
     }
 }
 

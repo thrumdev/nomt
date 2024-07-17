@@ -7,11 +7,12 @@ use std::{
 
 use branch::BranchId;
 
+mod bbn;
 mod branch;
 mod btree;
 mod leaf;
 mod meta;
-mod bbn;
+mod sync;
 
 pub struct Tree {
     inner: Arc<Mutex<Inner>>,
