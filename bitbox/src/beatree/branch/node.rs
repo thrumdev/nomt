@@ -28,7 +28,8 @@ use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
 // prefix: bitvec[prefix_len]
 // separators: bitvec[(n + 1) * separator_len]
 //
-// # Then the pointers follow.
+// # Node pointers follow. The list is aligned to the end of the node, with the last item in the
+// # list occupying the last 4 bytes of the node.
 //
 // node_pointers: LNPN or BNID[n]
 // ```
@@ -77,6 +78,10 @@ impl BranchNode {
     pub fn set_bbn_pn(&mut self, pn: u32) {
         let slice = self.as_mut_slice();
         slice[12..16].copy_from_slice(&pn.to_le_bytes());
+    }
+
+    pub fn is_bbn(&self) -> bool {
+        self.bbn_pn() == 0
     }
 
     pub fn n(&self) -> u16 {
@@ -128,6 +133,12 @@ impl BranchNode {
     pub fn separator(&self, i: usize) -> &BitSlice<u8> {
         let offset = self.prefix_len() as usize + (i + 1) * self.separator_len() as usize;
         &self.varbits()[offset..offset + self.separator_len() as usize]
+    }
+
+    pub fn node_pointer(&self, i: usize) -> u32 {
+        let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
+        let slice = self.as_slice();
+        u32::from_le_bytes(slice[offset..offset + 4].try_into().unwrap())
     }
 
     // TODO: modification.

@@ -11,13 +11,19 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use node::BranchNode;
+pub use node::BranchNode;
 
 mod node;
 
 /// The ID of a branch node in the node pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BranchId(u32);
+
+impl From<u32> for BranchId {
+    fn from(x: u32) -> Self {
+        BranchId(x)
+    }
+}
 
 const BRANCH_NODE_SIZE: usize = 4096;
 
@@ -94,9 +100,9 @@ impl BranchNodePool {
     ///
     /// Note that this function expects the node to be allocated. If the node is not allocated,
     /// the behavior is unspecified.
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// Panics if the node is already checked out.
     pub fn checkout(&self, id: BranchId) -> Option<BranchNode> {
         let mut inner = self.inner.lock().unwrap();

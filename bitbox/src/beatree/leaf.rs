@@ -21,6 +21,12 @@ impl LeafPn {
     }
 }
 
+impl From<u32> for LeafPn {
+    fn from(x: u32) -> Self {
+        LeafPn(x)
+    }
+}
+
 pub struct LeafPage {}
 
 /// Handle. Cheap to clone.
@@ -36,14 +42,13 @@ impl LeafStore {
     pub fn query(&self, pn: LeafPn) -> LeafPage {
         todo!()
     }
-    
+
     pub fn start_tx(&self) -> LeafStoreTx {
         todo!()
     }
 }
 
-pub struct LeafStoreTx {
-}
+pub struct LeafStoreTx {}
 
 impl LeafStoreTx {
     pub fn allocate(&mut self, page: LeafPage) -> LeafPn {
