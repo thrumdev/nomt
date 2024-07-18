@@ -16,7 +16,7 @@ use super::{
     meta::Meta,
 };
 
-fn sync(
+pub fn sync(
     io_sender: Sender<IoCommand>,
     io_handle_index: usize,
     io_receiver: Receiver<CompleteIo>,

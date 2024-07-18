@@ -21,6 +21,7 @@ pub struct BranchId(u32);
 
 const BRANCH_NODE_SIZE: usize = 4096;
 
+/// Handle. Cheap to clone.
 pub struct BranchNodePool {
     /// The pointer to the beginning of the pool allocation.
     pool_base_ptr: *mut (),
@@ -114,6 +115,15 @@ impl BranchNodePool {
                 pool: self.inner.clone(),
                 id,
             })
+        }
+    }
+}
+
+impl Clone for BranchNodePool {
+    fn clone(&self) -> Self {
+        Self {
+            pool_base_ptr: self.pool_base_ptr,
+            inner: self.inner.clone(),
         }
     }
 }

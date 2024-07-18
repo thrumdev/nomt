@@ -23,6 +23,8 @@ impl LeafPn {
 
 pub struct LeafPage {}
 
+/// Handle. Cheap to clone.
+#[derive(Clone)]
 pub struct LeafStore {}
 
 impl LeafStore {
@@ -34,10 +36,13 @@ impl LeafStore {
     pub fn query(&self, pn: LeafPn) -> LeafPage {
         todo!()
     }
+    
+    pub fn start_tx(&self) -> LeafStoreTx {
+        todo!()
+    }
 }
 
 pub struct LeafStoreTx {
-
 }
 
 impl LeafStoreTx {

@@ -24,12 +24,13 @@ struct Inner {
     branch_node_pool: branch::BranchNodePool,
     primary_staging: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     secondary_staging: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    commit_seqn: u32,
 }
 
 impl Inner {
-    fn blit(&mut self) {
+    fn take_staged_changeset(&mut self) -> BTreeMap<Vec<u8>, Option<Vec<u8>>> {
         assert!(self.secondary_staging.is_empty());
-        mem::swap(&mut self.primary_staging, &mut self.secondary_staging);
+        mem::take(&mut self.primary_staging)
     }
 }
 
@@ -78,9 +79,47 @@ impl Tree {
         //     - the new BBNs and LNs are dumped into io engine and other sync-stuff is performed like metadata fsync.
 
         // Under a lock, swap the primary map with the secondary map, then drop the lock.
+        let commit_seqn;
+        let staged_changeset;
+        let root;
+        let mut branch_node_pool;
+        let mut leaf_store_tx;
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.blit();
+            commit_seqn = inner.commit_seqn;
+            staged_changeset = inner.take_staged_changeset();
+            root = inner.root.unwrap();
+            branch_node_pool = inner.branch_node_pool.clone();
+            leaf_store_tx = inner.leaf_store.start_tx();
+        }
+        let new_root = btree::update(
+            commit_seqn,
+            staged_changeset,
+            root,
+            &mut branch_node_pool,
+            &mut leaf_store_tx,
+        );
+        let new_root = new_root.unwrap();
+
+        // sync::sync(
+        //     io_sender,
+        //     io_handle_index,
+        //     io_receiver,
+        //     bnp,
+        //     bbn_fd,
+        //     ln_fd,
+        //     meta_fd,
+        //     bbn,
+        //     bbn_extend_file_sz,
+        //     ln,
+        //     ln_extend_file_sz,
+        //     new_meta,
+        // );
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.root = Some(new_root);
+            inner.commit_seqn += 1;
         }
 
         todo!()

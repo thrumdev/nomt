@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::{collections::BTreeMap, fs::File};
 use anyhow::Result;
 
 use super::{
@@ -22,7 +22,7 @@ pub fn lookup(
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
     commit_seqn: u32,
-    changeset: &[(Vec<u8>, Option<Vec<u8>>)],
+    changeset: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     root: BranchId,
     bnp: &mut branch::BranchNodePool,
     leaf_store: &mut leaf::LeafStoreTx,
