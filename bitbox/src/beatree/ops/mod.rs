@@ -9,6 +9,10 @@ use super::{
     leaf, Key,
 };
 
+mod reconstruction;
+
+pub use reconstruction::reconstruct;
+
 /// Lookup a key in the btree.
 pub fn lookup(
     key: Key,
@@ -49,13 +53,6 @@ pub fn update(
     leaf_store: &mut leaf::store::LeafStoreTx,
 ) -> Result<(BranchId, Vec<BranchId>)> {
     let _ = (sync_seqn, next_bbn_seqn, changeset, root, bnp, leaf_store);
-    todo!();
-}
-
-/// Reconstruct the upper branch nodes of the btree from the bottom branch nodes and the leaf nodes.
-/// Returns the root of the reconstructed btree.
-pub fn reconstruct(bn_fd: File, bnp: &mut branch::BranchNodePool) -> Result<BranchId> {
-    let _ = (bn_fd, bnp);
     todo!();
 }
 
