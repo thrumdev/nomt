@@ -15,7 +15,7 @@ use super::{
     meta::Meta,
 };
 
-pub fn sync(
+pub fn run(
     io_sender: Sender<IoCommand>,
     io_handle_index: usize,
     io_receiver: Receiver<CompleteIo>,
@@ -30,7 +30,7 @@ pub fn sync(
     new_meta: Meta,
 ) {
     let io = IoDmux::new(io_sender, io_handle_index, io_receiver);
-    run(
+    do_run(
         Cx {
             bbn_write_out: Some(BbnWriteOut {
                 bbn_fd,
@@ -54,7 +54,7 @@ pub fn sync(
     );
 }
 
-fn run(mut cx: Cx, mut io: IoDmux, bnp: BranchNodePool) {
+fn do_run(mut cx: Cx, mut io: IoDmux, bnp: BranchNodePool) {
     // This should perform the following actions:
     // - truncate the BBN file to the correct size.
     // - truncate the LN file to the correct size.

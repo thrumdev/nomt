@@ -17,7 +17,7 @@ mod branch;
 mod btree;
 mod leaf;
 mod meta;
-mod sync;
+mod writeout;
 
 pub type Key = [u8; 32];
 
@@ -151,7 +151,7 @@ impl Tree {
             bbn_bump: 0,
         };
 
-        // sync::sync(
+        // writeout::run(
         //     sync.sync_io_sender,
         //     sync.sync_io_handle_index,
         //     sync.sync_io_receiver,
@@ -172,7 +172,7 @@ impl Tree {
             &sync.sync_io_sender,
             &sync.sync_io_handle_index,
             &sync.sync_io_receiver,
-            &sync::sync,
+            &writeout::run,
         );
 
         sync.next_bbn_seqn = next_bbn_seqn;
