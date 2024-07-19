@@ -67,7 +67,10 @@ fn read_bbns(
 
                 // UNWRAP: just allocated
                 bnp.checkout(new_branch_id).unwrap().as_mut_slice().copy_from_slice(node);
-                branch_meta.push(Some((todo!(), new_branch_id))); // TODO: first separator.
+
+                let mut separator = view.prefix().to_bitvec();
+                separator.extend(view.separator(0));
+                branch_meta.push(Some((separator, new_branch_id)));
                 Some(branch_meta.len())
             };
 
