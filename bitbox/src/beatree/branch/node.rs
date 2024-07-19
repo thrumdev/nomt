@@ -10,9 +10,9 @@ use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
 //                        // On disk, two nodes with the same seqn
 //                        // will be considered the same, and
 //                        // and the one with the latest valid
-//                        // commit_seqn wins.
+//                        // sync_seqn wins.
 //
-// commit_seqn: u32       // the sequence number of the commit under
+// sync_seqn: u32       // the sequence number of the commit under
 //                        // which this node was created.
 //                        // Important for BBNs only.
 //
@@ -60,12 +60,12 @@ impl BranchNode {
         slice[0..8].copy_from_slice(&seqn.to_le_bytes());
     }
 
-    pub fn commit_seqn(&self) -> u32 {
+    pub fn sync_seqn(&self) -> u32 {
         let slice = self.as_slice();
         u32::from_le_bytes(slice[8..12].try_into().unwrap())
     }
 
-    pub fn set_commit_seqn(&mut self, seqn: u32) {
+    pub fn set_sync_seqn(&mut self, seqn: u32) {
         let slice = self.as_mut_slice();
         slice[8..12].copy_from_slice(&seqn.to_le_bytes());
     }

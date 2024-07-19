@@ -4,18 +4,15 @@ use std::{collections::BTreeMap, fs::File};
 
 use super::{
     branch::{self, BranchId},
-    leaf,
+    leaf, Key,
 };
-
-// TODO: this should be [u8; 32] or (even better) [u8; KEY_LEN] but leaving as-is for now.
-pub type Key = Vec<u8>;
 
 /// Lookup a key in the btree.
 pub fn lookup(
     key: Key,
     root: BranchId,
     branch_node_pool: &branch::BranchNodePool,
-    leaf_store: &leaf::store::LeafStore,
+    leaf_store: &leaf::store::LeafStoreReader,
 ) -> Result<Option<Vec<u8>>> {
     let mut branch_id = root;
     let leaf_pn = loop {
@@ -33,20 +30,23 @@ pub fn lookup(
     };
 
     let _ = leaf_store;
+    let _ = leaf_pn;
     todo!();
 }
 
-/// Change the btree in the specified way. Returns the root of the new btree.
+/// Change the btree in the specified way. Returns the root of the new btree and the list of the 
+/// branches that became obsolete.
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
-    commit_seqn: u32,
+    sync_seqn: u32,
+    next_bbn_seqn: &mut u32,
     changeset: BTreeMap<Key, Option<Vec<u8>>>,
     root: BranchId,
     bnp: &mut branch::BranchNodePool,
     leaf_store: &mut leaf::store::LeafStoreTx,
-) -> Result<BranchId> {
-    let _ = (commit_seqn, changeset, root, bnp, leaf_store);
+) -> Result<(BranchId, Vec<BranchId>)> {
+    let _ = (sync_seqn, next_bbn_seqn, changeset, root, bnp, leaf_store);
     todo!();
 }
 

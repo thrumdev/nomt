@@ -1,14 +1,13 @@
 use std::{
     fs::File,
-    io,
     os::fd::{FromRawFd, RawFd},
 };
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
-use crate::store::{
+use crate::{
     io::{CompleteIo, IoCommand, IoKind},
-    Page,
+    store::Page,
 };
 
 use super::{

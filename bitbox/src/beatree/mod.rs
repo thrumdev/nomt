@@ -6,6 +6,11 @@ use std::{
 };
 
 use branch::BranchId;
+use crossbeam_channel::{Receiver, Sender};
+use leaf::store::{LeafStoreReader, LeafStoreWriter};
+use meta::Meta;
+
+use crate::io::{CompleteIo, IoCommand};
 
 mod bbn;
 mod branch;
@@ -17,20 +22,29 @@ mod sync;
 pub type Key = [u8; 32];
 
 pub struct Tree {
-    inner: Arc<Mutex<Inner>>,
+    shared: Arc<Mutex<Shared>>,
+    sync: Arc<Mutex<Sync>>,
 }
 
-struct Inner {
+struct Shared {
     root: Option<BranchId>,
-    leaf_store: leaf::store::LeafStore,
+    leaf_store_rd: LeafStoreReader,
     branch_node_pool: branch::BranchNodePool,
     primary_staging: BTreeMap<Key, Option<Vec<u8>>>,
     secondary_staging: BTreeMap<Key, Option<Vec<u8>>>,
-    commit_seqn: u32,
 }
 
-impl Inner {
-    fn take_staged_changeset(&mut self) -> BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+struct Sync {
+    leaf_store_wr: LeafStoreWriter,
+    sync_seqn: u32,
+    next_bbn_seqn: u32,
+    sync_io_handle_index: usize,
+    sync_io_sender: Sender<IoCommand>,
+    sync_io_receiver: Receiver<CompleteIo>,
+}
+
+impl Shared {
+    fn take_staged_changeset(&mut self) -> BTreeMap<Key, Option<Vec<u8>>> {
         assert!(self.secondary_staging.is_empty());
         mem::take(&mut self.primary_staging)
     }
@@ -38,16 +52,17 @@ impl Inner {
 
 impl Tree {
     pub fn open(db_dir: impl AsRef<Path>) -> Tree {
+        let _ = db_dir;
         todo!()
     }
 
     /// Lookup a key in the btree.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
-        let inner = self.inner.lock().unwrap();
-        let Some(ref root) = inner.root else {
+        let shared = self.shared.lock().unwrap();
+        let Some(ref root) = shared.root else {
             return None;
         };
-        btree::lookup(key, *root, &inner.branch_node_pool, &inner.leaf_store).unwrap()
+        btree::lookup(key, *root, &shared.branch_node_pool, &shared.leaf_store_rd).unwrap()
     }
 
     /// Commit a set of changes to the btree.
@@ -58,7 +73,7 @@ impl Tree {
         if changeset.is_empty() {
             return;
         }
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.shared.lock().unwrap();
         let primary_staging = &mut inner.primary_staging;
         for (key, value) in changeset {
             primary_staging.insert(key, value);
@@ -80,33 +95,66 @@ impl Tree {
         //     - the nodes of the old index are freed up.
         //     - the new BBNs and LNs are dumped into io engine and other sync-stuff is performed like metadata fsync.
 
-        // Under a lock, swap the primary map with the secondary map, then drop the lock.
-        let commit_seqn;
+        // Take the sync lock.
+        //
+        // That will exclude any other syncs from happening. This is a long running operation.
+        //
+        // Note the ordering of taking locks is important.
+        let mut sync = self.sync.lock().unwrap();
+
+        let sync_seqn = sync.sync_seqn;
+        let mut next_bbn_seqn = sync.next_bbn_seqn;
+        let mut leaf_store_tx = sync.leaf_store_wr.start_tx();
+
+        // Take the shared lock. Briefly.
         let staged_changeset;
         let root;
         let mut branch_node_pool;
-        let mut leaf_store_tx;
         {
-            let mut inner = self.inner.lock().unwrap();
-            commit_seqn = inner.commit_seqn;
+            let mut inner = self.shared.lock().unwrap();
             staged_changeset = inner.take_staged_changeset();
             root = inner.root.unwrap();
             branch_node_pool = inner.branch_node_pool.clone();
-            leaf_store_tx = inner.leaf_store.start_tx();
         }
-        let new_root = btree::update(
-            commit_seqn,
+
+        let (new_root, obsolete_branches) = btree::update(
+            sync_seqn,
+            &mut next_bbn_seqn,
             staged_changeset,
             root,
             &mut branch_node_pool,
             &mut leaf_store_tx,
-        );
-        let new_root = new_root.unwrap();
+        )
+        .unwrap();
+
+        let (ln, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
+            let o = leaf_store_tx.commit();
+            let ln: Vec<()> = o
+                .to_allocate
+                .into_iter()
+                .chain(o.exceeded)
+                .map(|(_pn, _page)| ())
+                .collect();
+            let ln_freelist_pn = o.new_free_list_head.0;
+            let ln_bump = 0; // TODO: commit should return the bump;
+            let ln_extend_file_sz: Option<u64> = None;
+            (ln, ln_freelist_pn, ln_bump, ln_extend_file_sz)
+        };
+
+        // TODO: BBN dumping.
+
+        let new_meta = Meta {
+            sync_seqn,
+            next_bbn_seqn,
+            ln_freelist_pn,
+            ln_bump,
+            bbn_bump: 0,
+        };
 
         // sync::sync(
-        //     io_sender,
-        //     io_handle_index,
-        //     io_receiver,
+        //     sync.sync_io_sender,
+        //     sync.sync_io_handle_index,
+        //     sync.sync_io_receiver,
         //     bnp,
         //     bbn_fd,
         //     ln_fd,
@@ -117,11 +165,34 @@ impl Tree {
         //     ln_extend_file_sz,
         //     new_meta,
         // );
+        let _ = (
+            new_meta,
+            ln,
+            ln_extend_file_sz,
+            &sync.sync_io_sender,
+            &sync.sync_io_handle_index,
+            &sync.sync_io_receiver,
+            &sync::sync,
+        );
+
+        sync.next_bbn_seqn = next_bbn_seqn;
+        sync.sync_seqn = sync_seqn + 1;
 
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.shared.lock().unwrap();
             inner.root = Some(new_root);
-            inner.commit_seqn += 1;
+            // TODO: watch out for the lock contention here. If we change 50k values, that might
+            // result in 50k bottom-level branch nodes being released. On top of that, there are
+            // also upper-level branch nodes. We are also adding a lot of nodes one by one.
+            //
+            // If you think about it, it's all not necessary, because we only need to access to
+            // the BNP freelist, which should be used exclusively by the sync thread.
+            //
+            // Also, the sync needs to query the branch pages in the course of the sync, so that's
+            // another indication for splitting the read/write parts.
+            for id in obsolete_branches {
+                inner.branch_node_pool.release(id);
+            }
         }
 
         todo!()

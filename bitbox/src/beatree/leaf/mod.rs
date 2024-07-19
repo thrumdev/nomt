@@ -21,7 +21,7 @@ pub struct FreeListPage {
 
 /// The number of a page, either a Leaf or a Free List page, in the LeafStore
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageNumber(u32);
+pub struct PageNumber(pub u32);
 
 impl PageNumber {
     pub fn is_nil(&self) -> bool {

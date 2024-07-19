@@ -1,5 +1,5 @@
 use crate::beatree::leaf::{FreeListPage, PageNumber};
-use crate::io::{self, CompleteIo, IoCommand, IoKind, Mode};
+use crate::io::{CompleteIo, IoCommand, IoKind};
 use crate::store::{Page, PAGE_SIZE};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -32,7 +32,7 @@ pub struct FreeListAppendOutput {
 }
 
 impl FreeList {
-    pub fn new(
+    pub fn read(
         store_file: &File,
         io_sender: &Sender<IoCommand>,
         io_handle_index: usize,

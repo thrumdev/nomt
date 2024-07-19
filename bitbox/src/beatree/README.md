@@ -150,9 +150,9 @@ bbn_seqn: u64          // The sequence number of this BBN.
                        // On disk, two nodes with the same seqn
                        // will be considered the same, and
                        // and the one with the latest valid 
-                       // commit_seqn wins.
+                       // sync_seqn wins.
 
-commit_seqn: u32       // the sequence number of the commit under
+sync_seqn: u32       // the sequence number of the commit under
                        // which this node was created. 
                        // Important for BBNs only.
 
@@ -169,7 +169,7 @@ padding                // to next whole byte
 node_pointers: [LNPN or BNID]   // n * 32
 ```
 
-> NOTE: bbn_seqn, commit_seqn, bbn_pn are only relevant to the BBNs. However, because the branch node format is shared between the bottom-level branch nodes and upper-level branch nodes, 16 bytes of memory are wasted for every upper-level branch node. With the expected index size of 10 GiB, this wastage would amount to 40 MiB, which seems to be bearable. As future optimization, we could adjust the in-memory format of UBN in such a way, that those fields could be used for separators and node pointers, by e.g. borrowing a bit from bbn_seqn or reserving a niche value for commit_seqn.
+> NOTE: bbn_seqn, sync_seqn, bbn_pn are only relevant to the BBNs. However, because the branch node format is shared between the bottom-level branch nodes and upper-level branch nodes, 16 bytes of memory are wasted for every upper-level branch node. With the expected index size of 10 GiB, this wastage would amount to 40 MiB, which seems to be bearable. As future optimization, we could adjust the in-memory format of UBN in such a way, that those fields could be used for separators and node pointers, by e.g. borrowing a bit from bbn_seqn or reserving a niche value for sync_seqn.
 
 ### `sync` op
 
