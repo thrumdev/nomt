@@ -1,3 +1,5 @@
+//! BTree Operations.
+
 use anyhow::Result;
 use bitvec::prelude::*;
 use std::{collections::BTreeMap, fs::File};

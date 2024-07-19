@@ -14,9 +14,9 @@ use crate::io::{CompleteIo, IoCommand};
 
 mod bbn;
 mod branch;
-mod btree;
 mod leaf;
 mod meta;
+mod ops;
 mod writeout;
 
 pub type Key = [u8; 32];
@@ -60,7 +60,7 @@ impl Tree {
         let Some(ref root) = shared.root else {
             return None;
         };
-        btree::lookup(key, *root, &shared.branch_node_pool, &shared.leaf_store_rd).unwrap()
+        ops::lookup(key, *root, &shared.branch_node_pool, &shared.leaf_store_rd).unwrap()
     }
 
     /// Commit a set of changes to the btree.
@@ -104,7 +104,7 @@ impl Tree {
             branch_node_pool = inner.branch_node_pool.clone();
         }
 
-        let (new_root, obsolete_branches) = btree::update(
+        let (new_root, obsolete_branches) = ops::update(
             sync_seqn,
             &mut next_bbn_seqn,
             staged_changeset,
