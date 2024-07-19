@@ -186,7 +186,8 @@ impl Tree {
             // also upper-level branch nodes. We are also adding a lot of nodes one by one.
             //
             // If you think about it, it's all not necessary, because we only need to access to
-            // the BNP freelist, which should be used exclusively by the sync thread.
+            // the BNP freelist, which should be used exclusively by the sync thread. But note
+            // once crucial thing: the obsolete branches are not released until the new root is set.
             //
             // Also, the sync needs to query the branch pages in the course of the sync, so that's
             // another indication for splitting the read/write parts.
