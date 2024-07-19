@@ -30,8 +30,7 @@ struct Shared {
     root: Option<BranchId>,
     leaf_store_rd: LeafStoreReader,
     branch_node_pool: branch::BranchNodePool,
-    primary_staging: BTreeMap<Key, Option<Vec<u8>>>,
-    secondary_staging: BTreeMap<Key, Option<Vec<u8>>>,
+    staging: BTreeMap<Key, Option<Vec<u8>>>,
 }
 
 struct Sync {
@@ -45,8 +44,7 @@ struct Sync {
 
 impl Shared {
     fn take_staged_changeset(&mut self) -> BTreeMap<Key, Option<Vec<u8>>> {
-        assert!(self.secondary_staging.is_empty());
-        mem::take(&mut self.primary_staging)
+        mem::take(&mut self.staging)
     }
 }
 
@@ -74,9 +72,9 @@ impl Tree {
             return;
         }
         let mut inner = self.shared.lock().unwrap();
-        let primary_staging = &mut inner.primary_staging;
+        let staging = &mut inner.staging;
         for (key, value) in changeset {
-            primary_staging.insert(key, value);
+            staging.insert(key, value);
         }
     }
 
@@ -84,17 +82,6 @@ impl Tree {
     ///
     /// Either blocks or panics if another sync is inflight.
     pub fn sync(&self) {
-        // - assert that the secondary staging is empty.
-        // - move the primary staging to secondary staging.
-        //     (from this point on, the commits will be editing the primary staging.)
-        // - a new version of the index is built from the secondary staging.
-        //     - the untouched nodes from the previous index are reused as is via references.
-        // - then atomically
-        //     - the secondary staging is discarded.
-        //     - the new index replaces the old one.
-        //     - the nodes of the old index are freed up.
-        //     - the new BBNs and LNs are dumped into io engine and other sync-stuff is performed like metadata fsync.
-
         // Take the sync lock.
         //
         // That will exclude any other syncs from happening. This is a long running operation.
