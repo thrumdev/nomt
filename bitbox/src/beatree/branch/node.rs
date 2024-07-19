@@ -46,13 +46,16 @@ impl BranchNode {
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, BRANCH_NODE_SIZE) }
     }
 
+    pub fn view(&self) -> BranchNodeView {
+        BranchNodeView { inner: self.as_slice() }
+    }
+
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, BRANCH_NODE_SIZE) }
     }
 
     pub fn bbn_seqn(&self) -> u64 {
-        let slice = self.as_slice();
-        u64::from_le_bytes(slice[0..8].try_into().unwrap())
+        self.view().bbn_seqn()
     }
 
     pub fn set_bbn_seqn(&mut self, seqn: u64) {
@@ -61,8 +64,7 @@ impl BranchNode {
     }
 
     pub fn sync_seqn(&self) -> u32 {
-        let slice = self.as_slice();
-        u32::from_le_bytes(slice[8..12].try_into().unwrap())
+        self.view().sync_seqn()
     }
 
     pub fn set_sync_seqn(&mut self, seqn: u32) {
@@ -71,8 +73,7 @@ impl BranchNode {
     }
 
     pub fn bbn_pn(&self) -> u32 {
-        let slice = self.as_slice();
-        u32::from_le_bytes(slice[12..16].try_into().unwrap())
+        self.view().bbn_pn()
     }
 
     pub fn set_bbn_pn(&mut self, pn: u32) {
@@ -81,12 +82,11 @@ impl BranchNode {
     }
 
     pub fn is_bbn(&self) -> bool {
-        self.bbn_pn() == 0
+        self.view().is_bbn()
     }
 
     pub fn n(&self) -> u16 {
-        let slice = self.as_slice();
-        u16::from_le_bytes(slice[16..18].try_into().unwrap())
+        self.view().n()
     }
 
     pub fn set_n(&mut self, n: u16) {
@@ -95,8 +95,7 @@ impl BranchNode {
     }
 
     pub fn prefix_len(&self) -> u8 {
-        let slice = self.as_slice();
-        slice[18]
+        self.view().prefix_len()
     }
 
     pub fn set_prefix_len(&mut self, len: u8) {
@@ -105,8 +104,7 @@ impl BranchNode {
     }
 
     pub fn separator_len(&self) -> u8 {
-        let slice = self.as_slice();
-        slice[19]
+        self.view().separator_len()
     }
 
     pub fn set_separator_len(&mut self, len: u8) {
@@ -115,9 +113,7 @@ impl BranchNode {
     }
 
     fn varbits(&self) -> &BitSlice<u8> {
-        let bit_cnt =
-            self.prefix_len() as usize + (self.separator_len() as usize) * (self.n() as usize + 1);
-        self.as_slice()[20..(20 + bit_cnt)].view_bits()
+        self.view().varbits()
     }
 
     fn varbits_mut(&mut self) -> &mut BitSlice<u8> {
@@ -127,18 +123,15 @@ impl BranchNode {
     }
 
     pub fn prefix(&self) -> &BitSlice<u8> {
-        &self.varbits()[..self.prefix_len() as usize]
+        self.view().prefix()
     }
 
     pub fn separator(&self, i: usize) -> &BitSlice<u8> {
-        let offset = self.prefix_len() as usize + (i + 1) * self.separator_len() as usize;
-        &self.varbits()[offset..offset + self.separator_len() as usize]
+        self.view().separator(i)
     }
 
     pub fn node_pointer(&self, i: usize) -> u32 {
-        let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
-        let slice = self.as_slice();
-        u32::from_le_bytes(slice[offset..offset + 4].try_into().unwrap())
+        self.view().node_pointer(i)
     }
 
     // TODO: modification.
@@ -157,5 +150,66 @@ impl Drop for BranchNode {
         // Remove the node from the checked out list.
         let mut inner = self.pool.lock().unwrap();
         inner.checked_out.retain(|id| *id != self.id);
+    }
+}
+
+pub struct BranchNodeView<'a> {
+    inner: &'a [u8]
+}
+
+impl<'a> BranchNodeView<'a> {
+    pub fn from_slice(slice: &'a [u8]) -> Self {
+        assert_eq!(slice.len(), BRANCH_NODE_SIZE);
+        BranchNodeView {
+            inner: slice,
+        }
+    }
+
+    pub fn bbn_seqn(&self) -> u64 {
+        u64::from_le_bytes(self.inner[0..8].try_into().unwrap())
+    }
+
+    pub fn sync_seqn(&self) -> u32 {
+        u32::from_le_bytes(self.inner[8..12].try_into().unwrap())
+    }
+
+    pub fn bbn_pn(&self) -> u32 {
+        u32::from_le_bytes(self.inner[12..16].try_into().unwrap())
+    }
+
+    pub fn is_bbn(&self) -> bool {
+        self.bbn_pn() == 0
+    }
+
+    pub fn n(&self) -> u16 {
+        u16::from_le_bytes(self.inner[16..18].try_into().unwrap())
+    }
+
+    pub fn prefix_len(&self) -> u8 {
+        self.inner[18]
+    }
+
+    pub fn separator_len(&self) -> u8 {
+        self.inner[19]
+    }
+
+    fn varbits(&self) -> &'a BitSlice<u8> {
+        let bit_cnt =
+            self.prefix_len() as usize + (self.separator_len() as usize) * (self.n() as usize + 1);
+        self.inner[20..(20 + bit_cnt)].view_bits()
+    }
+
+    pub fn prefix(&self) -> &'a BitSlice<u8> {
+        &self.varbits()[..self.prefix_len() as usize]
+    }
+
+    pub fn separator(&self, i: usize) -> &'a BitSlice<u8> {
+        let offset = self.prefix_len() as usize + (i + 1) * self.separator_len() as usize;
+        &self.varbits()[offset..offset + self.separator_len() as usize]
+    }
+
+    pub fn node_pointer(&self, i: usize) -> u32 {
+        let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
+        u32::from_le_bytes(self.inner[offset..offset + 4].try_into().unwrap())
     }
 }

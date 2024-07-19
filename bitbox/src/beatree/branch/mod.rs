@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub use node::BranchNode;
+pub use node::{BranchNode, BranchNodeView};
 
 mod node;
 
@@ -25,7 +25,7 @@ impl From<u32> for BranchId {
     }
 }
 
-const BRANCH_NODE_SIZE: usize = 4096;
+pub const BRANCH_NODE_SIZE: usize = 4096;
 
 /// Handle. Cheap to clone.
 pub struct BranchNodePool {
