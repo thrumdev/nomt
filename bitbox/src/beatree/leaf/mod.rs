@@ -9,28 +9,5 @@
 // As soon as the handle is dropped, the data becomes inaccessible and another disk roundtrip would
 // be required to access the data again.
 
-use crate::store::Page;
-
-mod free_list;
 pub mod node;
 pub mod store;
-
-pub struct FreeListPage {
-    pub inner: Box<Page>,
-}
-
-/// The number of a page, either a Leaf or a Free List page, in the LeafStore
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageNumber(pub u32);
-
-impl PageNumber {
-    pub fn is_nil(&self) -> bool {
-        self.0 == 0
-    }
-}
-
-impl From<u32> for PageNumber {
-    fn from(x: u32) -> Self {
-        PageNumber(x)
-    }
-}

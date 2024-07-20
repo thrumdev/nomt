@@ -5,16 +5,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use branch::BranchId;
-use crossbeam_channel::{Receiver, Sender};
-use leaf::store::{LeafStoreReader, LeafStoreWriter};
-use meta::Meta;
-
 use crate::{
     beatree::leaf::store::LeafStoreCommitOutput,
     io::{CompleteIo, IoCommand},
 };
 
+use branch::BranchId;
+use crossbeam_channel::{Receiver, Sender};
+use leaf::store::{LeafStoreReader, LeafStoreWriter};
+use meta::Meta;
+
+mod allocator;
 mod bbn;
 mod branch;
 mod index;
@@ -61,7 +62,13 @@ impl Tree {
     /// Lookup a key in the btree.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let shared = self.shared.lock().unwrap();
-        ops::lookup(key, &shared.bbn_index, &shared.branch_node_pool, &shared.leaf_store_rd).unwrap()
+        ops::lookup(
+            key,
+            &shared.bbn_index,
+            &shared.branch_node_pool,
+            &shared.leaf_store_rd,
+        )
+        .unwrap()
     }
 
     /// Commit a set of changes to the btree.
@@ -118,10 +125,10 @@ impl Tree {
             let LeafStoreCommitOutput {
                 pages,
                 extend_file_sz,
-                freelist_head_pn,
+                freelist_head,
                 bump,
             } = sync.leaf_store_wr.commit();
-            (pages, freelist_head_pn.0, bump.0, extend_file_sz)
+            (pages, freelist_head.0, bump.0, extend_file_sz)
         };
 
         // TODO: BBN dumping.

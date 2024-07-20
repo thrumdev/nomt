@@ -49,7 +49,9 @@ impl BranchNode {
     }
 
     pub fn view(&self) -> BranchNodeView {
-        BranchNodeView { inner: self.as_slice() }
+        BranchNodeView {
+            inner: self.as_slice(),
+        }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
@@ -156,15 +158,13 @@ impl Drop for BranchNode {
 }
 
 pub struct BranchNodeView<'a> {
-    inner: &'a [u8]
+    inner: &'a [u8],
 }
 
 impl<'a> BranchNodeView<'a> {
     pub fn from_slice(slice: &'a [u8]) -> Self {
         assert_eq!(slice.len(), BRANCH_NODE_SIZE);
-        BranchNodeView {
-            inner: slice,
-        }
+        BranchNodeView { inner: slice }
     }
 
     pub fn bbn_seqn(&self) -> u64 {

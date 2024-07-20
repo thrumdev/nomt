@@ -5,6 +5,7 @@ use bitvec::prelude::*;
 use std::{collections::BTreeMap, fs::File};
 
 use super::{
+    allocator::{self, PageNumber},
     branch::{self, BranchId},
     index::Index,
     leaf, Key,
@@ -65,7 +66,7 @@ pub fn update(
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
 /// node pointer whose separator is less than or equal to the given key.
-fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<leaf::PageNumber> {
+fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<PageNumber> {
     let prefix = branch.prefix();
 
     if key.view_bits::<Lsb0>()[..prefix.len()] != prefix {

@@ -1,14 +1,14 @@
-use crate::beatree::leaf::{FreeListPage, PageNumber};
-use crate::io::{CompleteIo, IoCommand, IoKind};
-use crate::store::{Page, PAGE_SIZE};
-
+use crate::{
+    beatree::allocator::PageNumber,
+    io::{CompleteIo, IoCommand, IoKind},
+    store::{Page, PAGE_SIZE},
+};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
-use std::fs::File;
-use std::os::fd::AsRawFd;
+use std::{fs::File, os::fd::AsRawFd};
 
 const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
 
-/// In-memory version of the FreeList which provides a way to decode from and encode into the LeafStore file
+/// In-memory version of FreeList which provides a way to decode from and encode into pages
 /// and provide two primitives, one for extracting free pages from the list and one to append
 /// freed pages.
 ///
@@ -54,14 +54,14 @@ impl FreeList {
             while let Some(c) = command.take() {
                 match io_sender.try_send(c) {
                     Ok(()) => break,
-                    Err(TrySendError::Disconnected(_)) => panic!("I/O leaf store worker dropped"),
+                    Err(TrySendError::Disconnected(_)) => panic!("I/O worker dropped"),
                     Err(TrySendError::Full(c)) => {
                         command = Some(c);
                     }
                 }
             }
 
-            let completion = io_receiver.recv().expect("I/O leaf store worker dropped");
+            let completion = io_receiver.recv().expect("I/O store worker dropped");
             assert!(completion.result.is_ok());
             let page = completion.command.kind.unwrap_buf();
 
@@ -88,7 +88,7 @@ impl FreeList {
             return None;
         };
 
-        let leaf_pn = head.pop().unwrap();
+        let pn = head.pop().unwrap();
 
         // replace head if we just emptied one
         if head.is_empty() {
@@ -96,7 +96,7 @@ impl FreeList {
             self.head = self.portions.pop();
         }
 
-        Some(leaf_pn)
+        Some(pn)
     }
 
     fn push(
@@ -104,7 +104,7 @@ impl FreeList {
         pn: PageNumber,
         next_head_pns: &mut impl Iterator<Item = PageNumber>,
         force_new_head: bool,
-    ) -> Option<(PageNumber, FreeListPage)> {
+    ) -> Option<(PageNumber, Box<Page>)> {
         let mut encoded_head = None;
 
         // create new_head if required
@@ -137,17 +137,17 @@ impl FreeList {
     /// Pages numbers are updated during batches of changes by taking free pages from the free list
     /// or adding new ones to the list.
     ///
-    /// FreeList Pages are stored in the LeafStore using a Copy-On-Write (COW) approach.
+    /// FreeList Pages are stored in the file using a Copy-On-Write (COW) approach.
     ///
     /// This function considers every step taken since the last call to this function,
-    /// creating an encoded version of the updated free list state. (ready to be saved into the LeafStore)
+    /// creating an encoded version of the updated free list state
     ///
     /// Possible operations on a FreeList include removing a free page or adding a new one.
     /// These operations, while creating the encoded format, lead to multiple intermediate steps:
     ///    1. Removing pages consumes the list.
     ///    2. Adding pages appends them to the list's head.
     ///    3. Adding new pages require allocating a new page for the list's head.
-    ///       This page should not overwrite pages in the leaf store and
+    ///       This page should not overwrite pages in the store and
     ///       should be taken from the head at the end of step one.
     ///
     /// Shifting page numbers to the old head involves moving all page numbers added at step two.
@@ -188,7 +188,7 @@ impl FreeList {
         &mut self,
         mut to_append: Vec<PageNumber>,
         bump: &mut PageNumber,
-    ) -> Vec<(PageNumber, FreeListPage)> {
+    ) -> Vec<(PageNumber, Box<Page>)> {
         // append the released free list pages
         to_append.extend(std::mem::take(&mut self.released_portions));
 
@@ -251,7 +251,7 @@ impl FreeList {
 // A free page is laid out in the following form:
 // + prev free page : u32
 // + item_count : u16
-// + leaf page number : [u32; item_count]
+// + free pages : [u32; item_count]
 fn decode_free_list_page(page: Box<Page>) -> (PageNumber, Vec<PageNumber>) {
     let prev = {
         let mut buf = [0u8; 4];
@@ -282,7 +282,7 @@ fn decode_free_list_page(page: Box<Page>) -> (PageNumber, Vec<PageNumber>) {
     (prev, free_list)
 }
 
-fn encode_free_list_page(prev: PageNumber, pns: &Vec<PageNumber>) -> FreeListPage {
+fn encode_free_list_page(prev: PageNumber, pns: &Vec<PageNumber>) -> Box<Page> {
     let mut page = Page::zeroed();
 
     page[0..4].copy_from_slice(&prev.0.to_le_bytes());
@@ -293,7 +293,5 @@ fn encode_free_list_page(prev: PageNumber, pns: &Vec<PageNumber>) -> FreeListPag
         page[start..start + 4].copy_from_slice(&pn.0.to_le_bytes());
     }
 
-    FreeListPage {
-        inner: Box::new(page),
-    }
+    Box::new(page)
 }

@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
+    allocator::PageNumber,
     branch::{BranchId, BranchNodePool},
-    leaf::PageNumber,
     meta::Meta,
 };
 
