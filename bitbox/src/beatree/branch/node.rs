@@ -34,6 +34,8 @@ use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
 // node_pointers: LNPN or BNID[n]
 // ```
 
+pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - (8 + 4 + 4 + 2 + 1 + 1);
+
 /// A branch node, regardless of its level.
 pub struct BranchNode {
     pub(super) pool: Arc<Mutex<BranchNodePoolInner>>,
@@ -212,4 +214,12 @@ impl<'a> BranchNodeView<'a> {
         let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
         u32::from_le_bytes(self.inner[offset..offset + 4].try_into().unwrap())
     }
+}
+
+pub fn body_size(prefix_len: usize, separator_len: usize, n: usize) -> usize {
+    prefix_len + (separator_len * (n + 1)) + (4 * n) 
+}
+
+pub fn body_fullness(prefix_len: usize, separator_len: usize, n: usize) -> f32 {
+    body_size(prefix_len, separator_len, n) as f32 / BRANCH_NODE_BODY_SIZE as f32
 }

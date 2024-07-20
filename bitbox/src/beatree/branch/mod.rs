@@ -11,9 +11,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub use node::{BranchNode, BranchNodeView};
+pub use node::{BRANCH_NODE_BODY_SIZE, BranchNode, BranchNodeView};
 
-mod node;
+pub mod node;
 
 /// The ID of a branch node in the node pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
