@@ -40,7 +40,7 @@ pub fn lookup(
     todo!();
 }
 
-/// Change the btree in the specified way. Updates the branch index in-place and returns 
+/// Change the btree in the specified way. Updates the branch index in-place and returns
 /// a list of branches which have become obsolete.
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
@@ -50,9 +50,16 @@ pub fn update(
     changeset: BTreeMap<Key, Option<Vec<u8>>>,
     bbn_index: &mut Index,
     bnp: &mut branch::BranchNodePool,
-    leaf_store: &mut leaf::store::LeafStoreTx,
+    leaf_store: &mut leaf::store::LeafStoreWriter,
 ) -> Result<Vec<BranchId>> {
-    let _ = (sync_seqn, next_bbn_seqn, changeset, bbn_index, bnp, leaf_store);
+    let _ = (
+        sync_seqn,
+        next_bbn_seqn,
+        changeset,
+        bbn_index,
+        bnp,
+        leaf_store,
+    );
     todo!();
 }
 
@@ -81,7 +88,7 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<leaf::PageNumb
 
     // sanity: this only happens if `key` is less than separator 0.
     if high == 0 {
-        return None
+        return None;
     }
     let node_pointer = branch.node_pointer(high - 1);
     Some(node_pointer.into())

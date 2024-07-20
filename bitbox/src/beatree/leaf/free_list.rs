@@ -20,17 +20,6 @@ pub struct FreeList {
     released_portions: Vec<PageNumber>,
 }
 
-// Result of an append operation on top of a free list,
-// contains pages and their relative page numbers.
-//
-// `to_allocate` are pages that can be allocated already,
-// while `exceeded` are the ones that require the store
-// to be bigger to create space for the new required page numbers
-pub struct FreeListAppendOutput {
-    pub to_allocate: Vec<(PageNumber, FreeListPage)>,
-    pub exceeded: Vec<(PageNumber, FreeListPage)>,
-}
-
 impl FreeList {
     pub fn read(
         store_file: &File,
@@ -192,12 +181,14 @@ impl FreeList {
     ///   The old head will then contain only 4 elements, and the new head will contain one element, resulting in:
     ///
     /// [(Page number: 2, Free list: [1, 7, 10, 12]), (Page number: 9, Free list: [15])]
+    ///
+    /// It returns a Vec containing all the pages that need to be written into storage to reflect the current
+    /// status of the free list along with their page numbers
     pub fn commit(
         &mut self,
         mut to_append: Vec<PageNumber>,
         bump: &mut PageNumber,
-        max_bump: PageNumber,
-    ) -> FreeListAppendOutput {
+    ) -> Vec<(PageNumber, FreeListPage)> {
         // append the released free list pages
         to_append.extend(std::mem::take(&mut self.released_portions));
 
@@ -239,34 +230,19 @@ impl FreeList {
             }
         }
 
-        let mut create_pages = vec![];
+        // encoding new free list pages
+        let mut pages = vec![];
 
         for pn in pns_iter {
             let maybe_encoded_head = self.push(pn, &mut free_list_pages_pns, inner_frag);
             inner_frag = false;
 
             if let Some(encoded) = maybe_encoded_head {
-                create_pages.push(encoded);
+                pages.push(encoded);
             }
         }
 
-        FreeListAppendOutput::create_output(create_pages, max_bump)
-    }
-}
-
-impl FreeListAppendOutput {
-    pub fn create_output(
-        pages: Vec<(PageNumber, FreeListPage)>,
-        max_bump: PageNumber,
-    ) -> FreeListAppendOutput {
-        let mut pages_iter = pages.into_iter();
-        FreeListAppendOutput {
-            to_allocate: pages_iter
-                .by_ref()
-                .take_while(|(pn, _)| pn.0 < max_bump.0)
-                .collect(),
-            exceeded: pages_iter.collect(),
-        }
+        pages
     }
 }
 

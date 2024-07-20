@@ -12,6 +12,7 @@ use crate::{
 
 use super::{
     branch::{BranchId, BranchNodePool},
+    leaf::PageNumber,
     meta::Meta,
 };
 
@@ -25,7 +26,7 @@ pub fn run(
     meta_fd: RawFd,
     bbn: Vec<BranchId>,
     bbn_extend_file_sz: Option<u64>,
-    ln: Vec<()>,
+    ln: Vec<(PageNumber, Box<Page>)>,
     ln_extend_file_sz: Option<u64>,
     new_meta: Meta,
 ) {
@@ -41,6 +42,7 @@ pub fn run(
             ln_write_out: Some(LnWriteOut {
                 ln_fd,
                 ln_extend_file_sz,
+                ln_remaining: ln.len(),
                 ln,
             }),
             meta_swap: Some(MetaSwap {
@@ -72,7 +74,7 @@ fn do_run(mut cx: Cx, mut io: IoDmux, bnp: BranchNodePool) {
                 }
             }
             if let Some(ref mut ln_write_out) = &mut cx.ln_write_out {
-                if ln_write_out.run() {
+                if ln_write_out.run(&mut io) {
                     cx.ln_write_out = None;
                 }
             }
@@ -130,6 +132,14 @@ impl IoDmux {
             kind,
             handle: self.io_handle_index,
             user_data: Self::BBN_USER_DATA,
+        })
+    }
+
+    fn try_send_ln(&mut self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
+        self.io_sender.try_send(IoCommand {
+            kind,
+            handle: self.io_handle_index,
+            user_data: Self::LN_USER_DATA,
         })
     }
 
@@ -246,6 +256,13 @@ impl BbnWriteOut {
             match command.kind {
                 IoKind::WriteRaw(_, _, _, _) => {
                     self.bbn_remaining = self.bbn_remaining.checked_sub(1).unwrap();
+
+                    if self.bbn_remaining == 0 {
+                        if let Err(_) = io.try_send_bbn(IoKind::Fsync(self.bbn_fd)) {
+                            return false;
+                        }
+                    }
+
                     continue;
                 }
                 IoKind::Fsync(_) => {
@@ -264,18 +281,72 @@ impl BbnWriteOut {
 struct LnWriteOut {
     ln_fd: RawFd,
     ln_extend_file_sz: Option<u64>,
-    ln: Vec<()>,
+    ln: Vec<(PageNumber, Box<Page>)>,
+    ln_remaining: usize,
 }
 
 impl LnWriteOut {
-    fn run(&mut self) -> bool {
+    fn run(&mut self, io: &mut IoDmux) -> bool {
+        // NOTE: The current process begins by `ftruncating` the file to support writing
+        // all pages contained in `self.ln`.
+        // This is necessary because the pages created by the LeafStore fall into two categories:
+        // - pages that can be safely written to the file
+        // - pages that need the file to be extended because their page number is out of range
+        //
+        // The first category is currently waiting until `ftruncate` is performed before
+        // being written with the second group.
+        //
+        // A possible improvement could be to allow the LeafStore to write all pages
+        // in the first category immediately, keep a vector of pending pages,
+        // and have the writeout call `ftruncate` to finish issuing all pending pages.
+
         if let Some(new_len) = self.ln_extend_file_sz.take() {
             unsafe {
                 File::from_raw_fd(self.ln_fd).set_len(new_len).unwrap();
             }
         }
 
-        // TODO: fill this out similar to BBN write out.
+        while self.ln.len() > 0 {
+            // UNWRAP: we know the list is not empty.
+            let (ln_pn, ln_page) = self.ln.pop().unwrap();
+
+            {
+                // UNWRAP: the branch node cannot be out of bounds because of the requirement of the
+                // sync machine.
+                if let Err(TrySendError::Full(IoCommand {
+                    kind: IoKind::Write(.., ln_page),
+                    ..
+                })) = io.try_send_ln(IoKind::Write(self.ln_fd, ln_pn.0 as u64, ln_page))
+                {
+                    // That's alright. We will retry on the next iteration.
+                    self.ln.push((ln_pn, ln_page));
+                    return false;
+                }
+            }
+        }
+
+        // Reap the completions.
+        while let Some(CompleteIo { command, result }) = io.try_recv_ln() {
+            assert!(result.is_ok());
+            match command.kind {
+                IoKind::WriteRaw(_, _, _, _) => {
+                    self.ln_remaining = self.ln_remaining.checked_sub(1).unwrap();
+
+                    if self.ln_remaining == 0 {
+                        if let Err(_) = io.try_send_ln(IoKind::Fsync(self.ln_fd)) {
+                            return false;
+                        }
+                    }
+
+                    continue;
+                }
+                IoKind::Fsync(_) => {
+                    assert!(self.ln_remaining == 0);
+                    return true;
+                }
+                _ => panic!("unexpected completion kind"),
+            }
+        }
 
         // we are not done yet.
         false

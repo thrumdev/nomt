@@ -10,7 +10,10 @@ use crossbeam_channel::{Receiver, Sender};
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
 use meta::Meta;
 
-use crate::io::{CompleteIo, IoCommand};
+use crate::{
+    beatree::leaf::store::LeafStoreCommitOutput,
+    io::{CompleteIo, IoCommand},
+};
 
 mod bbn;
 mod branch;
@@ -89,7 +92,6 @@ impl Tree {
 
         let sync_seqn = sync.sync_seqn;
         let mut next_bbn_seqn = sync.next_bbn_seqn;
-        let mut leaf_store_tx = sync.leaf_store_wr.start_tx();
 
         // Take the shared lock. Briefly.
         let staged_changeset;
@@ -108,22 +110,18 @@ impl Tree {
             staged_changeset,
             &mut bbn_index,
             &mut branch_node_pool,
-            &mut leaf_store_tx,
+            &mut sync.leaf_store_wr,
         )
         .unwrap();
 
         let (ln, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
-            let o = leaf_store_tx.commit();
-            let ln: Vec<()> = o
-                .to_allocate
-                .into_iter()
-                .chain(o.exceeded)
-                .map(|(_pn, _page)| ())
-                .collect();
-            let ln_freelist_pn = o.new_free_list_head.0;
-            let ln_bump = 0; // TODO: commit should return the bump;
-            let ln_extend_file_sz: Option<u64> = None;
-            (ln, ln_freelist_pn, ln_bump, ln_extend_file_sz)
+            let LeafStoreCommitOutput {
+                pages,
+                extend_file_sz,
+                freelist_head_pn,
+                bump,
+            } = sync.leaf_store_wr.commit();
+            (pages, freelist_head_pn.0, bump.0, extend_file_sz)
         };
 
         // TODO: BBN dumping.
