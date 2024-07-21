@@ -56,7 +56,8 @@ pub fn update(
     todo!();
 }
 
-/// Binary search a branch node for the child node containing the key.
+/// Binary search a branch node for the child node containing the key. This returns the last child
+/// node pointer whose separator is less than or equal to the given key.
 fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<leaf::PageNumber> {
     let prefix = branch.prefix();
 
@@ -67,19 +68,21 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<leaf::PageNumb
     let post_key =
         &key.view_bits::<Lsb0>()[prefix.len()..prefix.len() + branch.separator_len() as usize];
 
-    // ignore two endpoint separators, which are special and only used to indicate the key range of
-    // BBNs.
-    let mut low = 1;
+    let mut low = 0;
     let mut high = branch.n() as usize;
     while low < high {
         let mid = low + (high - low) / 2;
-        if post_key <= branch.separator(mid) {
+        if post_key < branch.separator(mid) {
             high = mid;
         } else {
             low = mid + 1;
         }
     }
 
+    // sanity: this only happens if `key` is less than separator 0.
+    if high == 0 {
+        return None
+    }
     let node_pointer = branch.node_pointer(high - 1);
     Some(node_pointer.into())
 }

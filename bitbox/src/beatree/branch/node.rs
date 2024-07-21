@@ -26,7 +26,7 @@ use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
 // # Then the varbits follow. To avoid two padding bytes, the varbits are stored in a single bitvec.
 //
 // prefix: bitvec[prefix_len]
-// separators: bitvec[(n + 1) * separator_len]
+// separators: bitvec[n * separator_len]
 //
 // # Node pointers follow. The list is aligned to the end of the node, with the last item in the
 // # list occupying the last 4 bytes of the node.
@@ -120,7 +120,7 @@ impl BranchNode {
 
     fn varbits_mut(&mut self) -> &mut BitSlice<u8> {
         let bit_cnt =
-            self.prefix_len() as usize + (self.separator_len() as usize) * (self.n() as usize + 1);
+            self.prefix_len() as usize + (self.separator_len() as usize) * self.n() as usize;
         self.as_mut_slice()[20..(20 + bit_cnt)].view_bits_mut()
     }
 
@@ -197,7 +197,7 @@ impl<'a> BranchNodeView<'a> {
 
     fn varbits(&self) -> &'a BitSlice<u8> {
         let bit_cnt =
-            self.prefix_len() as usize + (self.separator_len() as usize) * (self.n() as usize + 1);
+            self.prefix_len() as usize + (self.separator_len() as usize) * self.n() as usize;
         self.inner[20..(20 + bit_cnt)].view_bits()
     }
 
@@ -206,7 +206,7 @@ impl<'a> BranchNodeView<'a> {
     }
 
     pub fn separator(&self, i: usize) -> &'a BitSlice<u8> {
-        let offset = self.prefix_len() as usize + (i + 1) * self.separator_len() as usize;
+        let offset = self.prefix_len() as usize + i * self.separator_len() as usize;
         &self.varbits()[offset..offset + self.separator_len() as usize]
     }
 
@@ -217,7 +217,7 @@ impl<'a> BranchNodeView<'a> {
 }
 
 pub fn body_size(prefix_len: usize, separator_len: usize, n: usize) -> usize {
-    prefix_len + (separator_len * (n + 1)) + (4 * n) 
+    prefix_len + (separator_len * n) + (4 * n) 
 }
 
 pub fn body_fullness(prefix_len: usize, separator_len: usize, n: usize) -> f32 {

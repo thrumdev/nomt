@@ -164,7 +164,7 @@ prefix_len: u8         // bits
 separator_len: u8      // bits
 prefix: var_bits
 padding                // to next whole byte
-separators: [var_bits] // (n + 1) * separator_len
+separators: [var_bits] // n * separator_len
 padding                // to next whole byte
 node_pointers: [LNPN or BNID]   // n * 32
 ```
