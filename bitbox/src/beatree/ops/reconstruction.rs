@@ -10,7 +10,7 @@
 use anyhow::Result;
 use crossbeam_channel::{Sender, Receiver};
 use bitvec::prelude::*;
-use std::{collections::{BTreeMap, HashMap}, fs::File};
+use std::{collections::{BTreeMap, HashMap}, fs::File, io::{ErrorKind, Read, Seek}};
 
 use crate::beatree::{
     branch::{self, BRANCH_NODE_SIZE, BranchId},
@@ -20,7 +20,8 @@ use crate::beatree::{
 };
 
 // 256K
-type SeqReadChunk = [u8; BRANCH_NODE_SIZE * 64];
+const SEQ_READ_CHUNK_LEN: usize = BRANCH_NODE_SIZE * 64;
+type SeqReadChunk = [u8; SEQ_READ_CHUNK_LEN];
 
 /// Reconstruct the upper branch nodes of the btree from the bottom branch nodes and the leaf nodes.
 /// This places all branches into the BNP and returns an index into all BBNs. 
@@ -33,7 +34,8 @@ pub fn reconstruct(
     let mut index = Index::default();
     let mut displaced = Vec::new();
 
-    for seq_chunk in read_sequential(bn_fd) {
+    for seq_chunk in read_sequential(bn_fd)? {
+        let seq_chunk = seq_chunk?;
         let nodes = seq_chunk.chunks(BRANCH_NODE_SIZE);
         for node in nodes {
             let view = branch::BranchNodeView::from_slice(node);
@@ -114,11 +116,23 @@ pub fn reconstruct(
 }
 
 fn read_sequential(
-    bn_fd: File,
-) -> Receiver<Box<SeqReadChunk>> {
+    mut bn_fd: File,
+) -> Result<Receiver<Result<Box<SeqReadChunk>>>> {
     let (tx, rx) = crossbeam_channel::unbounded();
-    std::thread::spawn(move || {
-        // TODO read entire file sequentially while sending chunks out.
+    bn_fd.seek(std::io::SeekFrom::Start(BRANCH_NODE_SIZE as u64))?;
+    std::thread::spawn(move || loop {
+        let mut buf = Box::new([0; SEQ_READ_CHUNK_LEN]);
+        match bn_fd.read_exact(&mut *buf) {
+            Ok(()) => { let _ = tx.send(Ok(buf)); },
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                let _ = tx.send(Ok(buf));
+                break
+            }
+            Err(e) => {
+                let _ = tx.send(Err(anyhow::Error::from(e)));
+                break
+            }
+        }
     });
-    rx
+    Ok(rx)
 }
