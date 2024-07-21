@@ -14,6 +14,7 @@ use crate::io::{CompleteIo, IoCommand};
 
 mod bbn;
 mod branch;
+mod index;
 mod leaf;
 mod meta;
 mod ops;
@@ -27,7 +28,7 @@ pub struct Tree {
 }
 
 struct Shared {
-    root: Option<BranchId>,
+    bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
     branch_node_pool: branch::BranchNodePool,
     staging: BTreeMap<Key, Option<Vec<u8>>>,
@@ -57,10 +58,7 @@ impl Tree {
     /// Lookup a key in the btree.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let shared = self.shared.lock().unwrap();
-        let Some(ref root) = shared.root else {
-            return None;
-        };
-        ops::lookup(key, *root, &shared.branch_node_pool, &shared.leaf_store_rd).unwrap()
+        ops::lookup(key, &shared.bbn_index, &shared.branch_node_pool, &shared.leaf_store_rd).unwrap()
     }
 
     /// Commit a set of changes to the btree.
@@ -95,20 +93,20 @@ impl Tree {
 
         // Take the shared lock. Briefly.
         let staged_changeset;
-        let root;
+        let mut bbn_index;
         let mut branch_node_pool;
         {
             let mut inner = self.shared.lock().unwrap();
             staged_changeset = inner.take_staged_changeset();
-            root = inner.root.unwrap();
+            bbn_index = inner.bbn_index.clone();
             branch_node_pool = inner.branch_node_pool.clone();
         }
 
-        let (new_root, obsolete_branches) = ops::update(
+        let obsolete_branches = ops::update(
             sync_seqn,
             &mut next_bbn_seqn,
             staged_changeset,
-            root,
+            &mut bbn_index,
             &mut branch_node_pool,
             &mut leaf_store_tx,
         )
@@ -167,14 +165,15 @@ impl Tree {
 
         {
             let mut inner = self.shared.lock().unwrap();
-            inner.root = Some(new_root);
+            inner.bbn_index = bbn_index;
             // TODO: watch out for the lock contention here. If we change 50k values, that might
             // result in 50k bottom-level branch nodes being released. On top of that, there are
             // also upper-level branch nodes. We are also adding a lot of nodes one by one.
             //
             // If you think about it, it's all not necessary, because we only need to access to
             // the BNP freelist, which should be used exclusively by the sync thread. But note
-            // once crucial thing: the obsolete branches are not released until the new root is set.
+            // once crucial thing: the obsolete branches are not released until the BBN index is
+            // overwritten in the line above.
             //
             // Also, the sync needs to query the branch pages in the course of the sync, so that's
             // another indication for splitting the read/write parts.

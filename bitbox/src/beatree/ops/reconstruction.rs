@@ -14,52 +14,56 @@ use std::{collections::{BTreeMap, HashMap}, fs::File};
 
 use crate::beatree::{
     branch::{self, BRANCH_NODE_SIZE, BranchId},
+    index::Index,
     leaf,
+    Key,
 };
 
 // 256K
 type SeqReadChunk = [u8; BRANCH_NODE_SIZE * 64];
 
 /// Reconstruct the upper branch nodes of the btree from the bottom branch nodes and the leaf nodes.
-/// Returns the root of the reconstructed btree.
+/// This places all branches into the BNP and returns an index into all BBNs. 
 pub fn reconstruct(
     sync_seqn: u32,
     bn_fd: File, 
     bnp: &mut branch::BranchNodePool,
-) -> Result<BranchId> {
-    let bbns = read_bbns(sync_seqn, bn_fd, bnp);
-    todo!()
-}
-
-fn read_bbns(
-    sync_seqn: u32,
-    bn_fd: File,
-    bnp: &mut branch::BranchNodePool,
-) -> Vec<(BitVec<u8>, BranchId)> {
-    let mut branch_seqns: HashMap<u64, (u32, Option<usize>)> = HashMap::new();
-    let mut branch_meta: Vec<Option<(BitVec<u8>, BranchId)>> = Vec::new();
+) -> Result<Index> {
+    let mut branch_seqns: HashMap<u64, (u32, Option<(Key, BranchId)>)> = HashMap::new();
+    let mut index = Index::default();
+    let mut displaced = Vec::new();
 
     for seq_chunk in read_sequential(bn_fd) {
         let nodes = seq_chunk.chunks(BRANCH_NODE_SIZE);
         for node in nodes {
-            // TODO: handle empty
-
             let view = branch::BranchNodeView::from_slice(node);
             if view.sync_seqn() > sync_seqn { continue }
 
-            if let Some((existing_sync_seqn, branch_meta_index)) = branch_seqns.get(&view.bbn_seqn()) {
+            // handle empty.
+            if view.n() == 0 && node == [0; BRANCH_NODE_SIZE] {
+                continue
+            }
+
+            if let Some((existing_sync_seqn, separator)) = branch_seqns.get(&view.bbn_seqn()) {
                 if *existing_sync_seqn < view.sync_seqn() {
-                    if let Some(branch_meta_index) = *branch_meta_index {
+                    if let Some((separator, expected_branch)) = *separator {
+                        // remove the previous branch, handling a corner case where it's already
+                        // been displaced by some other branch that shares the exact same
+                        // separator.
                         // UNWRAP: indices always correspond to `Some` entries.
-                        let (_, branch_id) = branch_meta[branch_meta_index].take().unwrap();
-                        bnp.release(branch_id);
+                        let branch = index.remove(&separator).unwrap();
+                        if branch != expected_branch {
+                            index.insert(separator, branch);
+                        } else {
+                            bnp.release(branch);
+                        }
                     }
                 } else {
                     continue
                 }
             }
 
-            let branch_meta_index = if view.n() == 0 {
+            let branch_info = if view.n() == 0 {
                 // tombstone
                 None
             } else {
@@ -68,22 +72,45 @@ fn read_bbns(
                 // UNWRAP: just allocated
                 bnp.checkout(new_branch_id).unwrap().as_mut_slice().copy_from_slice(node);
 
-                let mut separator = view.prefix().to_bitvec();
-                separator.extend(view.separator(0));
-                branch_meta.push(Some((separator, new_branch_id)));
-                Some(branch_meta.len())
+                let mut separator = [0u8; 32];
+                {
+                    let prefix = view.prefix();
+                    let mut separator = separator.view_bits_mut::<Lsb0>();
+                    separator[..prefix.len()].copy_from_bitslice(prefix);
+                    let first = view.separator(0);
+                    separator[prefix.len() .. prefix.len() + first.len()].copy_from_bitslice(first);
+                }
+
+                if let Some(displaced_branch_id) = index.insert(separator, new_branch_id) {
+                    // UNWRAP: previously allocated, never released.
+                    let displaced_branch = bnp.checkout(displaced_branch_id).unwrap();
+                    displaced.push((
+                        displaced_branch.bbn_seqn(), 
+                        displaced_branch_id,
+                    ));
+                }
+
+                Some((separator, new_branch_id))
             };
 
-            branch_seqns.insert(view.bbn_seqn(), (view.sync_seqn(), branch_meta_index));
+            branch_seqns.insert(view.bbn_seqn(), (view.sync_seqn(), branch_info));
         }
     }
 
-    // note: we expect the vector here to have a couple of million entries here at maximum
-    // (2.5M * 4096) = 10G . With 1B leaves (4TB) this is a branching factor of 400 expected.
-    // This takes a couple of seconds when the database is at absolute maximum capacity.
-    let mut branch_meta = branch_meta.into_iter().flatten().collect::<Vec<_>>();
-    branch_meta.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    branch_meta
+    // after iterating all BBNs, reinstate any displaced BBNs which are still relevant.
+    for (displaced_bbn_seqn, displaced_branch_id) in displaced {
+        if let Some((separator, _)) = branch_seqns
+            .get(&displaced_bbn_seqn)
+            .and_then(|x| x.1)
+            .filter(|x| x.1 == displaced_branch_id)
+        {
+            let _ = index.insert(separator, displaced_branch_id);
+        } else {
+            bnp.release(displaced_branch_id);
+        }
+    }
+
+    Ok(index)
 }
 
 fn read_sequential(
