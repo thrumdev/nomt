@@ -11,9 +11,9 @@ use super::{
     leaf, Key,
 };
 
-mod reconstruction;
-
-pub use reconstruction::reconstruct;
+// TODO: update with new `BbnStoreReader::recover_bbns` method
+//mod reconstruction;
+//pub use reconstruction::reconstruct;
 
 /// Lookup a key in the btree.
 pub fn lookup(
@@ -47,20 +47,13 @@ pub fn lookup(
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
     sync_seqn: u32,
-    next_bbn_seqn: &mut u32,
     changeset: BTreeMap<Key, Option<Vec<u8>>>,
     bbn_index: &mut Index,
     bnp: &mut branch::BranchNodePool,
     leaf_store: &mut leaf::store::LeafStoreWriter,
+    bbn_store: &mut branch::store::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
-    let _ = (
-        sync_seqn,
-        next_bbn_seqn,
-        changeset,
-        bbn_index,
-        bnp,
-        leaf_store,
-    );
+    let _ = (sync_seqn, changeset, bbn_index, bnp, leaf_store, bbn_store);
     todo!();
 }
 

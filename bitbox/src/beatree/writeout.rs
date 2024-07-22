@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     allocator::PageNumber,
-    branch::{BranchId, BranchNodePool},
+    branch::{BranchId, BranchNode, BranchNodePool},
     meta::Meta,
 };
 
@@ -24,7 +24,8 @@ pub fn run(
     bbn_fd: RawFd,
     ln_fd: RawFd,
     meta_fd: RawFd,
-    bbn: Vec<BranchId>,
+    bbn: Vec<BranchNode>,
+    bbn_free_list_pages: Vec<(PageNumber, Box<Page>)>,
     bbn_extend_file_sz: Option<u64>,
     ln: Vec<(PageNumber, Box<Page>)>,
     ln_extend_file_sz: Option<u64>,
@@ -36,8 +37,9 @@ pub fn run(
             bbn_write_out: Some(BbnWriteOut {
                 bbn_fd,
                 bbn_extend_file_sz,
-                bbn_remaining: bbn.len(),
+                remaining: bbn.len() + bbn_free_list_pages.len(),
                 bbn,
+                free_list_pages: bbn_free_list_pages,
             }),
             ln_write_out: Some(LnWriteOut {
                 ln_fd,
@@ -207,9 +209,10 @@ struct Cx {
 struct BbnWriteOut {
     bbn_fd: RawFd,
     bbn_extend_file_sz: Option<u64>,
-    bbn: Vec<BranchId>,
+    bbn: Vec<BranchNode>,
+    free_list_pages: Vec<(PageNumber, Box<Page>)>,
     // Initially, set to the len of `bbn`. Each completion will decrement this.
-    bbn_remaining: usize,
+    remaining: usize,
 }
 
 impl BbnWriteOut {
@@ -229,24 +232,42 @@ impl BbnWriteOut {
 
         while self.bbn.len() > 0 {
             // UNWRAP: we know the list is not empty.
-            let bnid = self.bbn.pop().unwrap();
+            let mut branch_node = self.bbn.pop().unwrap();
 
             {
                 // UNWRAP: the branch node cannot be out of bounds because of the requirement of the
                 // sync machine.
-                let mut page = bnp.checkout(bnid).unwrap();
-                let wrt = page.as_mut_slice();
+                let wrt = branch_node.as_mut_slice();
                 let (ptr, len) = (wrt.as_ptr(), wrt.len());
-                let bbn_pn = page.bbn_pn();
+                let bbn_pn = branch_node.bbn_pn();
 
                 if let Err(_) =
                     io.try_send_bbn(IoKind::WriteRaw(self.bbn_fd, bbn_pn as u64, ptr, len))
                 {
                     // That's alright. We will retry on the next iteration.
-                    self.bbn.push(bnid);
+                    self.bbn.push(branch_node);
                     return false;
                 }
-                let _ = page;
+                let _ = branch_node;
+            }
+        }
+
+        while self.free_list_pages.len() > 0 {
+            // UNWRAP: we know the list is not empty.
+            let (pn, page) = self.free_list_pages.pop().unwrap();
+
+            {
+                // UNWRAP: the branch node cannot be out of bounds because of the requirement of the
+                // sync machine.
+                if let Err(TrySendError::Full(IoCommand {
+                    kind: IoKind::Write(.., page),
+                    ..
+                })) = io.try_send_ln(IoKind::Write(self.bbn_fd, pn.0 as u64, page))
+                {
+                    // That's alright. We will retry on the next iteration.
+                    self.free_list_pages.push((pn, page));
+                    return false;
+                }
             }
         }
 
@@ -255,9 +276,9 @@ impl BbnWriteOut {
             assert!(result.is_ok());
             match command.kind {
                 IoKind::WriteRaw(_, _, _, _) => {
-                    self.bbn_remaining = self.bbn_remaining.checked_sub(1).unwrap();
+                    self.remaining = self.remaining.checked_sub(1).unwrap();
 
-                    if self.bbn_remaining == 0 {
+                    if self.remaining == 0 {
                         if let Err(_) = io.try_send_bbn(IoKind::Fsync(self.bbn_fd)) {
                             return false;
                         }
@@ -266,7 +287,7 @@ impl BbnWriteOut {
                     continue;
                 }
                 IoKind::Fsync(_) => {
-                    assert!(self.bbn_remaining == 0);
+                    assert!(self.remaining == 0);
                     return true;
                 }
                 _ => panic!("unexpected completion kind"),

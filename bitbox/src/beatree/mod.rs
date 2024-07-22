@@ -1,19 +1,21 @@
 use std::{
     collections::BTreeMap,
     mem,
+    ops::DerefMut,
     path::Path,
     sync::{Arc, Mutex},
 };
 
 use crate::{
-    beatree::leaf::store::LeafStoreCommitOutput,
+    beatree::{branch::store::BbnStoreCommitOutput, leaf::store::LeafStoreCommitOutput},
     io::{CompleteIo, IoCommand},
 };
 
-use branch::BranchId;
 use crossbeam_channel::{Receiver, Sender};
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
 use meta::Meta;
+
+use self::branch::store::{BbnStoreReader, BbnStoreWriter};
 
 mod allocator;
 mod bbn;
@@ -34,14 +36,15 @@ pub struct Tree {
 struct Shared {
     bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
+    bbn_store_rd: BbnStoreReader,
     branch_node_pool: branch::BranchNodePool,
     staging: BTreeMap<Key, Option<Vec<u8>>>,
 }
 
 struct Sync {
     leaf_store_wr: LeafStoreWriter,
+    bbn_store_wr: BbnStoreWriter,
     sync_seqn: u32,
-    next_bbn_seqn: u32,
     sync_io_handle_index: usize,
     sync_io_sender: Sender<IoCommand>,
     sync_io_receiver: Receiver<CompleteIo>,
@@ -98,7 +101,6 @@ impl Tree {
         let mut sync = self.sync.lock().unwrap();
 
         let sync_seqn = sync.sync_seqn;
-        let mut next_bbn_seqn = sync.next_bbn_seqn;
 
         // Take the shared lock. Briefly.
         let staged_changeset;
@@ -111,15 +113,23 @@ impl Tree {
             branch_node_pool = inner.branch_node_pool.clone();
         }
 
-        let obsolete_branches = ops::update(
-            sync_seqn,
-            &mut next_bbn_seqn,
-            staged_changeset,
-            &mut bbn_index,
-            &mut branch_node_pool,
-            &mut sync.leaf_store_wr,
-        )
-        .unwrap();
+        let obsolete_branches = {
+            // TODO: I don't know if this is the best way to handle this,
+            // but doing directly `&mut sync.leaf_store_wr` and `&mut sync.bbn_store_wr`
+            // doesn't work because the borrow checker doesn't allow two
+            // mutable borrow of `MutexGuard<_, Sync>`
+            let sync = sync.deref_mut();
+
+            ops::update(
+                sync_seqn,
+                staged_changeset,
+                &mut bbn_index,
+                &mut branch_node_pool,
+                &mut sync.leaf_store_wr,
+                &mut sync.bbn_store_wr,
+            )
+            .unwrap()
+        };
 
         let (ln, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
             let LeafStoreCommitOutput {
@@ -131,14 +141,29 @@ impl Tree {
             (pages, freelist_head.0, bump.0, extend_file_sz)
         };
 
-        // TODO: BBN dumping.
+        let (bbn, free_list_pages, bbn_freelist_pn, bbn_bump, bbn_extend_file_sz) = {
+            let BbnStoreCommitOutput {
+                bbn,
+                free_list_pages,
+                extend_file_sz,
+                freelist_head,
+                bump,
+            } = sync.bbn_store_wr.commit();
+            (
+                bbn,
+                free_list_pages,
+                freelist_head.0,
+                bump.0,
+                extend_file_sz,
+            )
+        };
 
         let new_meta = Meta {
             sync_seqn,
-            next_bbn_seqn,
             ln_freelist_pn,
             ln_bump,
-            bbn_bump: 0,
+            bbn_freelist_pn,
+            bbn_bump,
         };
 
         // writeout::run(
@@ -165,7 +190,6 @@ impl Tree {
             &writeout::run,
         );
 
-        sync.next_bbn_seqn = next_bbn_seqn;
         sync.sync_seqn = sync_seqn + 1;
 
         {
