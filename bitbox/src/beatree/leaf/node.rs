@@ -63,13 +63,15 @@ impl LeafNode {
 
         let n_items = self.n();
         let cell_pointers = self.cell_pointers();
-        let index = search(cell_pointers, &key);
 
-        // if the key is the same then that's an update
-        if index < n_items && cell_key(cell_pointers, index) == &key {
-            self.update(index, key, value);
-            return LeafInsertResult::Ok;
-        }
+        let index = match search(cell_pointers, &key) {
+            Ok(index) => {
+                // if the key is the same then that's an update
+                self.update(index, key, value);
+                return LeafInsertResult::Ok;
+            }
+            Err(index) => index,
+        };
 
         // make sure the new byte fits
         if self.space_left(cell_pointers) < 34 + value.len() {
@@ -107,11 +109,7 @@ impl LeafNode {
 
     pub fn remove(&mut self, key: Key) {
         let cell_pointers = self.cell_pointers();
-        let index = search(cell_pointers, &key);
-
-        if cell_key(cell_pointers, index) != &key {
-            return;
-        }
+        let Ok(index) = search(cell_pointers, &key) else { return };
 
         let prev_value_len = self.value_range(self.cell_pointers(), index).len();
 
@@ -131,13 +129,9 @@ impl LeafNode {
 
     pub fn get(&self, key: &Key) -> Option<&[u8]> {
         let cell_pointers = self.cell_pointers();
-        let index = search(cell_pointers, key);
 
-        if cell_key(cell_pointers, index) == key {
-            Some(&self.inner[self.value_range(cell_pointers, index)])
-        } else {
-            None
-        }
+        search(cell_pointers, key).ok()
+            .map(|index| &self.inner[self.value_range(cell_pointers, index)])
     }
 
     // Updates an existing value
@@ -297,19 +291,9 @@ fn encode_cell(key: [u8; 32], offset: usize) -> [u8; 34] {
     buf
 }
 
-// look for key in the node, returns the index of
-// the cell_pointer which contains the key or the index
-// of the cell_pointer just after where the key should be
-fn search(cell_pointers: &[[u8; 34]], key: &Key) -> usize {
-    cell_pointers
-        .binary_search_by(|cell| {
-            if &cell[0..32] < key {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            }
-        })
-        .unwrap_err()
+// look for key in the node. the return value has the same semantics as std binary_search*.
+fn search(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
+    cell_pointers.binary_search_by(|cell| cell[0..32].cmp(key))
 }
 
 #[cfg(test)]
@@ -317,7 +301,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn add_to_emtpy_leaf() {
+    fn add_to_empty_leaf() {
         let key = [1; 32];
         let val = vec![5; 10];
         let leaf = LeafNode::new(key, val.clone());
