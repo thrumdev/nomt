@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    beatree::{branch::store::BbnStoreCommitOutput, leaf::store::LeafStoreCommitOutput},
+    beatree::{bbn::BbnStoreCommitOutput, leaf::store::LeafStoreCommitOutput},
     io::{CompleteIo, IoCommand},
 };
 
@@ -15,7 +15,7 @@ use crossbeam_channel::{Receiver, Sender};
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
 use meta::Meta;
 
-use self::branch::store::{BbnStoreReader, BbnStoreWriter};
+use self::bbn::BbnStoreWriter;
 
 mod allocator;
 mod bbn;
@@ -36,7 +36,6 @@ pub struct Tree {
 struct Shared {
     bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
-    bbn_store_rd: BbnStoreReader,
     branch_node_pool: branch::BranchNodePool,
     staging: BTreeMap<Key, Option<Vec<u8>>>,
 }

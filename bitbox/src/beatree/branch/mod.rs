@@ -14,7 +14,6 @@ use std::{
 pub use node::{BranchNode, BranchNodeView};
 
 pub mod node;
-pub mod store;
 
 /// The ID of a branch node in the node pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

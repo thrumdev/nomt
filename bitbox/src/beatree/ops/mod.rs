@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, fs::File};
 
 use super::{
     allocator::{self, PageNumber},
+    bbn,
     branch::{self, BranchId},
     index::Index,
     leaf, Key,
@@ -50,7 +51,7 @@ pub fn update(
     bbn_index: &mut Index,
     bnp: &mut branch::BranchNodePool,
     leaf_store: &mut leaf::store::LeafStoreWriter,
-    bbn_store: &mut branch::store::BbnStoreWriter,
+    bbn_store: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
     let _ = (changeset, bbn_index, bnp, leaf_store, bbn_store);
     todo!();
