@@ -44,7 +44,6 @@ struct Shared {
 struct Sync {
     leaf_store_wr: LeafStoreWriter,
     bbn_store_wr: BbnStoreWriter,
-    sync_seqn: u32,
     sync_io_handle_index: usize,
     sync_io_sender: Sender<IoCommand>,
     sync_io_receiver: Receiver<CompleteIo>,
@@ -100,8 +99,6 @@ impl Tree {
         // Note the ordering of taking locks is important.
         let mut sync = self.sync.lock().unwrap();
 
-        let sync_seqn = sync.sync_seqn;
-
         // Take the shared lock. Briefly.
         let staged_changeset;
         let mut bbn_index;
@@ -121,7 +118,6 @@ impl Tree {
             let sync = sync.deref_mut();
 
             ops::update(
-                sync_seqn,
                 staged_changeset,
                 &mut bbn_index,
                 &mut branch_node_pool,
@@ -159,7 +155,6 @@ impl Tree {
         };
 
         let new_meta = Meta {
-            sync_seqn,
             ln_freelist_pn,
             ln_bump,
             bbn_freelist_pn,
@@ -189,8 +184,6 @@ impl Tree {
             &sync.sync_io_receiver,
             &writeout::run,
         );
-
-        sync.sync_seqn = sync_seqn + 1;
 
         {
             let mut inner = self.shared.lock().unwrap();
