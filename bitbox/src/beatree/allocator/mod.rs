@@ -188,7 +188,7 @@ impl AllocatorWriter {
         let next_max_bump = self.bump.0.next_multiple_of(256);
         let extend_file_sz = if self.file_max_bump.0 < next_max_bump {
             self.file_max_bump = PageNumber(next_max_bump);
-            Some(self.file_max_bump.0 as usize * PAGE_SIZE)
+            Some(self.file_max_bump.0 as u64 * PAGE_SIZE as u64)
         } else {
             None
         };
@@ -206,6 +206,6 @@ impl AllocatorWriter {
 pub struct AllocatorCommitOutput {
     pub free_list_pages: Vec<(PageNumber, Box<Page>)>,
     pub bump: PageNumber,
-    pub extend_file_sz: Option<usize>,
+    pub extend_file_sz: Option<u64>,
     pub freelist_head: PageNumber,
 }

@@ -101,6 +101,6 @@ impl LeafStoreWriter {
 pub struct LeafStoreCommitOutput {
     pub pages: Vec<(PageNumber, Box<Page>)>,
     pub bump: PageNumber,
-    pub extend_file_sz: Option<usize>,
+    pub extend_file_sz: Option<u64>,
     pub freelist_head: PageNumber,
 }

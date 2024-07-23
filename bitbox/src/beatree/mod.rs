@@ -1,14 +1,19 @@
+use allocator::PageNumber;
+use anyhow::Result;
+use branch::BRANCH_NODE_SIZE;
 use std::{
     collections::BTreeMap,
+    fs::File,
     mem,
     ops::DerefMut,
+    os::fd::{AsRawFd as _, RawFd},
     path::Path,
     sync::{Arc, Mutex},
 };
 
 use crate::{
     beatree::{bbn::BbnStoreCommitOutput, leaf::store::LeafStoreCommitOutput},
-    io::{CompleteIo, IoCommand},
+    io::{self, CompleteIo, IoCommand, Mode},
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -46,6 +51,9 @@ struct Sync {
     sync_io_handle_index: usize,
     sync_io_sender: Sender<IoCommand>,
     sync_io_receiver: Receiver<CompleteIo>,
+    meta_fd: RawFd,
+    ln_fd: RawFd,
+    bbn_fd: RawFd,
 }
 
 impl Shared {
@@ -55,9 +63,131 @@ impl Shared {
 }
 
 impl Tree {
-    pub fn open(db_dir: impl AsRef<Path>) -> Tree {
-        let _ = db_dir;
-        todo!()
+    pub fn open(db_dir: impl AsRef<Path>) -> Result<Tree> {
+        const IO_IX_RD_LN: usize = 0;
+        const IO_IX_WR_LN: usize = 1;
+        const IO_IX_RD_BBN: usize = 2;
+        const IO_IX_WR_BBN: usize = 3;
+        const IO_IX_SYNC: usize = 4;
+        const NUM_IO_HANDLES: usize = 5;
+
+        let (io_sender, io_recv) = io::start_io_worker(NUM_IO_HANDLES, Mode::Real { num_rings: 3 });
+
+        if !db_dir.as_ref().exists() {
+            use std::io::Write as _;
+
+            // Create the directory
+            std::fs::create_dir_all(db_dir.as_ref())?;
+            // Create the files
+            let ln_fd = File::create(db_dir.as_ref().join("ln"))?;
+            let bbn_fd = File::create(db_dir.as_ref().join("bbn"))?;
+            ln_fd.set_len(BRANCH_NODE_SIZE as u64)?;
+            bbn_fd.set_len(BRANCH_NODE_SIZE as u64)?;
+
+            let mut meta_fd = File::create(db_dir.as_ref().join("meta"))?;
+            let mut buf = [0u8; 20];
+            Meta {
+                ln_freelist_pn: 0,
+                ln_bump: 1,
+                bbn_freelist_pn: 0,
+                bbn_bump: 1,
+            }
+            .encode_to(&mut buf);
+            meta_fd.write_all(&buf)?;
+
+            // Sync files and the directory. I am not sure if syncing files is necessar, but it
+            // is necessary to make sure that the directory is synced.
+            meta_fd.sync_all()?;
+            ln_fd.sync_all()?;
+            bbn_fd.sync_all()?;
+            File::open(db_dir.as_ref())?.sync_all()?;
+        }
+
+        let bbn_fd = File::open(db_dir.as_ref().join("bbn"))?;
+        let ln_fd = File::open(db_dir.as_ref().join("ln"))?;
+        let meta_fd = File::open(db_dir.as_ref().join("meta"))?;
+
+        let bbn_raw_fd = bbn_fd.as_raw_fd();
+        let ln_raw_fd = ln_fd.as_raw_fd();
+        let meta_raw_fd = meta_fd.as_raw_fd();
+
+        let meta = meta::Meta::read(&meta_fd)?;
+        let ln_freelist_pn = Some(meta.ln_freelist_pn)
+            .filter(|&x| x != 0)
+            .map(PageNumber);
+        let bbn_freelist_pn = Some(meta.bbn_freelist_pn)
+            .filter(|&x| x != 0)
+            .map(PageNumber);
+        let ln_bump = PageNumber(meta.ln_bump);
+        let bbn_bump = PageNumber(meta.bbn_bump);
+
+        let (leaf_store_rd, leaf_store_wr) = {
+            let wr_io_handle_index = IO_IX_WR_LN;
+            let wr_io_sender = io_sender.clone();
+            let wr_io_receiver = io_recv[wr_io_handle_index].clone();
+            let rd_io_handle_index = IO_IX_RD_LN;
+            let rd_io_sender = io_sender.clone();
+            let rd_io_receiver = io_recv[rd_io_handle_index].clone();
+            leaf::store::create(
+                ln_fd,
+                ln_freelist_pn,
+                ln_bump,
+                wr_io_handle_index,
+                wr_io_sender,
+                wr_io_receiver,
+                rd_io_handle_index,
+                rd_io_sender,
+                rd_io_receiver,
+            )
+        };
+
+        let (bbn_store_wr, bbn_freelist) = {
+            let bbn_fd = bbn_fd.try_clone().unwrap();
+            let wr_io_handle_index = IO_IX_WR_BBN;
+            let wr_io_sender = io_sender.clone();
+            let wr_io_receiver = io_recv[wr_io_handle_index].clone();
+            let rd_io_handle_index = IO_IX_RD_BBN;
+            let rd_io_sender = io_sender.clone();
+            let rd_io_receiver = io_recv[rd_io_handle_index].clone();
+            bbn::create(
+                bbn_fd,
+                bbn_freelist_pn,
+                bbn_bump,
+                wr_io_handle_index,
+                wr_io_sender,
+                wr_io_receiver,
+                rd_io_handle_index,
+                rd_io_sender,
+                rd_io_receiver,
+            )
+        };
+        let mut bnp = branch::BranchNodePool::new();
+        let index = ops::reconstruct(bbn_fd, &mut bnp, &bbn_freelist)?;
+        let shared = Shared {
+            bbn_index: index,
+            leaf_store_rd,
+            branch_node_pool: bnp,
+            staging: BTreeMap::new(),
+        };
+
+        let sync_io_handle_index = IO_IX_SYNC;
+        let sync_io_sender = io_sender.clone();
+        let sync_io_receiver = io_recv[sync_io_handle_index].clone();
+        let sync = Sync {
+            leaf_store_wr,
+            bbn_store_wr,
+            sync_io_handle_index,
+            sync_io_sender,
+            sync_io_receiver,
+            meta_fd: meta_raw_fd,
+            ln_fd: ln_raw_fd,
+            bbn_fd: bbn_raw_fd,
+        };
+
+        Ok(Tree {
+            shared: Arc::new(Mutex::new(shared)),
+            sync: Arc::new(Mutex::new(sync)),
+        })
     }
 
     /// Lookup a key in the btree.
@@ -136,7 +266,7 @@ impl Tree {
             (pages, freelist_head.0, bump.0, extend_file_sz)
         };
 
-        let (bbn, free_list_pages, bbn_freelist_pn, bbn_bump, bbn_extend_file_sz) = {
+        let (bbn, bbn_freelist_pages, bbn_freelist_pn, bbn_bump, bbn_extend_file_sz) = {
             let BbnStoreCommitOutput {
                 bbn,
                 free_list_pages,
@@ -160,28 +290,22 @@ impl Tree {
             bbn_bump,
         };
 
-        // writeout::run(
-        //     sync.sync_io_sender,
-        //     sync.sync_io_handle_index,
-        //     sync.sync_io_receiver,
-        //     bnp,
-        //     bbn_fd,
-        //     ln_fd,
-        //     meta_fd,
-        //     bbn,
-        //     bbn_extend_file_sz,
-        //     ln,
-        //     ln_extend_file_sz,
-        //     new_meta,
-        // );
-        let _ = (
-            new_meta,
+        // TODO: workaround to make it compile. Obviously broken. see the comment below.
+        let bnp = branch::BranchNodePool::new();
+        writeout::run(
+            sync.sync_io_sender.clone(),
+            sync.sync_io_handle_index,
+            sync.sync_io_receiver.clone(),
+            bnp,
+            sync.bbn_fd,
+            sync.ln_fd,
+            sync.meta_fd,
+            bbn,
+            bbn_freelist_pages,
+            bbn_extend_file_sz,
             ln,
             ln_extend_file_sz,
-            &sync.sync_io_sender,
-            &sync.sync_io_handle_index,
-            &sync.sync_io_receiver,
-            &writeout::run,
+            new_meta,
         );
 
         {
@@ -209,7 +333,7 @@ impl Tree {
 
 #[allow(unused)]
 pub fn test_btree() {
-    let tree = Tree::open("test.store");
+    let tree = Tree::open("test.store").unwrap();
     let mut changeset = Vec::new();
     let key = [1u8; 32];
     changeset.push((key.clone(), Some(b"value1".to_vec())));

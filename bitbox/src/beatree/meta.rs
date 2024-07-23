@@ -1,3 +1,6 @@
+use anyhow::Result;
+use std::{fs::File, io::Read as _};
+
 /// This data structure describes the state of the btree.
 pub struct Meta {
     /// The page number of the head of the freelist of the leaf storage file. 0 means the freelist
@@ -35,5 +38,11 @@ impl Meta {
             bbn_freelist_pn,
             bbn_bump,
         }
+    }
+
+    pub fn read(mut fd: &File) -> Result<Self> {
+        let mut buf = [0u8; 20];
+        fd.read_exact(&mut buf)?;
+        Ok(Self::decode(&buf))
     }
 }

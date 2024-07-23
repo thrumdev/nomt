@@ -12,9 +12,8 @@ use super::{
     leaf, Key,
 };
 
-// TODO: update with new `BbnStoreReader::recover_bbns` method
-//mod reconstruction;
-//pub use reconstruction::reconstruct;
+mod reconstruction;
+pub use reconstruction::reconstruct;
 
 /// Lookup a key in the btree.
 pub fn lookup(
