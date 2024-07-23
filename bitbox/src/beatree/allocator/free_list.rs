@@ -4,7 +4,7 @@ use crate::{
     store::{Page, PAGE_SIZE},
 };
 use crossbeam_channel::{Receiver, Sender, TrySendError};
-use std::{fs::File, os::fd::AsRawFd};
+use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd};
 
 const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
 
@@ -75,6 +75,21 @@ impl FreeList {
             portions: free_list_portions,
             released_portions: vec![],
         }
+    }
+
+    pub fn into_set(self) -> BTreeSet<PageNumber> {
+        let Some(pns) = self.head.map(|(_, pns)| pns) else {
+            return BTreeSet::new();
+        };
+
+        let pns = vec![pns]
+            .into_iter()
+            .chain(self.portions.into_iter().map(|(_, pns)| pns))
+            .into_iter()
+            .flatten()
+            .into_iter();
+
+        BTreeSet::from_iter(pns)
     }
 
     pub fn head_pn(&self) -> Option<PageNumber> {

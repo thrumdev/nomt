@@ -13,7 +13,7 @@ use std::{
 mod free_list;
 
 /// The number of a page
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageNumber(pub u32);
 
 impl PageNumber {
@@ -31,6 +31,8 @@ impl From<u32> for PageNumber {
 /// The AllocatorReader enables fetching pages from the store.
 pub struct AllocatorReader {
     store_file: File,
+    free_list_head: Option<PageNumber>,
+    bump: PageNumber,
     io_handle_index: usize,
     io_sender: Sender<IoCommand>,
     io_receiver: Receiver<CompleteIo>,
@@ -95,6 +97,8 @@ pub fn create(
 
     let reader = AllocatorReader {
         store_file: reader_fd,
+        free_list_head,
+        bump,
         io_handle_index: rd_io_handle_index,
         io_sender: rd_io_sender,
         io_receiver: rd_io_receiver,
@@ -130,6 +134,20 @@ impl AllocatorReader {
         let page = completion.command.kind.unwrap_buf();
 
         page
+    }
+
+    pub fn free_list(&self) -> FreeList {
+        FreeList::read(
+            &self.store_file,
+            &self.io_sender,
+            self.io_handle_index,
+            &self.io_receiver,
+            self.free_list_head,
+        )
+    }
+
+    pub fn bump(&self) -> PageNumber {
+        self.bump
     }
 }
 

@@ -57,7 +57,20 @@ pub fn create(
 
 impl BbnStoreReader {
     pub fn recover_bbns(self) -> Vec<Box<Page>> {
-        todo!()
+        let mut valid_pages = vec![];
+
+        // read a free list from store
+        let invalid_pages = self.allocator_reader.free_list().into_set();
+
+        // iterate over all pages
+        for pn in 0..self.allocator_reader.bump().0 {
+            // filter invalid ones
+            if !invalid_pages.contains(&pn.into()) {
+                let page = self.allocator_reader.query(pn.into());
+                valid_pages.push(page);
+            }
+        }
+        valid_pages
     }
 }
 
