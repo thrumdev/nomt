@@ -1,6 +1,7 @@
 use allocator::PageNumber;
 use anyhow::Result;
 use branch::BRANCH_NODE_SIZE;
+use im::OrdMap;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -42,7 +43,7 @@ struct Shared {
     bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
     branch_node_pool: branch::BranchNodePool,
-    staging: BTreeMap<Key, Option<Vec<u8>>>,
+    staging: OrdMap<Key, Option<Vec<u8>>>,
 }
 
 struct Sync {
@@ -54,12 +55,6 @@ struct Sync {
     meta_fd: RawFd,
     ln_fd: RawFd,
     bbn_fd: RawFd,
-}
-
-impl Shared {
-    fn take_staged_changeset(&mut self) -> BTreeMap<Key, Option<Vec<u8>>> {
-        mem::take(&mut self.staging)
-    }
 }
 
 impl Tree {
@@ -167,7 +162,7 @@ impl Tree {
             bbn_index: index,
             leaf_store_rd,
             branch_node_pool: bnp,
-            staging: BTreeMap::new(),
+            staging: OrdMap::new(),
         };
 
         let sync_io_handle_index = IO_IX_SYNC;
@@ -193,6 +188,12 @@ impl Tree {
     /// Lookup a key in the btree.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let shared = self.shared.lock().unwrap();
+
+        // first look into the values in staging
+        if let Some(val) = shared.staging.get(&key) {
+            return val.clone();
+        }
+
         ops::lookup(
             key,
             &shared.bbn_index,
@@ -233,8 +234,8 @@ impl Tree {
         let mut bbn_index;
         let mut branch_node_pool;
         {
-            let mut inner = self.shared.lock().unwrap();
-            staged_changeset = inner.take_staged_changeset();
+            let inner = self.shared.lock().unwrap();
+            staged_changeset = inner.staging.clone();
             bbn_index = inner.bbn_index.clone();
             branch_node_pool = inner.branch_node_pool.clone();
         }
@@ -246,8 +247,25 @@ impl Tree {
             // mutable borrow of `MutexGuard<_, Sync>`
             let sync = sync.deref_mut();
 
+            // Update will use the branch_node_pool in a cow manner to make lookups
+            // possible during sync.
+            // Nodes that need to be modified are not modified in place but they are
+            // returned as obsolete, and new ones (implying the one created as modification
+            // of existing nodes) are allocated using the previous state of the free list.
+            //
+            // Thus during the update:
+            // + The index will just be modified, being a copy of the one used in parallel during lookups
+            // + Allocation and releases of the leaf_store_wr will be executed normally,
+            //   as everything will be in a pending state until commit
+            // + The branch_node_pool will only allocate new BranchIds.
+            //   All releases will be cached to be performed at the end of the sync.
+            //   This makes it possible to keep the previous state of the tree (before this sync)
+            //   available and reachable from the old index
+            // + The bbn_store_wr follows the same reasoning as leaf_store_wr,
+            //   so things will be allocated and released following what is being performed
+            //   on the branch_node_pool and commited later on onto disk
             ops::update(
-                staged_changeset,
+                staged_changeset.clone(),
                 &mut bbn_index,
                 &mut branch_node_pool,
                 &mut sync.leaf_store_wr,
@@ -290,13 +308,10 @@ impl Tree {
             bbn_bump,
         };
 
-        // TODO: workaround to make it compile. Obviously broken. see the comment below.
-        let bnp = branch::BranchNodePool::new();
         writeout::run(
             sync.sync_io_sender.clone(),
             sync.sync_io_handle_index,
             sync.sync_io_receiver.clone(),
-            bnp,
             sync.bbn_fd,
             sync.ln_fd,
             sync.meta_fd,
@@ -308,26 +323,13 @@ impl Tree {
             new_meta,
         );
 
-        {
-            let mut inner = self.shared.lock().unwrap();
-            inner.bbn_index = bbn_index;
-            // TODO: watch out for the lock contention here. If we change 50k values, that might
-            // result in 50k bottom-level branch nodes being released. On top of that, there are
-            // also upper-level branch nodes. We are also adding a lot of nodes one by one.
-            //
-            // If you think about it, it's all not necessary, because we only need to access to
-            // the BNP freelist, which should be used exclusively by the sync thread. But note
-            // once crucial thing: the obsolete branches are not released until the BBN index is
-            // overwritten in the line above.
-            //
-            // Also, the sync needs to query the branch pages in the course of the sync, so that's
-            // another indication for splitting the read/write parts.
-            for id in obsolete_branches {
-                inner.branch_node_pool.release(id);
-            }
+        // Take the shared lock again to complete the update to the new shared state
+        let mut inner = self.shared.lock().unwrap();
+        inner.staging = inner.staging.clone().difference(staged_changeset);
+        inner.bbn_index = bbn_index;
+        for id in obsolete_branches {
+            inner.branch_node_pool.release(id);
         }
-
-        todo!()
     }
 }
 

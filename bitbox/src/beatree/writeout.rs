@@ -20,7 +20,6 @@ pub fn run(
     io_sender: Sender<IoCommand>,
     io_handle_index: usize,
     io_receiver: Receiver<CompleteIo>,
-    bnp: BranchNodePool,
     bbn_fd: RawFd,
     ln_fd: RawFd,
     meta_fd: RawFd,
@@ -54,11 +53,10 @@ pub fn run(
             }),
         },
         io,
-        bnp,
     );
 }
 
-fn do_run(mut cx: Cx, mut io: IoDmux, bnp: BranchNodePool) {
+fn do_run(mut cx: Cx, mut io: IoDmux) {
     // This should perform the following actions:
     // - truncate the BBN file to the correct size.
     // - truncate the LN file to the correct size.
@@ -71,7 +69,7 @@ fn do_run(mut cx: Cx, mut io: IoDmux, bnp: BranchNodePool) {
     loop {
         if cx.bbn_write_out.is_some() || cx.ln_write_out.is_some() {
             if let Some(ref mut bbn_write_out) = &mut cx.bbn_write_out {
-                if bbn_write_out.run(&bnp, &mut io) {
+                if bbn_write_out.run(&mut io) {
                     cx.bbn_write_out = None;
                 }
             }
@@ -216,7 +214,7 @@ struct BbnWriteOut {
 }
 
 impl BbnWriteOut {
-    fn run(&mut self, bnp: &BranchNodePool, io: &mut IoDmux) -> bool {
+    fn run(&mut self, io: &mut IoDmux) -> bool {
         // Turns out, as of this writing, io_uring doesn't support ftruncate. So we have to do it
         // via good old ftruncate syscall here.
         //
