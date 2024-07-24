@@ -1,5 +1,5 @@
 use allocator::PageNumber;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
 use im::OrdMap;
 use std::{
@@ -157,7 +157,8 @@ impl Tree {
             )
         };
         let mut bnp = branch::BranchNodePool::new();
-        let index = ops::reconstruct(bbn_fd, &mut bnp, &bbn_freelist, bbn_bump)?;
+        let index = ops::reconstruct(bbn_fd, &mut bnp, &bbn_freelist, bbn_bump)
+            .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
         let shared = Shared {
             bbn_index: index,
             leaf_store_rd,
@@ -241,10 +242,6 @@ impl Tree {
         }
 
         let obsolete_branches = {
-            // TODO: I don't know if this is the best way to handle this,
-            // but doing directly `&mut sync.leaf_store_wr` and `&mut sync.bbn_store_wr`
-            // doesn't work because the borrow checker doesn't allow two
-            // mutable borrow of `MutexGuard<_, Sync>`
             let sync = sync.deref_mut();
 
             // Update will use the branch_node_pool in a cow manner to make lookups

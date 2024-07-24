@@ -7,7 +7,7 @@
 //!     Create a sorted list of this next layer of BNs as we go.
 //!   3. Repeat step 2 until the root node is created.
 
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use bitvec::prelude::*;
 use crossbeam_channel::Receiver;
 use std::{
@@ -41,21 +41,19 @@ pub fn reconstruct(
         let seq_chunk = seq_chunk?;
         let nodes = seq_chunk.chunks(BRANCH_NODE_SIZE);
         for node in nodes {
-            if pn == 0 {
-                // skip the first page present in the bbn store file
-                continue;
-            } else if pn >= bump.0 {
+            if pn >= bump.0 {
                 // Exceeded last possible valid page
                 return Ok(index);
             }
 
             let view = branch::BranchNodeView::from_slice(node);
+            ensure!(view.bbn_pn() == pn, "pn mismatch");
             if bbn_freelist.contains(&view.bbn_pn().into()) {
                 continue;
             }
 
             if view.n() == 0 && node == [0; BRANCH_NODE_SIZE] {
-                anyhow::bail!("bbn store is in an inconsistent state - invalid branch node")
+                bail!("zero-length branch node")
             }
 
             let new_branch_id = bnp.allocate();
@@ -76,9 +74,7 @@ pub fn reconstruct(
             }
 
             if let Some(_) = index.insert(separator, new_branch_id) {
-                anyhow::bail!(
-                    "bbn store is in an inconsistent state - 2 branch nodes with same separator"
-                )
+                bail!("2 branch nodes with same separator")
             }
 
             pn += 1;
