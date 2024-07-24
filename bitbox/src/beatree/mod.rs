@@ -157,7 +157,7 @@ impl Tree {
             )
         };
         let mut bnp = branch::BranchNodePool::new();
-        let index = ops::reconstruct(bbn_fd, &mut bnp, &bbn_freelist)?;
+        let index = ops::reconstruct(bbn_fd, &mut bnp, &bbn_freelist, bbn_bump)?;
         let shared = Shared {
             bbn_index: index,
             leaf_store_rd,

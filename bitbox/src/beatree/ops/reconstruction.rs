@@ -32,21 +32,30 @@ pub fn reconstruct(
     bn_fd: File,
     bnp: &mut branch::BranchNodePool,
     bbn_freelist: &BTreeSet<PageNumber>,
+    bump: PageNumber,
 ) -> Result<Index> {
     let mut index = Index::default();
 
+    let mut pn = 0u32;
     for seq_chunk in read_sequential(bn_fd)? {
         let seq_chunk = seq_chunk?;
         let nodes = seq_chunk.chunks(BRANCH_NODE_SIZE);
         for node in nodes {
+            if pn == 0 {
+                // skip the first page present in the bbn store file
+                continue;
+            } else if pn >= bump.0 {
+                // Exceeded last possible valid page
+                return Ok(index);
+            }
+
             let view = branch::BranchNodeView::from_slice(node);
             if bbn_freelist.contains(&view.bbn_pn().into()) {
                 continue;
             }
 
-            // handle empty.
             if view.n() == 0 && node == [0; BRANCH_NODE_SIZE] {
-                continue;
+                anyhow::bail!("bbn store is in an inconsistent state - invalid branch node")
             }
 
             let new_branch_id = bnp.allocate();
@@ -65,9 +74,14 @@ pub fn reconstruct(
                 let first = view.separator(0);
                 separator[prefix.len()..prefix.len() + first.len()].copy_from_bitslice(first);
             }
-            if let Some(_displaced_branch_id) = index.insert(separator, new_branch_id) {
-                // TODO:
+
+            if let Some(_) = index.insert(separator, new_branch_id) {
+                anyhow::bail!(
+                    "bbn store is in an inconsistent state - 2 branch nodes with same separator"
+                )
             }
+
+            pn += 1;
         }
     }
 
