@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use bitvec::prelude::*;
-use im::OrdMap;
 use std::{collections::BTreeMap, fs::File};
 
 use super::{
@@ -47,7 +46,7 @@ pub fn lookup(
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
-    changeset: OrdMap<Key, Option<Vec<u8>>>,
+    changeset: &BTreeMap<Key, Option<Vec<u8>>>,
     bbn_index: &mut Index,
     bnp: &mut branch::BranchNodePool,
     leaf_store: &mut leaf::store::LeafStoreWriter,
