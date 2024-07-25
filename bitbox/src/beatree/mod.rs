@@ -4,10 +4,13 @@ use branch::BRANCH_NODE_SIZE;
 use im::OrdMap;
 use std::{
     collections::BTreeMap,
-    fs::File,
+    fs::{File, OpenOptions},
     mem,
     ops::DerefMut,
-    os::fd::{AsRawFd as _, RawFd},
+    os::{
+        fd::{AsRawFd as _, RawFd},
+        unix::fs::OpenOptionsExt,
+    },
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -98,9 +101,21 @@ impl Tree {
             File::open(db_dir.as_ref())?.sync_all()?;
         }
 
-        let bbn_fd = File::open(db_dir.as_ref().join("bbn"))?;
-        let ln_fd = File::open(db_dir.as_ref().join("ln"))?;
-        let meta_fd = File::open(db_dir.as_ref().join("meta"))?;
+        let bbn_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(db_dir.as_ref().join("bbn"))?;
+        let ln_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(db_dir.as_ref().join("ln"))?;
+        let meta_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(db_dir.as_ref().join("meta"))?;
 
         let bbn_raw_fd = bbn_fd.as_raw_fd();
         let ln_raw_fd = ln_fd.as_raw_fd();
