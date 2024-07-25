@@ -96,14 +96,14 @@ impl Tree {
             bbn_fd.set_len(BRANCH_NODE_SIZE as u64)?;
 
             let mut meta_fd = File::create(db_dir.as_ref().join("meta"))?;
-            let mut buf = [0u8; 20];
+            let buf = [0u8; 4096];
             Meta {
                 ln_freelist_pn: 0,
                 ln_bump: 1,
                 bbn_freelist_pn: 0,
                 bbn_bump: 1,
             }
-            .encode_to(&mut buf);
+            .encode_to(&mut buf[0..20].try_into().unwrap());
             meta_fd.write_all(&buf)?;
 
             // Sync files and the directory. I am not sure if syncing files is necessar, but it

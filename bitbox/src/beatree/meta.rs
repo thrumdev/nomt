@@ -1,6 +1,8 @@
 use anyhow::Result;
 use std::{fs::File, io::Read as _};
 
+use crate::store::Page;
+
 /// This data structure describes the state of the btree.
 pub struct Meta {
     /// The page number of the head of the freelist of the leaf storage file. 0 means the freelist
@@ -41,7 +43,9 @@ impl Meta {
     }
 
     pub fn read(mut fd: &File) -> Result<Self> {
-        let mut buf = [0u8; 20];
+        // The fd is expected to be opened with O_DIRECT and thus we have to satisfy the alignment
+        // requirements for the buffer. Use a Page for that.
+        let mut buf = Page::zeroed();
         fd.read_exact(&mut buf)?;
         Ok(Self::decode(&buf))
     }
