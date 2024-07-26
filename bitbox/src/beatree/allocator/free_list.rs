@@ -17,6 +17,8 @@ const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
 pub struct FreeList {
     head: Option<(PageNumber, Vec<PageNumber>)>,
     portions: Vec<(PageNumber, Vec<PageNumber>)>,
+    // Becomes true if something is being popped, false otherwise
+    pop: bool,
     released_portions: Vec<PageNumber>,
 }
 
@@ -32,6 +34,7 @@ impl FreeList {
             return FreeList {
                 head: None,
                 portions: vec![],
+                pop: false,
                 released_portions: vec![],
             };
         };
@@ -70,8 +73,11 @@ impl FreeList {
             free_list_pn = prev;
         }
 
+        free_list_portions.reverse();
+
         FreeList {
             head: free_list_portions.pop(),
+            pop: false,
             portions: free_list_portions,
             released_portions: vec![],
         }
@@ -111,6 +117,7 @@ impl FreeList {
             self.head = self.portions.pop();
         }
 
+        self.pop = true;
         Some(pn)
     }
 
@@ -204,6 +211,11 @@ impl FreeList {
         mut to_append: Vec<PageNumber>,
         bump: &mut PageNumber,
     ) -> Vec<(PageNumber, Box<Page>)> {
+        // No changes were made
+        if !self.pop && to_append.is_empty() {
+            return vec![];
+        }
+
         // append the released free list pages
         to_append.extend(std::mem::take(&mut self.released_portions));
 
@@ -256,6 +268,18 @@ impl FreeList {
                 pages.push(encoded);
             }
         }
+
+        // After a commit the head will always be re encoded, if present
+        if let Some((head_pn, head_pns)) = &self.head {
+            let prev = self
+                .portions
+                .last()
+                .map(|(pn, _)| *pn)
+                .unwrap_or(PageNumber(0));
+            pages.push((head_pn.clone(), encode_free_list_page(prev, head_pns)));
+        }
+
+        self.pop = false;
 
         pages
     }

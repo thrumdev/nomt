@@ -43,9 +43,11 @@ pub struct AllocatorReader {
 /// to storage to reflect the store's state at that moment
 pub struct AllocatorWriter {
     store_file: File,
-    io_handle_index: usize,
-    io_sender: Sender<IoCommand>,
-    io_receiver: Receiver<CompleteIo>,
+    // Currently unused, they may become useful when writes will be shared
+    // between this struct and the writeout method
+    _io_handle_index: usize,
+    _io_sender: Sender<IoCommand>,
+    _io_receiver: Receiver<CompleteIo>,
     // Monotonic page number, used when the free list is empty
     bump: PageNumber,
     // The store is an array of pages, with indices as PageNumbers,
