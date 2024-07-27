@@ -13,7 +13,10 @@ use super::{
 };
 
 mod reconstruction;
+mod update;
+
 pub use reconstruction::reconstruct;
+pub use update::update;
 
 /// Lookup a key in the btree.
 pub fn lookup(
@@ -38,21 +41,6 @@ pub fn lookup(
 
     let _ = leaf_store;
     let _ = leaf_pn;
-    todo!();
-}
-
-/// Change the btree in the specified way. Updates the branch index in-place and returns
-/// a list of branches which have become obsolete.
-///
-/// The changeset is a list of key value pairs to be added or removed from the btree.
-pub fn update(
-    changeset: &BTreeMap<Key, Option<Vec<u8>>>,
-    bbn_index: &mut Index,
-    bnp: &mut branch::BranchNodePool,
-    leaf_store: &mut leaf::store::LeafStoreWriter,
-    bbn_store: &mut bbn::BbnStoreWriter,
-) -> Result<Vec<BranchId>> {
-    let _ = (changeset, bbn_index, bnp, leaf_store, bbn_store);
     todo!();
 }
 

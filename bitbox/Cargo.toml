@@ -17,6 +17,7 @@ blake3 = "1.5.1"
 ahash = "0.8.11"
 bitvec = "1.0.1"
 im = "15.1.0"
+itertools = "0.13.0"
 
 [profile.release]
 debug = true

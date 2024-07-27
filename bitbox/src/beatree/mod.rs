@@ -303,7 +303,7 @@ impl Tree {
                 &staged_changeset,
                 &mut bbn_index,
                 &mut branch_node_pool,
-                // & sync.leaf_store_rd
+                &sync.leaf_store_rd,
                 &mut sync.leaf_store_wr,
                 &mut sync.bbn_store_wr,
             )

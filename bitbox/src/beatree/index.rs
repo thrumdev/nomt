@@ -24,7 +24,12 @@ impl Index {
         self.first_key_map.range(std::ops::RangeToInclusive { end: key })
             .next_back()
             .map(|(_sep, b)| b.clone())
-    } 
+    }
+
+    /// Get the first branch in the index by key.
+    pub fn first(&self) -> Option<(Key, BranchId)> {
+        self.first_key_map.iter().next().map(|(k, b)| (*k, *b))
+    }
 
     /// Remove the branch with the given separator key.
     pub fn remove(&mut self, separator: &Key) -> Option<BranchId> {
