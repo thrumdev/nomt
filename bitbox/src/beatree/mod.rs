@@ -55,6 +55,7 @@ struct Shared {
 
 struct Sync {
     leaf_store_wr: LeafStoreWriter,
+    leaf_store_rd: LeafStoreReader,
     bbn_store_wr: BbnStoreWriter,
     sync_io_handle_index: usize,
     sync_io_sender: Sender<IoCommand>,
@@ -75,12 +76,13 @@ impl Shared {
 
 impl Tree {
     pub fn open(db_dir: impl AsRef<Path>) -> Result<Tree> {
-        const IO_IX_RD_LN: usize = 0;
-        const IO_IX_WR_LN: usize = 1;
-        const IO_IX_RD_BBN: usize = 2;
-        const IO_IX_WR_BBN: usize = 3;
-        const IO_IX_SYNC: usize = 4;
-        const NUM_IO_HANDLES: usize = 5;
+        const IO_IX_RD_LN_SHARED: usize = 0;
+        const IO_IX_RD_LN_SYNC: usize = 1;
+        const IO_IX_WR_LN: usize = 2;
+        const IO_IX_RD_BBN: usize = 3;
+        const IO_IX_WR_BBN: usize = 4;
+        const IO_IX_SYNC: usize = 5;
+        const NUM_IO_HANDLES: usize = 6;
 
         let (io_sender, io_recv) = io::start_io_worker(NUM_IO_HANDLES, Mode::Real { num_rings: 3 });
 
@@ -144,23 +146,30 @@ impl Tree {
         let ln_bump = PageNumber(meta.ln_bump);
         let bbn_bump = PageNumber(meta.bbn_bump);
 
-        let (leaf_store_rd, leaf_store_wr) = {
+        let (leaf_store_rd_shared, leaf_store_rd_sync, leaf_store_wr) = {
+            let rd_io_handle_index_shared = IO_IX_RD_LN_SHARED;
+            let rd_io_sender_shared = io_sender.clone();
+            let rd_io_receiver_shared = io_recv[rd_io_handle_index_shared].clone();
+            let rd_io_handle_index_sync = IO_IX_RD_LN_SYNC;
+            let rd_io_sender_sync = io_sender.clone();
+            let rd_io_receiver_sync = io_recv[rd_io_handle_index_sync].clone();
             let wr_io_handle_index = IO_IX_WR_LN;
             let wr_io_sender = io_sender.clone();
             let wr_io_receiver = io_recv[wr_io_handle_index].clone();
-            let rd_io_handle_index = IO_IX_RD_LN;
-            let rd_io_sender = io_sender.clone();
-            let rd_io_receiver = io_recv[rd_io_handle_index].clone();
+
             leaf::store::create(
                 ln_fd,
                 ln_freelist_pn,
                 ln_bump,
+                rd_io_handle_index_shared,
+                rd_io_sender_shared,
+                rd_io_receiver_shared,
+                rd_io_handle_index_sync,
+                rd_io_sender_sync,
+                rd_io_receiver_sync,
                 wr_io_handle_index,
                 wr_io_sender,
                 wr_io_receiver,
-                rd_io_handle_index,
-                rd_io_sender,
-                rd_io_receiver,
             )
         };
 
@@ -189,7 +198,7 @@ impl Tree {
             .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
         let shared = Shared {
             bbn_index: index,
-            leaf_store_rd,
+            leaf_store_rd: leaf_store_rd_shared,
             branch_node_pool: bnp,
             primary_staging: BTreeMap::new(),
             secondary_staging: None,
@@ -200,6 +209,7 @@ impl Tree {
         let sync_io_receiver = io_recv[sync_io_handle_index].clone();
         let sync = Sync {
             leaf_store_wr,
+            leaf_store_rd: leaf_store_rd_sync,
             bbn_store_wr,
             sync_io_handle_index,
             sync_io_sender,
@@ -300,6 +310,7 @@ impl Tree {
                 &staged_changeset,
                 &mut bbn_index,
                 &mut branch_node_pool,
+                // & sync.leaf_store_rd
                 &mut sync.leaf_store_wr,
                 &mut sync.bbn_store_wr,
             )

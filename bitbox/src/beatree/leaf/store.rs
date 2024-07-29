@@ -27,27 +27,50 @@ pub fn create(
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
+    rd_io_handle_index_shared: usize,
+    rd_io_sender_shared: Sender<IoCommand>,
+    rd_io_receiver_shared: Receiver<CompleteIo>,
+    rd_io_handle_index_sync: usize,
+    rd_io_sender_sync: Sender<IoCommand>,
+    rd_io_receiver_sync: Receiver<CompleteIo>,
     wr_io_handle_index: usize,
     wr_io_sender: Sender<IoCommand>,
     wr_io_receiver: Receiver<CompleteIo>,
-    rd_io_handle_index: usize,
-    rd_io_sender: Sender<IoCommand>,
-    rd_io_receiver: Receiver<CompleteIo>,
-) -> (LeafStoreReader, LeafStoreWriter) {
-    let (allocator_reader, allocator_writer) = allocator::create(
+) -> (LeafStoreReader, LeafStoreReader, LeafStoreWriter) {
+    let allocator_reader_shared = AllocatorReader::new(
+        fd.try_clone().expect("failed to clone file"),
+        free_list_head,
+        bump,
+        rd_io_handle_index_shared,
+        rd_io_sender_shared,
+        rd_io_receiver_shared,
+    );
+
+    let allocator_reader_sync = AllocatorReader::new(
+        fd.try_clone().expect("failed to clone file"),
+        free_list_head,
+        bump,
+        rd_io_handle_index_sync,
+        rd_io_sender_sync,
+        rd_io_receiver_sync,
+    );
+
+    let allocator_writer = AllocatorWriter::new(
         fd,
         free_list_head,
         bump,
         wr_io_handle_index,
         wr_io_sender,
         wr_io_receiver,
-        rd_io_handle_index,
-        rd_io_sender,
-        rd_io_receiver,
     );
 
     (
-        LeafStoreReader { allocator_reader },
+        LeafStoreReader {
+            allocator_reader: allocator_reader_shared,
+        },
+        LeafStoreReader {
+            allocator_reader: allocator_reader_sync,
+        },
         LeafStoreWriter {
             allocator_writer,
             pending: vec![],

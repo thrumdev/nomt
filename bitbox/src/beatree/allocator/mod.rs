@@ -58,56 +58,26 @@ pub struct AllocatorWriter {
     released: Vec<PageNumber>,
 }
 
-/// creates a pair of AllocatorReader and AllocatorWriter over a possibly already existing File.
-pub fn create(
-    fd: File,
-    free_list_head: Option<PageNumber>,
-    bump: PageNumber,
-    wr_io_handle_index: usize,
-    wr_io_sender: Sender<IoCommand>,
-    wr_io_receiver: Receiver<CompleteIo>,
-    rd_io_handle_index: usize,
-    rd_io_sender: Sender<IoCommand>,
-    rd_io_receiver: Receiver<CompleteIo>,
-) -> (AllocatorReader, AllocatorWriter) {
-    let file_size = fd
-        .metadata()
-        .expect("Error extracting metadata from file")
-        .size() as usize;
-
-    let reader_fd = fd.try_clone().expect("failed to clone file");
-    let writer_fd = fd;
-
-    let writer = AllocatorWriter {
-        free_list: FreeList::read(
-            &writer_fd,
-            &wr_io_sender,
-            wr_io_handle_index,
-            &wr_io_receiver,
-            free_list_head,
-        ),
-        store_file: writer_fd,
-        io_handle_index: wr_io_handle_index,
-        io_sender: wr_io_sender,
-        io_receiver: wr_io_receiver,
-        bump,
-        file_max_bump: PageNumber((file_size / PAGE_SIZE) as u32),
-        released: vec![],
-    };
-
-    let reader = AllocatorReader {
-        store_file: reader_fd,
-        free_list_head,
-        bump,
-        io_handle_index: rd_io_handle_index,
-        io_sender: rd_io_sender,
-        io_receiver: rd_io_receiver,
-    };
-
-    (reader, writer)
-}
-
 impl AllocatorReader {
+    /// creates an AllocatorReader over a possibly already existing File.
+    pub fn new(
+        fd: File,
+        free_list_head: Option<PageNumber>,
+        bump: PageNumber,
+        io_handle_index: usize,
+        io_sender: Sender<IoCommand>,
+        io_receiver: Receiver<CompleteIo>,
+    ) -> Self {
+        AllocatorReader {
+            store_file: fd,
+            free_list_head,
+            bump,
+            io_handle_index,
+            io_sender,
+            io_receiver,
+        }
+    }
+
     /// Returns the page with the specified page number.
     pub fn query(&self, pn: PageNumber) -> Box<Page> {
         let page = Box::new(Page::zeroed());
@@ -152,6 +122,38 @@ impl AllocatorReader {
 }
 
 impl AllocatorWriter {
+    /// creates an AllocatorWriter over a possibly already existing File.
+    pub fn new(
+        fd: File,
+        free_list_head: Option<PageNumber>,
+        bump: PageNumber,
+        io_handle_index: usize,
+        io_sender: Sender<IoCommand>,
+        io_receiver: Receiver<CompleteIo>,
+    ) -> Self {
+        let file_size = fd
+            .metadata()
+            .expect("Error extracting metadata from file")
+            .size() as usize;
+
+        AllocatorWriter {
+            free_list: FreeList::read(
+                &fd,
+                &io_sender,
+                io_handle_index,
+                &io_receiver,
+                free_list_head,
+            ),
+            store_file: fd,
+            io_handle_index,
+            io_sender,
+            io_receiver,
+            bump,
+            file_max_bump: PageNumber((file_size / PAGE_SIZE) as u32),
+            released: vec![],
+        }
+    }
+
     pub fn allocate(&mut self) -> PageNumber {
         let pn = match self.free_list.pop() {
             Some(pn) => pn,
