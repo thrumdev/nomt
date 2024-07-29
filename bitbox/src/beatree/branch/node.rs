@@ -181,7 +181,9 @@ impl<'a> BranchNodeView<'a> {
 }
 
 pub fn body_size(prefix_len: usize, separator_len: usize, n: usize) -> usize {
-    prefix_len + (separator_len * n) + (4 * n)
+    // prefix plus separator lengths are measured in bits, which we round
+    // up to the next byte boundary and then follow by the node pointers.
+    (prefix_len + (separator_len * n) + 7)/8 + (4 * n)
 }
 
 pub fn body_fullness(prefix_len: usize, separator_len: usize, n: usize) -> f32 {
