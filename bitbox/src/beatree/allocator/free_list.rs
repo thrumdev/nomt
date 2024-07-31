@@ -14,6 +14,7 @@ const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
 ///
 /// Pages that are freed due to the fetch of free pages are automatically added back during the encode phase,
 /// which also covers the addition of new free pages.
+#[derive(Clone)]
 pub struct FreeList {
     head: Option<(PageNumber, Vec<PageNumber>)>,
     portions: Vec<(PageNumber, Vec<PageNumber>)>,

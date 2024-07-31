@@ -39,8 +39,6 @@ pub fn create(
 ) -> (LeafStoreReader, LeafStoreReader, LeafStoreWriter) {
     let allocator_reader_shared = AllocatorReader::new(
         fd.try_clone().expect("failed to clone file"),
-        free_list_head,
-        bump,
         rd_io_handle_index_shared,
         rd_io_sender_shared,
         rd_io_receiver_shared,
@@ -48,8 +46,6 @@ pub fn create(
 
     let allocator_reader_sync = AllocatorReader::new(
         fd.try_clone().expect("failed to clone file"),
-        free_list_head,
-        bump,
         rd_io_handle_index_sync,
         rd_io_sender_sync,
         rd_io_receiver_sync,

@@ -24,32 +24,19 @@ pub fn create(
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
-    wr_io_handle_index: usize,
-    wr_io_sender: Sender<IoCommand>,
-    wr_io_receiver: Receiver<CompleteIo>,
-    rd_io_handle_index: usize,
-    rd_io_sender: Sender<IoCommand>,
-    rd_io_receiver: Receiver<CompleteIo>,
+    io_handle_index: usize,
+    io_sender: Sender<IoCommand>,
+    io_receiver: Receiver<CompleteIo>,
 ) -> (BbnStoreWriter, BTreeSet<PageNumber>) {
-    let allocator_reader = AllocatorReader::new(
-        fd.try_clone().expect("failed to clone file"),
-        free_list_head,
-        bump,
-        rd_io_handle_index,
-        rd_io_sender,
-        rd_io_receiver,
-    );
-
-    let freelist = allocator_reader.free_list().into_set();
-
     let allocator_writer = AllocatorWriter::new(
         fd,
         free_list_head,
         bump,
-        wr_io_handle_index,
-        wr_io_sender,
-        wr_io_receiver,
+        io_handle_index,
+        io_sender,
+        io_receiver,
     );
+    let freelist = allocator_writer.free_list().clone().into_set();
 
     (
         BbnStoreWriter {

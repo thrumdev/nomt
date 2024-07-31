@@ -31,8 +31,6 @@ impl From<u32> for PageNumber {
 /// The AllocatorReader enables fetching pages from the store.
 pub struct AllocatorReader {
     store_file: File,
-    free_list_head: Option<PageNumber>,
-    bump: PageNumber,
     io_handle_index: usize,
     io_sender: Sender<IoCommand>,
     io_receiver: Receiver<CompleteIo>,
@@ -42,12 +40,6 @@ pub struct AllocatorReader {
 /// Upon calling commit, it returns a list of encoded pages that must be written
 /// to storage to reflect the store's state at that moment
 pub struct AllocatorWriter {
-    store_file: File,
-    // Currently unused, they may become useful when writes will be shared
-    // between this struct and the writeout method
-    _io_handle_index: usize,
-    _io_sender: Sender<IoCommand>,
-    _io_receiver: Receiver<CompleteIo>,
     // Monotonic page number, used when the free list is empty
     bump: PageNumber,
     // The store is an array of pages, with indices as PageNumbers,
@@ -64,16 +56,12 @@ impl AllocatorReader {
     /// creates an AllocatorReader over a possibly already existing File.
     pub fn new(
         fd: File,
-        free_list_head: Option<PageNumber>,
-        bump: PageNumber,
         io_handle_index: usize,
         io_sender: Sender<IoCommand>,
         io_receiver: Receiver<CompleteIo>,
     ) -> Self {
         AllocatorReader {
             store_file: fd,
-            free_list_head,
-            bump,
             io_handle_index,
             io_sender,
             io_receiver,
@@ -107,20 +95,6 @@ impl AllocatorReader {
 
         page
     }
-
-    pub fn free_list(&self) -> FreeList {
-        FreeList::read(
-            &self.store_file,
-            &self.io_sender,
-            self.io_handle_index,
-            &self.io_receiver,
-            self.free_list_head,
-        )
-    }
-
-    pub fn bump(&self) -> PageNumber {
-        self.bump
-    }
 }
 
 impl AllocatorWriter {
@@ -146,14 +120,14 @@ impl AllocatorWriter {
                 &io_receiver,
                 free_list_head,
             ),
-            store_file: fd,
-            io_handle_index,
-            io_sender,
-            io_receiver,
             bump,
             file_max_bump: PageNumber((file_size / PAGE_SIZE) as u32),
             released: vec![],
         }
+    }
+
+    pub fn free_list(&self) -> &FreeList {
+        &self.free_list
     }
 
     pub fn allocate(&mut self) -> PageNumber {

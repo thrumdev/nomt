@@ -79,10 +79,9 @@ impl Tree {
         const IO_IX_RD_LN_SHARED: usize = 0;
         const IO_IX_RD_LN_SYNC: usize = 1;
         const IO_IX_WR_LN: usize = 2;
-        const IO_IX_RD_BBN: usize = 3;
-        const IO_IX_WR_BBN: usize = 4;
-        const IO_IX_SYNC: usize = 5;
-        const NUM_IO_HANDLES: usize = 6;
+        const IO_IX_BBN: usize = 3;
+        const IO_IX_SYNC: usize = 4;
+        const NUM_IO_HANDLES: usize = 5;
 
         let (io_sender, io_recv) = io::start_io_worker(NUM_IO_HANDLES, Mode::Real { num_rings: 3 });
 
@@ -175,22 +174,16 @@ impl Tree {
 
         let (bbn_store_wr, bbn_freelist) = {
             let bbn_fd = bbn_fd.try_clone().unwrap();
-            let wr_io_handle_index = IO_IX_WR_BBN;
-            let wr_io_sender = io_sender.clone();
-            let wr_io_receiver = io_recv[wr_io_handle_index].clone();
-            let rd_io_handle_index = IO_IX_RD_BBN;
-            let rd_io_sender = io_sender.clone();
-            let rd_io_receiver = io_recv[rd_io_handle_index].clone();
+            let io_handle_index = IO_IX_BBN;
+            let io_sender = io_sender.clone();
+            let io_receiver = io_recv[io_handle_index].clone();
             bbn::create(
                 bbn_fd,
                 bbn_freelist_pn,
                 bbn_bump,
-                wr_io_handle_index,
-                wr_io_sender,
-                wr_io_receiver,
-                rd_io_handle_index,
-                rd_io_sender,
-                rd_io_receiver,
+                io_handle_index,
+                io_sender,
+                io_receiver,
             )
         };
         let mut bnp = branch::BranchNodePool::new();
