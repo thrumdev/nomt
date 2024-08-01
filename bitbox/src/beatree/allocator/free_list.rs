@@ -14,7 +14,6 @@ const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
 ///
 /// Pages that are freed due to the fetch of free pages are automatically added back during the encode phase,
 /// which also covers the addition of new free pages.
-#[derive(Clone)]
 pub struct FreeList {
     head: Option<(PageNumber, Vec<PageNumber>)>,
     portions: Vec<(PageNumber, Vec<PageNumber>)>,
@@ -84,14 +83,15 @@ impl FreeList {
         }
     }
 
-    pub fn into_set(self) -> BTreeSet<PageNumber> {
-        let Some(pns) = self.head.map(|(_, pns)| pns) else {
+    /// Copies all the elements present in the free list into a set
+    pub fn get_set(&self) -> BTreeSet<PageNumber> {
+        let Some(pns) = self.head.as_ref().map(|(_, pns)| pns.clone()) else {
             return BTreeSet::new();
         };
 
         let pns = vec![pns]
             .into_iter()
-            .chain(self.portions.into_iter().map(|(_, pns)| pns))
+            .chain(self.portions.iter().map(|(_, pns)| pns.clone()))
             .into_iter()
             .flatten()
             .into_iter();

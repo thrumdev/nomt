@@ -36,7 +36,7 @@ pub fn create(
         io_sender,
         io_receiver,
     );
-    let freelist = allocator_writer.free_list().clone().into_set();
+    let freelist = allocator_writer.free_list().get_set();
 
     (
         BbnStoreWriter {
