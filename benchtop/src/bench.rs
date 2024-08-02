@@ -24,6 +24,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
         common_params.workload.percentage_cold,
     )?;
     let fetch_concurrency = common_params.workload.fetch_concurrency;
+    let num_rings = common_params.workload.num_rings;
 
     let backends = if common_params.backends.is_empty() {
         Backend::all_backends()
@@ -39,6 +40,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             params.iterations,
             true,
             fetch_concurrency,
+            num_rings,
         )
         .map(|_| ()),
         BenchType::Sequential(params) => bench_sequential(
@@ -49,6 +51,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             params.time_limit,
             true,
             fetch_concurrency,
+            num_rings,
         )
         .map(|_| ()),
     }
@@ -66,13 +69,14 @@ pub fn bench_isolate(
     iterations: u64,
     print: bool,
     fetch_concurrency: usize,
+    num_rings: usize,
 ) -> Result<Vec<u64>> {
     let mut mean_results = vec![];
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
 
         for _ in 0..iterations {
-            let mut db = backend.instantiate(true, fetch_concurrency);
+            let mut db = backend.instantiate(true, fetch_concurrency, num_rings);
             db.execute(None, &mut init);
             db.execute(Some(&mut timer), &mut *workload);
             db.print_metrics();
@@ -101,6 +105,7 @@ pub fn bench_sequential(
     time_limit: Option<u64>,
     print: bool,
     fetch_concurrency: usize,
+    num_rings: usize,
 ) -> Result<Vec<u64>> {
     if let (None, None) = (op_limit, time_limit) {
         anyhow::bail!("You need to specify at least one limiter between operations and time")
@@ -110,7 +115,7 @@ pub fn bench_sequential(
 
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
-        let mut db = backend.instantiate(true, fetch_concurrency);
+        let mut db = backend.instantiate(true, fetch_concurrency, num_rings);
 
         let mut elapsed_time = 0;
         let mut op_count = 0;

@@ -38,8 +38,7 @@ impl Store {
 
         let values = rocksdb::DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
 
-        // TODO: add option to specify number of io_uring instances
-        let pages = bitbox::DB::open(3, o.path.clone())?;
+        let pages = bitbox::DB::open(o.num_rings, o.path.clone()).unwrap();
 
         Ok(Self {
             shared: Arc::new(Shared { values, pages }),

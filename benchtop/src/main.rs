@@ -35,9 +35,11 @@ pub fn init(params: InitParams) -> Result<()> {
         u64::max_value(),
     )?;
 
-    let mut db = params
-        .backend
-        .instantiate(true, workload_params.fetch_concurrency);
+    let mut db = params.backend.instantiate(
+        true,
+        workload_params.fetch_concurrency,
+        workload_params.num_rings,
+    );
     db.execute(None, &mut *init);
 
     Ok(())
@@ -56,9 +58,11 @@ pub fn run(params: RunParams) -> Result<()> {
         params.limits.ops.unwrap_or(u64::max_value()),
     )?;
 
-    let mut db = params
-        .backend
-        .instantiate(params.reset, workload_params.fetch_concurrency);
+    let mut db = params.backend.instantiate(
+        params.reset,
+        workload_params.fetch_concurrency,
+        workload_params.num_rings,
+    );
     if params.reset {
         db.execute(None, &mut *init);
     }

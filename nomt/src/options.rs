@@ -7,6 +7,8 @@ pub struct Options {
     /// The maximum number of concurrent page fetches. Values over 64 will be rounded down to 64.
     /// May not be zero.
     pub(crate) fetch_concurrency: usize,
+    /// The number of io_uring instances
+    pub(crate) num_rings: usize,
     /// Enable or disable metrics collection.
     pub(crate) metrics: bool,
 }
@@ -16,6 +18,7 @@ impl Default for Options {
         Self {
             path: PathBuf::from("nomt_db"),
             fetch_concurrency: 1,
+            num_rings: 3,
             metrics: false,
         }
     }
@@ -46,5 +49,13 @@ impl Options {
     /// Default: off.
     pub fn metrics(&mut self, metrics: bool) {
         self.metrics = metrics;
+    }
+
+    /// Set the number of io_uring instances.
+    ///
+    /// Must be more than 0
+    pub fn num_rings(&mut self, num_rings: usize) {
+        assert!(num_rings > 0);
+        self.num_rings = num_rings;
     }
 }
