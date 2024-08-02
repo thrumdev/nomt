@@ -114,6 +114,13 @@ pub struct WorkloadParams {
     #[arg(long = "fetch-concurrency", short)]
     #[clap(default_value = "1")]
     pub fetch_concurrency: usize,
+
+    /// Number of io_uring instances. Only used with Nomt backend.
+    ///
+    /// Default value is 3
+    #[arg(long = "num-rings", short)]
+    #[clap(default_value = "3")]
+    pub num_rings: usize,
 }
 
 #[derive(Debug, Clone, Args)]
