@@ -25,6 +25,7 @@ pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
 pub use options::Options;
 
+mod bitbox;
 mod commit;
 mod metrics;
 mod options;
