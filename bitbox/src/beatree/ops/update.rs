@@ -20,6 +20,10 @@ use super::BranchId;
 
 const BRANCH_MERGE_THRESHOLD: usize = BRANCH_NODE_BODY_SIZE / 2;
 
+// At 180% of the branch size, we perform a 'bulk split' which follows a different algorithm
+// than a simple split.
+const BRANCH_BULK_SPLIT_THRESHOLD: usize = (BRANCH_NODE_BODY_SIZE * 9) / 5;
+
 /// Change the btree in the specified way. Updates the branch index in-place and returns
 /// a list of branches which have become obsolete.
 ///
@@ -50,28 +54,9 @@ struct PrevBranch {
     id: branch::BranchId,
 }
 
-enum BranchChange {
-    // Remove the entry with the given separator.
-    Remove(Key),
-    // Update the entry with the given separator.
-    Update(Key, PageNumber),
-    // Insert an entry with the given separator.
-    Insert(Key, PageNumber),
-}
-
-impl BranchChange {
-    fn key(&self) -> &Key {
-        match *self {
-            BranchChange::Remove(ref key) => key,
-            BranchChange::Update(ref key, _) => key,
-            BranchChange::Insert(ref key, _) => key,
-        }
-    }
-}
-
 struct BranchChanges {
     prev: Option<PrevBranch>,
-    changes: Vec<BranchChange>,
+    changes: Vec<(Key, Option<PageNumber>)>,
 }
 
 impl BranchChanges {
@@ -96,7 +81,7 @@ impl BranchChanges {
 
         let merge = existing_keys.merge_join_by(
             self.changes.iter(),
-            |existing_key, change| existing_key.cmp(change.key())
+            |existing_key, change| existing_key.cmp(&change.0)
         );
 
         let mut gauge = BranchGauge::new();
@@ -106,14 +91,20 @@ impl BranchChanges {
                 EitherOrBoth::Left(key) => {
                     gauge.ingest(key);
                 }
-                EitherOrBoth::Right(BranchChange::Insert(key, _)) => {
+                EitherOrBoth::Right((key, Some(_))) => {
                     gauge.ingest(*key);
                 }
-                EitherOrBoth::Both(key, BranchChange::Remove(_)) => {}
-                EitherOrBoth::Both(key, BranchChange::Update(_, _)) => {
+                EitherOrBoth::Right((_, None)) => panic!("removed nonexistent branch"),
+                EitherOrBoth::Both(key, (_, Some(branch_id))) => {
                     gauge.ingest(key);
                 }
-                _ => panic!("invalid branch update"),
+                EitherOrBoth::Both(key, (_, None)) => {
+                    gauge.ingest(key);
+                }
+            }
+
+            if gauge.body_size() > BRANCH_BULK_SPLIT_THRESHOLD {
+                // TODO: initiate bulk split.
             }
         }
 
