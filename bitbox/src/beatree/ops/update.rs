@@ -25,9 +25,14 @@ const BRANCH_MERGE_THRESHOLD: usize = BRANCH_NODE_BODY_SIZE / 2;
 // than a simple split. Bulk splits are encountered when there are a large number of insertions
 // on a single node, typically when inserting into a fresh database.
 const BRANCH_BULK_SPLIT_THRESHOLD: usize = (BRANCH_NODE_BODY_SIZE * 9) / 5;
+// When performing a bulk split, we target 75% fullness for all of the nodes we create except the
+// last.
+const BRANCH_BULK_SPLIT_TARGET: usize = (BRANCH_NODE_BODY_SIZE * 3) / 4;
+
 
 const LEAF_MERGE_THRESHOLD: usize = LEAF_NODE_BODY_SIZE / 2;
 const LEAF_BULK_SPLIT_THRESHOLD: usize = (LEAF_NODE_BODY_SIZE * 9) / 5;
+const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 
 /// Change the btree in the specified way. Updates the branch index in-place and returns
 /// a list of branches which have become obsolete.
@@ -104,6 +109,7 @@ impl Updater {
             cutoff: first_leaf_cutoff,
             ops: Vec::new(),
             gauge: LeafGauge::default(),
+            bulk_split: None,
         };
 
         Updater {
@@ -177,6 +183,10 @@ impl BaseLeaf {
         }
     }
 
+    fn key_value(&self, i: usize) -> (Key, &[u8]) {
+        (self.node.key(i), self.node.value(i))
+    }
+
     fn next_value(&self) -> &[u8] {
         self.node.value(self.iter_pos)
     }
@@ -188,7 +198,7 @@ impl BaseLeaf {
 
 enum LeafOp {
     Insert(Key, Vec<u8>),
-    Keep(usize),
+    Keep(usize, usize),
 }
 
 struct ActiveLeaf {
@@ -198,7 +208,11 @@ struct ActiveLeaf {
     // does not exist for the last leaf in the database.
     cutoff: Option<Key>,
     ops: Vec<LeafOp>,
+    // gauges total size of leaf after ops applied. 
+    // if bulk split is undergoing, this just stores the total size of the last leaf,
+    // and the gauges for the previous leaves are stored in `bulk_split`.
     gauge: LeafGauge,
+    bulk_split: Option<LeafBulkSplitter>,
 }
 
 impl ActiveLeaf {
@@ -206,31 +220,123 @@ impl ActiveLeaf {
         self.cutoff.map_or(true, |k| *key < k)
     }
 
+    fn begin_bulk_split(&mut self) {
+        let mut splitter = LeafBulkSplitter::default();
+
+        let mut n = 0;
+        let mut gauge = LeafGauge::default();
+        for op in &self.ops {
+            match op {
+                LeafOp::Insert(_, val) => gauge.ingest(val.len()),
+                LeafOp::Keep(_, val_size) => gauge.ingest(*val_size),
+            }
+
+            n += 1;
+
+            if gauge.body_size() >= LEAF_BULK_SPLIT_TARGET {
+                splitter.push(n);
+                n = 0;
+                gauge = LeafGauge::default();
+            }
+        }
+
+        self.gauge = gauge;
+        self.bulk_split = Some(splitter);
+    }
+
+    // check whether bulk split needs to start, and if so, start it.
+    // if ongoing, check if we need to cut off.
+    fn bulk_split_step(&mut self) {
+        match self.bulk_split {
+            None if self.gauge.body_size() >= LEAF_BULK_SPLIT_THRESHOLD => {
+                self.begin_bulk_split();
+            },
+            Some(ref mut bulk_splitter) if self.gauge.body_size() >= LEAF_BULK_SPLIT_TARGET => {
+                // push onto bulk splitter & restart gauge.
+                self.gauge = LeafGauge::default();
+                let n = self.ops.len() - bulk_splitter.total_count;
+                bulk_splitter.push(n);
+            },
+            _ => {}
+        }
+    }
+
     fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
-        if let Some(ref mut base_node) = self.base {
-            while base_node.cmp_next(&key) != Ordering::Less {
+        loop {
+            if let Some(ref mut base_node) = self.base {
+                if base_node.cmp_next(&key) == Ordering::Less {
+                    break
+                }
+
                 let size = base_node.next_value().len();
-                self.ops.push(LeafOp::Keep(base_node.iter_pos));
+                self.ops.push(LeafOp::Keep(base_node.iter_pos, size));
                 base_node.advance_iter();
 
                 self.gauge.ingest(size);
-
-                if self.gauge.body_size() >= LEAF_BULK_SPLIT_THRESHOLD {
-                    // TODO: big split.
-                }
+            } else {
+                break
             }
+
+            self.bulk_split_step();
         }
 
         if let Some(value) = value_change {
             self.ops.push(LeafOp::Insert(key, value));
         }
 
-        if self.gauge.body_size() >= LEAF_BULK_SPLIT_THRESHOLD {
-            // TODO: big split.
+        self.bulk_split_step();
+    }
+
+    fn build_bulk_splitter_leaves(&mut self, active_branch: &mut ActiveBranch) -> usize {
+        let Some(mut splitter) = self.bulk_split.take() else { return 0 };
+
+        let mut start = 0;
+        for item_count in splitter.items {
+            let leaf_ops = &self.ops[start..][..item_count];
+            start += item_count;
+            
+            for op in leaf_ops {
+                let (k, v) = match op {
+                    LeafOp::Keep(i, _) => self.base.as_ref().unwrap().key_value(*i),
+                    LeafOp::Insert(k, v) => (*k, &v[..])
+                };
+
+                // actually build leaf.
+                todo!()
+            }
         }
+
+        start
     }
 
     fn complete(&mut self, active_branch: &mut ActiveBranch) {
+        let body_size = self.gauge.body_size();
+
+        // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
+        // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
+        // in practice; bulk splits are rare.
+        let last_ops_start = self.build_bulk_splitter_leaves(active_branch);
+
+        if self.gauge.body_size() > LEAF_NODE_BODY_SIZE {
+            // TODO: split
+        } else if self.gauge.body_size() < LEAF_MERGE_THRESHOLD {
+            // TODO: pass ops onwards.
+        } else {
+            // TODO: build the node.
+        }
+    }
+}
+
+#[derive(Default)]
+struct LeafBulkSplitter {
+    items: Vec<usize>,
+    total_count: usize,
+}
+
+impl LeafBulkSplitter {
+    fn push(&mut self, count: usize) {
+        self.items.push(count);
+        self.total_count += count;
     }
 }
 
