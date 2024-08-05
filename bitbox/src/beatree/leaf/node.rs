@@ -43,15 +43,6 @@ pub enum LeafInsertResult {
 }
 
 impl LeafNode {
-    pub fn new(key: Key, value: Vec<u8>) -> Self {
-        let mut leaf = Self {
-            inner: Box::new(Page::zeroed()),
-        };
-
-        assert_eq!(leaf.insert(key, value), LeafInsertResult::Ok);
-        leaf
-    }
-
     pub fn n(&self) -> usize {
         u16::from_le_bytes(self.inner[0..2].try_into().unwrap()) as usize
     }
@@ -71,129 +62,11 @@ impl LeafNode {
         &self.inner[range]
     }
 
-    pub fn insert(&mut self, key: Key, value: Vec<u8>) -> LeafInsertResult {
-        assert!(!value.is_empty());
-
-        let n_items = self.n();
-        let cell_pointers = self.cell_pointers();
-
-        let index = match search(cell_pointers, &key) {
-            Ok(index) => {
-                // if the key is the same then that's an update
-                self.update(index, key, value);
-                return LeafInsertResult::Ok;
-            }
-            Err(index) => index,
-        };
-
-        // make sure the new byte fits
-        if self.space_left(cell_pointers) < 34 + value.len() {
-            return LeafInsertResult::NoSpaceLeft;
-        }
-
-        // When inserting a new element, the cell_pointers starting from the index must be shifted
-        // to the right by 34 bytes. The values prior to the one being inserted must be shifted to the left
-        // by the size of the inserted value.
-        //
-        // This adjustment also applies to all cell_pointers preceding the one related to the newly inserted value,
-        // where their offsets should be reduced by the length of the inserted value.
-
-        // create space
-        let new_offset = self.shift_left_cells(index, value.len());
-        self.shift_right_cell_pointers(index);
-
-        // update n + 1 items
-        self.set_n(n_items as u16 + 1);
-
-        // update cell_pointers offset
-        let cell_pointers = self.cell_pointers_mut();
-        for i in 0..index {
-            decrease_cell_offset(cell_pointers, i, value.len());
-        }
-
-        // store new cell_pointer offset
-        cell_pointers[index] = encode_cell(key, new_offset);
-
-        // store value
-        self.inner[new_offset..new_offset + value.len()].copy_from_slice(&value);
-
-        LeafInsertResult::Ok
-    }
-
-    pub fn remove(&mut self, key: Key) {
-        let cell_pointers = self.cell_pointers();
-        let Ok(index) = search(cell_pointers, &key) else { return };
-
-        let prev_value_len = self.value_range(self.cell_pointers(), index).len();
-
-        // shift cell and cells_pointers
-        self.shift_right_cells(index, prev_value_len);
-        self.shift_left_cell_pointers(index);
-
-        // update n - 1 items
-        self.set_n(self.n() as u16 - 1);
-
-        // update cell_pointers offset
-        let cell_pointers = self.cell_pointers_mut();
-        for i in 0..index {
-            increase_cell_offset(cell_pointers, i, prev_value_len);
-        }
-    }
-
     pub fn get(&self, key: &Key) -> Option<&[u8]> {
         let cell_pointers = self.cell_pointers();
 
         search(cell_pointers, key).ok()
             .map(|index| &self.inner[self.value_range(cell_pointers, index)])
-    }
-
-    // Updates an existing value
-    //
-    // panics if the value is empty
-    fn update(&mut self, index: usize, key: Key, new_value: Vec<u8>) {
-        // create space
-        let prev_value_len = self.value_range(self.cell_pointers(), index).len();
-
-        let delta = new_value.len() as i64 - prev_value_len as i64;
-
-        let new_offset = match delta {
-            // space value should decrease and the cell offset should increase
-            d if d < 0 => Some(self.shift_right_cells(index, delta.abs() as usize)),
-            // space value should increase and the cell offset should decrease
-            d if d > 0 => Some(self.shift_left_cells(index, delta as usize)),
-            // do nothing if the size is not changes
-            _ => None,
-        };
-
-        if let Some(new_offset) = new_offset {
-            // update cell_pointers offset
-            let cell_pointers = self.cell_pointers_mut();
-            for i in 0..index {
-                if delta < 0 {
-                    increase_cell_offset(cell_pointers, i, delta.abs() as usize);
-                } else if delta > 0 {
-                    decrease_cell_offset(cell_pointers, i, delta as usize);
-                }
-            }
-            // store new cell_pointer offset
-            let cell_pointers = self.cell_pointers_mut();
-            cell_pointers[index] = encode_cell(key, new_offset);
-        }
-
-        let value_range = self.value_range(self.cell_pointers(), index);
-        // store value
-        self.inner[value_range].copy_from_slice(&new_value);
-    }
-
-    fn space_left(&self, cell_pointers: &[[u8; 34]]) -> usize {
-        if cell_pointers.is_empty() {
-            return PAGE_SIZE - 2;
-        }
-
-        let end_cell_pointers = 2 + cell_pointers.len() * 34;
-        let start_cells = self.value_range(cell_pointers, 0).start;
-
-        start_cells - end_cell_pointers
     }
 
     // returns the range at which the value of a cell is stored
@@ -213,63 +86,6 @@ impl LeafNode {
             std::slice::from_raw_parts(self.inner[2..36].as_ptr() as *const [u8; 34], self.n())
         }
     }
-
-    fn cell_pointers_mut(&mut self) -> &mut [[u8; 34]] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.inner[2..36].as_ptr() as *mut [u8; 34], self.n())
-        }
-    }
-
-    fn shift_right_cell_pointers(&mut self, index: usize) {
-        if index == self.n() {
-            return;
-        }
-
-        let range = 2 + index * 34..2 + self.n() * 34;
-
-        for byte in range.rev() {
-            self.inner[byte + 34] = self.inner[byte];
-        }
-    }
-
-    fn shift_left_cell_pointers(&mut self, index: usize) {
-        let range = 2 + (index + 1) * 34..2 + self.n() * 34;
-
-        for byte in range {
-            self.inner[byte - 34] = self.inner[byte];
-        }
-    }
-
-    // returns the offset at which the new free space is avaible
-    fn shift_left_cells(&mut self, index: usize, size: usize) -> usize {
-        let cell_pointers = self.cell_pointers();
-
-        if cell_pointers.is_empty() {
-            return PAGE_SIZE - size;
-        }
-
-        let start = self.value_range(cell_pointers, 0).start;
-        let end = self.value_range(cell_pointers, index - 1).end;
-
-        for byte in start..end {
-            self.inner[byte - size] = self.inner[byte];
-        }
-
-        end - size
-    }
-
-    // returns the new start of the shrink space
-    fn shift_right_cells(&mut self, index: usize, size: usize) -> usize {
-        let cell_pointers = self.cell_pointers();
-        let start = self.value_range(cell_pointers, 0).start;
-        let end = self.value_range(cell_pointers, index - 1).end;
-
-        for byte in (start..end).rev() {
-            self.inner[byte + size] = self.inner[byte];
-        }
-
-        end + size
-    }
 }
 
 pub fn body_size(n: usize, value_size_sum: usize) -> usize {
@@ -280,24 +96,6 @@ fn cell_offset(cell_pointers: &[[u8; 34]], index: usize) -> usize {
     let mut buf = [0; 2];
     buf.copy_from_slice(&cell_pointers[index][32..34]);
     u16::from_le_bytes(buf) as usize
-}
-
-fn increase_cell_offset(cell_pointers: &mut [[u8; 34]], index: usize, amount: usize) {
-    let mut buf = [0; 2];
-    buf.copy_from_slice(&cell_pointers[index][32..34]);
-    let new_offset = u16::from_le_bytes(buf) + amount as u16;
-    cell_pointers[index][32..34].copy_from_slice(&new_offset.to_le_bytes());
-}
-
-fn decrease_cell_offset(cell_pointers: &mut [[u8; 34]], index: usize, amount: usize) {
-    let mut buf = [0; 2];
-    buf.copy_from_slice(&cell_pointers[index][32..34]);
-    let new_offset = u16::from_le_bytes(buf) - u16::try_from(amount).unwrap();
-    cell_pointers[index][32..34].copy_from_slice(&new_offset.to_le_bytes());
-}
-
-fn cell_key<'a>(cell_pointers: &'a [[u8; 34]], index: usize) -> &'a [u8] {
-    &cell_pointers[index][0..32]
 }
 
 // panics if offset is bigger then u16
