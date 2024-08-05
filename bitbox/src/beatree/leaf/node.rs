@@ -86,6 +86,46 @@ impl LeafNode {
             std::slice::from_raw_parts(self.inner[2..36].as_ptr() as *const [u8; 34], self.n())
         }
     }
+
+    fn cell_pointers_mut(&mut self) -> &mut [[u8; 34]] {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.inner[2..36].as_mut_ptr() as *mut [u8; 34], self.n())
+        }
+    }
+}
+
+pub struct LeafBuilder {
+    inner: LeafNode,
+    index: usize,
+    total_value_size: usize,
+}
+
+impl LeafBuilder {
+    pub fn new(mut leaf_node: LeafNode, n: usize) -> Self {
+        leaf_node.set_n(n as u16);
+        LeafBuilder {
+            inner: leaf_node,
+            index: 0,
+            total_value_size: 0,
+        }
+    } 
+
+    pub fn push(&mut self, key: Key, value: &[u8]) {
+        assert!(self.index < self.inner.n());
+
+        let offset = (self.inner.n() as usize) * 34 + self.total_value_size + 2;
+        let mut cell_pointer = self.inner.cell_pointers_mut()[self.index];
+
+        cell_pointer.copy_from_slice(&encode_cell(key, offset));
+        self.inner.inner[offset..][..value.len()].copy_from_slice(value);
+
+        self.index += 1;
+        self.total_value_size += value.len();
+    }
+
+    pub fn finish(self) -> LeafNode {
+        self.inner
+    }
 }
 
 pub fn body_size(n: usize, value_size_sum: usize) -> usize {
