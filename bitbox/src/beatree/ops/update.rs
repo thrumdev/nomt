@@ -41,11 +41,7 @@ pub fn update(
     leaf_writer: &mut leaf::store::LeafStoreWriter,
     bbn_store_writer: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
-    let mut updater = Updater {
-        active_branch: todo!(),
-        active_leaf: todo!(),
-    };
-
+    let mut updater = Updater::new(&*bbn_index, &*bnp, leaf_reader);
     for (key, value_change) in changeset {
         updater.ingest(*key, value_change.clone());
     }
@@ -61,6 +57,61 @@ struct Updater {
 }
 
 impl Updater {
+    fn new(
+        bbn_index: &Index,
+        bnp: &branch::BranchNodePool,
+        leaf_reader: &leaf::store::LeafStoreReader,
+    ) -> Self {
+        let first = bbn_index.first();
+
+        // UNWRAP: all nodes in index must exist.
+        let first_branch = first.as_ref().map(|(_, id)| bnp.checkout(*id).unwrap());
+        let first_branch_cutoff = first.as_ref()
+            .and_then(|(k, _)| bbn_index.next_after(*k))
+            .map(|(k, _)| k);
+
+        // first leaf cutoff is the separator of the second leaf _or_ the separator of the next
+        // branch if there is only 1 leaf, or nothing.
+        let first_leaf_cutoff = first_branch.as_ref().and_then(|node| if node.n() > 1 {
+            Some(reconstruct_key(node.prefix(), node.separator(1)))
+        } else {
+            None
+        }).or(first_branch_cutoff);
+
+        let first_leaf = first_branch.as_ref()
+            .map(|node| PageNumber::from(node.node_pointer(0)))
+            .map(|id| (id, leaf_reader.query(id)));
+
+        // active branch: first branch, cut-off second branch key.
+        let active_branch = ActiveBranch {
+            base: first_branch.map(|node| BaseBranch {
+                // UNWRAP: node can only exist if ID does.
+                id: first.as_ref().unwrap().1,
+                node,
+                iter_pos: 0,
+            }),
+            cutoff: first_branch_cutoff,
+            ops: Vec::new(),
+        };
+
+        // active leaf: first leaf in first branch, cut-off second leaf key.
+        let active_leaf = ActiveLeaf {
+            base: first_leaf.map(|(id, node)| BaseLeaf {
+                id,
+                node,
+                iter_pos: 0,
+            }),
+            cutoff: first_leaf_cutoff,
+            ops: Vec::new(),
+            gauge: LeafGauge::default(),
+        };
+
+        Updater {
+            active_branch,
+            active_leaf,
+        }
+    }
+
     fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
         // This is a while loop because merges may require multiple iterations.
         while !self.active_leaf.is_in_scope(&key) {
@@ -221,6 +272,7 @@ impl BranchGauge {
     }
 }
 
+#[derive(Default)]
 struct LeafGauge {
     n: usize,
     value_size_sum: usize,
