@@ -3,6 +3,7 @@ use bitvec::prelude::*;
 use crossbeam_channel::Receiver;
 use itertools::{Itertools, EitherOrBoth};
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     fs::File,
     io::{ErrorKind, Read, Seek},
@@ -13,7 +14,7 @@ use crate::beatree::{
     bbn,
     branch::{self, BRANCH_NODE_SIZE, BRANCH_NODE_BODY_SIZE},
     index::Index, 
-    leaf, Key,
+    leaf::{self, node::{LeafNode, LEAF_NODE_BODY_SIZE}}, Key,
 };
 
 use super::BranchId;
@@ -21,8 +22,12 @@ use super::BranchId;
 const BRANCH_MERGE_THRESHOLD: usize = BRANCH_NODE_BODY_SIZE / 2;
 
 // At 180% of the branch size, we perform a 'bulk split' which follows a different algorithm
-// than a simple split.
+// than a simple split. Bulk splits are encountered when there are a large number of insertions
+// on a single node, typically when inserting into a fresh database.
 const BRANCH_BULK_SPLIT_THRESHOLD: usize = (BRANCH_NODE_BODY_SIZE * 9) / 5;
+
+const LEAF_MERGE_THRESHOLD: usize = LEAF_NODE_BODY_SIZE / 2;
+const LEAF_BULK_SPLIT_THRESHOLD: usize = (LEAF_NODE_BODY_SIZE * 9) / 5;
 
 /// Change the btree in the specified way. Updates the branch index in-place and returns
 /// a list of branches which have become obsolete.
@@ -36,93 +41,145 @@ pub fn update(
     leaf_writer: &mut leaf::store::LeafStoreWriter,
     bbn_store_writer: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
-    let mut cur_branch: Option<BranchId> = None;
-    let mut cur_leaf: Option<PageNumber> = None;
+    let mut updater = Updater {
+        active_branch: todo!(),
+        active_leaf: todo!(),
+    };
 
     for (key, value_change) in changeset {
-        // 1. find branch for key. if not equal to the branch for the last key,
-        //    apply final changes to last leaf and branch.
-        // 2. find leaf for key. if not equal to leaf for last key, apply final changes
-        //    to last leaf
+        updater.ingest(*key, value_change.clone());
     }
+
+    updater.complete();
 
     Ok(todo!())
 }
 
-struct PrevBranch {
-    node: branch::BranchNode,
-    id: branch::BranchId,
+struct Updater {
+    active_branch: ActiveBranch,
+    active_leaf: ActiveLeaf,
 }
 
-struct BranchChanges {
-    prev: Option<PrevBranch>,
-    changes: Vec<(Key, Option<PageNumber>)>,
-}
+impl Updater {
+    fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
+        // This is a while loop because merges may require multiple iterations.
+        while !self.active_leaf.is_in_scope(&key) {
+            self.active_leaf.complete(&mut self.active_branch);
+            // TODO: determine where the active leaf should be set next. if merging, it's just the
+            // 'next' leaf. If done, it's the leaf for the key. Set active branch to the branch
+            // for the active leaf.
 
-impl BranchChanges {
-    fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+            if self.active_branch.is_in_scope(&key) {
+                continue
+            }
+            // TODO: complete branch. set active to relevant leaf and branch.
+        }
+
+        self.active_leaf.ingest(key, value_change);
     }
 
-    // Apply the changes. Returns `Some` if there are leftover changes to be applied
-    // to the first branch following the returned key. 
-    fn apply(
-        self, 
-        bbn_index: &mut Index,
-        bnp: &mut branch::BranchNodePool,
-        bbn_store_writer: &mut bbn::BbnStoreWriter,
-    ) -> Option<(Key, BranchChanges)> {
-        if self.is_empty() { return None }
+    fn complete(&mut self) {
+        self.active_leaf.complete(&mut self.active_branch);
+        self.active_branch.complete();
+    }
+}
 
-        let existing_keys = self.prev.as_ref().into_iter().flat_map(|p| {
-            let prefix = p.node.prefix();
-            (0..p.node.n()).map(|i| p.node.separator(i as usize)).map(move |separator| reconstruct_key(prefix, separator))
-        });
+struct BaseBranch {
+    node: branch::BranchNode,
+    id: branch::BranchId,
+    iter_pos: usize,
+}
 
-        let merge = existing_keys.merge_join_by(
-            self.changes.iter(),
-            |existing_key, change| existing_key.cmp(&change.0)
-        );
+struct ActiveBranch {
+    // the 'base' node we are working from. does not exist if DB is empty.
+    base: Option<BaseBranch>,
+    // the cutoff key, which determines if an operation is in-scope.
+    // does not exist for the last branch in the database.
+    cutoff: Option<Key>,
+    ops: Vec<(Key, Option<PageNumber>)>,
+}
 
-        let mut gauge = BranchGauge::new();
+impl ActiveBranch {
+    fn is_in_scope(&self, key: &Key) -> bool {
+        self.cutoff.map_or(true, |k| *key < k)
+    }
 
-        for merge_item in merge.clone() {
-            match merge_item {
-                EitherOrBoth::Left(key) => {
-                    gauge.ingest(key);
-                }
-                EitherOrBoth::Right((key, Some(_))) => {
-                    gauge.ingest(*key);
-                }
-                EitherOrBoth::Right((_, None)) => panic!("removed nonexistent branch"),
-                EitherOrBoth::Both(key, (_, Some(branch_id))) => {
-                    gauge.ingest(key);
-                }
-                EitherOrBoth::Both(key, (_, None)) => {
-                    gauge.ingest(key);
-                }
-            }
+    fn complete(&mut self) {
+        todo!()
+    }
+}
 
-            if gauge.body_size() > BRANCH_BULK_SPLIT_THRESHOLD {
-                // TODO: initiate bulk split.
-            }
-        }
+struct BaseLeaf {
+    node: LeafNode,
+    id: PageNumber,
+    iter_pos: usize,
+}
 
-        let new_size = gauge.body_size();
-
-        if new_size > BRANCH_NODE_BODY_SIZE {
-            // TODO: split
-            todo!()
-        } else if new_size <= BRANCH_MERGE_THRESHOLD {
-            // TODO: collect all existing keys/updates/inserts into branch changes
-            // and pass to next branch
-            todo!()
+impl BaseLeaf {
+    // How the key compares to the next key in the base node.
+    // If the base node is exhausted `Less` is returned.
+    fn cmp_next(&self, key: &Key) -> Ordering {
+        if self.iter_pos >= self.node.n() {
+            Ordering::Less
         } else {
-            // TODO: just create a replacement branch
-            todo!()
+            key.cmp(&self.node.key(self.iter_pos))
+        }
+    }
+
+    fn next_value(&self) -> &[u8] {
+        self.node.value(self.iter_pos)
+    }
+
+    fn advance_iter(&mut self) {
+        self.iter_pos += 1;
+    }
+}
+
+enum LeafOp {
+    Insert(Key, Vec<u8>),
+    Keep(usize),
+}
+
+struct ActiveLeaf {
+    // the 'base' node we are working from. does not exist if DB is empty.
+    base: Option<BaseLeaf>,
+    // the cutoff key, which determines if an operation is in-scope.
+    // does not exist for the last leaf in the database.
+    cutoff: Option<Key>,
+    ops: Vec<LeafOp>,
+    gauge: LeafGauge,
+}
+
+impl ActiveLeaf {
+    fn is_in_scope(&self, key: &Key) -> bool {
+        self.cutoff.map_or(true, |k| *key < k)
+    }
+
+    fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
+        if let Some(ref mut base_node) = self.base {
+            while base_node.cmp_next(&key) != Ordering::Less {
+                let size = base_node.next_value().len();
+                self.ops.push(LeafOp::Keep(base_node.iter_pos));
+                base_node.advance_iter();
+
+                self.gauge.ingest(size);
+
+                if self.gauge.body_size() >= LEAF_BULK_SPLIT_THRESHOLD {
+                    // TODO: big split.
+                }
+            }
         }
 
-        // TODO: delete previous branch.
+        if let Some(value) = value_change {
+            self.ops.push(LeafOp::Insert(key, value));
+        }
+
+        if self.gauge.body_size() >= LEAF_BULK_SPLIT_THRESHOLD {
+            // TODO: big split.
+        }
+    }
+
+    fn complete(&mut self, active_branch: &mut ActiveBranch) {
     }
 }
 
@@ -161,6 +218,22 @@ impl BranchGauge {
 
     fn body_size(&self) -> usize {
         branch::body_size(self.prefix_len, self.separator_len - self.prefix_len, self.n)
+    }
+}
+
+struct LeafGauge {
+    n: usize,
+    value_size_sum: usize,
+}
+
+impl LeafGauge {
+    fn ingest(&mut self, value_size: usize) {
+        self.n += 1;
+        self.value_size_sum += value_size;
+    }
+
+    fn body_size(&self) -> usize {
+        leaf::node::body_size(self.n, self.value_size_sum)
     }
 }
 

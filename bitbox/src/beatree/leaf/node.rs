@@ -30,6 +30,8 @@ use crate::{
     store::{Page, PAGE_SIZE},
 };
 
+pub const LEAF_NODE_BODY_SIZE: usize = PAGE_SIZE - 2;
+
 pub struct LeafNode {
     pub inner: Box<Page>,
 }
@@ -56,6 +58,17 @@ impl LeafNode {
 
     pub fn set_n(&mut self, n: u16) {
         self.inner[0..2].copy_from_slice(&n.to_le_bytes());
+    }
+
+    pub fn key(&self, i: usize) -> Key {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&self.cell_pointers()[i][..32]);
+        key
+    }
+
+    pub fn value(&self, i: usize) -> &[u8] {
+        let range = self.value_range(self.cell_pointers(), i);
+        &self.inner[range]
     }
 
     pub fn insert(&mut self, key: Key, value: Vec<u8>) -> LeafInsertResult {
@@ -257,6 +270,10 @@ impl LeafNode {
 
         end + size
     }
+}
+
+pub fn body_size(n: usize, value_size_sum: usize) -> usize {
+    n * 34 + value_size_sum
 }
 
 fn cell_offset(cell_pointers: &[[u8; 34]], index: usize) -> usize {
