@@ -43,6 +43,12 @@ pub enum LeafInsertResult {
 }
 
 impl LeafNode {
+    pub fn zeroed() -> Self {
+        LeafNode {
+            inner: Box::new(Page::zeroed()),
+        }
+    }
+
     pub fn n(&self) -> usize {
         u16::from_le_bytes(self.inner[0..2].try_into().unwrap()) as usize
     }

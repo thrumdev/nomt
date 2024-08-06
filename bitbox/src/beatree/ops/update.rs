@@ -14,7 +14,11 @@ use crate::beatree::{
     bbn,
     branch::{self, BRANCH_NODE_SIZE, BRANCH_NODE_BODY_SIZE},
     index::Index, 
-    leaf::{self, node::{LeafNode, LEAF_NODE_BODY_SIZE}}, Key,
+    leaf::{
+        self, 
+        node::{LeafNode, LeafBuilder, LEAF_NODE_BODY_SIZE},
+        store::{LeafStoreReader, LeafStoreWriter},
+    }, Key,
 };
 
 use super::BranchId;
@@ -42,16 +46,16 @@ pub fn update(
     changeset: &BTreeMap<Key, Option<Vec<u8>>>,
     bbn_index: &mut Index,
     bnp: &mut branch::BranchNodePool,
-    leaf_reader: &leaf::store::LeafStoreReader,
-    leaf_writer: &mut leaf::store::LeafStoreWriter,
+    leaf_reader: &LeafStoreReader,
+    leaf_writer: &mut LeafStoreWriter,
     bbn_store_writer: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
     let mut updater = Updater::new(&*bbn_index, &*bnp, leaf_reader);
     for (key, value_change) in changeset {
-        updater.ingest(*key, value_change.clone());
+        updater.ingest(*key, value_change.clone(), leaf_writer);
     }
 
-    updater.complete();
+    updater.complete(leaf_writer);
 
     Ok(todo!())
 }
@@ -65,7 +69,7 @@ impl Updater {
     fn new(
         bbn_index: &Index,
         bnp: &branch::BranchNodePool,
-        leaf_reader: &leaf::store::LeafStoreReader,
+        leaf_reader: &LeafStoreReader,
     ) -> Self {
         let first = bbn_index.first();
 
@@ -84,8 +88,16 @@ impl Updater {
         }).or(first_branch_cutoff);
 
         let first_leaf = first_branch.as_ref()
-            .map(|node| PageNumber::from(node.node_pointer(0)))
-            .map(|id| (id, leaf_reader.query(id)));
+            .map(|node| (
+                PageNumber::from(node.node_pointer(0)), 
+                reconstruct_key(node.prefix(), node.separator(0)),
+            ))
+            .map(|(id, separator)| BaseLeaf {
+                id,
+                node: leaf_reader.query(id),
+                iter_pos: 0,
+                separator,
+            });
 
         // active branch: first branch, cut-off second branch key.
         let active_branch = ActiveBranch {
@@ -101,12 +113,9 @@ impl Updater {
 
         // active leaf: first leaf in first branch, cut-off second leaf key.
         let active_leaf = ActiveLeaf {
-            base: first_leaf.map(|(id, node)| BaseLeaf {
-                id,
-                node,
-                iter_pos: 0,
-            }),
+            base: first_leaf,
             cutoff: first_leaf_cutoff,
+            separator_override: None,
             ops: Vec::new(),
             gauge: LeafGauge::default(),
             bulk_split: None,
@@ -118,10 +127,15 @@ impl Updater {
         }
     }
 
-    fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
+    fn ingest(
+        &mut self, 
+        key: Key, 
+        value_change: Option<Vec<u8>>,
+        leaf_writer: &mut LeafStoreWriter,
+    ) {
         // This is a while loop because merges may require multiple iterations.
         while !self.active_leaf.is_in_scope(&key) {
-            self.active_leaf.complete(&mut self.active_branch);
+            self.active_leaf.complete(&mut self.active_branch, leaf_writer);
             // TODO: determine where the active leaf should be set next. if merging, it's just the
             // 'next' leaf. If done, it's the leaf for the key. Set active branch to the branch
             // for the active leaf.
@@ -135,8 +149,8 @@ impl Updater {
         self.active_leaf.ingest(key, value_change);
     }
 
-    fn complete(&mut self) {
-        self.active_leaf.complete(&mut self.active_branch);
+    fn complete(&mut self, leaf_writer: &mut LeafStoreWriter) {
+        self.active_leaf.complete(&mut self.active_branch, leaf_writer);
         self.active_branch.complete();
     }
 }
@@ -161,6 +175,10 @@ impl ActiveBranch {
         self.cutoff.map_or(true, |k| *key < k)
     }
 
+    fn ingest(&mut self, key: Key, pn: Option<PageNumber>) {
+        todo!()
+    } 
+
     fn complete(&mut self) {
         todo!()
     }
@@ -170,6 +188,7 @@ struct BaseLeaf {
     node: LeafNode,
     id: PageNumber,
     iter_pos: usize,
+    separator: Key,
 }
 
 impl BaseLeaf {
@@ -181,6 +200,10 @@ impl BaseLeaf {
         } else {
             key.cmp(&self.node.key(self.iter_pos))
         }
+    }
+
+    fn key(&self, i: usize) -> Key {
+        self.node.key(i)
     }
 
     fn key_value(&self, i: usize) -> (Key, &[u8]) {
@@ -207,6 +230,9 @@ struct ActiveLeaf {
     // the cutoff key, which determines if an operation is in-scope.
     // does not exist for the last leaf in the database.
     cutoff: Option<Key>,
+    // a separator override. this is set as `Some` either as part of a bulk split or when the
+    // leaf is having values merged in from some earlier node.
+    separator_override: Option<Key>,
     ops: Vec<LeafOp>,
     // gauges total size of leaf after ops applied. 
     // if bulk split is undergoing, this just stores the total size of the last leaf,
@@ -259,6 +285,8 @@ impl ActiveLeaf {
             },
             _ => {}
         }
+
+        // TODO: set separator override based on last key from bulk split and first key if inserted.
     }
 
     fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
@@ -287,44 +315,107 @@ impl ActiveLeaf {
         self.bulk_split_step();
     }
 
-    fn build_bulk_splitter_leaves(&mut self, active_branch: &mut ActiveBranch) -> usize {
-        let Some(mut splitter) = self.bulk_split.take() else { return 0 };
+    fn build_bulk_splitter_leaves(
+        &mut self, 
+        active_branch: &mut ActiveBranch,
+        leaf_writer: &mut LeafStoreWriter,
+    ) -> (usize, bool) {
+        let Some(mut splitter) = self.bulk_split.take() else { return (0, false) };
 
         let mut start = 0;
+        let mut old_separator_deleted = false;
         for item_count in splitter.items {
             let leaf_ops = &self.ops[start..][..item_count];
             start += item_count;
-            
-            for op in leaf_ops {
-                let (k, v) = match op {
-                    LeafOp::Keep(i, _) => self.base.as_ref().unwrap().key_value(*i),
-                    LeafOp::Insert(k, v) => (*k, &v[..])
+
+            let separator = if start == 0 {
+                self.separator_override
+                    .or(self.base.as_ref().map(|base| base.separator))
+                    .unwrap_or([0u8; 32])
+            } else {
+                // UNWRAP: separator override is always set when more items follow after a bulk
+                // split.
+                self.separator_override.take().unwrap()
+            };
+            let new_node = build_leaf(self.base.as_ref(), leaf_ops);
+
+            // if our split creates a node with a separator greater than the old separator of the
+            // node and we haven't yet deleted the old one, do so now.
+            if !old_separator_deleted && self.base.as_ref()
+                .map_or(false, |b| b.separator < separator) 
+            {
+                old_separator_deleted = true;
+
+                // UNWRAP: just checked existence above.
+                active_branch.ingest(self.base.as_ref().map(|b| b.separator).unwrap(), None);
+                leaf_writer.release(self.base.as_ref().map(|b| b.id).unwrap());
+            }
+
+            // set the separator override for the next 
+            if let Some(op) = self.ops.get(start + item_count + 1) {
+                let next = match op {
+                    LeafOp::Insert(k, _) => *k,
+                    LeafOp::Keep(i, _) => self.base.as_ref().unwrap().key(*i),
                 };
 
-                // actually build leaf.
-                todo!()
+                let last = new_node.key(new_node.n() - 1);
+                self.separator_override = Some(separate(&last, &next));
             }
+
+            // write the node and provide it to the branch above.
+            let pn = leaf_writer.allocate(new_node);
+            active_branch.ingest(separator, Some(pn));
+
         }
 
-        start
+        (start, old_separator_deleted)
     }
 
-    fn complete(&mut self, active_branch: &mut ActiveBranch) {
+    fn complete(&mut self, active_branch: &mut ActiveBranch, leaf_writer: &mut LeafStoreWriter) {
         let body_size = self.gauge.body_size();
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_leaves(active_branch);
+        let (last_ops_start, old_separator_deleted) 
+            = self.build_bulk_splitter_leaves(active_branch, leaf_writer);
 
-        if self.gauge.body_size() > LEAF_NODE_BODY_SIZE {
+        if let Some(ref base) = self.base {
+            leaf_writer.release(base.id);
+        }
+
+        if self.gauge.body_size() == 0 {
+            return
+        } else if self.gauge.body_size() > LEAF_NODE_BODY_SIZE {
             // TODO: split
-        } else if self.gauge.body_size() < LEAF_MERGE_THRESHOLD {
-            // TODO: pass ops onwards.
+        } else if self.gauge.body_size() > LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
+            let node = build_leaf(self.base.as_ref(), &self.ops);
+            let pn = leaf_writer.allocate(node);
+            let separator = self.separator_override
+                .or(self.base.as_ref().map(|b| b.separator))
+                .unwrap_or([0u8; 32]); // first leaf always gets separator of all 0.
+            
+            active_branch.ingest(separator, Some(pn));
         } else {
-            // TODO: build the node.
+            // merge is only performed when there is a following node to merge with
+            
         }
     }
+}
+
+fn build_leaf(base: Option<&BaseLeaf>, ops: &[LeafOp]) -> LeafNode {
+    let leaf = LeafNode::zeroed();
+    let mut leaf_builder = LeafBuilder::new(leaf, ops.len());
+    for op in ops {
+        // UNWRAP: base must exist if a Keep op is present.
+        let (k, v) = match op {
+            LeafOp::Keep(i, _) => base.as_ref().unwrap().key_value(*i),
+            LeafOp::Insert(k, v) => (*k, &v[..]),
+        };
+
+        leaf_builder.push(k, v);
+    }
+    leaf_builder.finish()
 }
 
 #[derive(Default)]
@@ -415,4 +506,18 @@ fn reconstruct_key(
     key.view_bits_mut::<Lsb0>()[..prefix.len()].copy_from_bitslice(prefix);
     key.view_bits_mut::<Lsb0>()[prefix.len()..][..separator.len()].copy_from_bitslice(prefix);
     key
+}
+
+// separate two keys a and b where b > a
+fn separate(a: &Key, b: &Key) -> Key {
+    // if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
+    let len = a.view_bits::<Lsb0>()
+        .iter()
+        .zip(b.view_bits::<Lsb0>().iter())
+        .take_while(|(a, b)| a == b)
+        .count() + 1;
+
+    let mut separator = [0u8; 32];
+    separator.view_bits_mut::<Lsb0>()[..len].copy_from_bitslice(&b.view_bits::<Lsb0>());
+    separator
 }
