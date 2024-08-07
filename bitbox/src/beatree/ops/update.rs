@@ -469,8 +469,7 @@ impl ActiveLeaf {
     }
 
     fn build_leaf(&self, ops: &[LeafOp]) -> LeafNode {
-        let leaf = LeafNode::zeroed();
-        let mut leaf_builder = LeafBuilder::new(leaf, ops.len());
+        let mut leaf_builder = LeafBuilder::new(ops.len());
         for op in ops {
             let (k, v) = self.op_key_value(op);
     

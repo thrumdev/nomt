@@ -101,36 +101,37 @@ impl LeafNode {
 }
 
 pub struct LeafBuilder {
-    inner: LeafNode,
+    leaf: LeafNode,
     index: usize,
     total_value_size: usize,
 }
 
 impl LeafBuilder {
-    pub fn new(mut leaf_node: LeafNode, n: usize) -> Self {
-        leaf_node.set_n(n as u16);
+    pub fn new(n: usize) -> Self {
+        let mut leaf = LeafNode { inner: Box::new(Page::zeroed()) };
+        leaf.set_n(n as u16);
         LeafBuilder {
-            inner: leaf_node,
+            leaf,
             index: 0,
             total_value_size: 0,
         }
     } 
 
     pub fn push(&mut self, key: Key, value: &[u8]) {
-        assert!(self.index < self.inner.n());
+        assert!(self.index < self.leaf.n());
 
-        let offset = (self.inner.n() as usize) * 34 + self.total_value_size + 2;
-        let mut cell_pointer = self.inner.cell_pointers_mut()[self.index];
+        let offset = (self.leaf.n() as usize) * 34 + self.total_value_size + 2;
+        let mut cell_pointer = self.leaf.cell_pointers_mut()[self.index];
 
-        cell_pointer.copy_from_slice(&encode_cell(key, offset));
-        self.inner.inner[offset..][..value.len()].copy_from_slice(value);
+        encode_cell(&mut cell_pointer[..], key, offset);
+        self.leaf.inner[offset..][..value.len()].copy_from_slice(value);
 
         self.index += 1;
         self.total_value_size += value.len();
     }
 
     pub fn finish(self) -> LeafNode {
-        self.inner
+        self.leaf
     }
 }
 
@@ -144,12 +145,10 @@ fn cell_offset(cell_pointers: &[[u8; 34]], index: usize) -> usize {
     u16::from_le_bytes(buf) as usize
 }
 
-// panics if offset is bigger then u16
-fn encode_cell(key: [u8; 32], offset: usize) -> [u8; 34] {
-    let mut buf = [0; 34];
-    buf[0..32].copy_from_slice(&key);
-    buf[32..34].copy_from_slice(&(u16::try_from(offset).unwrap()).to_le_bytes());
-    buf
+// panics if offset is bigger then u16 or `cell` length is less than 34.
+fn encode_cell(cell: &mut [u8], key: [u8; 32], offset: usize) {
+    cell[0..32].copy_from_slice(&key);
+    cell[32..34].copy_from_slice(&(u16::try_from(offset).unwrap()).to_le_bytes());
 }
 
 // look for key in the node. the return value has the same semantics as std binary_search*.
