@@ -7,7 +7,7 @@ use std::ops::{Bound, RangeToInclusive, RangeBounds};
 use im::OrdMap;
 
 use super::{
-    branch::{self, BranchId},
+    branch::{BranchId},
     Key
 };
 

@@ -1,20 +1,17 @@
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result};
 use bitvec::prelude::*;
-use crossbeam_channel::Receiver;
+
 use std::{
-    cmp::Ordering,
     collections::BTreeMap,
-    fs::File,
-    io::{ErrorKind, Read, Seek},
 };
 
 use crate::beatree::{
     allocator::PageNumber,
     bbn,
-    branch::{BranchNodePool, BRANCH_NODE_SIZE, BRANCH_NODE_BODY_SIZE},
+    branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},
     index::Index, 
     leaf::{
-        node::{LeafNode, LeafBuilder, LEAF_NODE_BODY_SIZE},
+        node::{LEAF_NODE_BODY_SIZE},
         store::{LeafStoreReader, LeafStoreWriter},
     }, Key,
 };
@@ -52,7 +49,7 @@ pub fn update(
     bnp: &mut BranchNodePool,
     leaf_reader: &LeafStoreReader,
     leaf_writer: &mut LeafStoreWriter,
-    bbn_store_writer: &mut bbn::BbnStoreWriter,
+    _bbn_store_writer: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
     let mut updater = Updater::new(&*bbn_index, &*bnp, leaf_reader);
     for (key, value_change) in changeset {

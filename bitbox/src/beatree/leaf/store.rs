@@ -1,6 +1,6 @@
 use crate::{
     beatree::{
-        allocator::{self, AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
+        allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },
     io::{CompleteIo, IoCommand},

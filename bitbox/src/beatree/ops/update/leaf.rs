@@ -1,26 +1,20 @@
-use anyhow::{bail, ensure, Result};
+
 use bitvec::prelude::*;
 use std::{
     cmp::Ordering,
-    collections::BTreeMap,
-    fs::File,
-    io::{ErrorKind, Read, Seek},
+    io::{Read},
 };
 
 use crate::beatree::{
-    allocator::PageNumber,
-    bbn,
-    branch::{BRANCH_NODE_SIZE, BRANCH_NODE_BODY_SIZE},
-    index::Index, 
+    allocator::PageNumber, 
     leaf::{
         node::{self as leaf_node, LeafNode, LeafBuilder, LEAF_NODE_BODY_SIZE},
-        store::{LeafStoreReader, LeafStoreWriter},
+        store::{LeafStoreWriter},
     }, Key,
 };
 
 use super::{
-    branch::ActiveBranch, LEAF_MERGE_THRESHOLD, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, 
-    BranchId,
+    branch::ActiveBranch, LEAF_MERGE_THRESHOLD, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
 };
 
 pub struct BaseLeaf {
@@ -140,7 +134,7 @@ impl ActiveLeaf {
         active_branch: &mut ActiveBranch, 
         leaf_writer: &mut LeafStoreWriter,
     ) -> LeafCompletionStatus {
-        let body_size = self.gauge.body_size();
+        let _body_size = self.gauge.body_size();
 
         if let Some(ref base) = self.base {
             active_branch.possibly_delete(base.separator);
@@ -233,7 +227,7 @@ impl ActiveLeaf {
         active_branch: &mut ActiveBranch,
         leaf_writer: &mut LeafStoreWriter,
     ) -> usize {
-        let Some(mut splitter) = self.bulk_split.take() else { return 0 };
+        let Some(splitter) = self.bulk_split.take() else { return 0 };
 
         let mut start = 0;
         for item_count in splitter.items {
@@ -294,7 +288,7 @@ impl ActiveLeaf {
         let left_key = self.op_key(&self.ops[split_point - 1]);
         let right_key = self.op_key(&self.ops[split_point]);
 
-        let left_node = self.build_leaf(left_ops);
+        let _left_node = self.build_leaf(left_ops);
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);

@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     allocator::PageNumber,
-    branch::{BranchId, BranchNode, BranchNodePool},
+    branch::{BranchNode},
     meta::Meta,
 };
 
