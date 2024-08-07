@@ -109,6 +109,7 @@ impl Updater {
                 iter_pos: 0,
             }),
             cutoff: first_branch_cutoff,
+            possibly_deleted: None,
             ops: Vec::new(),
         };
 
@@ -168,6 +169,9 @@ struct ActiveBranch {
     // the cutoff key, which determines if an operation is in-scope.
     // does not exist for the last branch in the database.
     cutoff: Option<Key>,
+    // a separator key which is to be possibly deleted and will be at the point that another
+    // separator greater than it is ingested.
+    possibly_deleted: Option<Key>,
     ops: Vec<(Key, Option<PageNumber>)>,
 }
 
@@ -176,7 +180,11 @@ impl ActiveBranch {
         self.cutoff.map_or(true, |k| *key < k)
     }
 
-    fn ingest(&mut self, key: Key, pn: Option<PageNumber>) {
+    fn possibly_delete(&mut self, key: Key) {
+        self.possibly_deleted = Some(key);
+    }
+
+    fn ingest(&mut self, key: Key, pn: PageNumber) {
         todo!()
     } 
 
@@ -223,6 +231,11 @@ impl BaseLeaf {
 enum LeafOp {
     Insert(Key, Vec<u8>),
     Keep(usize, usize),
+}
+
+enum LeafCompletionStatus {
+    NeedsMerge(Key),
+    Finished,
 }
 
 struct ActiveLeaf {
@@ -286,8 +299,6 @@ impl ActiveLeaf {
             },
             _ => {}
         }
-
-        // TODO: set separator override based on last key from bulk split and first key if inserted.
     }
 
     fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
@@ -320,11 +331,10 @@ impl ActiveLeaf {
         &mut self, 
         active_branch: &mut ActiveBranch,
         leaf_writer: &mut LeafStoreWriter,
-    ) -> (usize, bool) {
-        let Some(mut splitter) = self.bulk_split.take() else { return (0, false) };
+    ) -> usize {
+        let Some(mut splitter) = self.bulk_split.take() else { return 0 };
 
         let mut start = 0;
-        let mut old_separator_deleted = false;
         for item_count in splitter.items {
             let leaf_ops = &self.ops[start..][..item_count];
             start += item_count;
@@ -340,18 +350,6 @@ impl ActiveLeaf {
             };
             let new_node = self.build_leaf(leaf_ops);
 
-            // if our split creates a node with a separator greater than the old separator of the
-            // node and we haven't yet deleted the old one, do so now.
-            if !old_separator_deleted && self.base.as_ref()
-                .map_or(false, |b| b.separator < separator) 
-            {
-                old_separator_deleted = true;
-
-                // UNWRAP: just checked existence above.
-                active_branch.ingest(self.base.as_ref().map(|b| b.separator).unwrap(), None);
-                leaf_writer.release(self.base.as_ref().map(|b| b.id).unwrap());
-            }
-
             // set the separator override for the next 
             if let Some(op) = self.ops.get(start + item_count + 1) {
                 let next = self.op_key(op);
@@ -361,52 +359,78 @@ impl ActiveLeaf {
 
             // write the node and provide it to the branch above.
             let pn = leaf_writer.allocate(new_node);
-            active_branch.ingest(separator, Some(pn));
-
+            active_branch.ingest(separator, pn);
         }
 
-        (start, old_separator_deleted)
+        start
     }
 
-    fn complete(&mut self, active_branch: &mut ActiveBranch, leaf_writer: &mut LeafStoreWriter) {
+    // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
+    // separator_override is set.
+    // If `Finished` is returned, `ops` is guaranteed empty and separator_override is empty.
+    fn complete(&mut self, active_branch: &mut ActiveBranch, leaf_writer: &mut LeafStoreWriter) 
+        -> LeafCompletionStatus
+    {
         let body_size = self.gauge.body_size();
+
+        if let Some(ref base) = self.base {
+            active_branch.possibly_delete(base.separator);
+        }
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let (last_ops_start, old_separator_deleted) 
-            = self.build_bulk_splitter_leaves(active_branch, leaf_writer);
+        let last_ops_start = self.build_bulk_splitter_leaves(active_branch, leaf_writer);
 
         if let Some(ref base) = self.base {
             leaf_writer.release(base.id);
         }
 
         if self.gauge.body_size() == 0 {
-            return
+            self.ops.clear();
+            self.separator_override = None;
+
+            LeafCompletionStatus::Finished
         } else if self.gauge.body_size() > LEAF_NODE_BODY_SIZE {
-            self.split(active_branch, leaf_writer);
+            assert_eq!(last_ops_start, 0, "normal split can only occur when not bulk splitting");
+            self.split(active_branch, leaf_writer)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_leaf(&self.ops);
             let pn = leaf_writer.allocate(node);
-            let separator = self.separator_override
-                .or(self.base.as_ref().map(|b| b.separator))
-                .unwrap_or([0u8; 32]); // first leaf always gets separator of all 0.
+            let separator = self.separator();
             
-            active_branch.ingest(separator, Some(pn));
+            active_branch.ingest(separator, pn);
 
-            if let Some(ref base) = self.base {
-                if !old_separator_deleted && base.separator != separator {
-                    active_branch.ingest(base.separator, None);
-                }
-            }
+            self.ops.clear();
+            self.separator_override = None;
+            LeafCompletionStatus::Finished
         } else {
+            // UNWRAP: if cutoff exists, then base must too.
             // merge is only performed when not at the rightmost leaf. this is protected by the
             // check on self.cutoff above.
-            
+            if self.separator_override.is_none() {
+                self.separator_override = Some(self.base.as_ref().unwrap().separator);
+            }
+
+            self.prepare_merge_ops(last_ops_start);
+
+            LeafCompletionStatus::NeedsMerge(self.cutoff.unwrap())
         }
     }
 
-    fn split(&mut self, active_branch: &mut ActiveBranch, leaf_writer: &mut LeafStoreWriter) {
+    fn separator(&self) -> Key {
+        // the first leaf always gets a separator of all 0.
+        self.separator_override.or(self.base.as_ref().map(|b| b.separator)).unwrap_or([0u8; 32])
+    }
+
+    fn reset_base(&mut self, base: Option<BaseLeaf>, cutoff: Option<Key>) {
+        self.base = base;
+        self.cutoff = cutoff;
+    }
+
+    fn split(&mut self, active_branch: &mut ActiveBranch, leaf_writer: &mut LeafStoreWriter) 
+        -> LeafCompletionStatus
+    {
         let midpoint = self.gauge.body_size() / 2;
         let mut left_size = 0;
         let mut split_point = 0;
@@ -429,26 +453,47 @@ impl ActiveLeaf {
 
         let left_node = self.build_leaf(left_ops);
         let right_separator = separate(&left_key, &right_key);
-        let left_separator = if let Some(ref base) = self.base {
-            if self.separator_override.is_some() && right_separator != base.separator {
-                active_branch.ingest(base.separator, None);
-            }
-
-            self.separator_override.unwrap_or(base.separator)
-        } else {
-            self.separator_override.unwrap_or([0u8; 32])
-        };
 
         let left_leaf = self.build_leaf(left_ops);
         let left_pn = leaf_writer.allocate(left_leaf);
-        active_branch.ingest(left_separator, Some(left_pn));
 
-        if self.gauge.body_size() - left_size >= LEAF_MERGE_THRESHOLD {
+        let left_separator = self.separator();
+
+        active_branch.ingest(left_separator, left_pn);
+
+        if self.gauge.body_size() - left_size >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
             let right_pn = leaf_writer.allocate(right_leaf);
-            active_branch.ingest(right_separator, Some(right_pn));
+            active_branch.ingest(right_separator, right_pn);
+
+            LeafCompletionStatus::Finished
         } else {
-            // TODO: degenerate split: right node not large enough. pass on to merge with sibling.
+            // degenerate split: impossible to create two nodes with >50%. Merge remainder into
+            // sibling node.
+
+            self.separator_override = Some(right_separator);
+            self.prepare_merge_ops(split_point);
+
+            // UNWRAP: protected above.
+            LeafCompletionStatus::NeedsMerge(self.cutoff.unwrap())
+        }
+    }
+
+    fn prepare_merge_ops(&mut self, split_point: usize) {
+        // copy the left over operations to the front of the vector.
+        let count = self.ops.len() - split_point;
+        for i in 0..count {
+            self.ops.swap(i, i + split_point);
+        }
+        self.ops.truncate(count);
+
+        let Some(ref base) = self.base else { return };
+
+        // then replace `Keep` ops with pure key-value ops, preparing for the base to be changed.
+        for op in self.ops.iter_mut() {
+            let LeafOp::Keep(i, _) = *op else { continue };
+            let (k, v) = base.key_value(i);
+            *op = LeafOp::Insert(k, v.to_vec());
         }
     }
 
@@ -478,8 +523,6 @@ impl ActiveLeaf {
         leaf_builder.finish()
     }
 }
-
-
 
 #[derive(Default)]
 struct LeafBulkSplitter {
