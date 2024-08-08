@@ -35,7 +35,7 @@ pub fn lookup(
 
     let leaf_pn = match search_branch(&branch, key.clone()) {
         None => return Ok(None),
-        Some(leaf_pn) => leaf_pn,
+        Some((_, leaf_pn)) => leaf_pn,
     };
 
     let _ = leaf_store;
@@ -45,7 +45,7 @@ pub fn lookup(
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
 /// node pointer whose separator is less than or equal to the given key.
-fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<PageNumber> {
+fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     let prefix = branch.prefix();
 
     if key.view_bits::<Lsb0>()[..prefix.len()] != prefix {
@@ -71,5 +71,5 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<PageNumber> {
         return None;
     }
     let node_pointer = branch.node_pointer(high - 1);
-    Some(node_pointer.into())
+    Some((high - 1, node_pointer.into()))
 }

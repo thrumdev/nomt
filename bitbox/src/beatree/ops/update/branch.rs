@@ -15,7 +15,12 @@ pub struct BaseBranch {
     pub iter_pos: usize,
 }
 
-pub struct ActiveBranch {
+pub enum DigestResult {
+    Finished,
+    NeedsMerge(Key),
+}
+
+pub struct BranchUpdater {
     // the 'base' node we are working from. does not exist if DB is empty.
     base: Option<BaseBranch>,
     // the cutoff key, which determines if an operation is in-scope.
@@ -27,9 +32,9 @@ pub struct ActiveBranch {
     ops: Vec<(Key, Option<PageNumber>)>,
 }
 
-impl ActiveBranch {
+impl BranchUpdater {
     pub fn new(base: Option<BaseBranch>, cutoff: Option<Key>) -> Self {
-        ActiveBranch {
+        BranchUpdater {
             base,
             cutoff,
             possibly_deleted: None,
@@ -39,9 +44,17 @@ impl ActiveBranch {
 
     pub fn ingest(&mut self, _key: Key, _pn: PageNumber) {
         todo!()
-    } 
+    }
 
-    pub fn complete(&mut self) {
+    pub fn base(&self) -> Option<&BaseBranch> {
+        self.base.as_ref()
+    }
+
+    pub fn cutoff(&self) -> Option<Key> {
+        self.cutoff
+    }
+
+    pub fn digest(&mut self) -> DigestResult {
         todo!()
     }
 
@@ -51,6 +64,11 @@ impl ActiveBranch {
 
     pub fn possibly_delete(&mut self, key: Key) {
         self.possibly_deleted = Some(key);
+    }
+
+    pub fn reset_base(&mut self, base: Option<BaseBranch>, cutoff: Option<Key>) {
+        self.base = base;
+        self.cutoff = cutoff;
     }
 }
 
