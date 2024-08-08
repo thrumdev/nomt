@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::beatree::{
-    allocator::PageNumber, 
+    allocator::PageNumber,
     leaf::{
         node::{self as leaf_node, LeafNode, LeafBuilder, LEAF_NODE_BODY_SIZE},
         store::{LeafStoreWriter},
@@ -25,13 +25,11 @@ pub struct BaseLeaf {
 }
 
 impl BaseLeaf {
-    // How the key compares to the next key in the base node.
-    // If the base node is exhausted `Less` is returned.
-    fn cmp_next(&self, key: &Key) -> Ordering {
-        if self.iter_pos >= self.node.n() {
-            Ordering::Less
+    fn next_key(&self) -> Option<Key> {
+        if self.iter_pos >= self.node.n() as usize {
+            None
         } else {
-            key.cmp(&self.node.key(self.iter_pos))
+            Some(self.key(self.iter_pos))
         }
     }
 
@@ -73,7 +71,7 @@ pub struct LeafUpdater {
     // leaf is having values merged in from some earlier node.
     separator_override: Option<Key>,
     ops: Vec<LeafOp>,
-    // gauges total size of leaf after ops applied. 
+    // gauges total size of leaf after ops applied.
     // if bulk split is undergoing, this just stores the total size of the last leaf,
     // and the gauges for the previous leaves are stored in `bulk_split`.
     gauge: LeafGauge,
@@ -102,23 +100,7 @@ impl LeafUpdater {
     }
 
     pub fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
-        loop {
-            if let Some(ref mut base_node) = self.base {
-                if base_node.cmp_next(&key) == Ordering::Less {
-                    break
-                }
-
-                let size = base_node.next_value().len();
-                self.ops.push(LeafOp::Keep(base_node.iter_pos, size));
-                base_node.advance_iter();
-
-                self.gauge.ingest(size);
-            } else {
-                break
-            }
-
-            self.bulk_split_step();
-        }
+        self.keep_up_to(Some(&key));
 
         if let Some(value) = value_change {
             self.ops.push(LeafOp::Insert(key, value));
@@ -131,15 +113,15 @@ impl LeafUpdater {
     // separator_override is set.
     // If `Finished` is returned, `ops` is guaranteed empty and separator_override is empty.
     pub fn digest(
-        &mut self, 
-        branch_updater: &mut BranchUpdater, 
+        &mut self,
+        branch_updater: &mut BranchUpdater,
         leaf_writer: &mut LeafStoreWriter,
     ) -> DigestResult {
         if let Some(ref base) = self.base {
             branch_updater.possibly_delete(base.separator);
         }
 
-        // TODO: "ingest" all the remaining items in the leaf.
+        self.keep_up_to(None);
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
@@ -162,7 +144,7 @@ impl LeafUpdater {
             let node = self.build_leaf(&self.ops);
             let pn = leaf_writer.allocate(node);
             let separator = self.separator();
-            
+
             branch_updater.ingest(separator, pn);
 
             self.ops.clear();
@@ -179,6 +161,23 @@ impl LeafUpdater {
             self.prepare_merge_ops(last_ops_start);
 
             DigestResult::NeedsMerge(self.cutoff.unwrap())
+        }
+    }
+
+    fn keep_up_to(&mut self, up_to: Option<&Key>) {
+        while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
+            let Some(ref mut base_node) = self.base else { return };
+            if up_to.map_or(false, |up_to| up_to.cmp(&next_key) != Ordering::Greater) {
+                break
+            }
+
+            let size = base_node.next_value().len();
+            self.ops.push(LeafOp::Keep(base_node.iter_pos, size));
+            base_node.advance_iter();
+
+            self.gauge.ingest(size);
+
+            self.bulk_split_step();
         }
     }
 
@@ -224,7 +223,7 @@ impl LeafUpdater {
     }
 
     fn build_bulk_splitter_leaves(
-        &mut self, 
+        &mut self,
         branch_updater: &mut BranchUpdater,
         leaf_writer: &mut LeafStoreWriter,
     ) -> usize {
@@ -246,7 +245,7 @@ impl LeafUpdater {
             };
             let new_node = self.build_leaf(leaf_ops);
 
-            // set the separator override for the next 
+            // set the separator override for the next
             if let Some(op) = self.ops.get(start + item_count + 1) {
                 let next = self.op_key(op);
                 let last = new_node.key(new_node.n() - 1);
@@ -266,7 +265,7 @@ impl LeafUpdater {
         self.separator_override.or(self.base.as_ref().map(|b| b.separator)).unwrap_or([0u8; 32])
     }
 
-    fn split(&mut self, branch_updater: &mut BranchUpdater, leaf_writer: &mut LeafStoreWriter) 
+    fn split(&mut self, branch_updater: &mut BranchUpdater, leaf_writer: &mut LeafStoreWriter)
         -> DigestResult
     {
         let midpoint = self.gauge.body_size() / 2;
@@ -355,7 +354,7 @@ impl LeafUpdater {
         let mut leaf_builder = LeafBuilder::new(ops.len());
         for op in ops {
             let (k, v) = self.op_key_value(op);
-    
+
             leaf_builder.push(k, v);
         }
         leaf_builder.finish()
