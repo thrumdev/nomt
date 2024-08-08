@@ -9,7 +9,7 @@ use crate::beatree::{
     allocator::PageNumber,
     bbn,
     branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},
-    index::Index, 
+    index::Index,
     leaf::{
         node::{LEAF_NODE_BODY_SIZE},
         store::{LeafStoreReader, LeafStoreWriter},
@@ -17,8 +17,8 @@ use crate::beatree::{
 };
 
 use super::BranchId;
-use branch::{BaseBranch, ActiveBranch};
-use leaf::{BaseLeaf, ActiveLeaf};
+use branch::{DigestResult as BranchDigestResult, BaseBranch, BranchUpdater};
+use leaf::{DigestResult as LeafDigestResult, BaseLeaf, LeafUpdater};
 
 mod branch;
 mod leaf;
@@ -49,35 +49,47 @@ pub fn update(
     bnp: &mut BranchNodePool,
     leaf_reader: &LeafStoreReader,
     leaf_writer: &mut LeafStoreWriter,
-    _bbn_store_writer: &mut bbn::BbnStoreWriter,
+    bbn_writer: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
-    let mut updater = Updater::new(&*bbn_index, &*bnp, leaf_reader);
+    let mut ctx = Ctx {
+        bbn_index,
+        bbn_writer,
+        bnp,
+        leaf_reader,
+        leaf_writer,
+    };
+
+    let mut updater = Updater::new(&ctx);
     for (key, value_change) in changeset {
-        updater.ingest(*key, value_change.clone(), leaf_writer);
+        updater.ingest(*key, value_change.clone(), &mut ctx);
     }
 
-    updater.complete(leaf_writer);
+    updater.complete(&mut ctx);
 
     Ok(todo!())
 }
 
+struct Ctx<'a> {
+    bbn_index: &'a mut Index,
+    bbn_writer: &'a mut bbn::BbnStoreWriter,
+    bnp: &'a mut BranchNodePool,
+    leaf_reader: &'a LeafStoreReader,
+    leaf_writer: &'a mut LeafStoreWriter,
+}
+
 struct Updater {
-    active_branch: ActiveBranch,
-    active_leaf: ActiveLeaf,
+    branch_updater: BranchUpdater,
+    leaf_updater: LeafUpdater,
 }
 
 impl Updater {
-    fn new(
-        bbn_index: &Index,
-        bnp: &BranchNodePool,
-        leaf_reader: &LeafStoreReader,
-    ) -> Self {
-        let first = bbn_index.first();
+    fn new(ctx: &Ctx) -> Self {
+        let first = ctx.bbn_index.first();
 
         // UNWRAP: all nodes in index must exist.
-        let first_branch = first.as_ref().map(|(_, id)| bnp.checkout(*id).unwrap());
+        let first_branch = first.as_ref().map(|(_, id)| ctx.bnp.checkout(*id).unwrap());
         let first_branch_cutoff = first.as_ref()
-            .and_then(|(k, _)| bbn_index.next_after(*k))
+            .and_then(|(k, _)| ctx.bbn_index.next_after(*k))
             .map(|(k, _)| k);
 
         // first leaf cutoff is the separator of the second leaf _or_ the separator of the next
@@ -90,66 +102,150 @@ impl Updater {
 
         let first_leaf = first_branch.as_ref()
             .map(|node| (
-                PageNumber::from(node.node_pointer(0)), 
+                PageNumber::from(node.node_pointer(0)),
                 reconstruct_key(node.prefix(), node.separator(0)),
             ))
             .map(|(id, separator)| BaseLeaf {
                 id,
-                node: leaf_reader.query(id),
+                node: ctx.leaf_reader.query(id),
                 iter_pos: 0,
                 separator,
             });
 
-        // active branch: first branch, cut-off second branch key.
-        let active_branch = ActiveBranch::new(
+        // start with the first branch, cut-off second branch key.
+        let branch_updater = BranchUpdater::new(
             first_branch.map(|node| BaseBranch {
                 // UNWRAP: node can only exist if ID does.
                 id: first.as_ref().unwrap().1,
                 node,
                 iter_pos: 0,
             }),
-           first_branch_cutoff,
+            first_branch_cutoff,
         );
 
-        // active leaf: first leaf in first branch, cut-off second leaf key.
-        let active_leaf = ActiveLeaf::new(first_leaf, first_leaf_cutoff);
+        // start with first leaf in first branch, cut-off second leaf key.
+        let leaf_updater = LeafUpdater::new(first_leaf, first_leaf_cutoff);
 
         Updater {
-            active_branch,
-            active_leaf,
+            branch_updater,
+            leaf_updater,
         }
     }
 
     fn ingest(
-        &mut self, 
-        key: Key, 
+        &mut self,
+        key: Key,
         value_change: Option<Vec<u8>>,
-        leaf_writer: &mut LeafStoreWriter,
+        ctx: &mut Ctx,
     ) {
-        // This is a while loop because merges may require multiple iterations.
-        while !self.active_leaf.is_in_scope(&key) {
-            self.active_leaf.complete(&mut self.active_branch, leaf_writer);
-            // TODO: determine where the active leaf should be set next. if merging, it's just the
-            // 'next' leaf. If done, it's the leaf for the key. Set active branch to the branch
-            // for the active leaf.
-
-            if self.active_branch.is_in_scope(&key) {
-                continue
-            }
-            // TODO: complete branch. set active to relevant leaf and branch.
-        }
-
-        self.active_leaf.ingest(key, value_change);
+        self.digest_until(Some(key), ctx);
+        self.leaf_updater.ingest(key, value_change);
     }
 
-    fn complete(&mut self, leaf_writer: &mut LeafStoreWriter) {
-        self.active_leaf.complete(&mut self.active_branch, leaf_writer);
-        self.active_branch.complete();
+    fn complete(&mut self, ctx: &mut Ctx) {
+        self.digest_until(None, ctx);
+    }
+
+    fn digest_until(&mut self, until: Option<Key>, ctx: &mut Ctx) {
+        while until.map_or(true, |k| !self.leaf_updater.is_in_scope(&k)) {
+            match self.leaf_updater.digest(&mut self.branch_updater, &mut ctx.leaf_writer) {
+                LeafDigestResult::Finished => {
+                    self.digest_branches_until(until, ctx);
+                    let Some(until) = until else { break };
+
+                    // UNWRAP: branch updater base must be `Some` as an empty DB would never
+                    // pass the loop condition if `until` is `Some`.
+                    //
+                    // UNWRAP: branch updater base must contain `until` as a postcondition of
+                    // digest_branches_until.
+                    self.reset_leaf_base(until, ctx).unwrap();
+                },
+                LeafDigestResult::NeedsMerge(key) => {
+                    self.digest_branches_until(Some(key), ctx);
+
+                    // UNWRAP: branch updater base must be `Some` as an empty DB would never
+                    // pass the loop condition _and_ the merge key is always a known leaf.
+                    //
+                    // UNWRAP: branch updater base must contain `key` as a postcondition of
+                    // digest_branches_until.
+                    self.reset_leaf_base(key, ctx).unwrap();
+                },
+                LeafDigestResult::NeedsBranch(key) => {
+                    self.digest_branches_until(Some(key), ctx);
+                },
+            }
+        }
+    }
+
+    // post condition: if `until` is `Some`, `branch_updater`'s base is always set to the branch
+    // containing the `until` key.
+    fn digest_branches_until(
+        &mut self,
+        until: Option<Key>,
+        ctx: &mut Ctx,
+    ) {
+        while until.map_or(true, |k| !self.branch_updater.is_in_scope(&k)) {
+            match self.branch_updater.digest() {
+                BranchDigestResult::Finished => {
+                    let Some(until) = until else { break };
+                    self.reset_branch_base(until, &*ctx);
+                }
+                BranchDigestResult::NeedsMerge(key) => {
+                    self.reset_branch_base(key, &*ctx);
+                }
+            }
+        }
+    }
+
+    // panics if branch updater base is not a branch containing the target.
+    fn reset_leaf_base(
+        &mut self,
+        target: Key,
+        ctx: &Ctx,
+    ) -> Result<(), ()> {
+        let branch = self.branch_updater.base().ok_or(())?;
+        let (i, leaf_pn) = super::search_branch(&branch.node, target).ok_or(())?;
+        let leaf = ctx.leaf_reader.query(leaf_pn);
+
+        let separator = reconstruct_key(branch.node.prefix(), branch.node.separator(i));
+
+        let cutoff = if branch.node.n() as usize > i + 1 {
+            Some(reconstruct_key(branch.node.prefix(), branch.node.separator(i + 1)))
+        } else {
+            self.branch_updater.cutoff()
+        };
+
+        let base_leaf = BaseLeaf {
+            node: leaf,
+            id: leaf_pn,
+            iter_pos: 0,
+            separator,
+        };
+
+        self.leaf_updater.reset_base(Some(base_leaf), cutoff);
+        Ok(())
+    }
+
+    fn reset_branch_base(
+        &mut self,
+        target: Key,
+        ctx: &Ctx,
+    ) {
+        let target_branch = ctx.bbn_index.lookup(target);
+        let cutoff = ctx.bbn_index.next_after(target).map(|(k, _)| k);
+        let base = target_branch.map(|id| {
+            // UNWRAP: all nodes in index must exist.
+            let node = ctx.bnp.checkout(id).unwrap();
+            BaseBranch {
+                id: id,
+                node,
+                iter_pos: 0,
+            }
+        });
+
+        self.branch_updater.reset_base(base, cutoff);
     }
 }
-
-
-
 
 fn reconstruct_key(
     prefix: &BitSlice<u8>,
