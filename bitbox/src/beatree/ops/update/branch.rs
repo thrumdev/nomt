@@ -5,7 +5,10 @@ use std::cmp::Ordering;
 
 use crate::beatree::{
     allocator::PageNumber,
-    branch::{self as branch_node, BranchNode}, Key,
+    bbn::BbnStoreWriter,
+    branch::{self as branch_node, BranchNode, BranchNodePool, BRANCH_NODE_BODY_SIZE},
+    index::Index,
+    Key,
 };
 
 use super::{reconstruct_key, BranchId, BRANCH_MERGE_THRESHOLD, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD};
@@ -27,6 +30,14 @@ impl BaseBranch {
 
     fn key(&self, i: usize) -> Key {
         reconstruct_key(self.node.prefix(), self.node.separator(i))
+    }
+
+    fn key_value(&self, i: usize) -> (Key, PageNumber) {
+        (self.key(i), self.node.node_pointer(i).into())
+    }
+
+    fn separator(&self) -> Key {
+        self.key(0)
     }
 
     fn advance_iter(&mut self) {
@@ -94,8 +105,57 @@ impl BranchUpdater {
         self.cutoff
     }
 
-    pub fn digest(&mut self) -> DigestResult {
-        todo!()
+    pub fn digest(
+        &mut self,
+        bbn_index: &mut Index,
+        bnp: &mut BranchNodePool,
+        bbn_writer: &mut BbnStoreWriter,
+    ) -> (Option<BranchId>, DigestResult) {
+        if let Some(ref base) = self.base {
+            bbn_index.remove(&base.separator());
+            bbn_writer.release(base.node.bbn_pn().into());
+        }
+
+        let old_branch_id = self.base.as_ref().map(|b| b.id);
+
+        self.keep_up_to(None);
+
+        // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
+        // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
+        // in practice; bulk splits are rare.
+        let last_ops_start = self.build_bulk_splitter_branches();
+
+        if self.gauge.body_size() == 0 {
+            self.ops.clear();
+            self.separator_override = None;
+
+            (old_branch_id, DigestResult::Finished)
+        } else if self.gauge.body_size() > BRANCH_NODE_BODY_SIZE {
+            assert_eq!(last_ops_start, 0, "normal split can only occur when not bulk splitting");
+            (old_branch_id, self.split())
+        } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
+            let (branch_id, node) = self.build_branch(&self.ops, &self.gauge, bnp);
+            let separator = self.separator();
+
+            bbn_index.insert(separator, branch_id);
+            bbn_writer.allocate(node);
+
+            self.ops.clear();
+            self.gauge = BranchGauge::new();
+            self.separator_override = None;
+            (old_branch_id, DigestResult::Finished)
+        } else {
+            // UNWRAP: if cutoff exists, then base must too.
+            // merge is only performed when not at the rightmost leaf. this is protected by the
+            // check on self.cutoff above.
+            if self.separator_override.is_none() {
+                self.separator_override = Some(self.base.as_ref().unwrap().separator());
+            }
+
+            self.prepare_merge_ops(last_ops_start);
+
+            (old_branch_id, DigestResult::NeedsMerge(self.cutoff.unwrap()))
+        }
     }
 
     pub fn is_in_scope(&self, key: &Key) -> bool {
@@ -112,6 +172,12 @@ impl BranchUpdater {
         self.possibly_deleted.clear();
     }
 
+    fn separator(&self) -> Key {
+        self.separator_override
+            .or_else(|| self.base.as_ref().map(|b| b.separator()))
+            .unwrap_or([0u8; 32])
+    }
+
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
         while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
             let Some(ref mut base_node) = self.base else { return };
@@ -124,6 +190,9 @@ impl BranchUpdater {
                 base_node.advance_iter();
                 continue;
             }
+
+            // TODO: is this right? if the key is equal to `up_to` we should advance the iterator
+            // but not keep.
 
             let separator_len = separator_len(&next_key);
             self.ops.push(BranchOp::Keep(base_node.iter_pos, separator_len));
@@ -177,6 +246,41 @@ impl BranchUpdater {
                 bulk_splitter.push(n);
             },
             _ => {}
+        }
+    }
+
+    fn build_bulk_splitter_branches(&mut self) -> usize {
+        todo!()
+    }
+
+    fn split(&mut self) -> DigestResult {
+        todo!()
+    }
+
+    fn build_branch(
+        &self,
+        ops: &[BranchOp],
+        gauge: &BranchGauge,
+        bnp: &mut BranchNodePool,
+    ) -> (BranchId, BranchNode) {
+        todo!()
+    }
+
+    fn prepare_merge_ops(&mut self, split_point: usize) {
+        // copy the left over operations to the front of the vector.
+        let count = self.ops.len() - split_point;
+        for i in 0..count {
+            self.ops.swap(i, i + split_point);
+        }
+        self.ops.truncate(count);
+
+        let Some(ref base) = self.base else { return };
+
+        // then replace `Keep` ops with pure key-value ops, preparing for the base to be changed.
+        for op in self.ops.iter_mut() {
+            let BranchOp::Keep(i, _) = *op else { continue };
+            let (k, pn) = base.key_value(i);
+            *op = BranchOp::Insert(k, pn);
         }
     }
 }
