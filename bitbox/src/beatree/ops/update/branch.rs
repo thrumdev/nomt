@@ -136,7 +136,7 @@ impl BranchUpdater {
             (old_branch_id, DigestResult::Finished)
         } else if self.gauge.body_size() > BRANCH_NODE_BODY_SIZE {
             assert_eq!(last_ops_start, 0, "normal split can only occur when not bulk splitting");
-            (old_branch_id, self.split())
+            (old_branch_id, self.split(bbn_index, bnp, bbn_writer))
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let (branch_id, node) = self.build_branch(&self.ops, &self.gauge, bnp);
             let separator = self.separator();
@@ -290,8 +290,77 @@ impl BranchUpdater {
         start
     }
 
-    fn split(&mut self) -> DigestResult {
-        todo!()
+    fn split(
+        &mut self,
+        bbn_index: &mut Index,
+        bnp: &mut BranchNodePool,
+        bbn_writer: &mut BbnStoreWriter,
+    ) -> DigestResult {
+        let midpoint = self.gauge.body_size() / 2;
+        let mut left_size = 0;
+        let mut split_point = 0;
+
+        let mut left_gauge = BranchGauge::new();
+        while left_gauge.body_size() < midpoint {
+            let (key, separator_len) = match self.ops[split_point] {
+                BranchOp::Keep(i, separator_len) => {
+                    // UNWRAP: keep ops require base to exist.
+                    let k = self.base.as_ref().unwrap().key(i);
+                    (k, separator_len)
+                }
+                BranchOp::Insert(k, _) => (k, separator_len(&k)),
+            };
+
+            // TODO: if this would spill us over, rewind.
+            left_gauge.ingest(key, separator_len);
+            split_point += 1;
+        }
+
+        let left_ops = &self.ops[..split_point];
+        let right_ops = &self.ops[split_point..];
+
+        let right_separator = self.op_key(&self.ops[split_point]);
+
+        let (left_branch_id, left_node) = self.build_branch(left_ops, &left_gauge, bnp);
+        let left_separator = self.separator();
+
+        bbn_index.insert(left_separator, left_branch_id);
+        bbn_writer.allocate(left_node);
+
+        let mut right_gauge = BranchGauge::new();
+        for op in &self.ops[split_point..] {
+            let (key, separator_len) = match op {
+                BranchOp::Keep(i, separator_len) => {
+                    // UNWRAP: keep ops require base to exist.
+                    let k = self.base.as_ref().unwrap().key(*i);
+                    (k, *separator_len)
+                }
+                BranchOp::Insert(k, _) => (*k, separator_len(&k)),
+            };
+
+            right_gauge.ingest(key, separator_len);
+        }
+
+        if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD
+            || self.cutoff.is_none()
+        {
+            let (right_branch_id, right_node) = self.build_branch(right_ops, &right_gauge, bnp);
+
+            bbn_index.insert(right_separator, right_branch_id);
+            bbn_writer.allocate(right_node);
+
+            DigestResult::Finished
+        } else {
+            // degenerate split: impossible to create two nodes with >50%. Merge remainder into
+            // sibling node.
+
+            self.separator_override = Some(right_separator);
+            self.prepare_merge_ops(split_point);
+            self.gauge = right_gauge;
+
+            // UNWRAP: protected above.
+            DigestResult::NeedsMerge(self.cutoff.unwrap())
+        }
     }
 
     fn build_branch(

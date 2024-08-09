@@ -273,6 +273,8 @@ impl LeafUpdater {
         let mut left_size = 0;
         let mut split_point = 0;
 
+        // TODO: this isn't quite right since it doesn't account for cell overhead. better to
+        // rebuild a gauge.
         while left_size < midpoint {
             let item_size = match self.ops[split_point] {
                 LeafOp::Keep(_, size) => size,
@@ -289,7 +291,6 @@ impl LeafUpdater {
         let left_key = self.op_key(&self.ops[split_point - 1]);
         let right_key = self.op_key(&self.ops[split_point]);
 
-        let _left_node = self.build_leaf(left_ops);
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);
