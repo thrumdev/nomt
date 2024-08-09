@@ -170,9 +170,6 @@ impl Updater {
                     // digest_branches_until.
                     self.reset_leaf_base(key, ctx).unwrap();
                 },
-                LeafDigestResult::NeedsBranch(key) => {
-                    self.digest_branches_until(Some(key), ctx);
-                },
             }
         }
     }

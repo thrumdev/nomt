@@ -57,7 +57,6 @@ enum LeafOp {
 
 pub enum DigestResult {
     NeedsMerge(Key),
-    NeedsBranch(Key),
     Finished,
 }
 
@@ -103,6 +102,7 @@ impl LeafUpdater {
         self.keep_up_to(Some(&key));
 
         if let Some(value) = value_change {
+            self.gauge.ingest(value.len());
             self.ops.push(LeafOp::Insert(key, value));
         }
 
@@ -148,6 +148,7 @@ impl LeafUpdater {
             branch_updater.ingest(separator, pn);
 
             self.ops.clear();
+            self.gauge = LeafGauge::default();
             self.separator_override = None;
             DigestResult::Finished
         } else {
@@ -213,6 +214,8 @@ impl LeafUpdater {
                 self.begin_bulk_split();
             },
             Some(ref mut bulk_splitter) if self.gauge.body_size() >= LEAF_BULK_SPLIT_TARGET => {
+                // TODO: this might be greater than the maximum. what do ?
+
                 // push onto bulk splitter & restart gauge.
                 self.gauge = LeafGauge::default();
                 let n = self.ops.len() - bulk_splitter.total_count;
@@ -310,6 +313,16 @@ impl LeafUpdater {
 
             self.separator_override = Some(right_separator);
             self.prepare_merge_ops(split_point);
+
+            self.gauge = LeafGauge::default();
+            for op in self.ops.iter() {
+                let size = match op {
+                    LeafOp::Keep(_, size) => *size,
+                    LeafOp::Insert(_, val) => val.len(),
+                };
+
+                self.gauge.ingest(size);
+            }
 
             // UNWRAP: protected above.
             DigestResult::NeedsMerge(self.cutoff.unwrap())
