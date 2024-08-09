@@ -182,7 +182,13 @@ impl Updater {
         ctx: &mut Ctx,
     ) {
         while until.map_or(true, |k| !self.branch_updater.is_in_scope(&k)) {
-            match self.branch_updater.digest() {
+            let (_old_branch, digest_result) = self.branch_updater.digest(
+                &mut ctx.bbn_index,
+                &mut ctx.bnp,
+                &mut ctx.bbn_writer,
+            );
+            // TODO: push old branch ID onto vector.
+            match digest_result {
                 BranchDigestResult::Finished => {
                     let Some(until) = until else { break };
                     self.reset_branch_base(until, &*ctx);
