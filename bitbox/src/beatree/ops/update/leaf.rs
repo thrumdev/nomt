@@ -238,9 +238,7 @@ impl LeafUpdater {
             start += item_count;
 
             let separator = if start == 0 {
-                self.separator_override
-                    .or(self.base.as_ref().map(|base| base.separator))
-                    .unwrap_or([0u8; 32])
+                self.separator()
             } else {
                 // UNWRAP: separator override is always set when more items follow after a bulk
                 // split.
