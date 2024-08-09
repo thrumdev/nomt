@@ -48,8 +48,9 @@ pub fn create(
 }
 
 impl BbnStoreWriter {
-    pub fn allocate(&mut self, branch_node: BranchNode) -> PageNumber {
+    pub fn allocate(&mut self, mut branch_node: BranchNode) -> PageNumber {
         let pn = self.allocator_writer.allocate();
+        branch_node.set_bbn_pn(pn.0);
         self.pending.push(branch_node);
         pn
     }
