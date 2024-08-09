@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use crate::beatree::{
     allocator::PageNumber,
     bbn::BbnStoreWriter,
-    branch::{self as branch_node, BranchNode, BranchNodePool, BRANCH_NODE_BODY_SIZE},
+    branch::{self as branch_node, BranchNode, BranchNodeBuilder, BranchNodePool, BRANCH_NODE_BODY_SIZE},
     index::Index,
     Key,
 };
@@ -215,7 +215,7 @@ impl BranchUpdater {
         let mut gauge = BranchGauge::new();
         for op in &self.ops {
             match op {
-                BranchOp::Insert(key, pn) => gauge.ingest(*key, separator_len(&key)),
+                BranchOp::Insert(key, _) => gauge.ingest(*key, separator_len(&key)),
                 BranchOp::Keep(i, separator_len) => gauge.ingest(
                     // UNWRAP: `Keep` ops require base node to exist.
                     self.base.as_ref().unwrap().key(*i),
@@ -297,7 +297,6 @@ impl BranchUpdater {
         bbn_writer: &mut BbnStoreWriter,
     ) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
-        let mut left_size = 0;
         let mut split_point = 0;
 
         let mut left_gauge = BranchGauge::new();
@@ -369,7 +368,28 @@ impl BranchUpdater {
         gauge: &BranchGauge,
         bnp: &mut BranchNodePool,
     ) -> (BranchId, BranchNode) {
-        todo!()
+        let branch_id = bnp.allocate();
+
+        // UNWRAP: freshly allocated branch can always be checked out.
+        let branch = bnp.checkout(branch_id).unwrap();
+        let mut builder = BranchNodeBuilder::new(
+            branch,
+            gauge.n,
+            gauge.prefix_len,
+            gauge.separator_len,
+        );
+
+        for op in ops {
+            match op {
+                BranchOp::Insert(k, pn) => builder.push(*k, pn.0),
+                BranchOp::Keep(i, _) => {
+                    let (k, pn) = self.base.as_ref().unwrap().key_value(*i);
+                    builder.push(k, pn.0);
+                }
+            }
+        }
+
+        (branch_id, builder.finish())
     }
 
     fn prepare_merge_ops(&mut self, split_point: usize) {
