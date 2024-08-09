@@ -123,7 +123,11 @@ impl BranchUpdater {
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_branches();
+        let last_ops_start = self.build_bulk_splitter_branches(
+            bbn_index,
+            bnp,
+            bbn_writer,
+        );
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
@@ -222,9 +226,10 @@ impl BranchUpdater {
             n += 1;
 
             if gauge.body_size() >= BRANCH_BULK_SPLIT_TARGET {
-                splitter.push(n);
-                n = 0;
+                let last_gauge = gauge;
                 gauge = BranchGauge::new();
+                splitter.push(n, last_gauge);
+                n = 0;
             }
         }
 
@@ -241,16 +246,48 @@ impl BranchUpdater {
             },
             Some(ref mut bulk_splitter) if self.gauge.body_size() >= BRANCH_BULK_SPLIT_TARGET => {
                 // push onto bulk splitter & restart gauge.
-                self.gauge = BranchGauge::new();
+                let last_gauge = std::mem::replace(&mut self.gauge, BranchGauge::new());
                 let n = self.ops.len() - bulk_splitter.total_count;
-                bulk_splitter.push(n);
+                bulk_splitter.push(n, last_gauge);
             },
             _ => {}
         }
     }
 
-    fn build_bulk_splitter_branches(&mut self) -> usize {
-        todo!()
+    fn build_bulk_splitter_branches(
+        &mut self,
+        bbn_index: &mut Index,
+        bnp: &mut BranchNodePool,
+        bbn_writer: &mut BbnStoreWriter,
+    ) -> usize {
+        let Some(splitter) = self.bulk_split.take() else { return 0 };
+
+        let mut start = 0;
+        for (item_count, gauge) in splitter.items {
+            let branch_ops = &self.ops[start..][..item_count];
+            start += item_count;
+
+            let separator = if start == 0 {
+                self.separator()
+            } else {
+                // UNWRAP: separator override is always set when more items follow after a bulk
+                // split.
+                self.separator_override.take().unwrap()
+            };
+            let (new_branch_id, new_node) = self.build_branch(branch_ops, &gauge, bnp);
+
+            // set the separator override for the next
+            if let Some(op) = self.ops.get(start + item_count + 1) {
+                let next = self.op_key(op);
+                self.separator_override = Some(next);
+            }
+
+            // write the node and provide it to the branch above.
+            bbn_index.insert(separator, new_branch_id);
+            bbn_writer.allocate(new_node);
+        }
+
+        start
     }
 
     fn split(&mut self) -> DigestResult {
@@ -281,6 +318,14 @@ impl BranchUpdater {
             let BranchOp::Keep(i, _) = *op else { continue };
             let (k, pn) = base.key_value(i);
             *op = BranchOp::Insert(k, pn);
+        }
+    }
+
+    fn op_key(&self, op: &BranchOp) -> Key {
+        // UNWRAP: `Keep` ops require base to exist.
+        match op {
+            BranchOp::Insert(k, _) => *k,
+            BranchOp::Keep(i, _) => self.base.as_ref().unwrap().key(*i),
         }
     }
 }
@@ -338,13 +383,13 @@ fn separator_len(key: &Key) -> usize {
 
 #[derive(Default)]
 struct BranchBulkSplitter {
-    items: Vec<usize>,
+    items: Vec<(usize, BranchGauge)>,
     total_count: usize,
 }
 
 impl BranchBulkSplitter {
-    fn push(&mut self, count: usize) {
-        self.items.push(count);
+    fn push(&mut self, count: usize, gauge: BranchGauge) {
+        self.items.push((count, gauge));
         self.total_count += count;
     }
 }
