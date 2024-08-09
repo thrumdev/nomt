@@ -11,7 +11,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub use node::{BRANCH_NODE_BODY_SIZE, BranchNode, BranchNodeView, body_fullness, body_size};
+pub use node::{
+    BRANCH_NODE_BODY_SIZE, BranchNode, BranchNodeBuilder, BranchNodeView, body_fullness, body_size,
+};
 
 pub mod node;
 

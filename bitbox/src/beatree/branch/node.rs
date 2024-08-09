@@ -1,6 +1,7 @@
 use bitvec::prelude::*;
 use std::sync::{Arc, Mutex};
 
+use crate::beatree::Key;
 use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
 
 // Here is the layout of a branch node:
@@ -110,6 +111,11 @@ impl BranchNode {
         self.view().node_pointer(i)
     }
 
+    fn set_node_pointer(&mut self, i: usize, node_pointer: u32) {
+        let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
+        self.as_mut_slice()[offset..offset + 4].copy_from_slice(&node_pointer.to_le_bytes());
+    }
+
     // TODO: modification.
     //
     // Coming up with the right API for this is tricky:
@@ -188,4 +194,54 @@ pub fn body_size(prefix_len: usize, separator_len: usize, n: usize) -> usize {
 
 pub fn body_fullness(prefix_len: usize, separator_len: usize, n: usize) -> f32 {
     body_size(prefix_len, separator_len, n) as f32 / BRANCH_NODE_BODY_SIZE as f32
+}
+
+pub struct BranchNodeBuilder {
+    branch: BranchNode,
+    index: usize,
+    prefix_len: usize,
+    separator_len: usize,
+}
+
+impl BranchNodeBuilder {
+    pub fn new(mut branch: BranchNode, n: usize, prefix_len: usize, total_separator_len: usize)
+        -> Self
+    {
+        let separator_len = total_separator_len - prefix_len;
+
+        branch.set_n(n as u16);
+        branch.set_prefix_len(prefix_len as u8);
+        branch.set_separator_len(separator_len as u8);
+
+        BranchNodeBuilder {
+            branch,
+            index: 0,
+            prefix_len,
+            separator_len,
+        }
+    }
+
+    pub fn push(&mut self, key: Key, pn: u32) {
+        assert!(self.index < self.branch.n() as usize);
+
+        let varbits = self.branch.varbits_mut();
+        if self.index == 0 {
+            let prefix = &key.view_bits::<Lsb0>()[..self.prefix_len];
+            varbits[..self.prefix_len].copy_from_bitslice(prefix);
+        }
+
+        let separator = &key.view_bits::<Lsb0>()[self.prefix_len..][..self.separator_len];
+
+        let cell_start = self.prefix_len + self.index * self.separator_len;
+        let cell_end = cell_start + self.separator_len;
+        varbits[cell_start..cell_end].copy_from_bitslice(separator);
+
+        self.branch.set_node_pointer(self.index, pn);
+
+        self.index += 1;
+    }
+
+    pub fn finish(self) -> BranchNode {
+        self.branch
+    }
 }
