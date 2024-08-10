@@ -38,9 +38,8 @@ pub fn lookup(
         Some((_, leaf_pn)) => leaf_pn,
     };
 
-    let _ = leaf_store;
-    let _ = leaf_pn;
-    todo!();
+    let leaf = leaf_store.query(leaf_pn);
+    Ok(leaf.get(&key).map(|v| v.to_vec()))
 }
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
