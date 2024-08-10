@@ -102,11 +102,10 @@ impl LeafUpdater {
         self.keep_up_to(Some(&key));
 
         if let Some(value) = value_change {
-            self.gauge.ingest(value.len());
             self.ops.push(LeafOp::Insert(key, value));
         }
 
-        self.bulk_split_step();
+        self.bulk_split_step(self.ops.len() - 1);
     }
 
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
@@ -176,52 +175,52 @@ impl LeafUpdater {
             if order == Ordering::Greater {
                 let size = base_node.next_value().len();
                 self.ops.push(LeafOp::Keep(base_node.iter_pos, size));
-                self.gauge.ingest(size);
                 base_node.advance_iter();
-                self.bulk_split_step();
+                self.bulk_split_step(self.ops.len() - 1);
             } else {
                 base_node.advance_iter();
             }
         }
     }
 
-    fn begin_bulk_split(&mut self) {
-        let mut splitter = LeafBulkSplitter::default();
-
-        let mut n = 0;
-        let mut gauge = LeafGauge::default();
-        for op in &self.ops {
-            match op {
-                LeafOp::Insert(_, val) => gauge.ingest(val.len()),
-                LeafOp::Keep(_, val_size) => gauge.ingest(*val_size),
-            }
-
-            n += 1;
-
-            if gauge.body_size() >= LEAF_BULK_SPLIT_TARGET {
-                splitter.push(n);
-                n = 0;
-                gauge = LeafGauge::default();
-            }
-        }
-
-        self.gauge = gauge;
-        self.bulk_split = Some(splitter);
-    }
-
     // check whether bulk split needs to start, and if so, start it.
     // if ongoing, check if we need to cut off.
-    fn bulk_split_step(&mut self) {
+    fn bulk_split_step(&mut self, op_index: usize) {
+        let item_size = match self.ops[op_index] {
+            LeafOp::Keep(_, size) => size,
+            LeafOp::Insert(_, ref val) => val.len(),
+        };
+
+        let body_size_after = self.gauge.body_size_after(item_size);
         match self.bulk_split {
-            None if self.gauge.body_size() >= LEAF_BULK_SPLIT_THRESHOLD => {
-                self.begin_bulk_split();
+            None if body_size_after >= LEAF_BULK_SPLIT_THRESHOLD => {
+                self.bulk_split = Some(LeafBulkSplitter::default());
+                self.gauge = LeafGauge::default();
+                for i in 0..=op_index {
+                    self.bulk_split_step(i);
+                }
             },
-            Some(ref mut bulk_splitter) if self.gauge.body_size() >= LEAF_BULK_SPLIT_TARGET => {
-                // TODO: this might be greater than the maximum. what do ?
+            Some(ref mut bulk_splitter) if body_size_after >= LEAF_BULK_SPLIT_TARGET => {
+                let accept_item = body_size_after <= LEAF_NODE_BODY_SIZE || {
+                    if self.gauge.body_size() < LEAF_MERGE_THRESHOLD {
+                        // super degenerate split! node grew from underfull to overfull in one
+                        // item. only thing to do here is merge leftwards, unfortunately.
+                        // save this for later to do another pass with.
+                        todo!()
+                    }
+
+                    false
+                };
+
+                let n = if accept_item {
+                    self.gauge.ingest(item_size);
+                    op_index + 1 - bulk_splitter.total_count
+                } else {
+                    op_index - bulk_splitter.total_count
+                };
 
                 // push onto bulk splitter & restart gauge.
                 self.gauge = LeafGauge::default();
-                let n = self.ops.len() - bulk_splitter.total_count;
                 bulk_splitter.push(n);
             },
             _ => {}
@@ -282,8 +281,16 @@ impl LeafUpdater {
                 LeafOp::Insert(_, ref val) => val.len(),
             };
 
-            left_gauge.ingest(item_size);
+            if left_gauge.body_size_after(item_size) > LEAF_NODE_BODY_SIZE {
+                if left_gauge.body_size() < LEAF_MERGE_THRESHOLD {
+                    // super degenerate split! jumped from underfull to overfull in a single step.
+                    todo!()
+                }
 
+                break
+            }
+
+            left_gauge.ingest(item_size);
             split_point += 1;
         }
 
@@ -400,6 +407,10 @@ impl LeafGauge {
     fn ingest(&mut self, value_size: usize) {
         self.n += 1;
         self.value_size_sum += value_size;
+    }
+
+    fn body_size_after(&self, value_size: usize) -> usize {
+        leaf_node::body_size(self.n + 1, self.value_size_sum + value_size)
     }
 
     fn body_size(&self) -> usize {
