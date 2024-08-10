@@ -273,18 +273,17 @@ impl LeafUpdater {
         -> DigestResult
     {
         let midpoint = self.gauge.body_size() / 2;
-        let mut left_size = 0;
         let mut split_point = 0;
 
-        // TODO: this isn't quite right since it doesn't account for cell overhead. better to
-        // rebuild a gauge.
-        while left_size < midpoint {
+        let mut left_gauge = LeafGauge::default();
+        while left_gauge.body_size() < midpoint {
             let item_size = match self.ops[split_point] {
                 LeafOp::Keep(_, size) => size,
                 LeafOp::Insert(_, ref val) => val.len(),
             };
 
-            left_size += item_size;
+            left_gauge.ingest(item_size);
+
             split_point += 1;
         }
 
@@ -303,7 +302,17 @@ impl LeafUpdater {
 
         branch_updater.ingest(left_separator, left_pn);
 
-        if self.gauge.body_size() - left_size >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
+        let mut right_gauge = LeafGauge::default();
+        for op in &self.ops[split_point..] {
+            let item_size = match op {
+                LeafOp::Keep(_, size) => *size,
+                LeafOp::Insert(_, ref val) => val.len(),
+            };
+
+            right_gauge.ingest(item_size);
+        }
+
+        if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
             let right_pn = leaf_writer.allocate(right_leaf);
             branch_updater.ingest(right_separator, right_pn);
@@ -316,15 +325,7 @@ impl LeafUpdater {
             self.separator_override = Some(right_separator);
             self.prepare_merge_ops(split_point);
 
-            self.gauge = LeafGauge::default();
-            for op in self.ops.iter() {
-                let size = match op {
-                    LeafOp::Keep(_, size) => *size,
-                    LeafOp::Insert(_, val) => val.len(),
-                };
-
-                self.gauge.ingest(size);
-            }
+            self.gauge = right_gauge;
 
             // UNWRAP: protected above.
             DigestResult::NeedsMerge(self.cutoff.unwrap())
