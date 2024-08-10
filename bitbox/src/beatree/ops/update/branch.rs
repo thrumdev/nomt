@@ -93,8 +93,7 @@ impl BranchUpdater {
     pub fn ingest(&mut self, key: Key, pn: PageNumber) {
         self.keep_up_to(Some(&key));
         self.ops.push(BranchOp::Insert(key, pn));
-        self.gauge.ingest(key, separator_len(&key));
-        self.bulk_split_step();
+        self.bulk_split_step(self.ops.len() - 1);
     }
 
     pub fn base(&self) -> Option<&BaseBranch> {
@@ -199,10 +198,8 @@ impl BranchUpdater {
                 let separator_len = separator_len(&next_key);
                 self.ops.push(BranchOp::Keep(base_node.iter_pos, separator_len));
 
-                self.gauge.ingest(next_key, separator_len);
-
                 base_node.advance_iter();
-                self.bulk_split_step();
+                self.bulk_split_step(self.ops.len() - 1);
             } else {
                 base_node.advance_iter();
             }
@@ -241,15 +238,43 @@ impl BranchUpdater {
 
     // check whether bulk split needs to start, and if so, start it.
     // if ongoing, check if we need to cut off.
-    fn bulk_split_step(&mut self) {
+    fn bulk_split_step(&mut self, op_index: usize) {
+        // UNWRAP: `Keep` ops require separator len to exist.
+        let (key, separator_len) = match self.ops[op_index] {
+            BranchOp::Keep(i, separator_len) => (self.base.as_ref().unwrap().key(i), separator_len),
+            BranchOp::Insert(k, _) => (k, separator_len(&k)),
+        };
+
+        let body_size_after = self.gauge.body_size_after(key, separator_len);
         match self.bulk_split {
-            None if self.gauge.body_size() >= BRANCH_BULK_SPLIT_THRESHOLD => {
-                self.begin_bulk_split();
+            None if body_size_after >= BRANCH_BULK_SPLIT_THRESHOLD => {
+                self.bulk_split = Some(BranchBulkSplitter::default());
+                self.gauge = BranchGauge::new();
+                for i in 0..=op_index {
+                    self.bulk_split_step(i);
+                }
             },
-            Some(ref mut bulk_splitter) if self.gauge.body_size() >= BRANCH_BULK_SPLIT_TARGET => {
+            Some(ref mut bulk_splitter) if body_size_after >= BRANCH_BULK_SPLIT_TARGET => {
+                let accept_item = body_size_after <= BRANCH_NODE_BODY_SIZE || {
+                    if self.gauge.body_size() < BRANCH_MERGE_THRESHOLD {
+                        // super degenerate split! node grew from underfull to overfull in one
+                        // item. only thing to do here is merge leftwards, unfortunately.
+                        // save this for later to do another pass with.
+                        todo!()
+                    }
+
+                    false
+                };
+
+                let n = if accept_item {
+                    self.gauge.ingest(key, separator_len);
+                    op_index + 1 - bulk_splitter.total_count
+                } else {
+                    op_index - bulk_splitter.total_count
+                };
+
                 // push onto bulk splitter & restart gauge.
                 let last_gauge = std::mem::replace(&mut self.gauge, BranchGauge::new());
-                let n = self.ops.len() - bulk_splitter.total_count;
                 bulk_splitter.push(n, last_gauge);
             },
             _ => {}
@@ -312,7 +337,15 @@ impl BranchUpdater {
                 BranchOp::Insert(k, _) => (k, separator_len(&k)),
             };
 
-            // TODO: if this would spill us over, rewind.
+            if left_gauge.body_size_after(key, separator_len) > BRANCH_NODE_BODY_SIZE {
+                if left_gauge.body_size() < BRANCH_MERGE_THRESHOLD {
+                    // super degenerate split! jumped from underfull to overfull in a single step.
+                    todo!()
+                }
+
+                break
+            }
+
             left_gauge.ingest(key, separator_len);
             split_point += 1;
         }
@@ -452,6 +485,20 @@ impl BranchGauge {
         self.separator_len = std::cmp::max(len, self.separator_len);
         self.prefix_len = prefix_len(first, &key);
         self.n += 1;
+    }
+
+    fn body_size_after(&mut self, key: Key, len: usize) -> usize {
+        let p;
+        let s;
+        if let Some(ref first) = self.first_separator {
+            s = std::cmp::max(len, self.separator_len);
+            p = prefix_len(first, &key);
+        } else {
+            s = len;
+            p = len;
+        }
+
+        branch_node::body_size(p, s - p, self.n + 1)
     }
 
     fn body_size(&self) -> usize {
