@@ -168,17 +168,20 @@ impl LeafUpdater {
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
         while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
             let Some(ref mut base_node) = self.base else { return };
-            if up_to.map_or(false, |up_to| up_to.cmp(&next_key) != Ordering::Greater) {
+            let order = up_to.map(|up_to| up_to.cmp(&next_key)).unwrap_or(Ordering::Greater);
+            if order == Ordering::Less {
                 break
             }
 
-            let size = base_node.next_value().len();
-            self.ops.push(LeafOp::Keep(base_node.iter_pos, size));
-            base_node.advance_iter();
-
-            self.gauge.ingest(size);
-
-            self.bulk_split_step();
+            if order == Ordering::Greater {
+                let size = base_node.next_value().len();
+                self.ops.push(LeafOp::Keep(base_node.iter_pos, size));
+                self.gauge.ingest(size);
+                base_node.advance_iter();
+                self.bulk_split_step();
+            } else {
+                base_node.advance_iter();
+            }
         }
     }
 

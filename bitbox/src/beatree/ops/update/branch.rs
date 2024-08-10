@@ -185,26 +185,28 @@ impl BranchUpdater {
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
         while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
             let Some(ref mut base_node) = self.base else { return };
-            if up_to.map_or(false, |up_to| up_to.cmp(&next_key) != Ordering::Greater) {
+
+            let order = up_to.map(|up_to| up_to.cmp(&next_key)).unwrap_or(Ordering::Greater);
+            if order == Ordering::Less {
                 break
             }
 
             if self.possibly_deleted.first() == Some(&next_key) {
                 self.possibly_deleted.remove(0);
-                base_node.advance_iter();
-                continue;
             }
 
-            // TODO: is this right? if the key is equal to `up_to` we should advance the iterator
-            // but not keep.
+            if order == Ordering::Greater {
+                let separator_len = separator_len(&next_key);
+                self.ops.push(BranchOp::Keep(base_node.iter_pos, separator_len));
 
-            let separator_len = separator_len(&next_key);
-            self.ops.push(BranchOp::Keep(base_node.iter_pos, separator_len));
-            base_node.advance_iter();
+                self.gauge.ingest(next_key, separator_len);
 
-            self.gauge.ingest(next_key, separator_len);
+                base_node.advance_iter();
+                self.bulk_split_step();
+            } else {
+                base_node.advance_iter();
+            }
 
-            self.bulk_split_step();
         }
     }
 
