@@ -439,6 +439,6 @@ fn separate(a: &Key, b: &Key) -> Key {
         + 1;
 
     let mut separator = [0u8; 32];
-    separator.view_bits_mut::<Lsb0>()[..len].copy_from_bitslice(&b.view_bits::<Lsb0>());
+    separator.view_bits_mut::<Lsb0>()[..len].copy_from_bitslice(&b.view_bits::<Lsb0>()[..len]);
     separator
 }
