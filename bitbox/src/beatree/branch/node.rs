@@ -1,8 +1,8 @@
 use bitvec::prelude::*;
 use std::sync::{Arc, Mutex};
 
-use crate::beatree::Key;
 use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
+use crate::beatree::Key;
 
 // Here is the layout of a branch node:
 //
@@ -189,7 +189,7 @@ impl<'a> BranchNodeView<'a> {
 pub fn body_size(prefix_len: usize, separator_len: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round
     // up to the next byte boundary and then follow by the node pointers.
-    (prefix_len + (separator_len * n) + 7)/8 + (4 * n)
+    (prefix_len + (separator_len * n) + 7) / 8 + (4 * n)
 }
 
 pub fn body_fullness(prefix_len: usize, separator_len: usize, n: usize) -> f32 {
@@ -204,9 +204,12 @@ pub struct BranchNodeBuilder {
 }
 
 impl BranchNodeBuilder {
-    pub fn new(mut branch: BranchNode, n: usize, prefix_len: usize, total_separator_len: usize)
-        -> Self
-    {
+    pub fn new(
+        mut branch: BranchNode,
+        n: usize,
+        prefix_len: usize,
+        total_separator_len: usize,
+    ) -> Self {
         let separator_len = total_separator_len - prefix_len;
 
         branch.set_n(n as u16);

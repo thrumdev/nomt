@@ -9,12 +9,7 @@
 
 use anyhow::{bail, ensure, Ok, Result};
 use bitvec::prelude::*;
-use std::{
-    collections::BTreeSet,
-    fs::File,
-    os::fd::AsRawFd,
-    ptr,
-};
+use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd, ptr};
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -71,7 +66,7 @@ pub fn reconstruct(
 }
 
 /// An utility to read sequentially from a file.
-/// 
+///
 /// This is backed by an mmap of the file. The kernel is instructed that the contents of the file
 /// should be read sequentially. This will make the kernel to read ahead the file sequentially.
 struct SeqFileReader {

@@ -12,7 +12,7 @@ use std::{
 };
 
 pub use node::{
-    BRANCH_NODE_BODY_SIZE, BranchNode, BranchNodeBuilder, BranchNodeView, body_fullness, body_size,
+    body_fullness, body_size, BranchNode, BranchNodeBuilder, BranchNodeView, BRANCH_NODE_BODY_SIZE,
 };
 
 pub mod node;

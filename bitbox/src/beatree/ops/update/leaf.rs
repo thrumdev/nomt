@@ -1,20 +1,17 @@
-
 use bitvec::prelude::*;
-use std::{
-    cmp::Ordering,
-    io::{Read},
-};
+use std::{cmp::Ordering, io::Read};
 
 use crate::beatree::{
     allocator::PageNumber,
     leaf::{
-        node::{self as leaf_node, LeafNode, LeafBuilder, LEAF_NODE_BODY_SIZE},
-        store::{LeafStoreWriter},
-    }, Key,
+        node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},
+        store::LeafStoreWriter,
+    },
+    Key,
 };
 
 use super::{
-    branch::BranchUpdater, LEAF_MERGE_THRESHOLD, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
+    branch::BranchUpdater, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD,
 };
 
 pub struct BaseLeaf {
@@ -137,7 +134,10 @@ impl LeafUpdater {
 
             DigestResult::Finished
         } else if self.gauge.body_size() > LEAF_NODE_BODY_SIZE {
-            assert_eq!(last_ops_start, 0, "normal split can only occur when not bulk splitting");
+            assert_eq!(
+                last_ops_start, 0,
+                "normal split can only occur when not bulk splitting"
+            );
             self.split(branch_updater, leaf_writer)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_leaf(&self.ops);
@@ -166,10 +166,14 @@ impl LeafUpdater {
 
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
         while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
-            let Some(ref mut base_node) = self.base else { return };
-            let order = up_to.map(|up_to| up_to.cmp(&next_key)).unwrap_or(Ordering::Greater);
+            let Some(ref mut base_node) = self.base else {
+                return;
+            };
+            let order = up_to
+                .map(|up_to| up_to.cmp(&next_key))
+                .unwrap_or(Ordering::Greater);
             if order == Ordering::Less {
-                break
+                break;
             }
 
             if order == Ordering::Greater {
@@ -199,7 +203,7 @@ impl LeafUpdater {
                 for i in 0..=op_index {
                     self.bulk_split_step(i);
                 }
-            },
+            }
             Some(ref mut bulk_splitter) if body_size_after >= LEAF_BULK_SPLIT_TARGET => {
                 let accept_item = body_size_after <= LEAF_NODE_BODY_SIZE || {
                     if self.gauge.body_size() < LEAF_MERGE_THRESHOLD {
@@ -222,7 +226,7 @@ impl LeafUpdater {
                 // push onto bulk splitter & restart gauge.
                 self.gauge = LeafGauge::default();
                 bulk_splitter.push(n);
-            },
+            }
             _ => {}
         }
     }
@@ -232,7 +236,9 @@ impl LeafUpdater {
         branch_updater: &mut BranchUpdater,
         leaf_writer: &mut LeafStoreWriter,
     ) -> usize {
-        let Some(splitter) = self.bulk_split.take() else { return 0 };
+        let Some(splitter) = self.bulk_split.take() else {
+            return 0;
+        };
 
         let mut start = 0;
         for item_count in splitter.items {
@@ -265,12 +271,16 @@ impl LeafUpdater {
 
     fn separator(&self) -> Key {
         // the first leaf always gets a separator of all 0.
-        self.separator_override.or(self.base.as_ref().map(|b| b.separator)).unwrap_or([0u8; 32])
+        self.separator_override
+            .or(self.base.as_ref().map(|b| b.separator))
+            .unwrap_or([0u8; 32])
     }
 
-    fn split(&mut self, branch_updater: &mut BranchUpdater, leaf_writer: &mut LeafStoreWriter)
-        -> DigestResult
-    {
+    fn split(
+        &mut self,
+        branch_updater: &mut BranchUpdater,
+        leaf_writer: &mut LeafStoreWriter,
+    ) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -287,7 +297,7 @@ impl LeafUpdater {
                     todo!()
                 }
 
-                break
+                break;
             }
 
             left_gauge.ingest(item_size);
@@ -421,11 +431,13 @@ impl LeafGauge {
 // separate two keys a and b where b > a
 fn separate(a: &Key, b: &Key) -> Key {
     // if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
-    let len = a.view_bits::<Lsb0>()
+    let len = a
+        .view_bits::<Lsb0>()
         .iter()
         .zip(b.view_bits::<Lsb0>().iter())
         .take_while(|(a, b)| a == b)
-        .count() + 1;
+        .count()
+        + 1;
 
     let mut separator = [0u8; 32];
     separator.view_bits_mut::<Lsb0>()[..len].copy_from_bitslice(&b.view_bits::<Lsb0>());

@@ -10,11 +10,7 @@ use crate::{
     store::Page,
 };
 
-use super::{
-    allocator::PageNumber,
-    branch::{BranchNode},
-    meta::Meta,
-};
+use super::{allocator::PageNumber, branch::BranchNode, meta::Meta};
 
 pub fn run(
     io_sender: Sender<IoCommand>,
