@@ -9,7 +9,7 @@ use std::{
 use threadpool::ThreadPool;
 
 use crate::{
-    bitbox::{io::IoKind, store::PAGE_SIZE},
+    bitbox::io::{IoKind, PAGE_SIZE},
     page_cache::PageDiff,
 };
 
