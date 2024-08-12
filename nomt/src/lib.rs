@@ -36,7 +36,6 @@ mod rw_pass_cell;
 mod seek;
 mod store;
 
-#[path = "bitbox/io.rs"]
 mod io;
 
 const MAX_FETCH_CONCURRENCY: usize = 64;

@@ -83,7 +83,7 @@ impl Tree {
         const IO_IX_SYNC: usize = 4;
         const NUM_IO_HANDLES: usize = 5;
 
-        let (io_sender, io_recv) = io::start_io_worker(NUM_IO_HANDLES, Mode::Real { num_rings: 3 });
+        let (io_sender, io_recv) = crate::io::start_io_worker(NUM_IO_HANDLES, Mode::Real { num_rings: 3 });
 
         if !db_dir.as_ref().exists() {
             use std::io::Write as _;

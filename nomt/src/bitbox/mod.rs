@@ -9,23 +9,20 @@ use std::{
 use threadpool::ThreadPool;
 
 use crate::{
-    bitbox::io::{IoKind, PAGE_SIZE},
+    io::{CompleteIo, IoCommand, IoKind, Page, PAGE_SIZE},
     page_cache::PageDiff,
 };
 
 use self::{
-    io::{CompleteIo, IoCommand},
     meta_map::MetaMap,
     store::{MetaPage, Store},
     wal::{Batch as WalBatch, ConsistencyError, Entry as WalEntry, WalWriter},
 };
 
-mod io;
 mod meta_map;
 mod store;
 mod wal;
 
-pub use store::Page;
 
 const LOAD_PAGE_HANDLE_INDEX: usize = 0;
 const LOAD_VALUE_HANDLE_INDEX: usize = 1;
@@ -108,7 +105,7 @@ impl DB {
         };
 
         // Spawn io_workers
-        let (io_sender, io_receivers) = io::start_io_worker(N_WORKER, num_rings);
+        let (io_sender, io_receivers) = crate::io::start_io_worker(N_WORKER, num_rings);
 
         let load_page_sender = io_sender.clone();
         let load_page_receiver = io_receivers[LOAD_PAGE_HANDLE_INDEX].clone();

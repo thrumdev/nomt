@@ -1,6 +1,5 @@
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
-use rand::prelude::SliceRandom;
 use slab::Slab;
 use std::{
     ops::{Deref, DerefMut},
