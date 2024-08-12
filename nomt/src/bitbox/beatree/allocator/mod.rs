@@ -29,6 +29,9 @@ impl From<u32> for PageNumber {
     }
 }
 
+/// 0 is used to indicate that the free-list is empty.
+pub const FREELIST_EMPTY: PageNumber = PageNumber(0);
+
 /// The AllocatorReader enables fetching pages from the store.
 pub struct AllocatorReader {
     store_file: File,
@@ -176,8 +179,7 @@ impl AllocatorWriter {
             free_list_pages,
             bump: self.bump,
             extend_file_sz,
-            // after appending to the free list, the head will always be present
-            freelist_head: self.free_list.head_pn().unwrap(),
+            freelist_head: self.free_list.head_pn().unwrap_or(FREELIST_EMPTY),
         }
     }
 }
