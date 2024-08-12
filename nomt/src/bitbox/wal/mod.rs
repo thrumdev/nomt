@@ -9,7 +9,7 @@ mod batch;
 mod entry;
 mod record;
 
-pub use crate::wal::{batch::Batch, entry::Entry};
+pub use self::{batch::Batch, entry::Entry};
 
 use self::record::Record;
 
@@ -231,22 +231,19 @@ fn validate_records(wal_file: &mut File) -> (Vec<Record>, usize) {
         let seq_num = record.sequence_number();
         curr_records.push(record);
 
-        // first record
-        let Some(expected_seqn) = sequence_number else {
-            sequence_number = Some(seq_num);
-            continue;
-        };
+        // NOTE: this has been changed, how was it working before?
 
-        if expected_seqn != seq_num {
-            break;
-        }
+        if let Some(expected_seqn) = sequence_number {
+            if expected_seqn != seq_num {
+                break;
+            }
+        };
 
         if is_last {
             // sequence_number is expected to be increased from the next record
             sequence_number = Some(seq_num + 1);
             last_records = std::mem::replace(&mut curr_records, vec![]);
             last_records_position = WAL_RECORD_SIZE * (record_index + 1);
-            continue;
         }
     }
 

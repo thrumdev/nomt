@@ -1,6 +1,8 @@
-use crate::sim::{PageDiff, PageId};
 use anyhow::bail;
 use bitvec::{prelude::Msb0, view::AsBits};
+
+pub type PageId = [u8; 32];
+pub type PageDiff = [u8; 16];
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Entry {
@@ -20,7 +22,7 @@ pub enum Entry {
 impl Entry {
     pub fn len(&self) -> usize {
         match self {
-            Entry::Update { changed, .. } => 1 + 16 + 16 + changed.len() * 32 + 8,
+            Entry::Update { changed, .. } => 1 + 32 + 16 + changed.len() * 32 + 8,
             Entry::Clear { .. } => 1 + 8,
         }
     }
@@ -55,14 +57,14 @@ impl Entry {
 
         // Parse Entry::Update
         let (raw_page_id, raw_page_diff) = {
-            if raw_entry.len() < 33 {
+            if raw_entry.len() < 49 {
                 bail!("Error in Entry format")
             }
-            (&raw_entry[1..17], &raw_entry[17..33])
+            (&raw_entry[1..33], &raw_entry[33..49])
         };
 
         let page_id = {
-            let mut buf = [0; 16];
+            let mut buf = [0; 32];
             buf.copy_from_slice(raw_page_id);
             buf
         };
@@ -75,12 +77,12 @@ impl Entry {
 
         let n_changed = page_diff.as_bits::<Msb0>().count_ones();
 
-        let expected_consume = 33 + n_changed * 32 + 8;
+        let expected_consume = 49 + n_changed * 32 + 8;
         if raw_entry.len() < expected_consume {
             bail!("Not enough space for changed and bucket_index in Entry")
         }
 
-        let mut changed_ptr = 33;
+        let mut changed_ptr = 49;
         let changed: Vec<_> = (0..n_changed)
             .map(|_| {
                 let mut buf = [0; 32];
@@ -92,7 +94,7 @@ impl Entry {
             })
             .collect();
 
-        let end_changed = 33 + n_changed * 32;
+        let end_changed = 49 + n_changed * 32;
         // TODO: remove
         assert_eq!(changed_ptr, end_changed);
 
@@ -154,7 +156,7 @@ mod tests {
         let mut page_diff = [0; 16];
         page_diff[0] = 0b00001001;
         let entry = Entry::Update {
-            page_id: [1; 16],
+            page_id: [1; 32],
             page_diff,
             changed: vec![[7; 32], [9; 32]],
             bucket_index: 1107,

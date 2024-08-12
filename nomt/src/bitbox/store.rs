@@ -1,3 +1,5 @@
+use super::meta_map::MetaMap;
+use crate::io::{Page, PAGE_SIZE};
 use rand::Rng;
 use std::{
     fs::{File, OpenOptions},
@@ -7,12 +9,16 @@ use std::{
         unix::fs::OpenOptionsExt,
     },
     path::PathBuf,
+    sync::Arc,
 };
-use crate::io::{Page, PAGE_SIZE};
-use crate::meta_map::MetaMap;
 
 /// The Store is an on disk array of [`Page`]
+#[derive(Clone)]
 pub struct Store {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
     store_file: File,
     // the number of pages to add to a page number to find its real location in the file,
     // taking account of the meta page and meta byte pages.
@@ -63,9 +69,11 @@ impl Store {
         let num_pages = meta_page.num_pages as usize;
         Ok((
             Store {
-                store_file,
-                data_page_offset,
-                seed: meta_page.seed,
+                shared: Arc::new(Shared {
+                    store_file,
+                    data_page_offset,
+                    seed: meta_page.seed,
+                }),
             },
             meta_page,
             MetaMap::from_bytes(meta_bytes, num_pages),
@@ -74,18 +82,18 @@ impl Store {
 
     /// Get the hash seed.
     pub fn seed(&self) -> [u8; 32] {
-        self.seed
+        self.shared.seed
     }
 
     /// Get the data page offset.
     #[allow(unused)]
     pub fn data_page_offset(&self) -> u64 {
-        self.data_page_offset
+        self.shared.data_page_offset
     }
 
     /// Returns the page number of the `ix`th item in the data section of the store.
     pub fn data_page_index(&self, ix: u64) -> u64 {
-        self.data_page_offset + ix
+        self.shared.data_page_offset + ix
     }
 
     /// Returns the page number of the `ix`th item in the meta bytes section of the store.
@@ -94,7 +102,7 @@ impl Store {
     }
 
     pub fn store_fd(&self) -> RawFd {
-        self.store_file.as_raw_fd()
+        self.shared.store_file.as_raw_fd()
     }
 }
 

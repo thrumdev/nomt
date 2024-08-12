@@ -126,7 +126,7 @@ pub fn page_is_empty(page: &[u8]) -> bool {
 #[derive(Debug, Default, Clone)]
 pub struct PageDiff {
     /// A bitfield indicating the number of updated slots
-    updated_slots: BitArray<[u64; 2], Lsb0>,
+    updated_slots: BitArray<[u8; 16], Lsb0>,
 }
 
 impl PageDiff {
@@ -135,6 +135,14 @@ impl PageDiff {
     pub fn set_changed(&mut self, slot_index: usize) {
         assert!(slot_index < NODES_PER_PAGE);
         self.updated_slots.set(slot_index, true);
+    }
+
+    pub fn get_changed(&self) -> Vec<usize> {
+        self.updated_slots.iter_ones().collect()
+    }
+
+    pub fn get_raw(self) -> [u8; 16] {
+        self.updated_slots.data
     }
 }
 
@@ -683,32 +691,19 @@ impl PageCache {
         page_diffs: impl IntoIterator<Item = (PageId, PageDiff)>,
         tx: &mut Transaction,
     ) {
-        const FULL_PAGE_THRESHOLD: usize = 32;
-
         let read_pass = self.new_read_pass();
         let mut apply_page = |page_id, page_data: Option<&Vec<u8>>, page_diff: PageDiff| {
-            if page_data.map_or(true, |p| page_is_empty(&p[..])) {
-                tx.delete_page(page_id);
-                return;
+            match page_data {
+                None => {
+                    tx.delete_page(page_id);
+                }
+                Some(p) if page_is_empty(&p[..]) => {
+                    tx.delete_page(page_id);
+                }
+                Some(p) => {
+                    tx.write_page(page_id, p, page_diff);
+                }
             }
-
-            let Some(page_data) = page_data else {
-                return;
-            };
-
-            let updated_count = page_diff.updated_slots.count_ones();
-            if updated_count >= FULL_PAGE_THRESHOLD {
-                tx.write_page(page_id, page_data);
-                return;
-            }
-
-            let mut tagged_nodes = Vec::with_capacity(33 * updated_count);
-            for slot_index in page_diff.updated_slots.iter_ones() {
-                tagged_nodes.push(slot_index as u8);
-
-                tagged_nodes.extend(&page_data[slot_index * 32..][..32]);
-            }
-            tx.write_page_nodes(page_id, tagged_nodes);
         };
 
         // helper for exploiting locality effects in the diffs to avoid searching through

@@ -1,5 +1,6 @@
 //! A wrapper around RocksDB for avoiding prolifiration of RocksDB-specific code.
 
+use crate::{bitbox, page_cache::PageDiff};
 use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node, TERMINATOR},
@@ -20,6 +21,7 @@ pub struct Store {
 
 struct Shared {
     db: DB,
+    bitbox: bitbox::DB,
 }
 
 impl Store {
@@ -43,8 +45,10 @@ impl Store {
             ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
         ];
         let db = DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
+        // TODO: add option to specify number of io_uring instances
+        let bitbox = bitbox::DB::open(3, o.path.clone()).unwrap();
         Ok(Self {
-            shared: Arc::new(Shared { db }),
+            shared: Arc::new(Shared { db, bitbox }),
         })
     }
 
@@ -73,12 +77,7 @@ impl Store {
 
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
-        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
-        let value = self
-            .shared
-            .db
-            .get_cf(&cf, page_id.length_dependent_encoding())?;
-        Ok(value)
+        self.shared.bitbox.get(&page_id)
     }
 
     /// Create a new transaction to be applied against this database.
@@ -86,6 +85,7 @@ impl Store {
         Transaction {
             shared: self.shared.clone(),
             batch: WriteBatch::default(),
+            new_pages: vec![],
         }
     }
 
@@ -95,6 +95,7 @@ impl Store {
     /// updated values.
     pub fn commit(&self, tx: Transaction) -> anyhow::Result<()> {
         self.shared.db.write(tx.batch)?;
+        self.shared.bitbox.commit(tx.new_pages)?;
         Ok(())
     }
 }
@@ -103,6 +104,7 @@ impl Store {
 pub struct Transaction {
     shared: Arc<Shared>,
     batch: WriteBatch,
+    new_pages: Vec<(PageId, Option<(Vec<u8>, PageDiff)>)>,
 }
 
 impl Transaction {
@@ -131,17 +133,14 @@ impl Transaction {
     }
 
     /// Write a page to storage in its entirety.
-    pub fn write_page<V: AsRef<[u8]>>(&mut self, page_id: PageId, value: V) {
-        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
-        self.batch
-            .put_cf(&cf, page_id.length_dependent_encoding(), value);
+    pub fn write_page(&mut self, page_id: PageId, page: &Vec<u8>, page_diff: PageDiff) {
+        self.new_pages
+            .push((page_id, Some((page.clone(), page_diff))));
     }
 
     /// Delete a page from storage.
     pub fn delete_page(&mut self, page_id: PageId) {
-        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
-        self.batch
-            .delete_cf(&cf, page_id.length_dependent_encoding());
+        self.new_pages.push((page_id, None));
     }
 
     /// Write the root to metadata.
