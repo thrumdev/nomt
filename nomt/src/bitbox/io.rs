@@ -77,23 +77,11 @@ struct PendingIo {
     start: Instant,
 }
 
-#[derive(Clone, Copy)]
-pub enum Mode {
-    /// actually use io_uring
-    Real {
-        /// The number of rings to maintain.
-        num_rings: usize,
-    },
-    /// complete io_requests after a random latency.
-    #[allow(unused)]
-    Fake,
-}
-
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
 pub fn start_io_worker(
     num_handles: usize,
-    mode: Mode,
+    num_rings: usize,
 ) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * 2);
@@ -101,20 +89,10 @@ pub fn start_io_worker(
         .map(|_| crossbeam_channel::unbounded())
         .unzip();
 
-    match mode {
-        Mode::Real { num_rings } => {
-            let _ = std::thread::Builder::new()
-                .name("io_ingress".to_string())
-                .spawn(move || run_ingress(command_rx, handle_txs, num_rings))
-                .unwrap();
-        }
-        Mode::Fake => {
-            let _ = std::thread::Builder::new()
-                .name("io_worker".to_string())
-                .spawn(move || run_fake_worker(command_rx, handle_txs))
-                .unwrap();
-        }
-    }
+    let _ = std::thread::Builder::new()
+        .name("io_ingress".to_string())
+        .spawn(move || run_ingress(command_rx, handle_txs, num_rings))
+        .unwrap();
 
     (command_tx, handle_rxs)
 }
@@ -311,86 +289,5 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-    }
-}
-
-struct FakePendingIo {
-    command: IoCommand,
-    duration: u64,
-    end: Instant,
-}
-
-fn possible_latencies(latency_occurrences: Vec<(u64, usize)>) -> Vec<u64> {
-    latency_occurrences
-        .into_iter()
-        .flat_map(|(l, x)| std::iter::repeat(l).take(x))
-        .collect()
-}
-
-fn run_fake_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>>) {
-    // EV = ~319us with this distribution.
-    let possible_latencies = possible_latencies(vec![
-        (50, 1),
-        (75, 1),
-        (150, 2),
-        (250, 5),
-        (300, 10),
-        (400, 5),
-        (500, 2),
-        (600, 1),
-        (700, 1),
-    ]);
-
-    let mut stats = Stats::new();
-    let mut pending: Slab<FakePendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
-    let mut rng = rand::thread_rng();
-
-    loop {
-        stats.log();
-
-        let now = Instant::now();
-        for i in 0..MAX_IN_FLIGHT {
-            if pending.get(i).map_or(false, |i| i.end <= now) {
-                let item = pending.remove(i);
-
-                stats.note_completion(item.duration as u64);
-
-                let command = item.command;
-                let handle_idx = command.handle;
-                let complete = CompleteIo {
-                    command,
-                    result: Ok(()),
-                };
-                if let Err(_) = handle_tx[handle_idx].send(complete) {
-                    // TODO: handle?
-                    break;
-                }
-            }
-        }
-
-        if pending.len() == MAX_IN_FLIGHT {
-            continue;
-        }
-        let next_io = if pending.is_empty() {
-            match command_rx.recv() {
-                Ok(io) => io,
-                Err(_) => break,
-            }
-        } else {
-            match command_rx.try_recv() {
-                Ok(io) => io,
-                Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => continue,
-            }
-        };
-
-        let duration = *possible_latencies.choose(&mut rng).unwrap();
-        let end = Instant::now() + Duration::from_micros(duration);
-        pending.insert(FakePendingIo {
-            command: next_io,
-            duration,
-            end,
-        });
-        stats.note_arrival();
     }
 }
