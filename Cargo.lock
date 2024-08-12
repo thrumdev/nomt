@@ -753,13 +753,18 @@ dependencies = [
 name = "nomt"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "bitvec",
  "blake3",
  "crossbeam",
+ "crossbeam-channel",
  "dashmap",
  "fxhash",
  "hex-literal",
+ "im",
+ "io-uring",
+ "libc",
  "loom",
  "lru",
  "nomt-core",
@@ -767,6 +772,7 @@ dependencies = [
  "rand",
  "rand_pcg",
  "rocksdb",
+ "slab",
  "threadpool",
 ]
 

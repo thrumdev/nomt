@@ -35,6 +35,9 @@ mod rw_pass_cell;
 mod seek;
 mod store;
 
+#[path = "../../bitbox/src/io.rs"]
+mod io;
+
 const MAX_FETCH_CONCURRENCY: usize = 64;
 
 /// A full value stored within the trie.

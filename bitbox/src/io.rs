@@ -3,11 +3,35 @@ use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use rand::prelude::SliceRandom;
 use slab::Slab;
 use std::{
+    ops::{Deref, DerefMut},
     os::fd::RawFd,
     time::{Duration, Instant},
 };
 
-use crate::store::{Page, PAGE_SIZE};
+pub const PAGE_SIZE: usize = 4096;
+
+#[derive(Clone)]
+#[repr(align(4096))]
+pub struct Page(pub [u8; PAGE_SIZE]);
+
+impl Deref for Page {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Page {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Page {
+    pub fn zeroed() -> Self {
+        Self([0; PAGE_SIZE])
+    }
+}
 
 const RING_CAPACITY: u32 = 128;
 

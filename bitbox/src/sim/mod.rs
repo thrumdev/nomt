@@ -25,9 +25,9 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier, RwLock};
 
-use crate::io::{self, CompleteIo, IoCommand, IoKind, Mode as IoMode};
+use crate::io::{self, CompleteIo, IoCommand, IoKind, Mode as IoMode, Page};
 use crate::meta_map::MetaMap;
-use crate::store::{MetaPage, Page, Store};
+use crate::store::{MetaPage, Store};
 use crate::wal::{Batch as WalBatch, Entry as WalEntry, WalWriter};
 
 mod read;

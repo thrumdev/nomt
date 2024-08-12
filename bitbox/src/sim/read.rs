@@ -7,7 +7,8 @@ use std::sync::{Arc, Barrier, RwLock};
 
 use crate::io::{CompleteIo, IoCommand, IoKind};
 use crate::meta_map::MetaMap;
-use crate::store::{Page, Store};
+use crate::store::Store;
+use crate::io::Page;
 
 use super::{
     slot_range, BucketIndex, ChangedPage, Map, PageDiff, PageId, Params, ProbeSequence,

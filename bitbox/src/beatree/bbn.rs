@@ -4,7 +4,7 @@ use crate::{
         branch::BranchNode,
     },
     io::{CompleteIo, IoCommand},
-    store::Page,
+    io::Page,
 };
 use crossbeam_channel::{Receiver, Sender};
 
