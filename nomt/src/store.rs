@@ -5,12 +5,10 @@ use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node, TERMINATOR},
 };
-use rocksdb::{ColumnFamilyDescriptor, MergeOperands, WriteBatch, DB};
-use std::collections::HashMap;
+use rocksdb::{self, ColumnFamilyDescriptor, WriteBatch};
 use std::sync::Arc;
 
 static FLAT_KV_CF: &str = "flat_kv";
-static PAGES_CF: &str = "pages";
 static METADATA_CF: &str = "metadata";
 
 /// This is a lightweight handle and can be cloned cheaply.
@@ -20,8 +18,9 @@ pub struct Store {
 }
 
 struct Shared {
-    db: DB,
-    bitbox: bitbox::DB,
+    // TODO: change values name, it stores also the root
+    values: rocksdb::DB,
+    pages: bitbox::DB,
 }
 
 impl Store {
@@ -32,31 +31,26 @@ impl Store {
         open_opts.create_if_missing(true);
         open_opts.create_missing_column_families(true);
 
-        let pages_cf_opts = {
-            let mut opts = open_opts.clone();
-            opts.set_merge_operator("page update operator", merge_page, partial_merge_page_ops);
-
-            opts
-        };
-
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(FLAT_KV_CF, open_opts.clone()),
-            ColumnFamilyDescriptor::new(PAGES_CF, pages_cf_opts),
             ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
         ];
-        let db = DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
+
+        let values = rocksdb::DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
+
         // TODO: add option to specify number of io_uring instances
-        let bitbox = bitbox::DB::open(3, o.path.clone()).unwrap();
+        let pages = bitbox::DB::open(3, o.path.clone())?;
+
         Ok(Self {
-            shared: Arc::new(Shared { db, bitbox }),
+            shared: Arc::new(Shared { values, pages }),
         })
     }
 
     /// Load the root node from the database. Fails only on I/O.
     /// Returns [`nomt_core::trie::TERMINATOR`] on an empty trie.
     pub fn load_root(&self) -> anyhow::Result<Node> {
-        let cf = self.shared.db.cf_handle(METADATA_CF).unwrap();
-        let value = self.shared.db.get_cf(&cf, b"root")?;
+        let cf = self.shared.values.cf_handle(METADATA_CF).unwrap();
+        let value = self.shared.values.get_cf(&cf, b"root")?;
         match value {
             None => Ok(TERMINATOR),
             Some(value) => {
@@ -70,14 +64,14 @@ impl Store {
 
     /// Loads the flat value stored under the given key.
     pub fn load_value(&self, key: KeyPath) -> anyhow::Result<Option<Vec<u8>>> {
-        let cf = self.shared.db.cf_handle(FLAT_KV_CF).unwrap();
-        let value = self.shared.db.get_cf(&cf, key.as_ref())?;
+        let cf = self.shared.values.cf_handle(FLAT_KV_CF).unwrap();
+        let value = self.shared.values.get_cf(&cf, key.as_ref())?;
         Ok(value)
     }
 
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
-        self.shared.bitbox.get(&page_id)
+        self.shared.pages.get(&page_id)
     }
 
     /// Create a new transaction to be applied against this database.
@@ -94,8 +88,8 @@ impl Store {
     /// After this function returns, accessor methods such as [`Self::load_page`] will return the
     /// updated values.
     pub fn commit(&self, tx: Transaction) -> anyhow::Result<()> {
-        self.shared.db.write(tx.batch)?;
-        self.shared.bitbox.commit(tx.new_pages)?;
+        self.shared.values.write(tx.batch)?;
+        self.shared.pages.commit(tx.new_pages)?;
         Ok(())
     }
 }
@@ -110,7 +104,7 @@ pub struct Transaction {
 impl Transaction {
     /// Write a value to flat storage.
     pub fn write_value(&mut self, path: KeyPath, value: Option<&[u8]>) {
-        let flat_cf = self.shared.db.cf_handle(FLAT_KV_CF).unwrap();
+        let flat_cf = self.shared.values.cf_handle(FLAT_KV_CF).unwrap();
 
         match value {
             None => self.batch.delete_cf(&flat_cf, path.as_ref()),
@@ -118,18 +112,6 @@ impl Transaction {
                 self.batch.put_cf(&flat_cf, path.as_ref(), value);
             }
         }
-    }
-
-    /// Write a page node diff to storage.
-    ///
-    /// The diff should consist of 33 bytes per updated slot. The first byte indicates the slot
-    /// number and the following 32 bytes contain the slot data.
-    ///
-    /// This does not sanity-check slot number.
-    pub fn write_page_nodes(&mut self, page_id: PageId, tagged_nodes: Vec<u8>) {
-        let cf = self.shared.db.cf_handle(PAGES_CF).unwrap();
-        self.batch
-            .merge_cf(&cf, page_id.length_dependent_encoding(), tagged_nodes);
     }
 
     /// Write a page to storage in its entirety.
@@ -145,52 +127,7 @@ impl Transaction {
 
     /// Write the root to metadata.
     pub fn write_root(&mut self, root: Node) {
-        let cf = self.shared.db.cf_handle(METADATA_CF).unwrap();
+        let cf = self.shared.values.cf_handle(METADATA_CF).unwrap();
         self.batch.put_cf(&cf, b"root", &root[..]);
-    }
-}
-
-fn merge_page(_key: &[u8], prev_value: Option<&[u8]>, operands: &MergeOperands) -> Option<Vec<u8>> {
-    let mut val = prev_value.map(|x| x.to_vec());
-    for op in operands.iter() {
-        for op in op.chunks_exact(33) {
-            let val = val.get_or_insert_with(|| vec![0u8; 4096]);
-            let slot_index = op[0] as usize;
-
-            let slot_start = slot_index * 32;
-            let slot_end = slot_start + 32;
-            val[slot_start..slot_end].copy_from_slice(&op[1..]);
-        }
-    }
-
-    // merge operators are not supposed to fail unless there is corruption.
-    val
-}
-
-fn partial_merge_page_ops(
-    _key: &[u8],
-    prev_value: Option<&[u8]>,
-    operands: &MergeOperands,
-) -> Option<Vec<u8>> {
-    let mut slots = HashMap::new();
-
-    for prev_op in prev_value.into_iter().flat_map(|x| x.chunks_exact(33)) {
-        slots.insert(prev_op[0], prev_op);
-    }
-
-    for op in operands.iter() {
-        for op in op.chunks_exact(33) {
-            slots.insert(op[0], op);
-        }
-    }
-
-    if slots.is_empty() {
-        None
-    } else {
-        let mut v = Vec::with_capacity(33 * slots.len());
-        for (_, op) in slots.into_iter() {
-            v.extend(op);
-        }
-        Some(v)
     }
 }

@@ -694,8 +694,9 @@ impl PageCache {
         tx: &mut Transaction,
     ) {
         let read_pass = self.new_read_pass();
-        let mut apply_page =
-            |page_id, page_data: Option<&Vec<u8>>, page_diff: PageDiff| match page_data {
+        let mut apply_page = |page_id, page_data: Option<&Vec<u8>>, page_diff: PageDiff| {
+            // NOTE: no more merge logic
+            match page_data {
                 None => {
                     tx.delete_page(page_id);
                 }
@@ -705,7 +706,8 @@ impl PageCache {
                 Some(p) => {
                     tx.write_page(page_id, p, page_diff);
                 }
-            };
+            }
+        };
 
         // helper for exploiting locality effects in the diffs to avoid searching through
         // shards constantly.
