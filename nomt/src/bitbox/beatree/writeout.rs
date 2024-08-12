@@ -344,7 +344,7 @@ impl LnWriteOut {
         while let Some(CompleteIo { command, result }) = io.try_recv_ln() {
             assert!(result.is_ok());
             match command.kind {
-                IoKind::WriteRaw(_, _, _, _) => {
+                IoKind::Write(_, _, _) => {
                     self.ln_remaining = self.ln_remaining.checked_sub(1).unwrap();
 
                     if self.ln_remaining == 0 {
@@ -379,7 +379,7 @@ impl MetaSwap {
         if let Some(new_meta) = self.new_meta.take() {
             // Oh god, there is a special place in hell for this. Will do for now though.
             let mut page = Box::new(Page::zeroed());
-            new_meta.encode_to(&mut page.as_mut()[..24].try_into().unwrap());
+            new_meta.encode_to(&mut page.as_mut()[..20].try_into().unwrap());
 
             if let Err(_) = io.try_send_meta(IoKind::Write(self.meta_fd, 0, page)) {
                 self.new_meta = Some(new_meta);
@@ -397,7 +397,7 @@ impl MetaSwap {
         while let Some(CompleteIo { command, result }) = io.try_recv_meta() {
             assert!(result.is_ok());
             match command.kind {
-                IoKind::WriteRaw(_, _, _, _) => {
+                IoKind::Write(_, _, _) => {
                     self.should_fsync = true;
                     continue;
                 }
