@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    os::fd::{FromRawFd, RawFd},
+    os::fd::{FromRawFd, IntoRawFd, RawFd},
 };
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -219,7 +219,9 @@ impl BbnWriteOut {
         // file) right away and defer only the writes to the pages higher the bump pointe.
         if let Some(new_len) = self.bbn_extend_file_sz.take() {
             unsafe {
-                File::from_raw_fd(self.bbn_fd).set_len(new_len).unwrap();
+                let f = File::from_raw_fd(self.bbn_fd);
+                f.set_len(new_len).unwrap();
+                let _ = f.into_raw_fd();
             }
             return false;
         }
@@ -317,7 +319,9 @@ impl LnWriteOut {
 
         if let Some(new_len) = self.ln_extend_file_sz.take() {
             unsafe {
-                File::from_raw_fd(self.ln_fd).set_len(new_len).unwrap();
+                let f = File::from_raw_fd(self.ln_fd);
+                f.set_len(new_len).unwrap();
+                let _ = f.into_raw_fd();
             }
         }
 
