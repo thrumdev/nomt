@@ -1,7 +1,7 @@
 use crate::{
     beatree::allocator::PageNumber,
     io::{CompleteIo, IoCommand, IoKind},
-    store::{Page, PAGE_SIZE},
+    io::{Page, PAGE_SIZE},
 };
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd};

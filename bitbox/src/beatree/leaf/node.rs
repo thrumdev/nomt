@@ -27,7 +27,7 @@ use std::ops::Range;
 
 use crate::{
     beatree::Key,
-    store::{Page, PAGE_SIZE},
+    io::{Page, PAGE_SIZE},
 };
 
 pub const LEAF_NODE_BODY_SIZE: usize = PAGE_SIZE - 2;

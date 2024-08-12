@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::{fs::File, io::Read as _};
 
-use crate::store::Page;
+use crate::io::Page;
 
 /// This data structure describes the state of the btree.
 pub struct Meta {

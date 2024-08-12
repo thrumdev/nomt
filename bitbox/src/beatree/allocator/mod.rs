@@ -1,7 +1,7 @@
 use crate::{
     beatree::allocator::free_list::FreeList,
     io::{CompleteIo, IoCommand, IoKind},
-    store::{Page, PAGE_SIZE},
+    io::{Page, PAGE_SIZE},
 };
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 

@@ -2,40 +2,14 @@ use rand::Rng;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
-    ops::{Deref, DerefMut},
     os::{
         fd::{AsRawFd, RawFd},
         unix::fs::OpenOptionsExt,
     },
     path::PathBuf,
 };
-
+use crate::io::{Page, PAGE_SIZE};
 use crate::meta_map::MetaMap;
-
-pub const PAGE_SIZE: usize = 4096;
-
-#[derive(Clone)]
-#[repr(align(4096))]
-pub struct Page([u8; PAGE_SIZE]);
-
-impl Deref for Page {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Page {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Page {
-    pub fn zeroed() -> Self {
-        Self([0; PAGE_SIZE])
-    }
-}
 
 /// The Store is an on disk array of [`Page`]
 pub struct Store {

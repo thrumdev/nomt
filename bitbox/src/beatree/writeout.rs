@@ -7,7 +7,7 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use crate::{
     io::{CompleteIo, IoCommand, IoKind},
-    store::Page,
+    io::Page,
 };
 
 use super::{allocator::PageNumber, branch::BranchNode, meta::Meta};
