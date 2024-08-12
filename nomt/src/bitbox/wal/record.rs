@@ -1,6 +1,4 @@
-use crate::wal::entry::Entry;
-use crate::wal::WAL_CHECKSUM_MAGIC;
-use crate::wal::WAL_RECORD_SIZE;
+use crate::bitbox::wal::{entry::Entry, WAL_CHECKSUM_MAGIC, WAL_RECORD_SIZE};
 
 use anyhow::bail;
 

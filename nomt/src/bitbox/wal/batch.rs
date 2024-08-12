@@ -1,4 +1,4 @@
-use crate::wal::{entry::Entry, record::Record, WAL_RECORD_SIZE};
+use crate::bitbox::wal::{entry::Entry, record::Record, WAL_RECORD_SIZE};
 
 // It can be constructed by multiple records
 #[derive(Clone, PartialEq, Debug)]
@@ -19,8 +19,8 @@ impl Batch {
         self.sequence_number
     }
 
-    pub fn data(self) -> Vec<Entry> {
-        self.data
+    pub fn data(&self) -> &Vec<Entry> {
+        &self.data
     }
 
     pub fn append_entry(&mut self, new_entry: Entry) {
