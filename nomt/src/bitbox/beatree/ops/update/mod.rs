@@ -3,7 +3,7 @@ use bitvec::prelude::*;
 
 use std::collections::BTreeMap;
 
-use crate::beatree::{
+use crate::bitbox::beatree::{
     allocator::PageNumber,
     bbn,
     branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},

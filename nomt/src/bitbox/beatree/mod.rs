@@ -14,16 +14,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{
-    beatree::{bbn::BbnStoreCommitOutput, leaf::store::LeafStoreCommitOutput},
-    io::{self, CompleteIo, IoCommand, Mode},
-};
+use crate::io::{self, CompleteIo, IoCommand};
 
 use crossbeam_channel::{Receiver, Sender};
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
 use meta::Meta;
 
-use self::bbn::BbnStoreWriter;
+use self::{
+    bbn::{BbnStoreCommitOutput, BbnStoreWriter},
+    leaf::store::LeafStoreCommitOutput,
+};
 
 mod allocator;
 mod bbn;
@@ -83,7 +83,7 @@ impl Tree {
         const IO_IX_SYNC: usize = 4;
         const NUM_IO_HANDLES: usize = 5;
 
-        let (io_sender, io_recv) = crate::io::start_io_worker(NUM_IO_HANDLES, Mode::Real { num_rings: 3 });
+        let (io_sender, io_recv) = crate::io::start_io_worker(NUM_IO_HANDLES, 3);
 
         if !db_dir.as_ref().exists() {
             use std::io::Write as _;

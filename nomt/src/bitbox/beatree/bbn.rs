@@ -1,14 +1,15 @@
 use crate::{
-    beatree::{
-        allocator::{AllocatorCommitOutput, AllocatorWriter, PageNumber},
-        branch::BranchNode,
-    },
     io::Page,
     io::{CompleteIo, IoCommand},
 };
 use crossbeam_channel::{Receiver, Sender};
 
 use std::{collections::BTreeSet, fs::File};
+
+use super::{
+    allocator::{AllocatorCommitOutput, AllocatorWriter, PageNumber},
+    branch::BranchNode,
+};
 
 /// The BbnStoreWriter enables dynamic allocation and release of BBNs.
 /// Upon calling commit, it returns a list of encoded pages and BranchNodes that must be written

@@ -1,10 +1,11 @@
 use crate::{
-    beatree::allocator::PageNumber,
     io::{CompleteIo, IoCommand, IoKind},
     io::{Page, PAGE_SIZE},
 };
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd};
+
+use super::PageNumber;
 
 const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
 

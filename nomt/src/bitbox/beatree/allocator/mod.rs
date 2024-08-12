@@ -1,5 +1,4 @@
 use crate::{
-    beatree::allocator::free_list::FreeList,
     io::{CompleteIo, IoCommand, IoKind},
     io::{Page, PAGE_SIZE},
 };
@@ -9,6 +8,8 @@ use std::{
     fs::File,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
 };
+
+use free_list::FreeList;
 
 mod free_list;
 

@@ -19,10 +19,10 @@ use self::{
     wal::{Batch as WalBatch, ConsistencyError, Entry as WalEntry, WalWriter},
 };
 
+mod beatree;
 mod meta_map;
 mod store;
 mod wal;
-
 
 const LOAD_PAGE_HANDLE_INDEX: usize = 0;
 const LOAD_VALUE_HANDLE_INDEX: usize = 1;
