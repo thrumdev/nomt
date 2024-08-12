@@ -378,7 +378,12 @@ impl LeafUpdater {
     }
 
     fn build_leaf(&self, ops: &[LeafOp]) -> LeafNode {
-        let mut leaf_builder = LeafBuilder::new(ops.len());
+        let total_value_size = ops.iter().map(|op| match op {
+            LeafOp::Keep(_, size) => *size,
+            LeafOp::Insert(_, v) => v.len(),
+        }).sum();
+
+        let mut leaf_builder = LeafBuilder::new(ops.len(), total_value_size);
         for op in ops {
             let (k, v) = self.op_key_value(op);
 

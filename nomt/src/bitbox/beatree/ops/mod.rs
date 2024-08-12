@@ -3,6 +3,8 @@
 use anyhow::Result;
 use bitvec::prelude::*;
 
+use std::cmp::Ordering;
+
 use super::{
     allocator::PageNumber,
     branch::{self, BranchId},
@@ -46,8 +48,13 @@ pub fn lookup(
 fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     let prefix = branch.prefix();
 
-    if key.view_bits::<Lsb0>()[..prefix.len()] != prefix {
-        return None;
+    match key.view_bits::<Lsb0>()[..prefix.len()].cmp(prefix) {
+        Ordering::Equal => {}
+        Ordering::Less => return None,
+        Ordering::Greater => {
+            let i = branch.n() as usize - 1;
+            return Some((i, branch.node_pointer(i).into()))
+        }
     }
 
     let post_key =

@@ -101,11 +101,11 @@ impl LeafNode {
 pub struct LeafBuilder {
     leaf: LeafNode,
     index: usize,
-    total_value_size: usize,
+    remaining_value_size: usize,
 }
 
 impl LeafBuilder {
-    pub fn new(n: usize) -> Self {
+    pub fn new(n: usize, total_value_size: usize) -> Self {
         let mut leaf = LeafNode {
             inner: Box::new(Page::zeroed()),
         };
@@ -113,24 +113,25 @@ impl LeafBuilder {
         LeafBuilder {
             leaf,
             index: 0,
-            total_value_size: 0,
+            remaining_value_size: total_value_size,
         }
     }
 
     pub fn push(&mut self, key: Key, value: &[u8]) {
         assert!(self.index < self.leaf.n());
 
-        let offset = PAGE_SIZE - self.total_value_size - value.len();
-        let mut cell_pointer = self.leaf.cell_pointers_mut()[self.index];
+        let offset = PAGE_SIZE - self.remaining_value_size;
+        let cell_pointer = &mut self.leaf.cell_pointers_mut()[self.index];
 
         encode_cell_pointer(&mut cell_pointer[..], key, offset);
         self.leaf.inner[offset..][..value.len()].copy_from_slice(value);
 
         self.index += 1;
-        self.total_value_size += value.len();
+        self.remaining_value_size -= value.len();
     }
 
     pub fn finish(self) -> LeafNode {
+        assert!(self.remaining_value_size == 0);
         self.leaf
     }
 }
