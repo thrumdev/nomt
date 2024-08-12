@@ -137,10 +137,12 @@ impl PageDiff {
         self.updated_slots.set(slot_index, true);
     }
 
+    /// Get a vector containing the indexes of all changed nodes
     pub fn get_changed(&self) -> Vec<usize> {
         self.updated_slots.iter_ones().collect()
     }
 
+    /// Get raw bytes representing the PageDiff
     pub fn get_raw(self) -> [u8; 16] {
         self.updated_slots.data
     }
