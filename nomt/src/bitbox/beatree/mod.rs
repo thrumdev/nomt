@@ -60,9 +60,9 @@ struct Sync {
     sync_io_handle_index: usize,
     sync_io_sender: Sender<IoCommand>,
     sync_io_receiver: Receiver<CompleteIo>,
-    meta_fd: RawFd,
-    ln_fd: RawFd,
-    bbn_fd: RawFd,
+    meta_file: File,
+    ln_file: File,
+    bbn_file: File,
 }
 
 impl Shared {
@@ -115,27 +115,23 @@ impl Tree {
             File::open(db_dir.as_ref())?.sync_all()?;
         }
 
-        let bbn_fd = OpenOptions::new()
+        let bbn_file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_DIRECT)
             .open(db_dir.as_ref().join("bbn"))?;
-        let ln_fd = OpenOptions::new()
+        let ln_file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_DIRECT)
             .open(db_dir.as_ref().join("ln"))?;
-        let meta_fd = OpenOptions::new()
+        let meta_file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_DIRECT)
             .open(db_dir.as_ref().join("meta"))?;
 
-        let bbn_raw_fd = bbn_fd.as_raw_fd();
-        let ln_raw_fd = ln_fd.as_raw_fd();
-        let meta_raw_fd = meta_fd.as_raw_fd();
-
-        let meta = meta::Meta::read(&meta_fd)?;
+        let meta = meta::Meta::read(&meta_file)?;
         let ln_freelist_pn = Some(meta.ln_freelist_pn)
             .map(PageNumber)
             .filter(|&x| x != FREELIST_EMPTY);
@@ -147,6 +143,7 @@ impl Tree {
         let bbn_bump = PageNumber(meta.bbn_bump);
 
         let (leaf_store_rd_shared, leaf_store_rd_sync, leaf_store_wr) = {
+            let ln_file = ln_file.try_clone().unwrap();
             let rd_io_handle_index_shared = IO_IX_RD_LN_SHARED;
             let rd_io_sender_shared = io_sender.clone();
             let rd_io_receiver_shared = io_recv[rd_io_handle_index_shared].clone();
@@ -158,7 +155,7 @@ impl Tree {
             let wr_io_receiver = io_recv[wr_io_handle_index].clone();
 
             leaf::store::create(
-                ln_fd,
+                ln_file,
                 ln_freelist_pn,
                 ln_bump,
                 rd_io_handle_index_shared,
@@ -174,7 +171,7 @@ impl Tree {
         };
 
         let (bbn_store_wr, bbn_freelist) = {
-            let bbn_fd = bbn_fd.try_clone().unwrap();
+            let bbn_fd = bbn_file.try_clone().unwrap();
             let io_handle_index = IO_IX_BBN;
             let io_sender = io_sender.clone();
             let io_receiver = io_recv[io_handle_index].clone();
@@ -188,7 +185,7 @@ impl Tree {
             )
         };
         let mut bnp = branch::BranchNodePool::new();
-        let index = ops::reconstruct(bbn_fd, &mut bnp, &bbn_freelist, bbn_bump)
+        let index = ops::reconstruct(bbn_file.try_clone().unwrap(), &mut bnp, &bbn_freelist, bbn_bump)
             .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
         let shared = Shared {
             bbn_index: index,
@@ -208,9 +205,9 @@ impl Tree {
             sync_io_handle_index,
             sync_io_sender,
             sync_io_receiver,
-            meta_fd: meta_raw_fd,
-            ln_fd: ln_raw_fd,
-            bbn_fd: bbn_raw_fd,
+            meta_file,
+            ln_file,
+            bbn_file,
         };
 
         Ok(Tree {
@@ -349,9 +346,9 @@ impl Tree {
             sync.sync_io_sender.clone(),
             sync.sync_io_handle_index,
             sync.sync_io_receiver.clone(),
-            sync.bbn_fd,
-            sync.ln_fd,
-            sync.meta_fd,
+            sync.bbn_file.as_raw_fd(),
+            sync.ln_file.as_raw_fd(),
+            sync.meta_file.as_raw_fd(),
             bbn,
             bbn_freelist_pages,
             bbn_extend_file_sz,
