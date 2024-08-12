@@ -201,10 +201,10 @@ impl BranchUpdater {
             }
 
             if self.possibly_deleted.first() == Some(&next_key) {
+                // never keep items from `possibly_deleted`.
                 self.possibly_deleted.remove(0);
-            }
-
-            if order == Ordering::Greater {
+                base_node.advance_iter();
+            } else if order == Ordering::Greater {
                 let separator_len = separator_len(&next_key);
                 self.ops
                     .push(BranchOp::Keep(base_node.iter_pos, separator_len));
@@ -213,6 +213,7 @@ impl BranchUpdater {
                 self.bulk_split_step(self.ops.len() - 1);
             } else {
                 base_node.advance_iter();
+                break
             }
         }
     }
