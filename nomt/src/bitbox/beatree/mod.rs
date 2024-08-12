@@ -1,4 +1,4 @@
-use allocator::PageNumber;
+use allocator::{PageNumber, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
 use std::{
@@ -137,11 +137,12 @@ impl Tree {
 
         let meta = meta::Meta::read(&meta_fd)?;
         let ln_freelist_pn = Some(meta.ln_freelist_pn)
-            .filter(|&x| x != 0)
-            .map(PageNumber);
+            .map(PageNumber)
+            .filter(|&x| x != FREELIST_EMPTY);
         let bbn_freelist_pn = Some(meta.bbn_freelist_pn)
-            .filter(|&x| x != 0)
-            .map(PageNumber);
+            .map(PageNumber)
+            .filter(|&x| x != FREELIST_EMPTY);
+
         let ln_bump = PageNumber(meta.ln_bump);
         let bbn_bump = PageNumber(meta.bbn_bump);
 
