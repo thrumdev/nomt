@@ -100,9 +100,8 @@ impl LeafUpdater {
 
         if let Some(value) = value_change {
             self.ops.push(LeafOp::Insert(key, value));
+            self.bulk_split_step(self.ops.len() - 1);
         }
-
-        self.bulk_split_step(self.ops.len() - 1);
     }
 
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
@@ -140,7 +139,7 @@ impl LeafUpdater {
             );
             self.split(branch_updater, leaf_writer)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
-            let node = self.build_leaf(&self.ops);
+            let node = self.build_leaf(&self.ops[last_ops_start..]);
             let pn = leaf_writer.allocate(node);
             let separator = self.separator();
 
@@ -227,7 +226,7 @@ impl LeafUpdater {
                 self.gauge = LeafGauge::default();
                 bulk_splitter.push(n);
             }
-            _ => {}
+            _ => self.gauge.ingest(item_size),
         }
     }
 
@@ -350,12 +349,7 @@ impl LeafUpdater {
     }
 
     fn prepare_merge_ops(&mut self, split_point: usize) {
-        // copy the left over operations to the front of the vector.
-        let count = self.ops.len() - split_point;
-        for i in 0..count {
-            self.ops.swap(i, i + split_point);
-        }
-        self.ops.truncate(count);
+        self.ops.drain(..split_point);
 
         let Some(ref base) = self.base else { return };
 

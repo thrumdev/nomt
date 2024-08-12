@@ -3,7 +3,7 @@ use crate::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },
-    io::{Page, CompleteIo, IoCommand},
+    io::{CompleteIo, IoCommand, Page},
 };
 use crossbeam_channel::{Receiver, Sender};
 

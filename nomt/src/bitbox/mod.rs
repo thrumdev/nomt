@@ -9,7 +9,7 @@ use std::{
 use threadpool::ThreadPool;
 
 use crate::{
-    io::{self, Page, PAGE_SIZE, CompleteIo, IoCommand, IoKind},
+    io::{self, CompleteIo, IoCommand, IoKind, Page, PAGE_SIZE},
     page_cache::PageDiff,
 };
 

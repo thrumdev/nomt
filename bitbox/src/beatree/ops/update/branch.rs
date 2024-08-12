@@ -140,7 +140,8 @@ impl BranchUpdater {
             );
             (old_branch_id, self.split(bbn_index, bnp, bbn_writer))
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
-            let (branch_id, node) = self.build_branch(&self.ops, &self.gauge, bnp);
+            let (branch_id, node) =
+                self.build_branch(&self.ops[last_ops_start..], &self.gauge, bnp);
             let separator = self.separator();
 
             bbn_index.insert(separator, branch_id);
@@ -213,7 +214,7 @@ impl BranchUpdater {
                 self.bulk_split_step(self.ops.len() - 1);
             } else {
                 base_node.advance_iter();
-                break
+                break;
             }
         }
     }
@@ -288,7 +289,7 @@ impl BranchUpdater {
                 let last_gauge = std::mem::replace(&mut self.gauge, BranchGauge::new());
                 bulk_splitter.push(n, last_gauge);
             }
-            _ => {}
+            _ => self.gauge.ingest(key, separator_len),
         }
     }
 
@@ -435,12 +436,7 @@ impl BranchUpdater {
     }
 
     fn prepare_merge_ops(&mut self, split_point: usize) {
-        // copy the left over operations to the front of the vector.
-        let count = self.ops.len() - split_point;
-        for i in 0..count {
-            self.ops.swap(i, i + split_point);
-        }
-        self.ops.truncate(count);
+        self.ops.drain(..split_point);
 
         let Some(ref base) = self.base else { return };
 
