@@ -219,35 +219,6 @@ impl BranchUpdater {
         }
     }
 
-    fn begin_bulk_split(&mut self) {
-        let mut splitter = BranchBulkSplitter::default();
-
-        let mut n = 0;
-        let mut gauge = BranchGauge::new();
-        for op in &self.ops {
-            match op {
-                BranchOp::Insert(key, _) => gauge.ingest(*key, separator_len(&key)),
-                BranchOp::Keep(i, separator_len) => gauge.ingest(
-                    // UNWRAP: `Keep` ops require base node to exist.
-                    self.base.as_ref().unwrap().key(*i),
-                    *separator_len,
-                ),
-            }
-
-            n += 1;
-
-            if gauge.body_size() >= BRANCH_BULK_SPLIT_TARGET {
-                let last_gauge = gauge;
-                gauge = BranchGauge::new();
-                splitter.push(n, last_gauge);
-                n = 0;
-            }
-        }
-
-        self.gauge = gauge;
-        self.bulk_split = Some(splitter);
-    }
-
     // check whether bulk split needs to start, and if so, start it.
     // if ongoing, check if we need to cut off.
     fn bulk_split_step(&mut self, op_index: usize) {
@@ -524,7 +495,7 @@ fn prefix_len(key_a: &Key, key_b: &Key) -> usize {
 
 fn separator_len(key: &Key) -> usize {
     let key = &key.view_bits::<Lsb0>();
-    std::cmp::min(1, key.len() - key.trailing_zeros())
+    std::cmp::max(1, key.len() - key.trailing_zeros())
 }
 
 #[derive(Default)]
