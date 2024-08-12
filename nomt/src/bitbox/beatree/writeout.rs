@@ -258,7 +258,7 @@ impl BbnWriteOut {
                 if let Err(TrySendError::Full(IoCommand {
                     kind: IoKind::Write(.., page),
                     ..
-                })) = io.try_send_ln(IoKind::Write(self.bbn_fd, pn.0 as u64, page))
+                })) = io.try_send_bbn(IoKind::Write(self.bbn_fd, pn.0 as u64, page))
                 {
                     // That's alright. We will retry on the next iteration.
                     self.free_list_pages.push((pn, page));
@@ -271,7 +271,7 @@ impl BbnWriteOut {
         while let Some(CompleteIo { command, result }) = io.try_recv_bbn() {
             assert!(result.is_ok());
             match command.kind {
-                IoKind::WriteRaw(_, _, _, _) => {
+                IoKind::Write(_, _, _) | IoKind::WriteRaw(_, _, _, _) => {
                     self.remaining = self.remaining.checked_sub(1).unwrap();
 
                     if self.remaining == 0 {
