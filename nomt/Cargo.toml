@@ -29,6 +29,7 @@ im = "15.1.0"
 lru = "0.12.3"
 libc = "0.2.155"
 io-uring = "0.6.4"
+itertools = "0.13.0"
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }
