@@ -3,8 +3,8 @@ use crate::{
         allocator::{AllocatorCommitOutput, AllocatorWriter, PageNumber},
         branch::BranchNode,
     },
-    io::{CompleteIo, IoCommand},
     io::Page,
+    io::{CompleteIo, IoCommand},
 };
 use crossbeam_channel::{Receiver, Sender};
 

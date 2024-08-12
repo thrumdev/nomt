@@ -25,6 +25,7 @@ pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
 pub use options::Options;
 
+mod bitbox;
 mod commit;
 mod metrics;
 mod options;
@@ -34,7 +35,6 @@ mod page_walker;
 mod rw_pass_cell;
 mod seek;
 mod store;
-mod bitbox;
 
 #[path = "../../bitbox/src/io.rs"]
 mod io;

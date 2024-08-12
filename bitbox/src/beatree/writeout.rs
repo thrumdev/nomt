@@ -6,8 +6,8 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use crate::{
-    io::{CompleteIo, IoCommand, IoKind},
     io::Page,
+    io::{CompleteIo, IoCommand, IoKind},
 };
 
 use super::{allocator::PageNumber, branch::BranchNode, meta::Meta};
