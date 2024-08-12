@@ -457,7 +457,7 @@ impl BranchGauge {
         };
 
         self.separator_len = std::cmp::max(len, self.separator_len);
-        self.prefix_len = prefix_len(first, &key);
+        self.prefix_len = std::cmp::min(self.separator_len, prefix_len(first, &key));
         self.n += 1;
     }
 
@@ -466,7 +466,7 @@ impl BranchGauge {
         let s;
         if let Some(ref first) = self.first_separator {
             s = std::cmp::max(len, self.separator_len);
-            p = prefix_len(first, &key);
+            p = std::cmp::min(s, prefix_len(first, &key));
         } else {
             s = len;
             p = len;
