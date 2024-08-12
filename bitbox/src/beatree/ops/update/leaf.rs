@@ -1,20 +1,17 @@
-
 use bitvec::prelude::*;
-use std::{
-    cmp::Ordering,
-    io::{Read},
-};
+use std::{cmp::Ordering, io::Read};
 
 use crate::beatree::{
     allocator::PageNumber,
     leaf::{
-        node::{self as leaf_node, LeafNode, LeafBuilder, LEAF_NODE_BODY_SIZE},
-        store::{LeafStoreWriter},
-    }, Key,
+        node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},
+        store::LeafStoreWriter,
+    },
+    Key,
 };
 
 use super::{
-    branch::BranchUpdater, LEAF_MERGE_THRESHOLD, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
+    branch::BranchUpdater, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD,
 };
 
 pub struct BaseLeaf {
@@ -103,9 +100,17 @@ impl LeafUpdater {
 
         if let Some(value) = value_change {
             self.ops.push(LeafOp::Insert(key, value));
+            self.bulk_split_step(self.ops.len() - 1);
         }
 
-        self.bulk_split_step(self.ops.len() - 1);
+        // FIXME: Why should the bulk_split_step be performed for a removal?
+        // This should probably be moved to the previous if statement
+        //
+        // If we want to remove something, it will not be part of the bulk
+        // operations. We just keep up to that key and skip it,
+        // without bulk operations or increased gauges or anything else
+        //
+        // self.bulk_split_step(self.ops.len() - 1);
     }
 
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
@@ -127,28 +132,60 @@ impl LeafUpdater {
         // in practice; bulk splits are rare.
         let last_ops_start = self.build_bulk_splitter_leaves(branch_updater, leaf_writer);
 
-        if let Some(ref base) = self.base {
-            leaf_writer.release(base.id);
-        }
+        // FIXME: This release should not always be performed.
+        // For example, if nothing changed in this leaf and all ops are Keep,
+        // nothing is discarded. Why should this leaf be released?
+        // if let Some(ref base) = self.base {
+        //     leaf_writer.release(base.id);
+        // }
 
         if self.gauge.body_size() == 0 {
-            self.ops.clear();
-            self.separator_override = None;
+            // FIXME: why this? if gauge.body_size() is zero then no operations
+            // should have been performed previously
+            //self.ops.clear();
+            // self.separator_override = None;
+
+            // FIXME: Added here, if gauge is not increased it means
+            // that everything was deleted, thus the leaf can be released
+            if let Some(ref base) = self.base {
+                leaf_writer.release(base.id);
+            }
 
             DigestResult::Finished
         } else if self.gauge.body_size() > LEAF_NODE_BODY_SIZE {
-            assert_eq!(last_ops_start, 0, "normal split can only occur when not bulk splitting");
+            assert_eq!(
+                last_ops_start, 0,
+                "normal split can only occur when not bulk splitting"
+            );
             self.split(branch_updater, leaf_writer)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
-            let node = self.build_leaf(&self.ops);
-            let pn = leaf_writer.allocate(node);
-            let separator = self.separator();
+            // if the fold early returns it means that a new element has been
+            // inserted or an old one is removed
+            let to_update = self
+                .ops
+                .iter()
+                .try_fold(0, |acc, op| match op {
+                    LeafOp::Keep(index, _) if acc == *index => Some(acc + 1),
+                    _ => None,
+                })
+                .is_none();
 
-            branch_updater.ingest(separator, pn);
+            if to_update {
+                // FIXME: this should be performed only if the ops do not keep all elements
+                let node = self.build_leaf(&self.ops);
+                let pn = leaf_writer.allocate(node);
+                let separator = self.separator();
 
-            self.ops.clear();
-            self.gauge = LeafGauge::default();
-            self.separator_override = None;
+                branch_updater.ingest(separator, pn);
+
+                self.ops.clear();
+                self.gauge = LeafGauge::default();
+                self.separator_override = None;
+
+                // FIXME: Added here, because now a new leaf has been created
+                leaf_writer.release(self.base.as_ref().unwrap().id);
+            }
+
             DigestResult::Finished
         } else {
             // UNWRAP: if cutoff exists, then base must too.
@@ -166,10 +203,14 @@ impl LeafUpdater {
 
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
         while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
-            let Some(ref mut base_node) = self.base else { return };
-            let order = up_to.map(|up_to| up_to.cmp(&next_key)).unwrap_or(Ordering::Greater);
+            let Some(ref mut base_node) = self.base else {
+                return;
+            };
+            let order = up_to
+                .map(|up_to| up_to.cmp(&next_key))
+                .unwrap_or(Ordering::Greater);
             if order == Ordering::Less {
-                break
+                break;
             }
 
             if order == Ordering::Greater {
@@ -199,7 +240,7 @@ impl LeafUpdater {
                 for i in 0..=op_index {
                     self.bulk_split_step(i);
                 }
-            },
+            }
             Some(ref mut bulk_splitter) if body_size_after >= LEAF_BULK_SPLIT_TARGET => {
                 let accept_item = body_size_after <= LEAF_NODE_BODY_SIZE || {
                     if self.gauge.body_size() < LEAF_MERGE_THRESHOLD {
@@ -222,8 +263,13 @@ impl LeafUpdater {
                 // push onto bulk splitter & restart gauge.
                 self.gauge = LeafGauge::default();
                 bulk_splitter.push(n);
-            },
-            _ => {}
+            }
+            _ => {
+                // FIXME: should the gauge be increased? Otherwise, it will never increase
+                // and body_size_after will just be be slightly larger than the item_size,
+                // leading the previous conditions to always be false
+                self.gauge.ingest(item_size);
+            }
         }
     }
 
@@ -232,7 +278,9 @@ impl LeafUpdater {
         branch_updater: &mut BranchUpdater,
         leaf_writer: &mut LeafStoreWriter,
     ) -> usize {
-        let Some(splitter) = self.bulk_split.take() else { return 0 };
+        let Some(splitter) = self.bulk_split.take() else {
+            return 0;
+        };
 
         let mut start = 0;
         for item_count in splitter.items {
@@ -265,12 +313,16 @@ impl LeafUpdater {
 
     fn separator(&self) -> Key {
         // the first leaf always gets a separator of all 0.
-        self.separator_override.or(self.base.as_ref().map(|b| b.separator)).unwrap_or([0u8; 32])
+        self.separator_override
+            .or(self.base.as_ref().map(|b| b.separator))
+            .unwrap_or([0u8; 32])
     }
 
-    fn split(&mut self, branch_updater: &mut BranchUpdater, leaf_writer: &mut LeafStoreWriter)
-        -> DigestResult
-    {
+    fn split(
+        &mut self,
+        branch_updater: &mut BranchUpdater,
+        leaf_writer: &mut LeafStoreWriter,
+    ) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -287,7 +339,7 @@ impl LeafUpdater {
                     todo!()
                 }
 
-                break
+                break;
             }
 
             left_gauge.ingest(item_size);
@@ -341,11 +393,14 @@ impl LeafUpdater {
 
     fn prepare_merge_ops(&mut self, split_point: usize) {
         // copy the left over operations to the front of the vector.
-        let count = self.ops.len() - split_point;
-        for i in 0..count {
-            self.ops.swap(i, i + split_point);
-        }
-        self.ops.truncate(count);
+        // FIXME: why not drain?
+        self.ops.drain(0..split_point);
+
+        //let count = self.ops.len() - split_point;
+        //for i in 0..count {
+        //    self.ops.swap(i, i + split_point);
+        //}
+        //self.ops.truncate(count);
 
         let Some(ref base) = self.base else { return };
 
@@ -421,11 +476,13 @@ impl LeafGauge {
 // separate two keys a and b where b > a
 fn separate(a: &Key, b: &Key) -> Key {
     // if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
-    let len = a.view_bits::<Lsb0>()
+    let len = a
+        .view_bits::<Lsb0>()
         .iter()
         .zip(b.view_bits::<Lsb0>().iter())
         .take_while(|(a, b)| a == b)
-        .count() + 1;
+        .count()
+        + 1;
 
     let mut separator = [0u8; 32];
     separator.view_bits_mut::<Lsb0>()[..len].copy_from_bitslice(&b.view_bits::<Lsb0>());

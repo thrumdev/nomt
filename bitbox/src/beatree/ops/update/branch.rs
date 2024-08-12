@@ -1,4 +1,3 @@
-
 use bitvec::prelude::*;
 
 use std::cmp::Ordering;
@@ -6,12 +5,17 @@ use std::cmp::Ordering;
 use crate::beatree::{
     allocator::PageNumber,
     bbn::BbnStoreWriter,
-    branch::{self as branch_node, BranchNode, BranchNodeBuilder, BranchNodePool, BRANCH_NODE_BODY_SIZE},
+    branch::{
+        self as branch_node, BranchNode, BranchNodeBuilder, BranchNodePool, BRANCH_NODE_BODY_SIZE,
+    },
     index::Index,
     Key,
 };
 
-use super::{reconstruct_key, BranchId, BRANCH_MERGE_THRESHOLD, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD};
+use super::{
+    reconstruct_key, BranchId, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
+    BRANCH_MERGE_THRESHOLD,
+};
 
 pub struct BaseBranch {
     pub node: BranchNode,
@@ -110,6 +114,9 @@ impl BranchUpdater {
         bnp: &mut BranchNodePool,
         bbn_writer: &mut BbnStoreWriter,
     ) -> (Option<BranchId>, DigestResult) {
+        // FIXME: Why is this removed straight away???
+        // The same logic applied in leaf should be used, this removal and release
+        // is not always applied, if nothing has been changed why should it be removed
         if let Some(ref base) = self.base {
             bbn_index.remove(&base.separator());
             bbn_writer.release(base.node.bbn_pn().into());
@@ -122,21 +129,22 @@ impl BranchUpdater {
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_branches(
-            bbn_index,
-            bnp,
-            bbn_writer,
-        );
+        let last_ops_start = self.build_bulk_splitter_branches(bbn_index, bnp, bbn_writer);
 
         if self.gauge.body_size() == 0 {
+            // FIXME: same problem as in leaf
             self.ops.clear();
             self.separator_override = None;
 
             (old_branch_id, DigestResult::Finished)
         } else if self.gauge.body_size() > BRANCH_NODE_BODY_SIZE {
-            assert_eq!(last_ops_start, 0, "normal split can only occur when not bulk splitting");
+            assert_eq!(
+                last_ops_start, 0,
+                "normal split can only occur when not bulk splitting"
+            );
             (old_branch_id, self.split(bbn_index, bnp, bbn_writer))
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
+            // FIXME: same problem as in leaf
             let (branch_id, node) = self.build_branch(&self.ops, &self.gauge, bnp);
             let separator = self.separator();
 
@@ -157,7 +165,10 @@ impl BranchUpdater {
 
             self.prepare_merge_ops(last_ops_start);
 
-            (old_branch_id, DigestResult::NeedsMerge(self.cutoff.unwrap()))
+            (
+                old_branch_id,
+                DigestResult::NeedsMerge(self.cutoff.unwrap()),
+            )
         }
     }
 
@@ -183,57 +194,35 @@ impl BranchUpdater {
 
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
         while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
-            let Some(ref mut base_node) = self.base else { return };
+            let Some(ref mut base_node) = self.base else {
+                return;
+            };
 
-            let order = up_to.map(|up_to| up_to.cmp(&next_key)).unwrap_or(Ordering::Greater);
+            let order = up_to
+                .map(|up_to| up_to.cmp(&next_key))
+                .unwrap_or(Ordering::Greater);
             if order == Ordering::Less {
-                break
+                break;
             }
 
+            // FIXME: Question: why is "possibly" used here? If this method is called,
+            // then all subsequent keys equal to the first possibly_deleted will not be inserted
+            // into the ops. There are no other conditions for the separator to be skipped
             if self.possibly_deleted.first() == Some(&next_key) {
                 self.possibly_deleted.remove(0);
             }
 
             if order == Ordering::Greater {
                 let separator_len = separator_len(&next_key);
-                self.ops.push(BranchOp::Keep(base_node.iter_pos, separator_len));
+                self.ops
+                    .push(BranchOp::Keep(base_node.iter_pos, separator_len));
 
                 base_node.advance_iter();
                 self.bulk_split_step(self.ops.len() - 1);
             } else {
                 base_node.advance_iter();
             }
-
         }
-    }
-
-    fn begin_bulk_split(&mut self) {
-        let mut splitter = BranchBulkSplitter::default();
-
-        let mut n = 0;
-        let mut gauge = BranchGauge::new();
-        for op in &self.ops {
-            match op {
-                BranchOp::Insert(key, _) => gauge.ingest(*key, separator_len(&key)),
-                BranchOp::Keep(i, separator_len) => gauge.ingest(
-                    // UNWRAP: `Keep` ops require base node to exist.
-                    self.base.as_ref().unwrap().key(*i),
-                    *separator_len,
-                ),
-            }
-
-            n += 1;
-
-            if gauge.body_size() >= BRANCH_BULK_SPLIT_TARGET {
-                let last_gauge = gauge;
-                gauge = BranchGauge::new();
-                splitter.push(n, last_gauge);
-                n = 0;
-            }
-        }
-
-        self.gauge = gauge;
-        self.bulk_split = Some(splitter);
     }
 
     // check whether bulk split needs to start, and if so, start it.
@@ -253,7 +242,7 @@ impl BranchUpdater {
                 for i in 0..=op_index {
                     self.bulk_split_step(i);
                 }
-            },
+            }
             Some(ref mut bulk_splitter) if body_size_after >= BRANCH_BULK_SPLIT_TARGET => {
                 let accept_item = body_size_after <= BRANCH_NODE_BODY_SIZE || {
                     if self.gauge.body_size() < BRANCH_MERGE_THRESHOLD {
@@ -276,7 +265,9 @@ impl BranchUpdater {
                 // push onto bulk splitter & restart gauge.
                 let last_gauge = std::mem::replace(&mut self.gauge, BranchGauge::new());
                 bulk_splitter.push(n, last_gauge);
-            },
+            }
+            // FIXME: Here the gauge should be increased, otherwise it will never satisfy
+            // the previous conditions
             _ => {}
         }
     }
@@ -287,7 +278,9 @@ impl BranchUpdater {
         bnp: &mut BranchNodePool,
         bbn_writer: &mut BbnStoreWriter,
     ) -> usize {
-        let Some(splitter) = self.bulk_split.take() else { return 0 };
+        let Some(splitter) = self.bulk_split.take() else {
+            return 0;
+        };
 
         let mut start = 0;
         for (item_count, gauge) in splitter.items {
@@ -343,7 +336,7 @@ impl BranchUpdater {
                     todo!()
                 }
 
-                break
+                break;
             }
 
             left_gauge.ingest(key, separator_len);
@@ -375,9 +368,7 @@ impl BranchUpdater {
             right_gauge.ingest(key, separator_len);
         }
 
-        if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD
-            || self.cutoff.is_none()
-        {
+        if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let (right_branch_id, right_node) = self.build_branch(right_ops, &right_gauge, bnp);
 
             bbn_index.insert(right_separator, right_branch_id);
@@ -407,12 +398,8 @@ impl BranchUpdater {
 
         // UNWRAP: freshly allocated branch can always be checked out.
         let branch = bnp.checkout(branch_id).unwrap();
-        let mut builder = BranchNodeBuilder::new(
-            branch,
-            gauge.n,
-            gauge.prefix_len,
-            gauge.separator_len,
-        );
+        let mut builder =
+            BranchNodeBuilder::new(branch, gauge.n, gauge.prefix_len, gauge.separator_len);
 
         for op in ops {
             match op {
@@ -479,7 +466,7 @@ impl BranchGauge {
             self.prefix_len = self.separator_len;
 
             self.n = 1;
-            return
+            return;
         };
 
         self.separator_len = std::cmp::max(len, self.separator_len);
@@ -502,12 +489,17 @@ impl BranchGauge {
     }
 
     fn body_size(&self) -> usize {
-        branch_node::body_size(self.prefix_len, self.separator_len - self.prefix_len, self.n)
+        branch_node::body_size(
+            self.prefix_len,
+            self.separator_len - self.prefix_len,
+            self.n,
+        )
     }
 }
 
 fn prefix_len(key_a: &Key, key_b: &Key) -> usize {
-    key_a.view_bits::<Lsb0>()
+    key_a
+        .view_bits::<Lsb0>()
         .iter()
         .zip(key_b.view_bits::<Lsb0>().iter())
         .take_while(|(a, b)| a == b)
