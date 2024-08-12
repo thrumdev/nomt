@@ -286,7 +286,7 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
             opcode::Write::new(types::Fd(fd), ptr, size as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
-        }, 
+        }
     }
 }
 

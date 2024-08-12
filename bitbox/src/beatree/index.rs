@@ -2,14 +2,11 @@
 //! which is cheaply cloneable in O(1) and performs COW operations.
 
 use std::iter::DoubleEndedIterator;
-use std::ops::{Bound, RangeToInclusive, RangeBounds};
+use std::ops::{Bound, RangeBounds, RangeToInclusive};
 
 use im::OrdMap;
 
-use super::{
-    branch::{BranchId},
-    Key
-};
+use super::{branch::BranchId, Key};
 
 #[derive(Default, Clone)]
 pub struct Index {
@@ -22,7 +19,8 @@ impl Index {
     /// This is either a branch whose separator is exactly equal to this key or the branch with the
     /// highest separator less than the key.
     pub fn lookup(&self, key: Key) -> Option<BranchId> {
-        self.first_key_map.range(RangeToInclusive { end: key })
+        self.first_key_map
+            .range(RangeToInclusive { end: key })
             .next_back()
             .map(|(_sep, b)| b.clone())
     }
@@ -34,7 +32,8 @@ impl Index {
 
     /// Get the first branch with separator greater than the given key.
     pub fn next_after(&self, key: Key) -> Option<(Key, BranchId)> {
-        self.first_key_map.range(RangeFromExclusive { start: key })
+        self.first_key_map
+            .range(RangeFromExclusive { start: key })
             .next()
             .map(|(k, b)| (*k, *b))
     }
@@ -63,8 +62,9 @@ impl RangeBounds<Key> for RangeFromExclusive {
         Bound::Unbounded
     }
 
-    fn contains<U>(&self, item: &U) -> bool 
-        where U: PartialOrd<Key> + ?Sized
+    fn contains<U>(&self, item: &U) -> bool
+    where
+        U: PartialOrd<Key> + ?Sized,
     {
         item > &self.start
     }

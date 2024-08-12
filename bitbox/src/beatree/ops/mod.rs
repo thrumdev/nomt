@@ -3,9 +3,8 @@
 use anyhow::Result;
 use bitvec::prelude::*;
 
-
 use super::{
-    allocator::{PageNumber},
+    allocator::PageNumber,
     branch::{self, BranchId},
     index::Index,
     leaf, Key,

@@ -1,9 +1,7 @@
-use anyhow::{Result};
+use anyhow::Result;
 use bitvec::prelude::*;
 
-use std::{
-    collections::BTreeMap,
-};
+use std::collections::BTreeMap;
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -11,14 +9,15 @@ use crate::beatree::{
     branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},
     index::Index,
     leaf::{
-        node::{LEAF_NODE_BODY_SIZE},
+        node::LEAF_NODE_BODY_SIZE,
         store::{LeafStoreReader, LeafStoreWriter},
-    }, Key,
+    },
+    Key,
 };
 
 use super::BranchId;
-use branch::{DigestResult as BranchDigestResult, BaseBranch, BranchUpdater};
-use leaf::{DigestResult as LeafDigestResult, BaseLeaf, LeafUpdater};
+use branch::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
+use leaf::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater};
 
 mod branch;
 mod leaf;
@@ -33,7 +32,6 @@ const BRANCH_BULK_SPLIT_THRESHOLD: usize = (BRANCH_NODE_BODY_SIZE * 9) / 5;
 // When performing a bulk split, we target 75% fullness for all of the nodes we create except the
 // last.
 const BRANCH_BULK_SPLIT_TARGET: usize = (BRANCH_NODE_BODY_SIZE * 3) / 4;
-
 
 const LEAF_MERGE_THRESHOLD: usize = LEAF_NODE_BODY_SIZE / 2;
 const LEAF_BULK_SPLIT_THRESHOLD: usize = (LEAF_NODE_BODY_SIZE * 9) / 5;
@@ -89,23 +87,32 @@ impl Updater {
 
         // UNWRAP: all nodes in index must exist.
         let first_branch = first.as_ref().map(|(_, id)| ctx.bnp.checkout(*id).unwrap());
-        let first_branch_cutoff = first.as_ref()
+        let first_branch_cutoff = first
+            .as_ref()
             .and_then(|(k, _)| ctx.bbn_index.next_after(*k))
             .map(|(k, _)| k);
 
         // first leaf cutoff is the separator of the second leaf _or_ the separator of the next
         // branch if there is only 1 leaf, or nothing.
-        let first_leaf_cutoff = first_branch.as_ref().and_then(|node| if node.n() > 1 {
-            Some(reconstruct_key(node.prefix(), node.separator(1)))
-        } else {
-            None
-        }).or(first_branch_cutoff);
+        let first_leaf_cutoff = first_branch
+            .as_ref()
+            .and_then(|node| {
+                if node.n() > 1 {
+                    Some(reconstruct_key(node.prefix(), node.separator(1)))
+                } else {
+                    None
+                }
+            })
+            .or(first_branch_cutoff);
 
-        let first_leaf = first_branch.as_ref()
-            .map(|node| (
-                PageNumber::from(node.node_pointer(0)),
-                reconstruct_key(node.prefix(), node.separator(0)),
-            ))
+        let first_leaf = first_branch
+            .as_ref()
+            .map(|node| {
+                (
+                    PageNumber::from(node.node_pointer(0)),
+                    reconstruct_key(node.prefix(), node.separator(0)),
+                )
+            })
             .map(|(id, separator)| BaseLeaf {
                 id,
                 node: ctx.leaf_reader.query(id),
@@ -134,12 +141,7 @@ impl Updater {
         }
     }
 
-    fn ingest(
-        &mut self,
-        key: Key,
-        value_change: Option<Vec<u8>>,
-        ctx: &mut Ctx,
-    ) {
+    fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>, ctx: &mut Ctx) {
         self.digest_until(Some(key), ctx);
         self.leaf_updater.ingest(key, value_change);
     }
@@ -150,7 +152,10 @@ impl Updater {
 
     fn digest_until(&mut self, until: Option<Key>, ctx: &mut Ctx) {
         while until.map_or(true, |k| !self.leaf_updater.is_in_scope(&k)) {
-            match self.leaf_updater.digest(&mut self.branch_updater, &mut ctx.leaf_writer) {
+            match self
+                .leaf_updater
+                .digest(&mut self.branch_updater, &mut ctx.leaf_writer)
+            {
                 LeafDigestResult::Finished => {
                     self.digest_branches_until(until, ctx);
                     let Some(until) = until else { break };
@@ -161,7 +166,7 @@ impl Updater {
                     // UNWRAP: branch updater base must contain `until` as a postcondition of
                     // digest_branches_until.
                     self.reset_leaf_base(until, ctx).unwrap();
-                },
+                }
                 LeafDigestResult::NeedsMerge(key) => {
                     self.digest_branches_until(Some(key), ctx);
 
@@ -171,24 +176,18 @@ impl Updater {
                     // UNWRAP: branch updater base must contain `key` as a postcondition of
                     // digest_branches_until.
                     self.reset_leaf_base(key, ctx).unwrap();
-                },
+                }
             }
         }
     }
 
     // post condition: if `until` is `Some`, `branch_updater`'s base is always set to the branch
     // containing the `until` key.
-    fn digest_branches_until(
-        &mut self,
-        until: Option<Key>,
-        ctx: &mut Ctx,
-    ) {
+    fn digest_branches_until(&mut self, until: Option<Key>, ctx: &mut Ctx) {
         while until.map_or(true, |k| !self.branch_updater.is_in_scope(&k)) {
-            let (old_branch, digest_result) = self.branch_updater.digest(
-                &mut ctx.bbn_index,
-                &mut ctx.bnp,
-                &mut ctx.bbn_writer,
-            );
+            let (old_branch, digest_result) =
+                self.branch_updater
+                    .digest(&mut ctx.bbn_index, &mut ctx.bnp, &mut ctx.bbn_writer);
 
             self.obsolete_branches.extend(old_branch);
 
@@ -205,11 +204,7 @@ impl Updater {
     }
 
     // panics if branch updater base is not a branch containing the target.
-    fn reset_leaf_base(
-        &mut self,
-        target: Key,
-        ctx: &Ctx,
-    ) -> Result<(), ()> {
+    fn reset_leaf_base(&mut self, target: Key, ctx: &Ctx) -> Result<(), ()> {
         let branch = self.branch_updater.base().ok_or(())?;
         let (i, leaf_pn) = super::search_branch(&branch.node, target).ok_or(())?;
         let leaf = ctx.leaf_reader.query(leaf_pn);
@@ -217,7 +212,10 @@ impl Updater {
         let separator = reconstruct_key(branch.node.prefix(), branch.node.separator(i));
 
         let cutoff = if branch.node.n() as usize > i + 1 {
-            Some(reconstruct_key(branch.node.prefix(), branch.node.separator(i + 1)))
+            Some(reconstruct_key(
+                branch.node.prefix(),
+                branch.node.separator(i + 1),
+            ))
         } else {
             self.branch_updater.cutoff()
         };
@@ -233,11 +231,7 @@ impl Updater {
         Ok(())
     }
 
-    fn reset_branch_base(
-        &mut self,
-        target: Key,
-        ctx: &Ctx,
-    ) {
+    fn reset_branch_base(&mut self, target: Key, ctx: &Ctx) {
         let target_branch = ctx.bbn_index.lookup(target);
         let cutoff = ctx.bbn_index.next_after(target).map(|(k, _)| k);
         let base = target_branch.map(|id| {
@@ -254,10 +248,7 @@ impl Updater {
     }
 }
 
-fn reconstruct_key(
-    prefix: &BitSlice<u8>,
-    separator: &BitSlice<u8>,
-) -> Key {
+fn reconstruct_key(prefix: &BitSlice<u8>, separator: &BitSlice<u8>) -> Key {
     let mut key = [0u8; 32];
     key.view_bits_mut::<Lsb0>()[..prefix.len()].copy_from_bitslice(prefix);
     key.view_bits_mut::<Lsb0>()[prefix.len()..][..separator.len()].copy_from_bitslice(prefix);
