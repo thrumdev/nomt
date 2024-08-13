@@ -281,8 +281,6 @@ impl BranchUpdater {
         let mut start = 0;
         for (item_count, gauge) in splitter.items {
             let branch_ops = &self.ops[start..][..item_count];
-            start += item_count;
-
             let separator = if start == 0 {
                 self.separator()
             } else {
@@ -301,6 +299,8 @@ impl BranchUpdater {
             // write the node and provide it to the branch above.
             bbn_index.insert(separator, new_branch_id);
             bbn_writer.allocate(new_node);
+
+            start += item_count;
         }
 
         start

@@ -246,7 +246,6 @@ impl LeafUpdater {
         let mut start = 0;
         for item_count in splitter.items {
             let leaf_ops = &self.ops[start..][..item_count];
-            start += item_count;
 
             let separator = if start == 0 {
                 self.separator()
@@ -267,6 +266,8 @@ impl LeafUpdater {
             // write the node and provide it to the branch above.
             let pn = leaf_writer.allocate(new_node);
             branch_updater.ingest(separator, pn);
+
+            start += item_count;
         }
 
         start
