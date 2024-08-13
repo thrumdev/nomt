@@ -104,7 +104,7 @@ impl Tree {
                 bbn_freelist_pn: 0,
                 bbn_bump: 1,
             }
-            .encode_to(&mut buf[0..20].try_into().unwrap());
+            .encode_to(&mut buf[0..16].try_into().unwrap());
             meta_fd.write_all(&buf)?;
 
             // Sync files and the directory. I am not sure if syncing files is necessar, but it
@@ -185,8 +185,13 @@ impl Tree {
             )
         };
         let mut bnp = branch::BranchNodePool::new();
-        let index = ops::reconstruct(bbn_file.try_clone().unwrap(), &mut bnp, &bbn_freelist, bbn_bump)
-            .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
+        let index = ops::reconstruct(
+            bbn_file.try_clone().unwrap(),
+            &mut bnp,
+            &bbn_freelist,
+            bbn_bump,
+        )
+        .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
         let shared = Shared {
             bbn_index: index,
             leaf_store_rd: leaf_store_rd_shared,
