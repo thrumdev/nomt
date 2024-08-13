@@ -32,7 +32,7 @@ impl BaseBranch {
         }
     }
 
-    fn key(&self, i: usize) -> Key {
+    pub fn key(&self, i: usize) -> Key {
         reconstruct_key(self.node.prefix(), self.node.separator(i))
     }
 
@@ -40,7 +40,7 @@ impl BaseBranch {
         (self.key(i), self.node.node_pointer(i).into())
     }
 
-    fn separator(&self) -> Key {
+    pub fn separator(&self) -> Key {
         self.key(0)
     }
 
@@ -490,16 +490,19 @@ impl BranchGauge {
 
 fn prefix_len(key_a: &Key, key_b: &Key) -> usize {
     key_a
-        .view_bits::<Lsb0>()
+        .view_bits::<Msb0>()
         .iter()
-        .zip(key_b.view_bits::<Lsb0>().iter())
+        .zip(key_b.view_bits::<Msb0>().iter())
         .take_while(|(a, b)| a == b)
         .count()
 }
 
 fn separator_len(key: &Key) -> usize {
-    let key = &key.view_bits::<Lsb0>();
-    std::cmp::max(1, key.len() - key.trailing_zeros())
+    if key == &[0u8; 32] {
+        return 1;
+    }
+    let key = &key.view_bits::<Msb0>();
+    key.len() - key.trailing_zeros()
 }
 
 #[derive(Default)]

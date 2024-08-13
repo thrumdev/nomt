@@ -52,7 +52,7 @@ pub fn reconstruct(
         let mut separator = [0u8; 32];
         {
             let prefix = view.prefix();
-            let separator = separator.view_bits_mut::<Lsb0>();
+            let separator = separator.view_bits_mut::<Msb0>();
             separator[..prefix.len()].copy_from_bitslice(prefix);
             let first = view.separator(0);
             separator[prefix.len()..prefix.len() + first.len()].copy_from_bitslice(first);
