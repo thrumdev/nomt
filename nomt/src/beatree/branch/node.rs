@@ -184,6 +184,8 @@ impl<'a> BranchNodeView<'a> {
     }
 }
 
+unsafe impl Send for BranchNode {}
+
 pub fn body_size(prefix_len: usize, separator_len: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round
     // up to the next byte boundary and then follow by the node pointers.
