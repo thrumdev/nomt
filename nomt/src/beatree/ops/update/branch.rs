@@ -370,6 +370,10 @@ impl BranchUpdater {
             bbn_index.insert(right_separator, right_branch_id);
             bbn_writer.allocate(right_node);
 
+            self.ops.clear();
+            self.gauge = BranchGauge::new();
+            self.separator_override = None;
+
             DigestResult::Finished
         } else {
             // degenerate split: impossible to create two nodes with >50%. Merge remainder into
