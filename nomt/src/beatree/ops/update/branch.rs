@@ -259,6 +259,10 @@ impl BranchUpdater {
                 // push onto bulk splitter & restart gauge.
                 let last_gauge = std::mem::replace(&mut self.gauge, BranchGauge::new());
                 bulk_splitter.push(n, last_gauge);
+
+                if !accept_item {
+                    self.gauge.ingest(key, separator_len);
+                }
             }
             _ => self.gauge.ingest(key, separator_len),
         }
