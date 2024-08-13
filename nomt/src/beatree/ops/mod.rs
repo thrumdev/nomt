@@ -48,20 +48,21 @@ pub fn lookup(
 fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     let prefix = branch.prefix();
 
-    match key.view_bits::<Lsb0>()[..prefix.len()].cmp(prefix) {
+    match key.view_bits::<Msb0>()[..prefix.len()].cmp(prefix) {
         Ordering::Equal => {}
         Ordering::Less => return None,
         Ordering::Greater => {
             let i = branch.n() as usize - 1;
-            return Some((i, branch.node_pointer(i).into()))
+            return Some((i, branch.node_pointer(i).into()));
         }
     }
 
-    let post_key =
-        &key.view_bits::<Lsb0>()[prefix.len()..prefix.len() + branch.separator_len() as usize];
+    let total_separator_len = prefix.len() + branch.separator_len() as usize;
+    let post_key = &key.view_bits::<Msb0>()[prefix.len()..total_separator_len];
 
     let mut low = 0;
     let mut high = branch.n() as usize;
+
     while low < high {
         let mid = low + (high - low) / 2;
         if post_key < branch.separator(mid) {

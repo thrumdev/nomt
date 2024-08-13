@@ -248,9 +248,9 @@ impl Updater {
     }
 }
 
-fn reconstruct_key(prefix: &BitSlice<u8>, separator: &BitSlice<u8>) -> Key {
+pub fn reconstruct_key(prefix: &BitSlice<u8, Msb0>, separator: &BitSlice<u8, Msb0>) -> Key {
     let mut key = [0u8; 32];
-    key.view_bits_mut::<Lsb0>()[..prefix.len()].copy_from_bitslice(prefix);
-    key.view_bits_mut::<Lsb0>()[prefix.len()..][..separator.len()].copy_from_bitslice(separator);
+    key.view_bits_mut::<Msb0>()[..prefix.len()].copy_from_bitslice(prefix);
+    key.view_bits_mut::<Msb0>()[prefix.len()..][..separator.len()].copy_from_bitslice(separator);
     key
 }

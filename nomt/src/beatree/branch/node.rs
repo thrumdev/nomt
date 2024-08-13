@@ -89,21 +89,21 @@ impl BranchNode {
         slice[7] = len;
     }
 
-    fn varbits(&self) -> &BitSlice<u8> {
+    fn varbits(&self) -> &BitSlice<u8, Msb0> {
         self.view().varbits()
     }
 
-    fn varbits_mut(&mut self) -> &mut BitSlice<u8> {
+    fn varbits_mut(&mut self) -> &mut BitSlice<u8, Msb0> {
         let bit_cnt =
             self.prefix_len() as usize + (self.separator_len() as usize) * self.n() as usize;
         self.as_mut_slice()[8..(8 + bit_cnt)].view_bits_mut()
     }
 
-    pub fn prefix(&self) -> &BitSlice<u8> {
+    pub fn prefix(&self) -> &BitSlice<u8, Msb0> {
         self.view().prefix()
     }
 
-    pub fn separator(&self, i: usize) -> &BitSlice<u8> {
+    pub fn separator(&self, i: usize) -> &BitSlice<u8, Msb0> {
         self.view().separator(i)
     }
 
@@ -165,17 +165,17 @@ impl<'a> BranchNodeView<'a> {
         self.inner[7]
     }
 
-    fn varbits(&self) -> &'a BitSlice<u8> {
+    fn varbits(&self) -> &'a BitSlice<u8, Msb0> {
         let bit_cnt =
             self.prefix_len() as usize + (self.separator_len() as usize) * self.n() as usize;
         self.inner[8..(8 + bit_cnt)].view_bits()
     }
 
-    pub fn prefix(&self) -> &'a BitSlice<u8> {
+    pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
         &self.varbits()[..self.prefix_len() as usize]
     }
 
-    pub fn separator(&self, i: usize) -> &'a BitSlice<u8> {
+    pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
         let offset = self.prefix_len() as usize + i * self.separator_len() as usize;
         &self.varbits()[offset..offset + self.separator_len() as usize]
     }
@@ -229,11 +229,11 @@ impl BranchNodeBuilder {
 
         let varbits = self.branch.varbits_mut();
         if self.index == 0 {
-            let prefix = &key.view_bits::<Lsb0>()[..self.prefix_len];
+            let prefix = &key.view_bits::<Msb0>()[..self.prefix_len];
             varbits[..self.prefix_len].copy_from_bitslice(prefix);
         }
 
-        let separator = &key.view_bits::<Lsb0>()[self.prefix_len..][..self.separator_len];
+        let separator = &key.view_bits::<Msb0>()[self.prefix_len..][..self.separator_len];
 
         let cell_start = self.prefix_len + self.index * self.separator_len;
         let cell_end = cell_start + self.separator_len;

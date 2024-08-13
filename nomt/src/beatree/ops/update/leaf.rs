@@ -382,10 +382,13 @@ impl LeafUpdater {
     }
 
     fn build_leaf(&self, ops: &[LeafOp]) -> LeafNode {
-        let total_value_size = ops.iter().map(|op| match op {
-            LeafOp::Keep(_, size) => *size,
-            LeafOp::Insert(_, v) => v.len(),
-        }).sum();
+        let total_value_size = ops
+            .iter()
+            .map(|op| match op {
+                LeafOp::Keep(_, size) => *size,
+                LeafOp::Insert(_, v) => v.len(),
+            })
+            .sum();
 
         let mut leaf_builder = LeafBuilder::new(ops.len(), total_value_size);
         for op in ops {
@@ -435,14 +438,14 @@ impl LeafGauge {
 fn separate(a: &Key, b: &Key) -> Key {
     // if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
     let len = a
-        .view_bits::<Lsb0>()
+        .view_bits::<Msb0>()
         .iter()
-        .zip(b.view_bits::<Lsb0>().iter())
+        .zip(b.view_bits::<Msb0>().iter())
         .take_while(|(a, b)| a == b)
         .count()
         + 1;
 
     let mut separator = [0u8; 32];
-    separator.view_bits_mut::<Lsb0>()[..len].copy_from_bitslice(&b.view_bits::<Lsb0>()[..len]);
+    separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
     separator
 }
