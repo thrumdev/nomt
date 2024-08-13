@@ -22,7 +22,7 @@ pub struct Meta {
 }
 
 impl Meta {
-    pub fn encode_to(&self, buf: &mut [u8; 20]) {
+    pub fn encode_to(&self, buf: &mut [u8; 16]) {
         buf[0..4].copy_from_slice(&self.ln_freelist_pn.to_le_bytes());
         buf[4..8].copy_from_slice(&self.ln_bump.to_le_bytes());
         buf[8..12].copy_from_slice(&self.bbn_freelist_pn.to_le_bytes());
