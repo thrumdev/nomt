@@ -32,7 +32,7 @@ pub const BRANCH_NODE_SIZE: usize = 4096;
 /// Handle. Cheap to clone.
 pub struct BranchNodePool {
     /// The pointer to the beginning of the pool allocation.
-    pool_base_ptr: *mut (),
+    pool_base_ptr: *mut u8,
     inner: Arc<Mutex<BranchNodePoolInner>>,
 }
 
@@ -70,7 +70,7 @@ impl BranchNodePool {
         if pool_base_ptr == libc::MAP_FAILED {
             panic!("mmap failed");
         }
-        let pool_base_ptr = pool_base_ptr as *mut ();
+        let pool_base_ptr = pool_base_ptr as *mut u8;
         BranchNodePool {
             pool_base_ptr,
             inner: Arc::new(Mutex::new(BranchNodePoolInner {

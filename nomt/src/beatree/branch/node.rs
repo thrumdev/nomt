@@ -31,7 +31,7 @@ pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - (4 + 2 + 1 + 1);
 pub struct BranchNode {
     pub(super) pool: Arc<Mutex<BranchNodePoolInner>>,
     pub(super) id: BranchId,
-    pub(super) ptr: *mut (),
+    pub(super) ptr: *mut u8,
 }
 
 impl BranchNode {
