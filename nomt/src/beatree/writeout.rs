@@ -35,12 +35,14 @@ pub fn run(
                 remaining: bbn.len() + bbn_free_list_pages.len(),
                 bbn,
                 free_list_pages: bbn_free_list_pages,
+                should_fsync: false,
             }),
             ln_write_out: Some(LnWriteOut {
                 ln_fd,
                 ln_extend_file_sz,
                 ln_remaining: ln.len(),
                 ln,
+                should_fsync: false,
             }),
             meta_swap: Some(MetaSwap {
                 meta_fd,
@@ -207,6 +209,7 @@ struct BbnWriteOut {
     free_list_pages: Vec<(PageNumber, Box<Page>)>,
     // Initially, set to the len of `bbn`. Each completion will decrement this.
     remaining: usize,
+    should_fsync: bool,
 }
 
 impl BbnWriteOut {
@@ -267,17 +270,23 @@ impl BbnWriteOut {
             }
         }
 
+        if self.should_fsync {
+            if let Err(_) = io.try_send_bbn(IoKind::Fsync(self.bbn_fd)) {
+                return false
+            }
+
+            self.should_fsync = false;
+        }
+
         // Reap the completions.
         while let Some(CompleteIo { command, result }) = io.try_recv_bbn() {
             assert!(result.is_ok());
             match command.kind {
                 IoKind::Write(_, _, _) | IoKind::WriteRaw(_, _, _, _) => {
                     self.remaining = self.remaining.checked_sub(1).unwrap();
-
                     if self.remaining == 0 {
-                        if let Err(_) = io.try_send_bbn(IoKind::Fsync(self.bbn_fd)) {
-                            return false;
-                        }
+                        self.should_fsync = true;
+                        break
                     }
 
                     continue;
@@ -300,6 +309,7 @@ struct LnWriteOut {
     ln_extend_file_sz: Option<u64>,
     ln: Vec<(PageNumber, Box<Page>)>,
     ln_remaining: usize,
+    should_fsync: bool,
 }
 
 impl LnWriteOut {
@@ -344,6 +354,14 @@ impl LnWriteOut {
             }
         }
 
+        if self.should_fsync {
+            if let Err(_) = io.try_send_ln(IoKind::Fsync(self.ln_fd)) {
+                return false
+            }
+
+            self.should_fsync = false;
+        }
+
         // Reap the completions.
         while let Some(CompleteIo { command, result }) = io.try_recv_ln() {
             assert!(result.is_ok());
@@ -352,9 +370,8 @@ impl LnWriteOut {
                     self.ln_remaining = self.ln_remaining.checked_sub(1).unwrap();
 
                     if self.ln_remaining == 0 {
-                        if let Err(_) = io.try_send_ln(IoKind::Fsync(self.ln_fd)) {
-                            return false;
-                        }
+                        self.should_fsync = true;
+                        break;
                     }
 
                     continue;
@@ -395,6 +412,7 @@ impl MetaSwap {
             if let Err(_) = io.try_send_meta(IoKind::Fsync(self.meta_fd)) {
                 return false;
             }
+            self.should_fsync = false;
         }
 
         // Reap the completions.
