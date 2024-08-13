@@ -49,6 +49,8 @@ pub fn update(
     leaf_writer: &mut LeafStoreWriter,
     bbn_writer: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
+    let now = std::time::Instant::now();
+    println!("start update");
     let mut ctx = Ctx {
         bbn_index,
         bbn_writer,
@@ -64,6 +66,7 @@ pub fn update(
 
     updater.complete(&mut ctx);
 
+    println!("update {}us", now.elapsed().as_micros());
     Ok(updater.obsolete_branches)
 }
 

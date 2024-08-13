@@ -1,6 +1,6 @@
 //! A wrapper around RocksDB for avoiding prolifiration of RocksDB-specific code.
 
-use crate::{bitbox, page_cache::PageDiff};
+use crate::{beatree, bitbox, page_cache::PageDiff};
 use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node, TERMINATOR},
@@ -8,6 +8,7 @@ use nomt_core::{
 use parking_lot::Mutex;
 use rocksdb::{self, ColumnFamilyDescriptor, WriteBatch};
 use std::sync::Arc;
+use parking_lot::Mutex;
 
 static FLAT_KV_CF: &str = "flat_kv";
 static METADATA_CF: &str = "metadata";
@@ -19,54 +20,32 @@ pub struct Store {
 }
 
 struct Shared {
-    // TODO: change values name, it stores also the root
-    values: rocksdb::DB,
+    root: Mutex<Node>,
+    values: beatree::Tree,
     pages: bitbox::DB,
 }
 
 impl Store {
     /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options) -> anyhow::Result<Self> {
-        let mut open_opts = rocksdb::Options::default();
-        open_opts.set_error_if_exists(false);
-        open_opts.create_if_missing(true);
-        open_opts.create_missing_column_families(true);
-
-        let cf_descriptors = vec![
-            ColumnFamilyDescriptor::new(FLAT_KV_CF, open_opts.clone()),
-            ColumnFamilyDescriptor::new(METADATA_CF, open_opts.clone()),
-        ];
-
-        let values = rocksdb::DB::open_cf_descriptors(&open_opts, &o.path, cf_descriptors)?;
+        let values = beatree::Tree::open(&o.path)?;
 
         let pages = bitbox::DB::open(o.num_rings, o.path.clone()).unwrap();
 
         Ok(Self {
-            shared: Arc::new(Shared { values, pages }),
+            shared: Arc::new(Shared { values, pages, root: TERMINATOR.into() }),
         })
     }
 
     /// Load the root node from the database. Fails only on I/O.
     /// Returns [`nomt_core::trie::TERMINATOR`] on an empty trie.
     pub fn load_root(&self) -> anyhow::Result<Node> {
-        let cf = self.shared.values.cf_handle(METADATA_CF).unwrap();
-        let value = self.shared.values.get_cf(&cf, b"root")?;
-        match value {
-            None => Ok(TERMINATOR),
-            Some(value) => {
-                let Ok(node) = value.try_into() else {
-                    return Err(anyhow::anyhow!("invalid root hash length"));
-                };
-                Ok(node)
-            }
-        }
+        Ok(self.shared.root.lock().clone())
     }
 
     /// Loads the flat value stored under the given key.
     pub fn load_value(&self, key: KeyPath) -> anyhow::Result<Option<Vec<u8>>> {
-        let cf = self.shared.values.cf_handle(FLAT_KV_CF).unwrap();
-        let value = self.shared.values.get_cf(&cf, key.as_ref())?;
-        Ok(value)
+        Ok(self.shared.values.lookup(key))
     }
 
     /// Loads the given page.
@@ -78,8 +57,9 @@ impl Store {
     pub fn new_tx(&self) -> Transaction {
         Transaction {
             shared: self.shared.clone(),
-            batch: WriteBatch::default(),
+            batch: Vec::new(),
             new_pages: vec![],
+            new_root: None,
         }
     }
 
@@ -88,8 +68,12 @@ impl Store {
     /// After this function returns, accessor methods such as [`Self::load_page`] will return the
     /// updated values.
     pub fn commit(&self, tx: Transaction) -> anyhow::Result<()> {
-        self.shared.values.write(tx.batch)?;
+        self.shared.values.commit(tx.batch);
         self.shared.pages.commit(tx.new_pages)?;
+        if let Some(new_root) = tx.new_root {
+            *self.shared.root.lock() = new_root;
+        }
+        self.shared.values.sync();
         Ok(())
     }
 }
@@ -97,21 +81,15 @@ impl Store {
 /// An atomic transaction to be applied against th estore with [`Store::commit`].
 pub struct Transaction {
     shared: Arc<Shared>,
-    batch: WriteBatch,
+    batch: Vec<(KeyPath, Option<Vec<u8>>)>,
     new_pages: Vec<(PageId, Option<(Vec<u8>, PageDiff)>)>,
+    new_root: Option<Node>,
 }
 
 impl Transaction {
     /// Write a value to flat storage.
     pub fn write_value(&mut self, path: KeyPath, value: Option<&[u8]>) {
-        let flat_cf = self.shared.values.cf_handle(FLAT_KV_CF).unwrap();
-
-        match value {
-            None => self.batch.delete_cf(&flat_cf, path.as_ref()),
-            Some(value) => {
-                self.batch.put_cf(&flat_cf, path.as_ref(), value);
-            }
-        }
+        self.batch.push((path, value.map(|v| v.to_vec())))
     }
 
     /// Write a page to storage in its entirety.
@@ -127,7 +105,6 @@ impl Transaction {
 
     /// Write the root to metadata.
     pub fn write_root(&mut self, root: Node) {
-        let cf = self.shared.values.cf_handle(METADATA_CF).unwrap();
-        self.batch.put_cf(&cf, b"root", &root[..]);
+        self.new_root = Some(root);
     }
 }

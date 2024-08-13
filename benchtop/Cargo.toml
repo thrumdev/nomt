@@ -40,3 +40,6 @@ array-bytes = "6.1"
 
 # nomt
 nomt = { path = "../nomt" }
+
+[profile.release]
+debug = true

@@ -136,6 +136,9 @@ impl Clone for BranchNodePool {
     }
 }
 
+unsafe impl Send for BranchNodePool {}
+unsafe impl Sync for BranchNodePool {}
+
 #[test]
 fn test_branch_node_pool() {
     let pool = BranchNodePool::new();
