@@ -26,7 +26,7 @@
 use std::ops::Range;
 
 use crate::{
-    bitbox::beatree::Key,
+    beatree::Key,
     io::{Page, PAGE_SIZE},
 };
 

@@ -1,7 +1,7 @@
 use bitvec::prelude::*;
 use std::{cmp::Ordering, io::Read};
 
-use crate::bitbox::beatree::{
+use crate::beatree::{
     allocator::PageNumber,
     leaf::{
         node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},

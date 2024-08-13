@@ -11,7 +11,7 @@ use anyhow::{bail, ensure, Ok, Result};
 use bitvec::prelude::*;
 use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd, ptr};
 
-use crate::bitbox::beatree::{
+use crate::beatree::{
     allocator::PageNumber,
     branch::{self, BranchNodeView, BRANCH_NODE_SIZE},
     index::Index,

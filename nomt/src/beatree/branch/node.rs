@@ -2,7 +2,7 @@ use bitvec::prelude::*;
 use std::sync::{Arc, Mutex};
 
 use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
-use crate::bitbox::beatree::Key;
+use crate::beatree::Key;
 
 // Here is the layout of a branch node:
 //

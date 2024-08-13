@@ -1,5 +1,5 @@
 use crate::{
-    bitbox::beatree::{
+    beatree::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },

@@ -2,7 +2,7 @@ use bitvec::prelude::*;
 
 use std::cmp::Ordering;
 
-use crate::bitbox::beatree::{
+use crate::beatree::{
     allocator::PageNumber,
     bbn::BbnStoreWriter,
     branch::{

@@ -19,7 +19,6 @@ use self::{
     wal::{Batch as WalBatch, ConsistencyError, Entry as WalEntry, WalWriter},
 };
 
-mod beatree;
 mod meta_map;
 mod store;
 mod wal;
