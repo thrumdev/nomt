@@ -337,6 +337,10 @@ impl LeafUpdater {
             let right_pn = leaf_writer.allocate(right_leaf);
             branch_updater.ingest(right_separator, right_pn);
 
+            self.ops.clear();
+            self.gauge = LeafGauge::default();
+            self.separator_override = None;
+
             DigestResult::Finished
         } else {
             // degenerate split: impossible to create two nodes with >50%. Merge remainder into
