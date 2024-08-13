@@ -140,9 +140,9 @@ impl LeafUpdater {
             self.split(branch_updater, leaf_writer)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_leaf(&self.ops[last_ops_start..]);
-            let pn = leaf_writer.allocate(node);
             let separator = self.separator();
 
+            let pn = leaf_writer.allocate(node);
             branch_updater.ingest(separator, pn);
 
             self.ops.clear();
@@ -257,7 +257,7 @@ impl LeafUpdater {
             let new_node = self.build_leaf(leaf_ops);
 
             // set the separator override for the next
-            if let Some(op) = self.ops.get(start + item_count + 1) {
+            if let Some(op) = self.ops.get(start + item_count) {
                 let next = self.op_key(op);
                 let last = new_node.key(new_node.n() - 1);
                 self.separator_override = Some(separate(&last, &next));
@@ -314,12 +314,12 @@ impl LeafUpdater {
         let left_key = self.op_key(&self.ops[split_point - 1]);
         let right_key = self.op_key(&self.ops[split_point]);
 
+        let left_separator = self.separator();
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);
-        let left_pn = leaf_writer.allocate(left_leaf);
 
-        let left_separator = self.separator();
+        let left_pn = leaf_writer.allocate(left_leaf);
 
         branch_updater.ingest(left_separator, left_pn);
 
