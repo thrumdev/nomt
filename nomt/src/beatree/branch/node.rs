@@ -94,9 +94,8 @@ impl BranchNode {
     }
 
     fn varbits_mut(&mut self) -> &mut BitSlice<u8, Msb0> {
-        let bit_cnt =
-            self.prefix_len() as usize + (self.separator_len() as usize) * self.n() as usize;
-        self.as_mut_slice()[8..(8 + bit_cnt)].view_bits_mut()
+        let body_end = body_size(self.prefix_len() as _, self.separator_len() as _, self.n() as _) + 8;
+        self.as_mut_slice()[8..body_end].view_bits_mut()
     }
 
     pub fn prefix(&self) -> &BitSlice<u8, Msb0> {
@@ -166,9 +165,8 @@ impl<'a> BranchNodeView<'a> {
     }
 
     fn varbits(&self) -> &'a BitSlice<u8, Msb0> {
-        let bit_cnt =
-            self.prefix_len() as usize + (self.separator_len() as usize) * self.n() as usize;
-        self.inner[8..(8 + bit_cnt)].view_bits()
+        let body_end = body_size(self.prefix_len() as _, self.separator_len() as _, self.n() as _) + 8;
+        self.inner[8..body_end].view_bits()
     }
 
     pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
