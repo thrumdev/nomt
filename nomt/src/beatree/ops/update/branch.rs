@@ -65,9 +65,6 @@ pub struct BranchUpdater {
     // the cutoff key, which determines if an operation is in-scope.
     // does not exist for the last branch in the database.
     cutoff: Option<Key>,
-    // a separator override. this is set as `Some` either as part of a bulk split or when the
-    // leaf is having values merged in from some earlier node.
-    separator_override: Option<Key>,
     // separator keys which are to be possibly deleted and will be at the point that another
     // separator greater than it is ingested.
     possibly_deleted: Vec<Key>,
@@ -85,7 +82,6 @@ impl BranchUpdater {
             base,
             cutoff,
             possibly_deleted: Vec::new(),
-            separator_override: None,
             ops: Vec::new(),
             gauge: BranchGauge::new(),
             bulk_split: None,
@@ -130,7 +126,6 @@ impl BranchUpdater {
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
-            self.separator_override = None;
 
             (old_branch_id, DigestResult::Finished)
         } else if self.gauge.body_size() > BRANCH_NODE_BODY_SIZE {
@@ -142,23 +137,15 @@ impl BranchUpdater {
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let (branch_id, node) =
                 self.build_branch(&self.ops[last_ops_start..], &self.gauge, bnp);
-            let separator = self.separator();
+            let separator = self.op_key(&self.ops[last_ops_start]);
 
             bbn_index.insert(separator, branch_id);
             bbn_writer.allocate(node);
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
-            self.separator_override = None;
             (old_branch_id, DigestResult::Finished)
         } else {
-            // UNWRAP: if cutoff exists, then base must too.
-            // merge is only performed when not at the rightmost leaf. this is protected by the
-            // check on self.cutoff above.
-            if self.separator_override.is_none() {
-                self.separator_override = Some(self.base.as_ref().unwrap().separator());
-            }
-
             self.prepare_merge_ops(last_ops_start);
 
             (
@@ -180,12 +167,6 @@ impl BranchUpdater {
         self.base = base;
         self.cutoff = cutoff;
         self.possibly_deleted.clear();
-    }
-
-    fn separator(&self) -> Key {
-        self.separator_override
-            .or_else(|| self.base.as_ref().map(|b| b.separator()))
-            .unwrap_or([0u8; 32])
     }
 
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
@@ -281,20 +262,8 @@ impl BranchUpdater {
         let mut start = 0;
         for (item_count, gauge) in splitter.items {
             let branch_ops = &self.ops[start..][..item_count];
-            let separator = if start == 0 {
-                self.separator()
-            } else {
-                // UNWRAP: separator override is always set when more items follow after a bulk
-                // split.
-                self.separator_override.take().unwrap()
-            };
+            let separator = self.op_key(&self.ops[start]);
             let (new_branch_id, new_node) = self.build_branch(branch_ops, &gauge, bnp);
-
-            // set the separator override for the next
-            if let Some(op) = self.ops.get(start + item_count + 1) {
-                let next = self.op_key(op);
-                self.separator_override = Some(next);
-            }
 
             // write the node and provide it to the branch above.
             bbn_index.insert(separator, new_branch_id);
@@ -342,10 +311,10 @@ impl BranchUpdater {
         let left_ops = &self.ops[..split_point];
         let right_ops = &self.ops[split_point..];
 
+        let left_separator = self.op_key(&self.ops[0]);
         let right_separator = self.op_key(&self.ops[split_point]);
 
         let (left_branch_id, left_node) = self.build_branch(left_ops, &left_gauge, bnp);
-        let left_separator = self.separator();
 
         bbn_index.insert(left_separator, left_branch_id);
         bbn_writer.allocate(left_node);
@@ -372,14 +341,12 @@ impl BranchUpdater {
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
-            self.separator_override = None;
 
             DigestResult::Finished
         } else {
             // degenerate split: impossible to create two nodes with >50%. Merge remainder into
             // sibling node.
 
-            self.separator_override = Some(right_separator);
             self.prepare_merge_ops(split_point);
             self.gauge = right_gauge;
 
