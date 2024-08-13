@@ -225,6 +225,10 @@ impl LeafUpdater {
                 // push onto bulk splitter & restart gauge.
                 self.gauge = LeafGauge::default();
                 bulk_splitter.push(n);
+
+                if !accept_item {
+                    self.gauge.ingest(item_size);
+                }
             }
             _ => self.gauge.ingest(item_size),
         }
