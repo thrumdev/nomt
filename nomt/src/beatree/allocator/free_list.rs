@@ -1,4 +1,5 @@
 use crate::{
+    beatree::FREELIST_EMPTY,
     io::{CompleteIo, IoCommand, IoKind},
     io::{Page, PAGE_SIZE},
 };
@@ -7,7 +8,7 @@ use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd};
 
 use super::PageNumber;
 
-const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
+const MAX_PNS_PER_PAGE: usize = (PAGE_SIZE - 6) / 4;
 
 /// In-memory version of FreeList which provides a way to decode from and encode into pages
 /// and provide two primitives, one for extracting free pages from the list and one to append
@@ -16,7 +17,7 @@ const MAX_PNS_PER_FREE_PAGE: usize = (PAGE_SIZE - 6) / 4;
 /// Pages that are freed due to the fetch of free pages are automatically added back during the encode phase,
 /// which also covers the addition of new free pages.
 pub struct FreeList {
-    head: Option<(PageNumber, Vec<PageNumber>)>,
+    // head is last portion.
     portions: Vec<(PageNumber, Vec<PageNumber>)>,
     // Becomes true if something is being popped, false otherwise
     pop: bool,
@@ -33,14 +34,13 @@ impl FreeList {
     ) -> FreeList {
         let Some(mut free_list_pn) = free_list_head else {
             return FreeList {
-                head: None,
                 portions: vec![],
                 pop: false,
                 released_portions: vec![],
             };
         };
 
-        // restore free list form file
+        // restore free list from file
         let mut free_list_portions = vec![];
         loop {
             if free_list_pn.is_nil() {
@@ -77,7 +77,6 @@ impl FreeList {
         free_list_portions.reverse();
 
         FreeList {
-            head: free_list_portions.pop(),
             pop: false,
             portions: free_list_portions,
             released_portions: vec![],
@@ -87,204 +86,231 @@ impl FreeList {
     /// Get a set of all pages tracked in the free-list. This is all free pages plus all the
     /// free-list pages themselves.
     pub fn all_tracked_pages(&self) -> BTreeSet<PageNumber> {
-        let Some(list_item) = self.head.as_ref() else {
-            return BTreeSet::new();
-        };
-
-        let pns = std::iter::once(list_item)
-            .chain(self.portions.iter())
+        let pns = self.portions.iter()
             .map(|&(ref pn, ref pns)| std::iter::once(pn).chain(pns))
             .flatten()
-            .copied()
-            .into_iter();
+            .copied();
 
         BTreeSet::from_iter(pns)
     }
 
     pub fn head_pn(&self) -> Option<PageNumber> {
-        self.head.as_ref().map(|(head_pn, _)| head_pn).copied()
+        self.portions.last().map(|(head_pn, _)| head_pn).copied()
     }
 
     pub fn pop(&mut self) -> Option<PageNumber> {
-        let Some((head_pn, head)) = &mut self.head else {
-            // If there is no available head,
-            // then it means that there are no more elements in the free list
-            return None;
+        let pn;
+        let head_empty = {
+            let head = self.portions.last_mut()?;
+            // UNWRAP: free-list portions are always non-empty.
+            pn = head.1.pop().unwrap();
+            self.pop = true;
+
+            if head.1.is_empty() {
+                Some(head.0)
+            } else {
+                None
+            }
         };
 
-        let pn = head.pop().unwrap();
-
-        // replace head if we just emptied one
-        if head.is_empty() {
-            self.released_portions.push(*head_pn);
-            self.head = self.portions.pop();
+        if let Some(prev_head_pn) = head_empty {
+            let _ = self.portions.pop();
+            self.released_portions.push(prev_head_pn);
         }
 
-        self.pop = true;
         Some(pn)
+    }
+
+    /// Apply the changes resulting from calls to `pop()` and pushing all the `to_push` page numbers
+    /// to the free list. This returns a vector of pages to write, each tagged with the page number
+    /// it should be written at.
+    ///
+    /// FreeList Pages are stored in the file using a Copy-On-Write (COW) approach.
+    ///
+    /// This function only applies `pop` invocations since the last call to this function,
+    /// creating an encoded version of the updated free list state.
+    ///
+    /// The FreeList is conceptually a paginated stack. There are some additional constraints due
+    /// to the copy-on-write mechanics: all touched pages must have their previous page
+    /// number pushed at the end, and new page numbers are determined by popping from the list.
+    /// Additionally, to maintain crash-consistency, we do not reuse any page which is being
+    /// added afresh to the list within this function. Pops and pushes are therefore heavily
+    /// intertwined. Pushes can cause pops. Pops reduce the length of the list, making pops
+    /// possibly unnecessary. Pops can also cause further pops when they touch new pages.
+    ///
+    /// These restrictions add some code complexity, as well as the possibility of "fragmentation".
+    /// This fragmentation is minor and takes a very specific form: the second page will have one
+    /// fewer items than the maximum and the head page will have exactly one item. This occurs only
+    /// when the last item pushed would be the first in a new page and the pop to allocate that
+    /// new page dirties a previously untouched page. Needless to say, it is rare, something like
+    /// 1-in-a-million (1022^2) and of near-zero consequence if forced somehow by an adversary.
+    ///
+    /// The next call to `commit` will eliminate any previous fragmentation, but may result in
+    /// fragmentation itself.
+    ///
+    /// O(n) in the number of pops / pushes.
+    pub fn commit(
+        &mut self,
+        mut to_push: Vec<PageNumber>,
+        bump: &mut PageNumber,
+    ) -> Vec<(PageNumber, Box<Page>)> {
+        // No changes were made
+        if !self.pop && to_push.is_empty() {
+            return vec![];
+        }
+        self.pop = false;
+
+        // append the released free list pages
+        to_push.extend(self.released_portions.drain(..));
+
+        let new_pages = self.preallocate(&mut to_push, bump);
+        self.push_and_encode(&to_push, new_pages)
+    }
+
+    // determines the exact number of pops and bumps which are needed in order to fulfill the
+    // request. also schedules pushing of all touched pages' previous page numbers.
+    fn preallocate(
+        &mut self,
+        to_push: &mut Vec<PageNumber>,
+        bump: &mut PageNumber,
+    ) -> Vec<PageNumber> {
+        let mut new_pages = Vec::new();
+
+        // allocate a new page for rewriting the head (if any).
+        let mut new_full_portion = true;
+        let mut i = MAX_PNS_PER_PAGE;
+        if let Some(pn) = self.pop() {
+            match self.released_portions.pop() {
+                Some(x) => {
+                    if let Some((new_head_pn, new_head_pns)) = self.portions.last_mut()
+                        .filter(|p| p.1.len() == MAX_PNS_PER_PAGE - 1)
+                    {
+                        // fix up fragmentation. only the second-to-last page can be fragmented,
+                        // and it is. use this page to rewrite the second-to-last and position
+                        // the cursor at the end of this page instead.
+                        to_push.push(*new_head_pn);
+                        to_push.push(x);
+                        *new_head_pn = pn;
+                        new_full_portion = false;
+                        i -= new_head_pns.len();
+                    } else {
+                        // previous page was full or doesn't exist.
+                        to_push.push(x);
+                        new_pages.push(pn);
+                    }
+                },
+                None => {
+                    new_full_portion = false;
+
+                    // UNWRAP: protected since pop succeeded but head was not released.
+                    let (head_pn, head_pns) = self.portions.last_mut().unwrap();
+                    to_push.push(*head_pn);
+                    *head_pn = pn;
+
+                    // head is partially full. position cursor at the number of items needed to
+                    // fill it.
+                    i -= head_pns.len();
+                }
+            }
+        };
+
+        // loop invariant: free list len + i is always divisible by MAX_PNS_PER_PAGE.
+        // therefore, the loop condition asks "do we still have items beyond the last page?"
+        // while accounting for pops and pushes within the loop.
+        while i < to_push.len() {
+            if let Some((ref mut head_pn, ref mut head_pns))
+                = self.portions.last_mut().filter(|_| new_full_portion)
+            {
+                // just popped into a new portion (which we will edit). prepare it for rewrite
+                to_push.push(*head_pn);
+
+                // UNWRAP: new_full_portion guarantees that the new portion is full.
+                *head_pn = head_pns.pop().unwrap();
+
+                // pop reduces free list length, we adjust i to compensate.
+                // however, we must unconditionally rewrite this page even if i equals the previous
+                // value of to_push.len(). That is because if we didn't pop we wouldn't have enough
+                // pages.
+                // this is inescapable and is what causes fragmentation.
+                i += 1;
+
+                continue
+            }
+
+            match self.pop() {
+                Some(pn) => {
+                    new_pages.push(pn);
+                    // pop reduces free list length, we adjust i to compensate
+                    i += 1;
+
+                    if let Some(released) = self.released_portions.pop() {
+                        // note: this is the PN we took out of the new portion.
+                        to_push.push(released);
+                        new_full_portion = true;
+                    }
+                }
+                None => {
+                    new_pages.push(*bump);
+                    bump.0 += 1;
+                }
+            }
+
+            // jump 'i' to the end of the next page.
+            i += MAX_PNS_PER_PAGE;
+        }
+
+        new_pages
+    }
+
+    fn push_and_encode(
+        &mut self,
+        to_push: &[PageNumber],
+        new_pages: Vec<PageNumber>,
+    ) -> Vec<(PageNumber, Box<Page>)> {
+        let mut encoded = Vec::new();
+        let mut new_pages = new_pages.into_iter().peekable();
+        for (i, pn) in to_push.iter().cloned().enumerate() {
+            // the second condition is checking for the fragmentation described in the commit
+            // doc comment. fragmentation can only occur in the second page and the head page
+            // has a single item.
+            let new_head = self.portions.last().map_or(true, |h| h.1.len() % MAX_PNS_PER_PAGE == 0)
+                || i + 2 == to_push.len() && new_pages.peek().is_some();
+
+            if new_head {
+                encoded.extend(self.encode_head());
+                // UNWRAP: we've always allocated enough PNs for all appended PNs.
+                let new_head_pn = new_pages.next().unwrap();
+                self.portions.push((new_head_pn, Vec::new()));
+            }
+
+            self.push(pn);
+        }
+
+        assert!(new_pages.next().is_none());
+
+        encoded.extend(self.encode_head());
+        encoded
     }
 
     fn push(
         &mut self,
         pn: PageNumber,
-        next_head_pns: &mut impl Iterator<Item = PageNumber>,
-        force_new_head: bool,
-    ) -> Option<(PageNumber, Box<Page>)> {
-        let mut encoded_head = None;
-
-        // create new_head if required
-        match &mut self.head {
-            None => {
-                self.head = Some((next_head_pns.next().unwrap(), vec![]));
-            }
-            Some((head_pn, head)) if force_new_head || head.len() == MAX_PNS_PER_FREE_PAGE => {
-                let prev = self
-                    .portions
-                    .last()
-                    .map(|(pn, _)| *pn)
-                    .unwrap_or(PageNumber(0));
-
-                encoded_head = Some((*head_pn, encode_free_list_page(prev, head)));
-
-                self.portions.push((*head_pn, std::mem::take(head)));
-                *head_pn = next_head_pns.next().unwrap();
-            }
-            _ => (),
-        };
-
-        // extract head safely
-        let head = self.head.as_mut().map(|(_, h)| h).unwrap();
-        head.push(pn);
-
-        encoded_head
+    ) {
+        // UNWRAP: `push` is only called when head is not full.
+        let head = self.portions.last_mut().unwrap();
+        assert!(head.1.len() < MAX_PNS_PER_PAGE);
+        head.1.push(pn);
     }
 
-    /// Pages numbers are updated during batches of changes by taking free pages from the free list
-    /// or adding new ones to the list.
-    ///
-    /// FreeList Pages are stored in the file using a Copy-On-Write (COW) approach.
-    ///
-    /// This function considers every step taken since the last call to this function,
-    /// creating an encoded version of the updated free list state
-    ///
-    /// Possible operations on a FreeList include removing a free page or adding a new one.
-    /// These operations, while creating the encoded format, lead to multiple intermediate steps:
-    ///    1. Removing pages consumes the list.
-    ///    2. Adding pages appends them to the list's head.
-    ///    3. Adding new pages require allocating a new page for the list's head.
-    ///       This page should not overwrite pages in the store and
-    ///       should be taken from the head at the end of step one.
-    ///
-    /// Shifting page numbers to the old head involves moving all page numbers added at step two.
-    /// Generally, this is not an issue, for example using FreeList pages that can store up to five numbers:
-    ///
-    /// The current head is composed of: [1, 7, 9, 2, 5].
-    ///
-    /// The performed operations include one pop and pushing five elements ([6, 10, 12, 15, 20]).
-    ///
-    /// As a result, 5 is popped out, leaving space for only 6 in the head.
-    /// Consequently, a new head is created to store [10, 12, 15, 20].
-    ///
-    /// To accommodate the new head and overwrite the old one, two new page numbers are required.
-    /// These are taken from the head at the end of stage 1, after removing all values.
-    ///
-    /// In this case, 2 and 9 will be used. With two additional free spaces in the previous head,
-    /// values from the new head will shift to occupy all spots in the old head. The final result is:
-    ///
-    /// [(page_number: 2, free_list:[1, 7, 6, 10, 12]), (page_number: 5, free_list:[15, 20])]
-    ///
-    /// There is a special case where shifting values to the left can result in the new head becoming empty.
-    /// For example, starting from the previous state, if we pop 5 elements and push only [10, 12, 15]:
-    ///
-    /// - Head after step 1: [1, 7, 9, 2]
-    /// - We need to push 3 new elements, so 10 will be the last element in the head.
-    /// - Elements 2 and 9 are removed from the old head and used as new page numbers for both the old and new heads.
-    /// - The new head should store 12 and 15.
-    /// - The removal of 2 and 9 causes a shift, resulting in all elements fitting into the old head: [1, 7, 10, 12, 15]
-    ///   with a page number of 2 but unused page number 9.
-    /// - To maintain the LIFO property and avoid wasting page number 9, a small fragmentation is created.
-    ///   The old head will then contain only 4 elements, and the new head will contain one element, resulting in:
-    ///
-    /// [(Page number: 2, Free list: [1, 7, 10, 12]), (Page number: 9, Free list: [15])]
-    ///
-    /// It returns a Vec containing all the pages that need to be written into storage to reflect the current
-    /// status of the free list along with their page numbers
-    pub fn commit(
-        &mut self,
-        mut to_append: Vec<PageNumber>,
-        bump: &mut PageNumber,
-    ) -> Vec<(PageNumber, Box<Page>)> {
-        // No changes were made
-        if !self.pop && to_append.is_empty() {
-            return vec![];
+    fn encode_head(&self) -> Option<(PageNumber, Box<Page>)> {
+        if let Some((head_pn, head_pns)) = self.portions.last() {
+            let prev_pn = self.portions.len().checked_sub(2)
+                .map_or(FREELIST_EMPTY, |i| self.portions[i].0);
+
+            Some((*head_pn, encode_free_list_page(prev_pn, &head_pns)))
+        } else {
+            None
         }
-
-        // append the released free list pages
-        to_append.extend(std::mem::take(&mut self.released_portions));
-
-        let new_pns_len = to_append.len();
-
-        // max number of pages required to be allocated
-        let pages_to_allocate = (new_pns_len as f64 / MAX_PNS_PER_FREE_PAGE as f64).ceil() as usize;
-
-        let additional = if self.head.is_none() { 0 } else { 1 };
-        let mut free_list_pages_pns = (0..pages_to_allocate + additional)
-            .map(|_| match self.pop() {
-                Some(pn) => pn,
-                None => {
-                    let pn = *bump;
-                    bump.0 += 1;
-                    pn
-                }
-            })
-            .collect::<Vec<_>>()
-            .into_iter();
-
-        let mut pns_iter = to_append.into_iter();
-        let mut inner_frag = false;
-
-        // if the head is not empty, then the previous pop
-        // did not empty the free list, thus there will be some free space
-        // left in the head.
-        if let Some((head_pn, head)) = &mut self.head {
-            // let's change the page_number of the current head to avoid overwriting it
-            *head_pn = free_list_pages_pns.next().unwrap();
-
-            let free_space = MAX_PNS_PER_FREE_PAGE - head.len();
-
-            // if this holds then we will have to deal with a PageNumber fragmentation in the new
-            // head
-            if free_space + (pages_to_allocate - 1) * MAX_PNS_PER_FREE_PAGE == new_pns_len {
-                head.extend(pns_iter.by_ref().take(free_space - 1));
-                inner_frag = true;
-            }
-        }
-
-        // encoding new free list pages
-        let mut pages = vec![];
-
-        for pn in pns_iter {
-            let maybe_encoded_head = self.push(pn, &mut free_list_pages_pns, inner_frag);
-            inner_frag = false;
-
-            if let Some(encoded) = maybe_encoded_head {
-                pages.push(encoded);
-            }
-        }
-
-        // After a commit the head will always be re encoded, if present
-        if let Some((head_pn, head_pns)) = &self.head {
-            let prev = self
-                .portions
-                .last()
-                .map(|(pn, _)| *pn)
-                .unwrap_or(PageNumber(0));
-            pages.push((head_pn.clone(), encode_free_list_page(prev, head_pns)));
-        }
-
-        self.pop = false;
-
-        pages
     }
 }
 
@@ -324,7 +350,7 @@ fn decode_free_list_page(page: Box<Page>) -> (PageNumber, Vec<PageNumber>) {
     (prev, free_list)
 }
 
-fn encode_free_list_page(prev: PageNumber, pns: &Vec<PageNumber>) -> Box<Page> {
+fn encode_free_list_page(prev: PageNumber, pns: &[PageNumber]) -> Box<Page> {
     let mut page = Page::zeroed();
 
     page[0..4].copy_from_slice(&prev.0.to_le_bytes());
