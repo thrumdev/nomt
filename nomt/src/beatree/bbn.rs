@@ -19,8 +19,8 @@ pub struct BbnStoreWriter {
     pending: Vec<BranchNode>,
 }
 
-/// Initializes a BbnStoreWriter over a possibly already existing File and returns the pages from
-/// the freelist to inform the reconstruction process.
+/// Initializes a BbnStoreWriter over a possibly already existing File and returns all pages tracked
+/// by the freelist (free + used by the list itself) to inform reconstruction.
 pub fn create(
     fd: File,
     free_list_head: Option<PageNumber>,
@@ -37,7 +37,7 @@ pub fn create(
         io_sender,
         io_receiver,
     );
-    let freelist = allocator_writer.free_list().get_set();
+    let freelist = allocator_writer.free_list().all_tracked_pages();
 
     (
         BbnStoreWriter {

@@ -170,7 +170,7 @@ impl Tree {
             )
         };
 
-        let (bbn_store_wr, bbn_freelist) = {
+        let (bbn_store_wr, bbn_freelist_tracked) = {
             let bbn_fd = bbn_file.try_clone().unwrap();
             let io_handle_index = IO_IX_BBN;
             let io_sender = io_sender.clone();
@@ -188,7 +188,7 @@ impl Tree {
         let index = ops::reconstruct(
             bbn_file.try_clone().unwrap(),
             &mut bnp,
-            &bbn_freelist,
+            &bbn_freelist_tracked,
             bbn_bump,
         )
         .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;

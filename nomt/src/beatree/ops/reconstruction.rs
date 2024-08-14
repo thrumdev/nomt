@@ -22,7 +22,7 @@ use crate::beatree::{
 pub fn reconstruct(
     bn_fd: File,
     bnp: &mut branch::BranchNodePool,
-    bbn_freelist: &BTreeSet<PageNumber>,
+    bbn_freelist_tracked: &BTreeSet<PageNumber>,
     bump: PageNumber,
 ) -> Result<Index> {
     let mut index = Index::default();
@@ -30,16 +30,17 @@ pub fn reconstruct(
     let mut chunker = SeqFileReader::new(bn_fd, bump.0)?;
     while let Some((pn, node)) = chunker.next()? {
         let view = BranchNodeView::from_slice(node);
-        ensure!(view.bbn_pn() == pn, "pn mismatch");
 
         if view.n() == 0 && node == [0; BRANCH_NODE_SIZE] {
             // Just skip empty nodes.
             continue;
         }
 
-        if bbn_freelist.contains(&view.bbn_pn().into()) {
+        if bbn_freelist_tracked.contains(&PageNumber(pn)) {
             continue;
         }
+
+        ensure!(view.bbn_pn() == pn, "pn mismatch {} != {}", view.bbn_pn(), pn);
 
         let new_branch_id = bnp.allocate();
 
@@ -59,7 +60,7 @@ pub fn reconstruct(
         }
 
         if let Some(_) = index.insert(separator, new_branch_id) {
-            bail!("2 branch nodes with same separator")
+            bail!("2 branch nodes with same separator, separator={:?}", separator);
         }
     }
     Ok(index)
