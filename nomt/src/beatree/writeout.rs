@@ -26,7 +26,6 @@ pub fn run(
     ln_extend_file_sz: Option<u64>,
     new_meta: Meta,
 ) {
-    let now = std::time::Instant::now();
     let io = IoDmux::new(io_sender, io_handle_index, io_receiver);
     do_run(
         Cx {
@@ -43,15 +42,13 @@ pub fn run(
                 ln_remaining: ln.len(),
                 ln,
             },
-            meta_swap: Some(MetaSwap {
+            meta_swap: MetaSwap {
                 meta_fd,
                 new_meta: Some(new_meta),
-                should_fsync: false,
-            }),
+            },
         },
         io,
     );
-    println!("writeout {}us", now.elapsed().as_micros());
 }
 
 fn do_run(mut cx: Cx, mut io: IoDmux) {
@@ -74,34 +71,25 @@ fn do_run(mut cx: Cx, mut io: IoDmux) {
     cx.bbn_write_out.wait_writes(&mut io);
     cx.ln_write_out.wait_writes(&mut io);
 
-    cx.bbn_write_out.fsync(&mut io);
-    cx.ln_write_out.fsync(&mut io);
+    cx.bbn_write_out.send_fsync(&mut io);
+    cx.ln_write_out.send_fsync(&mut io);
 
-    loop {
-        // At this point, the BBN and LN files are fully synced. We can now update the meta file.
-        if let Some(ref mut meta_swap) = &mut cx.meta_swap {
-            if meta_swap.run(&mut io) {
-                cx.meta_swap = None;
-                return;
-            }
-        }
-    }
+    cx.bbn_write_out.wait_fsync(&mut io);
+    cx.ln_write_out.wait_fsync(&mut io);
+
+    cx.meta_swap.send_write(&mut io);
+    cx.meta_swap.wait_write(&mut io);
+    cx.meta_swap.send_fsync(&mut io);
+    cx.meta_swap.wait_fsync(&mut io);
 }
 
 struct IoDmux {
     io_sender: Sender<IoCommand>,
     io_handle_index: usize,
     io_receiver: Receiver<CompleteIo>,
-    bbn_inbox: Vec<CompleteIo>,
-    ln_inbox: Vec<CompleteIo>,
-    meta_inbox: Vec<CompleteIo>,
 }
 
 impl IoDmux {
-    const BBN_USER_DATA: u64 = 0;
-    const LN_USER_DATA: u64 = 1;
-    const META_USER_DATA: u64 = 2;
-
     fn new(
         io_sender: Sender<IoCommand>,
         io_handle_index: usize,
@@ -111,146 +99,41 @@ impl IoDmux {
             io_sender,
             io_handle_index,
             io_receiver,
-            bbn_inbox: Vec::new(),
-            ln_inbox: Vec::new(),
-            meta_inbox: Vec::new(),
         }
     }
 
-    fn try_recv_bbn(&mut self) -> Option<CompleteIo> {
-        match self.bbn_inbox.pop() {
-            Some(io) => Some(io),
-            None => self.try_poll(Self::BBN_USER_DATA),
-        }
+    fn send(&mut self, kind: IoKind) {
+        self.io_sender
+            .send(IoCommand {
+                kind,
+                handle: self.io_handle_index,
+                user_data: 0,
+            })
+            .expect("TODO");
     }
 
-    fn recv_bbn_write(&mut self) {
-        loop {
-            if let Some(CompleteIo { command, result }) = self.try_recv_bbn() {
-                assert!(result.is_ok());
-                match command.kind {
-                    IoKind::Write(_, _, _) | IoKind::WriteRaw(_, _, _, _) => {}
-                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
-                }
-                break;
-            }
-        }
+    fn try_send(&mut self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
+        self.io_sender
+            .try_send(IoCommand {
+                kind,
+                handle: self.io_handle_index,
+                user_data: 0,
+            })
+            .and_then(|()| Ok(()))
     }
 
-    fn recv_bbn_fsync(&mut self) {
-        loop {
-            if let Some(CompleteIo { command, result }) = self.try_recv_bbn() {
-                assert!(result.is_ok());
-                match command.kind {
-                    IoKind::Fsync(_) => {}
-                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
-                }
-                break;
-            }
-        }
-    }
-
-    fn recv_ln_write(&mut self) {
-        loop {
-            if let Some(CompleteIo { command, result }) = self.try_recv_ln() {
-                assert!(result.is_ok());
-                match command.kind {
-                    IoKind::Write(_, _, _) => {}
-                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
-                }
-                break;
-            }
-        }
-    }
-
-    fn recv_ln_fsync(&mut self) {
-        loop {
-            if let Some(CompleteIo { command, result }) = self.try_recv_ln() {
-                assert!(result.is_ok());
-                match command.kind {
-                    IoKind::Fsync(_) => {}
-                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
-                }
-                break;
-            }
-        }
-    }
-
-    fn try_send_bbn(&mut self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
-        self.io_sender.try_send(IoCommand {
-            kind,
-            handle: self.io_handle_index,
-            user_data: Self::BBN_USER_DATA,
-        })
-    }
-
-    fn try_send_ln(&mut self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
-        self.io_sender.try_send(IoCommand {
-            kind,
-            handle: self.io_handle_index,
-            user_data: Self::LN_USER_DATA,
-        })
-    }
-
-    fn try_recv_ln(&mut self) -> Option<CompleteIo> {
-        match self.ln_inbox.pop() {
-            Some(io) => Some(io),
-            None => self.try_poll(Self::LN_USER_DATA),
-        }
-    }
-
-    fn try_send_meta(&self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
-        self.io_sender.try_send(IoCommand {
-            kind,
-            handle: self.io_handle_index,
-            user_data: Self::META_USER_DATA,
-        })
-    }
-
-    fn try_recv_meta(&mut self) -> Option<CompleteIo> {
-        match self.meta_inbox.pop() {
-            Some(io) => Some(io),
-            None => self.try_poll(Self::META_USER_DATA),
-        }
-    }
-
-    /// Try to receive a completion from the io channel. If the completion is for the given user
-    /// data, it is immediately returned. Otherwise, it is pushed into the appropriate inbox.
-    fn try_poll(&mut self, eager_ud: u64) -> Option<CompleteIo> {
-        match self.io_receiver.try_recv() {
-            Ok(io) => {
-                if io.command.user_data == eager_ud {
-                    Some(io)
-                } else {
-                    match io.command.user_data {
-                        Self::BBN_USER_DATA => {
-                            self.bbn_inbox.push(io);
-                            None
-                        }
-                        Self::LN_USER_DATA => {
-                            self.ln_inbox.push(io);
-                            None
-                        }
-                        Self::META_USER_DATA => {
-                            self.meta_inbox.push(io);
-                            None
-                        }
-                        _ => panic!("unexpected user data"),
-                    }
-                }
-            }
-            Err(_) => {
-                // For future, we should seal the channel and don't attemp to poll it again.
-                None
-            }
-        }
+    fn recv(&mut self) {
+        let Ok(CompleteIo { result, .. }) = self.io_receiver.recv() else {
+            panic!("TODO");
+        };
+        assert!(result.is_ok());
     }
 }
 
 struct Cx {
     bbn_write_out: BbnWriteOut,
     ln_write_out: LnWriteOut,
-    meta_swap: Option<MetaSwap>,
+    meta_swap: MetaSwap,
 }
 
 struct BbnWriteOut {
@@ -292,11 +175,10 @@ impl BbnWriteOut {
                 let (ptr, len) = (wrt.as_ptr(), wrt.len());
                 let bbn_pn = branch_node.bbn_pn();
 
-                if let Err(_) =
-                    io.try_send_bbn(IoKind::WriteRaw(self.bbn_fd, bbn_pn as u64, ptr, len))
+                if let Err(_) = io.try_send(IoKind::WriteRaw(self.bbn_fd, bbn_pn as u64, ptr, len))
                 {
                     // That's alright. We will retry after trying to get something out of the cqueue
-                    io.recv_bbn_write();
+                    io.recv();
                     self.remaining = self.remaining.checked_sub(1).unwrap();
                     self.bbn.push(branch_node);
                 }
@@ -314,10 +196,10 @@ impl BbnWriteOut {
                 if let Err(TrySendError::Full(IoCommand {
                     kind: IoKind::Write(.., page),
                     ..
-                })) = io.try_send_bbn(IoKind::Write(self.bbn_fd, pn.0 as u64, page))
+                })) = io.try_send(IoKind::Write(self.bbn_fd, pn.0 as u64, page))
                 {
                     // That's alright. We will try again after getting something out of the cqueue
-                    io.recv_bbn_write();
+                    io.recv();
                     self.remaining = self.remaining.checked_sub(1).unwrap();
                     self.free_list_pages.push((pn, page));
                 }
@@ -328,14 +210,17 @@ impl BbnWriteOut {
     fn wait_writes(&mut self, io: &mut IoDmux) {
         // wait for all writes
         while self.remaining > 0 {
-            io.recv_bbn_write();
+            io.recv();
             self.remaining = self.remaining.checked_sub(1).unwrap();
         }
     }
 
-    fn fsync(&mut self, io: &mut IoDmux) {
-        while !io.try_send_bbn(IoKind::Fsync(self.bbn_fd)).is_ok() {}
-        io.recv_bbn_fsync();
+    fn send_fsync(&mut self, io: &mut IoDmux) {
+        io.send(IoKind::Fsync(self.bbn_fd));
+    }
+
+    fn wait_fsync(&mut self, io: &mut IoDmux) {
+        io.recv();
     }
 }
 
@@ -375,10 +260,10 @@ impl LnWriteOut {
                 if let Err(TrySendError::Full(IoCommand {
                     kind: IoKind::Write(.., ln_page),
                     ..
-                })) = io.try_send_ln(IoKind::Write(self.ln_fd, ln_pn.0 as u64, ln_page))
+                })) = io.try_send(IoKind::Write(self.ln_fd, ln_pn.0 as u64, ln_page))
                 {
                     // That's alright. We will retry after trying to get something out of the cqueue
-                    io.recv_ln_write();
+                    io.recv();
                     self.ln_remaining = self.ln_remaining.checked_sub(1).unwrap();
                     self.ln.push((ln_pn, ln_page));
                 }
@@ -389,60 +274,46 @@ impl LnWriteOut {
     fn wait_writes(&mut self, io: &mut IoDmux) {
         // wait for all writes
         while self.ln_remaining > 0 {
-            io.recv_ln_write();
+            io.recv();
             self.ln_remaining = self.ln_remaining.checked_sub(1).unwrap();
         }
     }
 
-    fn fsync(&mut self, io: &mut IoDmux) {
-        while !io.try_send_ln(IoKind::Fsync(self.ln_fd)).is_ok() {}
-        io.recv_ln_fsync();
+    fn send_fsync(&mut self, io: &mut IoDmux) {
+        io.send(IoKind::Fsync(self.ln_fd));
+    }
+
+    fn wait_fsync(&mut self, io: &mut IoDmux) {
+        io.recv();
     }
 }
 
 struct MetaSwap {
     meta_fd: RawFd,
     new_meta: Option<Meta>,
-    should_fsync: bool,
 }
 
 impl MetaSwap {
-    fn run(&mut self, io: &mut IoDmux) -> bool {
+    fn send_write(&mut self, io: &mut IoDmux) {
         if let Some(new_meta) = self.new_meta.take() {
             // Oh god, there is a special place in hell for this. Will do for now though.
             let mut page = Box::new(Page::zeroed());
 
             new_meta.encode_to(&mut page.as_mut()[..16]);
 
-            if let Err(_) = io.try_send_meta(IoKind::Write(self.meta_fd, 0, page)) {
-                self.new_meta = Some(new_meta);
-                return false;
-            }
+            io.send(IoKind::Write(self.meta_fd, 0, page));
         }
+    }
 
-        if self.should_fsync {
-            if let Err(_) = io.try_send_meta(IoKind::Fsync(self.meta_fd)) {
-                return false;
-            }
-            self.should_fsync = false;
-        }
+    fn wait_write(&mut self, io: &mut IoDmux) {
+        io.recv();
+    }
 
-        // Reap the completions.
-        while let Some(CompleteIo { command, result }) = io.try_recv_meta() {
-            assert!(result.is_ok());
-            match command.kind {
-                IoKind::Write(_, _, _) => {
-                    self.should_fsync = true;
-                    continue;
-                }
-                IoKind::Fsync(_) => {
-                    // done
-                    return true;
-                }
-                _ => panic!("unexpected completion kind"),
-            }
-        }
+    fn send_fsync(&mut self, io: &mut IoDmux) {
+        io.send(IoKind::Fsync(self.meta_fd));
+    }
 
-        false
+    fn wait_fsync(&mut self, io: &mut IoDmux) {
+        io.recv();
     }
 }
