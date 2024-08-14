@@ -84,17 +84,18 @@ impl FreeList {
         }
     }
 
-    /// Copies all the elements present in the free list into a set
-    pub fn get_set(&self) -> BTreeSet<PageNumber> {
-        let Some(pns) = self.head.as_ref().map(|(_, pns)| pns.clone()) else {
+    /// Get a set of all pages tracked in the free-list. This is all free pages plus all the
+    /// free-list pages themselves.
+    pub fn all_tracked_pages(&self) -> BTreeSet<PageNumber> {
+        let Some(list_item) = self.head.as_ref() else {
             return BTreeSet::new();
         };
 
-        let pns = vec![pns]
-            .into_iter()
-            .chain(self.portions.iter().map(|(_, pns)| pns.clone()))
-            .into_iter()
+        let pns = std::iter::once(list_item)
+            .chain(self.portions.iter())
+            .map(|&(ref pn, ref pns)| std::iter::once(pn).chain(pns))
             .flatten()
+            .copied()
             .into_iter();
 
         BTreeSet::from_iter(pns)
