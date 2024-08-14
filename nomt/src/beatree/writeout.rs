@@ -26,24 +26,23 @@ pub fn run(
     ln_extend_file_sz: Option<u64>,
     new_meta: Meta,
 ) {
+    let now = std::time::Instant::now();
     let io = IoDmux::new(io_sender, io_handle_index, io_receiver);
     do_run(
         Cx {
-            bbn_write_out: Some(BbnWriteOut {
+            bbn_write_out: BbnWriteOut {
                 bbn_fd,
                 bbn_extend_file_sz,
                 remaining: bbn.len() + bbn_free_list_pages.len(),
                 bbn,
                 free_list_pages: bbn_free_list_pages,
-                should_fsync: false,
-            }),
-            ln_write_out: Some(LnWriteOut {
+            },
+            ln_write_out: LnWriteOut {
                 ln_fd,
                 ln_extend_file_sz,
                 ln_remaining: ln.len(),
                 ln,
-                should_fsync: false,
-            }),
+            },
             meta_swap: Some(MetaSwap {
                 meta_fd,
                 new_meta: Some(new_meta),
@@ -52,6 +51,7 @@ pub fn run(
         },
         io,
     );
+    println!("writeout {}us", now.elapsed().as_micros());
 }
 
 fn do_run(mut cx: Cx, mut io: IoDmux) {
@@ -64,21 +64,20 @@ fn do_run(mut cx: Cx, mut io: IoDmux) {
     // - fsync the LN file
     // - update the meta file
     // - fsync on meta file
-    loop {
-        if cx.bbn_write_out.is_some() || cx.ln_write_out.is_some() {
-            if let Some(ref mut bbn_write_out) = &mut cx.bbn_write_out {
-                if bbn_write_out.run(&mut io) {
-                    cx.bbn_write_out = None;
-                }
-            }
-            if let Some(ref mut ln_write_out) = &mut cx.ln_write_out {
-                if ln_write_out.run(&mut io) {
-                    cx.ln_write_out = None;
-                }
-            }
-            continue;
-        }
 
+    cx.bbn_write_out.extend_file();
+    cx.bbn_write_out.send_writes(&mut io);
+
+    cx.ln_write_out.extend_file();
+    cx.ln_write_out.send_writes(&mut io);
+
+    cx.bbn_write_out.wait_writes(&mut io);
+    cx.ln_write_out.wait_writes(&mut io);
+
+    cx.bbn_write_out.fsync(&mut io);
+    cx.ln_write_out.fsync(&mut io);
+
+    loop {
         // At this point, the BBN and LN files are fully synced. We can now update the meta file.
         if let Some(ref mut meta_swap) = &mut cx.meta_swap {
             if meta_swap.run(&mut io) {
@@ -122,6 +121,58 @@ impl IoDmux {
         match self.bbn_inbox.pop() {
             Some(io) => Some(io),
             None => self.try_poll(Self::BBN_USER_DATA),
+        }
+    }
+
+    fn recv_bbn_write(&mut self) {
+        loop {
+            if let Some(CompleteIo { command, result }) = self.try_recv_bbn() {
+                assert!(result.is_ok());
+                match command.kind {
+                    IoKind::Write(_, _, _) | IoKind::WriteRaw(_, _, _, _) => {}
+                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
+                }
+                break;
+            }
+        }
+    }
+
+    fn recv_bbn_fsync(&mut self) {
+        loop {
+            if let Some(CompleteIo { command, result }) = self.try_recv_bbn() {
+                assert!(result.is_ok());
+                match command.kind {
+                    IoKind::Fsync(_) => {}
+                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
+                }
+                break;
+            }
+        }
+    }
+
+    fn recv_ln_write(&mut self) {
+        loop {
+            if let Some(CompleteIo { command, result }) = self.try_recv_ln() {
+                assert!(result.is_ok());
+                match command.kind {
+                    IoKind::Write(_, _, _) => {}
+                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
+                }
+                break;
+            }
+        }
+    }
+
+    fn recv_ln_fsync(&mut self) {
+        loop {
+            if let Some(CompleteIo { command, result }) = self.try_recv_ln() {
+                assert!(result.is_ok());
+                match command.kind {
+                    IoKind::Fsync(_) => {}
+                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
+                }
+                break;
+            }
         }
     }
 
@@ -197,8 +248,8 @@ impl IoDmux {
 }
 
 struct Cx {
-    bbn_write_out: Option<BbnWriteOut>,
-    ln_write_out: Option<LnWriteOut>,
+    bbn_write_out: BbnWriteOut,
+    ln_write_out: LnWriteOut,
     meta_swap: Option<MetaSwap>,
 }
 
@@ -213,7 +264,7 @@ struct BbnWriteOut {
 }
 
 impl BbnWriteOut {
-    fn run(&mut self, io: &mut IoDmux) -> bool {
+    fn extend_file(&mut self) {
         // Turns out, as of this writing, io_uring doesn't support ftruncate. So we have to do it
         // via good old ftruncate syscall here.
         //
@@ -226,9 +277,10 @@ impl BbnWriteOut {
                 f.set_len(new_len).unwrap();
                 let _ = f.into_raw_fd();
             }
-            return false;
         }
+    }
 
+    fn send_writes(&mut self, io: &mut IoDmux) {
         while self.bbn.len() > 0 {
             // UNWRAP: we know the list is not empty.
             let mut branch_node = self.bbn.pop().unwrap();
@@ -243,9 +295,10 @@ impl BbnWriteOut {
                 if let Err(_) =
                     io.try_send_bbn(IoKind::WriteRaw(self.bbn_fd, bbn_pn as u64, ptr, len))
                 {
-                    // That's alright. We will retry on the next iteration.
+                    // That's alright. We will retry after trying to get something out of the cqueue
+                    io.recv_bbn_write();
+                    self.remaining = self.remaining.checked_sub(1).unwrap();
                     self.bbn.push(branch_node);
-                    return false;
                 }
                 let _ = branch_node;
             }
@@ -263,44 +316,26 @@ impl BbnWriteOut {
                     ..
                 })) = io.try_send_bbn(IoKind::Write(self.bbn_fd, pn.0 as u64, page))
                 {
-                    // That's alright. We will retry on the next iteration.
-                    self.free_list_pages.push((pn, page));
-                    return false;
-                }
-            }
-        }
-
-        if self.should_fsync {
-            if let Err(_) = io.try_send_bbn(IoKind::Fsync(self.bbn_fd)) {
-                return false
-            }
-
-            self.should_fsync = false;
-        }
-
-        // Reap the completions.
-        while let Some(CompleteIo { command, result }) = io.try_recv_bbn() {
-            assert!(result.is_ok());
-            match command.kind {
-                IoKind::Write(_, _, _) | IoKind::WriteRaw(_, _, _, _) => {
+                    // That's alright. We will try again after getting something out of the cqueue
+                    io.recv_bbn_write();
                     self.remaining = self.remaining.checked_sub(1).unwrap();
-                    if self.remaining == 0 {
-                        self.should_fsync = true;
-                        break
-                    }
-
-                    continue;
+                    self.free_list_pages.push((pn, page));
                 }
-                IoKind::Fsync(_) => {
-                    assert!(self.remaining == 0);
-                    return true;
-                }
-                _ => panic!("unexpected completion kind"),
             }
         }
+    }
 
-        // we are not done yet.
-        false
+    fn wait_writes(&mut self, io: &mut IoDmux) {
+        // wait for all writes
+        while self.remaining > 0 {
+            io.recv_bbn_write();
+            self.remaining = self.remaining.checked_sub(1).unwrap();
+        }
+    }
+
+    fn fsync(&mut self, io: &mut IoDmux) {
+        while !io.try_send_bbn(IoKind::Fsync(self.bbn_fd)).is_ok() {}
+        io.recv_bbn_fsync();
     }
 }
 
@@ -313,20 +348,13 @@ struct LnWriteOut {
 }
 
 impl LnWriteOut {
-    fn run(&mut self, io: &mut IoDmux) -> bool {
-        // NOTE: The current process begins by `ftruncating` the file to support writing
-        // all pages contained in `self.ln`.
-        // This is necessary because the pages created by the LeafStore fall into two categories:
-        // - pages that can be safely written to the file
-        // - pages that need the file to be extended because their page number is out of range
+    fn extend_file(&mut self) {
+        // Turns out, as of this writing, io_uring doesn't support ftruncate. So we have to do it
+        // via good old ftruncate syscall here.
         //
-        // The first category is currently waiting until `ftruncate` is performed before
-        // being written with the second group.
-        //
-        // A possible improvement could be to allow the LeafStore to write all pages
-        // in the first category immediately, keep a vector of pending pages,
-        // and have the writeout call `ftruncate` to finish issuing all pending pages.
-
+        // Do it first for now, so we don't have to deal with deferring writes until after the
+        // ftruncate. Later on, we can schedule the writes before the bump pointer (size of the
+        // file) right away and defer only the writes to the pages higher the bump pointe.
         if let Some(new_len) = self.ln_extend_file_sz.take() {
             unsafe {
                 let f = File::from_raw_fd(self.ln_fd);
@@ -334,7 +362,9 @@ impl LnWriteOut {
                 let _ = f.into_raw_fd();
             }
         }
+    }
 
+    fn send_writes(&mut self, io: &mut IoDmux) {
         while self.ln.len() > 0 {
             // UNWRAP: we know the list is not empty.
             let (ln_pn, ln_page) = self.ln.pop().unwrap();
@@ -347,45 +377,26 @@ impl LnWriteOut {
                     ..
                 })) = io.try_send_ln(IoKind::Write(self.ln_fd, ln_pn.0 as u64, ln_page))
                 {
-                    // That's alright. We will retry on the next iteration.
-                    self.ln.push((ln_pn, ln_page));
-                    return false;
-                }
-            }
-        }
-
-        if self.should_fsync {
-            if let Err(_) = io.try_send_ln(IoKind::Fsync(self.ln_fd)) {
-                return false
-            }
-
-            self.should_fsync = false;
-        }
-
-        // Reap the completions.
-        while let Some(CompleteIo { command, result }) = io.try_recv_ln() {
-            assert!(result.is_ok());
-            match command.kind {
-                IoKind::Write(_, _, _) => {
+                    // That's alright. We will retry after trying to get something out of the cqueue
+                    io.recv_ln_write();
                     self.ln_remaining = self.ln_remaining.checked_sub(1).unwrap();
-
-                    if self.ln_remaining == 0 {
-                        self.should_fsync = true;
-                        break;
-                    }
-
-                    continue;
+                    self.ln.push((ln_pn, ln_page));
                 }
-                IoKind::Fsync(_) => {
-                    assert!(self.ln_remaining == 0);
-                    return true;
-                }
-                _ => panic!("unexpected completion kind"),
             }
         }
+    }
 
-        // we are not done yet.
-        false
+    fn wait_writes(&mut self, io: &mut IoDmux) {
+        // wait for all writes
+        while self.ln_remaining > 0 {
+            io.recv_ln_write();
+            self.ln_remaining = self.ln_remaining.checked_sub(1).unwrap();
+        }
+    }
+
+    fn fsync(&mut self, io: &mut IoDmux) {
+        while !io.try_send_ln(IoKind::Fsync(self.ln_fd)).is_ok() {}
+        io.recv_ln_fsync();
     }
 }
 

@@ -5,6 +5,7 @@ use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node, TERMINATOR},
 };
+use parking_lot::Mutex;
 use rocksdb::{self, ColumnFamilyDescriptor, WriteBatch};
 use std::sync::Arc;
 
