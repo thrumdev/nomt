@@ -33,11 +33,13 @@ use crate::{
     page_walker::{Output, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
     seek::{SeekOptions, Seeker},
+    store::Store,
     PathProof, WitnessedPath,
 };
 
 pub(super) struct Params {
     pub page_cache: PageCache,
+    pub store: Store,
     pub root: Node,
     pub barrier: Arc<Barrier>,
 }
@@ -51,6 +53,7 @@ pub(super) struct Comms {
 pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
     let Params {
         page_cache,
+        store,
         root,
         barrier,
     } = params;
@@ -74,6 +77,7 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
                     read_pass.as_ref().unwrap(),
                     root,
                     page_cache.clone(),
+                    store.clone(),
                     command,
                 ),
                 Err(_) => return,
@@ -86,7 +90,7 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
         // UNWRAP: Commit always sent after Prepare.
         Ok(ToWorker::Prepare) => unreachable!(),
         Ok(ToWorker::Commit(command)) => {
-            let output = commit::<H>(root, page_cache, command);
+            let output = commit::<H>(root, page_cache, store, command);
             let _ = comms.output_tx.send(output);
         }
     }
@@ -96,11 +100,12 @@ fn warm_up(
     read_pass: &ReadPass<ShardIndex>,
     root: Node,
     page_cache: PageCache,
+    store: Store,
     command: WarmUpCommand,
 ) {
     let WarmUpCommand { key_path, delete } = command;
 
-    let seeker = Seeker::new(root, page_cache);
+    let seeker = Seeker::new(root, page_cache, store);
     let _seek_result = seeker.seek(
         key_path,
         SeekOptions {
@@ -114,6 +119,7 @@ fn warm_up(
 fn commit<H: NodeHasher>(
     root: Node,
     page_cache: PageCache,
+    store: Store,
     command: CommitCommand,
 ) -> WorkerOutput {
     let CommitCommand { shared, write_pass } = command;
@@ -121,8 +127,13 @@ fn commit<H: NodeHasher>(
 
     let mut output = WorkerOutput::new(shared.witness);
 
-    let mut committer =
-        RangeCommitter::<H>::new(root, shared.clone(), write_pass, page_cache.clone());
+    let mut committer = RangeCommitter::<H>::new(
+        root,
+        shared.clone(),
+        write_pass,
+        page_cache.clone(),
+        store.clone(),
+    );
 
     while !committer.is_done() {
         committer.consume_terminal(&mut output);
@@ -179,6 +190,7 @@ struct RangeCommitter<H> {
     region: PageRegion,
     page_walker: PageWalker<H>,
     page_cache: PageCache,
+    store: Store,
     range_start: usize,
     range_end: usize,
     cur_index: usize,
@@ -190,6 +202,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
         shared: Arc<CommitShared>,
         write_pass: WritePass<ShardIndex>,
         page_cache: PageCache,
+        store: Store,
     ) -> Self {
         let region = match write_pass.region() {
             ShardIndex::Root => PageRegion::universe(),
@@ -215,6 +228,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
             region,
             page_walker: PageWalker::<H>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID)),
             page_cache,
+            store,
             range_start,
             range_end,
             cur_index: range_start,
@@ -232,7 +246,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
         // and page updates, such that while we're waiting on a page fetch we process the previous
         // terminal, and so on.
 
-        let seeker = Seeker::new(self.root, self.page_cache.clone());
+        let seeker = Seeker::new(self.root, self.page_cache.clone(), self.store.clone());
         let start_index = self.cur_index;
         let seek_result = seeker.seek(
             self.shared.read_write[start_index].0,

@@ -12,6 +12,7 @@ use std::{
 
 use commit::{CommitPool, Committer};
 use nomt_core::{
+    page_id::ROOT_PAGE_ID,
     proof::PathProof,
     trie::{NodeHasher, ValueHash, TERMINATOR},
 };
@@ -39,7 +40,7 @@ mod store;
 
 mod io;
 
-const MAX_FETCH_CONCURRENCY: usize = 64;
+const MAX_COMMIT_CONCURRENCY: usize = 64;
 
 /// A full value stored within the trie.
 pub type Value = Rc<Vec<u8>>;
@@ -168,21 +169,22 @@ pub struct Nomt {
 impl Nomt {
     /// Open the database with the given options.
     pub fn open(mut o: Options) -> anyhow::Result<Self> {
-        if o.fetch_concurrency == 0 {
-            anyhow::bail!("fetch concurrency must be greater than zero".to_string());
+        if o.commit_concurrency == 0 {
+            anyhow::bail!("commit concurrency must be greater than zero".to_string());
         }
 
-        if o.fetch_concurrency > MAX_FETCH_CONCURRENCY {
-            o.fetch_concurrency = MAX_FETCH_CONCURRENCY;
+        if o.commit_concurrency > MAX_COMMIT_CONCURRENCY {
+            o.commit_concurrency = MAX_COMMIT_CONCURRENCY;
         }
 
         let metrics = Metrics::new(o.metrics);
 
         let store = Store::open(&o)?;
-        let page_cache = PageCache::new(store.clone(), &o, metrics.clone())?;
+        let root_page = store.load_page(ROOT_PAGE_ID)?;
+        let page_cache = PageCache::new(root_page, &o, metrics.clone());
         let root = store.load_root()?;
         Ok(Self {
-            commit_pool: CommitPool::new(o.fetch_concurrency),
+            commit_pool: CommitPool::new(o.commit_concurrency),
             page_cache,
             store,
             shared: Arc::new(Mutex::new(Shared { root })),
@@ -213,10 +215,11 @@ impl Nomt {
         assert_eq!(prev, 0, "only one session could be active at a time");
         Session {
             store: self.store.clone(),
-            committer: Some(
-                self.commit_pool
-                    .begin::<Blake3Hasher>(self.page_cache.clone(), self.root()),
-            ),
+            committer: Some(self.commit_pool.begin::<Blake3Hasher>(
+                self.page_cache.clone(),
+                self.store.clone(),
+                self.root(),
+            )),
             session_cnt: self.session_cnt.clone(),
             metrics: self.metrics.clone(),
         }

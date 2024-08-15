@@ -3,6 +3,7 @@
 use crate::{
     page_cache::{self, Page, PageCache, ShardIndex},
     rw_pass_cell::ReadPass,
+    store::Store,
 };
 use bitvec::prelude::*;
 use nomt_core::{
@@ -43,12 +44,13 @@ pub struct Seek {
 pub struct Seeker {
     cache: PageCache,
     root: Node,
+    store: Store,
 }
 
 impl Seeker {
     /// Create a new Seeker, given the cache, page read pass, and a root node.
-    pub fn new(root: Node, cache: PageCache) -> Self {
-        Seeker { cache, root }
+    pub fn new(root: Node, cache: PageCache, store: Store) -> Self {
+        Seeker { cache, root, store }
     }
 
     fn read_leaf_children(
@@ -58,12 +60,22 @@ impl Seeker {
         read_pass: &ReadPass<ShardIndex>,
     ) -> trie::LeafData {
         let (page, _, children) = page_cache::locate_leaf_data(trie_pos, current_page, |page_id| {
-            self.cache.retrieve_sync(page_id, false)
+            self.retrieve_sync(page_id)
         });
         trie::LeafData {
             key_path: page.node(&read_pass, children.left()),
             value_hash: page.node(&read_pass, children.right()),
         }
+    }
+
+    fn retrieve_sync(&self, page_id: PageId) -> Page {
+        if let Some(page) = self.cache.get(page_id.clone()) {
+            return page;
+        }
+
+        // TODO: handle error.
+        let page_data = self.store.load_page(page_id.clone()).unwrap();
+        self.cache.insert(page_id, page_data)
     }
 
     fn down(
@@ -83,7 +95,7 @@ impl Seeker {
                     .expect("Pages do not go deeper than the maximum layer, 42"),
             };
 
-            *cur_page = Some((page_id.clone(), self.cache.retrieve_sync(page_id, false)));
+            *cur_page = Some((page_id.clone(), self.retrieve_sync(page_id)));
         }
         pos.down(bit);
 
@@ -106,11 +118,6 @@ impl Seeker {
         options: SeekOptions,
         read_pass: &ReadPass<ShardIndex>,
     ) -> Seek {
-        /// The breadth of the prefetch request.
-        ///
-        /// The number of items we want to request in a single batch.
-        const PREFETCH_N: usize = 7;
-
         let mut result = Seek {
             siblings: Vec::with_capacity(if options.record_siblings { 32 } else { 0 }),
             terminal: None,
@@ -121,39 +128,21 @@ impl Seeker {
         let mut trie_pos = TriePosition::new();
         let mut page: Option<(PageId, Page)> = None;
 
-        if !trie::is_internal(&self.root) {
-            // fast path: don't pre-fetch when trie is just a root.
-            if trie::is_leaf(&self.root) {
-                result.terminal = Some(self.read_leaf_children(&trie_pos, None, read_pass));
-            };
-
-            return result;
-        }
-
         let mut ppf = PageIdsIterator::new(dest);
 
         let mut sibling = trie::TERMINATOR;
         let mut cur_node = self.root;
 
-        let mut pending_prefetches = Vec::with_capacity(PREFETCH_N);
         for bit in dest.view_bits::<Msb0>().iter().by_vals() {
             if !trie::is_internal(&cur_node) {
                 if trie::is_leaf(&cur_node) {
                     let leaf_data = self.read_leaf_children(&trie_pos, page.as_ref(), read_pass);
-                    if trie_pos.depth() as usize % DEPTH == 0 {
-                        // leaf data page was needed.
-                        let _ = pending_prefetches.pop();
-                    }
                     assert!(leaf_data
                         .key_path
                         .view_bits::<Msb0>()
                         .starts_with(&dest.view_bits::<Msb0>()[..trie_pos.depth() as usize]));
 
                     result.terminal = Some(leaf_data);
-                };
-
-                for page_id in pending_prefetches {
-                    self.cache.cancel_prepopulate(page_id)
                 }
 
                 result.position = trie_pos;
@@ -161,21 +150,6 @@ impl Seeker {
                 return result;
             }
             if trie_pos.depth() as usize % DEPTH == 0 {
-                if trie_pos.depth() as usize % PREFETCH_N == 0 {
-                    for _ in 0..PREFETCH_N {
-                        let page_id = match ppf.next() {
-                            Some(page) => page,
-                            None => break,
-                        };
-                        pending_prefetches.push(page_id.clone());
-                        self.cache.prepopulate(page_id);
-                    }
-                    pending_prefetches.reverse();
-                }
-
-                // next step `down` after this if block relies on this page having been fetched.
-                let _ = pending_prefetches.pop();
-
                 if let (&Some((ref id, _)), true, true) = (
                     &page,
                     options.retrieve_sibling_leaf_children,
@@ -186,8 +160,7 @@ impl Seeker {
                     let child_page_id = id
                         .child_page_id(trie_pos.sibling_child_page_index())
                         .expect("Pages do not go deeper than the maximum layer, 42");
-                    // async; just warm up.
-                    let _ = self.cache.prepopulate(child_page_id);
+                    let _ = self.retrieve_sync(child_page_id);
                 }
             }
 

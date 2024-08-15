@@ -4,9 +4,8 @@ use std::path::PathBuf;
 pub struct Options {
     /// The path to the directory where the trie is stored.
     pub(crate) path: PathBuf,
-    /// The maximum number of concurrent page fetches. Values over 64 will be rounded down to 64.
-    /// May not be zero.
-    pub(crate) fetch_concurrency: usize,
+    /// The number of commit workers. Values over 64 will be rounded down to 64.
+    pub(crate) commit_concurrency: usize,
     /// The number of io_uring instances
     pub(crate) num_rings: usize,
     /// Enable or disable metrics collection.
@@ -18,7 +17,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             path: PathBuf::from("nomt_db"),
-            fetch_concurrency: 1,
+            commit_concurrency: 1,
             num_rings: 3,
             metrics: false,
             bitbox_num_pages: 64_000,
@@ -37,13 +36,13 @@ impl Options {
         self.path = path.into();
     }
 
-    /// Set the maximum number of concurrent page fetches.
+    /// Set the maximum number of concurrent commit workers.
     ///
     /// Values over 64 will be rounded down to 64.
     ///
     /// May not be zero.
-    pub fn fetch_concurrency(&mut self, fetch_concurrency: usize) {
-        self.fetch_concurrency = fetch_concurrency;
+    pub fn commit_concurrency(&mut self, commit_concurrency: usize) {
+        self.commit_concurrency = commit_concurrency;
     }
 
     /// Set metrics collection on or off.

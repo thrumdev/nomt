@@ -19,6 +19,7 @@ use threadpool::ThreadPool;
 use crate::{
     page_cache::{PageCache, PageDiff, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
+    store::Store,
     Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 
@@ -94,7 +95,12 @@ impl CommitPool {
     /// The Committer expects to have exclusive access to the page cache, so if there
     /// are outstanding read passes, write passes, or threads waiting on write passes,
     /// deadlocks are practically guaranteed at some point during the lifecycle of the Committer.
-    pub fn begin<H: NodeHasher>(&self, page_cache: PageCache, root: Node) -> Committer {
+    pub fn begin<H: NodeHasher>(
+        &self,
+        page_cache: PageCache,
+        store: Store,
+        root: Node,
+    ) -> Committer {
         let num_workers = page_cache.shard_count();
 
         let barrier = Arc::new(Barrier::new(num_workers + 1));
@@ -103,6 +109,7 @@ impl CommitPool {
             .map(|_| {
                 let params = worker::Params {
                     page_cache: page_cache.clone(),
+                    store: store.clone(),
                     root,
                     barrier: barrier.clone(),
                 };

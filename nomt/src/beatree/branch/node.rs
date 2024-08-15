@@ -94,7 +94,11 @@ impl BranchNode {
     }
 
     fn varbits_mut(&mut self) -> &mut BitSlice<u8, Msb0> {
-        let body_end = body_size(self.prefix_len() as _, self.separator_len() as _, self.n() as _) + 8;
+        let body_end = body_size(
+            self.prefix_len() as _,
+            self.separator_len() as _,
+            self.n() as _,
+        ) + 8;
         self.as_mut_slice()[8..body_end].view_bits_mut()
     }
 
@@ -165,7 +169,11 @@ impl<'a> BranchNodeView<'a> {
     }
 
     fn varbits(&self) -> &'a BitSlice<u8, Msb0> {
-        let body_end = body_size(self.prefix_len() as _, self.separator_len() as _, self.n() as _) + 8;
+        let body_end = body_size(
+            self.prefix_len() as _,
+            self.separator_len() as _,
+            self.n() as _,
+        ) + 8;
         self.inner[8..body_end].view_bits()
     }
 

@@ -113,7 +113,7 @@ pub struct WorkloadParams {
     /// Default value is 1
     #[arg(long = "fetch-concurrency", short)]
     #[clap(default_value = "1")]
-    pub fetch_concurrency: usize,
+    pub commit_concurrency: usize,
 
     /// Number of io_uring instances. Only used with Nomt backend.
     ///
