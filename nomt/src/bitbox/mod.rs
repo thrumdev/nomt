@@ -15,9 +15,11 @@ use crate::{
 
 use self::{
     meta_map::MetaMap,
-    store::{MetaPage, Store},
+    store::Store,
     wal::{Batch as WalBatch, ConsistencyError, Entry as WalEntry, WalWriter},
 };
+
+pub use self::store::create;
 
 mod meta_map;
 mod store;
@@ -34,7 +36,6 @@ pub struct DB {
 
 pub struct Shared {
     store: Store,
-    meta_page: RwLock<MetaPage>,
     // TODO: probably RwLock can be avoided being used only during commit
     wal: RwLock<WalWriter>,
     meta_map: RwLock<MetaMap>,
@@ -46,16 +47,19 @@ pub struct Shared {
 }
 
 impl DB {
-    pub fn open(num_rings: usize, path: PathBuf) -> anyhow::Result<Self> {
-        let db_path = path.join("db");
+    /// Opens an existing bitbox database.
+    pub fn open(
+        sync_seqn: u32,
+        num_pages: u32,
+        num_rings: usize,
+        path: PathBuf,
+    ) -> anyhow::Result<Self> {
+        // TODO: refactor to use u32.
+        let sync_seqn = sync_seqn as u64;
+
         let wal_path = path.join("wal");
 
-        if !db_path.is_file() {
-            std::fs::create_dir_all(path).unwrap();
-            store::create(db_path.clone(), 64_000).unwrap();
-        }
-
-        let (store, meta_page, meta_map) = match store::Store::open(db_path) {
+        let (store, meta_map) = match store::Store::open(num_pages, path.clone()) {
             Ok(x) => x,
             Err(e) => {
                 anyhow::bail!("encountered error in opening store: {e:?}");
@@ -64,18 +68,15 @@ impl DB {
 
         // Open the WAL, check its integrity and make sure the store is consistent with it
         let wal = wal::WalChecker::open_and_recover(wal_path.clone());
-        let _pending_batch = match wal.check_consistency(meta_page.sequence_number()) {
+        let _pending_batch = match wal.check_consistency(sync_seqn) {
             Ok(()) => {
-                println!(
-                    "Wal and Store are consistent, last sequence number: {}",
-                    meta_page.sequence_number()
-                );
+                println!("Wal and Store are consistent, last sequence number: {sync_seqn}");
                 None
             }
             Err(ConsistencyError::LastBatchCrashed(crashed_batch)) => {
                 println!(
                     "Wal and Store are not consistent, pending sequence number: {}",
-                    meta_page.sequence_number() + 1
+                    sync_seqn + 1
                 );
                 Some(crashed_batch)
             }
@@ -87,9 +88,7 @@ impl DB {
                     None
                 } else {
                     panic!(
-                        "Store and Wal have two inconsistent serial numbers. wal: {}, store: {}",
-                        wal_seqn,
-                        meta_page.sequence_number()
+                        "Store and Wal have two inconsistent serial numbers. wal: {wal_seqn}, store: {sync_seqn}"
                     );
                 }
             }
@@ -130,7 +129,6 @@ impl DB {
             shared: Arc::new(Shared {
                 store,
                 commit_page_receiver,
-                meta_page: RwLock::new(meta_page),
                 wal: RwLock::new(wal),
                 meta_map: RwLock::new(meta_map),
                 get_page_tx: Mutex::new(get_page_tx),
@@ -177,10 +175,11 @@ impl DB {
     }
 
     // TODO: update with async sync apporach
-    pub fn commit(
+    pub fn sync_begin(
         &self,
         new_pages: Vec<(PageId, Option<(Vec<u8>, PageDiff)>)>,
-    ) -> anyhow::Result<()> {
+        sync_seqn: u32,
+    ) -> anyhow::Result<u64> {
         // Steps are:
         // 0. Increase sequence number
         // 1. compute the WalBatch
@@ -192,7 +191,7 @@ impl DB {
         // 8. prune the wal
 
         let mut changed_meta_pages = HashSet::new();
-        let next_sequence_number = self.shared.meta_page.read().sequence_number() + 1;
+        let next_sequence_number = sync_seqn as u64;
         let mut wal_batch = WalBatch::new(next_sequence_number);
         let mut bucket_writes = Vec::new();
 
@@ -318,26 +317,6 @@ impl DB {
             },
         );
 
-        // update sequence number in metapage
-        self.shared
-            .meta_page
-            .write()
-            .set_sequence_number(next_sequence_number);
-
-        submit_and_wait_one(
-            &self.shared.io_sender,
-            &self.shared.commit_page_receiver,
-            IoCommand {
-                kind: IoKind::Write(
-                    self.shared.store.store_fd(),
-                    0,
-                    Box::new(self.shared.meta_page.read().to_page()),
-                ),
-                handle: COMMIT_HANDLE_INDEX,
-                user_data: 0, // unimportant
-            },
-        );
-
         // sync meta page change.
         submit_and_wait_one(
             &self.shared.io_sender,
@@ -349,9 +328,12 @@ impl DB {
             },
         );
 
+        Ok(prev_wal_size)
+    }
+
+    pub fn sync_end(&self, prev_wal_size: u64) -> anyhow::Result<()> {
         // clear the WAL.
         self.shared.wal.read().prune_front(prev_wal_size);
-
         Ok(())
     }
 }

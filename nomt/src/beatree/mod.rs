@@ -1,38 +1,31 @@
 use allocator::{PageNumber, FREELIST_EMPTY};
 use anyhow::{Context, Result};
-use branch::BRANCH_NODE_SIZE;
+use branch::{BranchId, BranchNode, BRANCH_NODE_SIZE};
+use index::Index;
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
+    fs::File,
     mem,
     ops::DerefMut,
-    os::{
-        fd::{AsRawFd as _, RawFd},
-        unix::fs::OpenOptionsExt,
-    },
     path::Path,
     sync::{Arc, Mutex},
 };
 
-use crate::io::{self, CompleteIo, IoCommand};
+use crate::io::Page;
 
-use crossbeam_channel::{Receiver, Sender};
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
-use meta::Meta;
 
 use self::{
     bbn::{BbnStoreCommitOutput, BbnStoreWriter},
     leaf::store::LeafStoreCommitOutput,
 };
 
-mod allocator;
+pub(crate) mod allocator;
 mod bbn;
-mod branch;
+pub(crate) mod branch;
 mod index;
 mod leaf;
-mod meta;
 mod ops;
-mod writeout;
 
 pub type Key = [u8; 32];
 
@@ -57,12 +50,6 @@ struct Sync {
     leaf_store_wr: LeafStoreWriter,
     leaf_store_rd: LeafStoreReader,
     bbn_store_wr: BbnStoreWriter,
-    sync_io_handle_index: usize,
-    sync_io_sender: Sender<IoCommand>,
-    sync_io_receiver: Receiver<CompleteIo>,
-    meta_file: File,
-    ln_file: File,
-    bbn_file: File,
 }
 
 impl Shared {
@@ -75,72 +62,31 @@ impl Shared {
 }
 
 impl Tree {
-    pub fn open(db_dir: impl AsRef<Path>) -> Result<Tree> {
+    pub fn open(
+        ln_freelist_pn: u32,
+        bbn_freelist_pn: u32,
+        ln_bump: u32,
+        bbn_bump: u32,
+        bbn_file: &File,
+        ln_file: &File,
+    ) -> Result<Tree> {
         const IO_IX_RD_LN_SHARED: usize = 0;
         const IO_IX_RD_LN_SYNC: usize = 1;
         const IO_IX_WR_LN: usize = 2;
         const IO_IX_BBN: usize = 3;
-        const IO_IX_SYNC: usize = 4;
-        const NUM_IO_HANDLES: usize = 5;
+        const NUM_IO_HANDLES: usize = 4;
 
         let (io_sender, io_recv) = crate::io::start_io_worker(NUM_IO_HANDLES, 3);
 
-        if !db_dir.as_ref().exists() {
-            use std::io::Write as _;
-
-            // Create the directory
-            std::fs::create_dir_all(db_dir.as_ref())?;
-            // Create the files
-            let ln_fd = File::create(db_dir.as_ref().join("ln"))?;
-            let bbn_fd = File::create(db_dir.as_ref().join("bbn"))?;
-            ln_fd.set_len(BRANCH_NODE_SIZE as u64)?;
-            bbn_fd.set_len(BRANCH_NODE_SIZE as u64)?;
-
-            let mut meta_fd = File::create(db_dir.as_ref().join("meta"))?;
-            let mut buf = [0u8; 4096];
-            Meta {
-                ln_freelist_pn: 0,
-                ln_bump: 1,
-                bbn_freelist_pn: 0,
-                bbn_bump: 1,
-            }
-            .encode_to(&mut buf[0..16]);
-            meta_fd.write_all(&buf)?;
-
-            // Sync files and the directory. I am not sure if syncing files is necessar, but it
-            // is necessary to make sure that the directory is synced.
-            meta_fd.sync_all()?;
-            ln_fd.sync_all()?;
-            bbn_fd.sync_all()?;
-            File::open(db_dir.as_ref())?.sync_all()?;
-        }
-
-        let bbn_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(db_dir.as_ref().join("bbn"))?;
-        let ln_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(db_dir.as_ref().join("ln"))?;
-        let meta_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(db_dir.as_ref().join("meta"))?;
-
-        let meta = meta::Meta::read(&meta_file)?;
-        let ln_freelist_pn = Some(meta.ln_freelist_pn)
+        let ln_freelist_pn = Some(ln_freelist_pn)
             .map(PageNumber)
             .filter(|&x| x != FREELIST_EMPTY);
-        let bbn_freelist_pn = Some(meta.bbn_freelist_pn)
+        let bbn_freelist_pn = Some(bbn_freelist_pn)
             .map(PageNumber)
             .filter(|&x| x != FREELIST_EMPTY);
 
-        let ln_bump = PageNumber(meta.ln_bump);
-        let bbn_bump = PageNumber(meta.bbn_bump);
+        let ln_bump = PageNumber(ln_bump);
+        let bbn_bump = PageNumber(bbn_bump);
 
         let (leaf_store_rd_shared, leaf_store_rd_sync, leaf_store_wr) = {
             let ln_file = ln_file.try_clone().unwrap();
@@ -200,19 +146,10 @@ impl Tree {
             secondary_staging: None,
         };
 
-        let sync_io_handle_index = IO_IX_SYNC;
-        let sync_io_sender = io_sender.clone();
-        let sync_io_receiver = io_recv[sync_io_handle_index].clone();
         let sync = Sync {
             leaf_store_wr,
             leaf_store_rd: leaf_store_rd_sync,
             bbn_store_wr,
-            sync_io_handle_index,
-            sync_io_sender,
-            sync_io_receiver,
-            meta_file,
-            ln_file,
-            bbn_file,
         };
 
         Ok(Tree {
@@ -263,7 +200,7 @@ impl Tree {
     /// Asynchronously dump all changes performed by commits to the underlying storage medium.
     ///
     /// Either blocks or panics if another sync is inflight.
-    pub fn sync(&self) {
+    pub fn prepare_sync(&self) -> WriteoutData {
         // Take the sync lock.
         //
         // That will exclude any other syncs from happening. This is a long running operation.
@@ -340,28 +277,22 @@ impl Tree {
             )
         };
 
-        let new_meta = Meta {
-            ln_freelist_pn,
-            ln_bump,
-            bbn_freelist_pn,
-            bbn_bump,
-        };
-
-        writeout::run(
-            sync.sync_io_sender.clone(),
-            sync.sync_io_handle_index,
-            sync.sync_io_receiver.clone(),
-            sync.bbn_file.as_raw_fd(),
-            sync.ln_file.as_raw_fd(),
-            sync.meta_file.as_raw_fd(),
+        WriteoutData {
             bbn,
             bbn_freelist_pages,
             bbn_extend_file_sz,
             ln,
             ln_extend_file_sz,
-            new_meta,
-        );
+            ln_freelist_pn,
+            ln_bump,
+            bbn_freelist_pn,
+            bbn_bump,
+            bbn_index,
+            obsolete_branches,
+        }
+    }
 
+    pub fn finish_sync(&self, bbn_index: Index, obsolete_branches: Vec<BranchId>) {
         // Take the shared lock again to complete the update to the new shared state
         let mut inner = self.shared.lock().unwrap();
         inner.secondary_staging = None;
@@ -372,13 +303,33 @@ impl Tree {
     }
 }
 
-#[allow(unused)]
-pub fn test_btree() {
-    let tree = Tree::open("test.store").unwrap();
-    let mut changeset = Vec::new();
-    let key = [1u8; 32];
-    changeset.push((key.clone(), Some(b"value1".to_vec())));
-    tree.commit(changeset);
-    assert_eq!(tree.lookup(key), Some(b"value1".to_vec()));
-    tree.sync();
+pub struct WriteoutData {
+    pub bbn: Vec<BranchNode>,
+    pub bbn_freelist_pages: Vec<(PageNumber, Box<Page>)>,
+    pub bbn_extend_file_sz: Option<u64>,
+    pub ln: Vec<(PageNumber, Box<Page>)>,
+    pub ln_extend_file_sz: Option<u64>,
+    pub ln_freelist_pn: u32,
+    pub ln_bump: u32,
+    pub bbn_freelist_pn: u32,
+    pub bbn_bump: u32,
+    pub bbn_index: Index,
+    pub obsolete_branches: Vec<BranchId>,
+}
+
+/// Creates the required files for the beatree.
+pub fn create(db_dir: impl AsRef<Path>) -> anyhow::Result<()> {
+    // Create the files.
+    //
+    // Size them to have an empty page at the beginning, this is reserved for the nil page.
+    let ln_fd = File::create(db_dir.as_ref().join("ln"))?;
+    let bbn_fd = File::create(db_dir.as_ref().join("bbn"))?;
+    ln_fd.set_len(BRANCH_NODE_SIZE as u64)?;
+    bbn_fd.set_len(BRANCH_NODE_SIZE as u64)?;
+
+    // Sync files and the directory. I am not sure if syncing files is necessar, but it
+    // is necessary to make sure that the directory is synced.
+    ln_fd.sync_all()?;
+    bbn_fd.sync_all()?;
+    Ok(())
 }
