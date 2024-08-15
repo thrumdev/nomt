@@ -11,6 +11,7 @@ pub struct Options {
     pub(crate) num_rings: usize,
     /// Enable or disable metrics collection.
     pub(crate) metrics: bool,
+    pub(crate) bitbox_num_pages: u32,
 }
 
 impl Default for Options {
@@ -20,6 +21,7 @@ impl Default for Options {
             fetch_concurrency: 1,
             num_rings: 3,
             metrics: false,
+            bitbox_num_pages: 64_000,
         }
     }
 }
