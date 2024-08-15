@@ -11,7 +11,7 @@ impl NomtDB {
         // Define the options used to open NOMT
         let mut opts = Options::new();
         opts.path(NOMT_DB_FOLDER);
-        opts.fetch_concurrency(1);
+        opts.commit_concurrency(1);
 
         // Open NOMT database, it will create the folder if it does not exist
         let nomt = Nomt::open(opts)?;

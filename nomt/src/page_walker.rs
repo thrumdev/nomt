@@ -96,7 +96,8 @@ impl<H: NodeHasher> PageWalker<H> {
     /// Create a new [`PageWalker`], with an optional parent page for constraining operations
     /// to a subsection of the page tree.
     pub fn new(root: Node, page_cache: PageCache, parent_page: Option<PageId>) -> Self {
-        let parent_page = parent_page.map(|id| (id.clone(), page_cache.retrieve_sync(id, false)));
+        // UNWRAP: the parent page must be cached.
+        let parent_page = parent_page.map(|id| (id.clone(), page_cache.get(id).unwrap()));
 
         PageWalker {
             page_cache,
@@ -222,8 +223,11 @@ impl<H: NodeHasher> PageWalker<H> {
 
         assert!(!trie::is_internal(&node));
 
-        // clear leaf children before overwriting terminal.
-        self.write_leaf_children(write_pass, None, false);
+        // clear leaf children before overwriting terminal, but the leaf-children page
+        // is only guaranteed to be in cache if the previous node is a leaf.
+        if trie::is_leaf(&node) {
+            self.write_leaf_children(write_pass, None, false);
+        }
 
         // replace sub-trie at the given position
         nomt_core::update::build_trie::<H>(
@@ -285,9 +289,10 @@ impl<H: NodeHasher> PageWalker<H> {
     fn down_fresh(&mut self, bit_path: &BitSlice<u8, Msb0>) {
         for bit in bit_path.iter().by_vals() {
             if self.position.is_root() {
+                // UNWRAP: all pages on the path to the node should be in the cache.
                 self.stack.push((
                     ROOT_PAGE_ID,
-                    self.page_cache.retrieve_sync(ROOT_PAGE_ID, true),
+                    get_page(&self.page_cache, ROOT_PAGE_ID).unwrap(),
                 ));
             } else if self.position.depth_in_page() == DEPTH {
                 // UNWRAP: the only legal positions are below the "parent" (root or parent_page)
@@ -297,9 +302,10 @@ impl<H: NodeHasher> PageWalker<H> {
 
                 // UNWRAP: we never overflow the page stack.
                 let child_page_id = parent_page_id.child_page_id(child_page_index).unwrap();
+
                 self.stack.push((
                     child_page_id.clone(),
-                    self.page_cache.retrieve_sync(child_page_id, true),
+                    self.page_cache.insert(child_page_id, None),
                 ));
             }
             self.position.down(bit);
@@ -489,7 +495,12 @@ impl<H: NodeHasher> PageWalker<H> {
         let page = self.stack.last().or(self.parent_page.as_ref());
         let (page, _, children) =
             crate::page_cache::locate_leaf_data(&self.position, page, |page_id| {
-                self.page_cache.retrieve_sync(page_id, false)
+                // TODO: this unwrap can fail if this is a sibling's leaf child.
+                // in this case, we should return something like `Err(FetchPage(id))`
+                // note that, at the time of writing, this is currently protected because commit
+                // aggressively over-fetches sibling leaf child pages. but fixing that would mean
+                // we'd have to protect this somehow.
+                get_page(&self.page_cache, page_id).unwrap()
             });
 
         trie::LeafData {
@@ -508,7 +519,12 @@ impl<H: NodeHasher> PageWalker<H> {
         let page = self.stack.last().or(self.parent_page.as_ref());
         let (page, page_id, children) =
             crate::page_cache::locate_leaf_data(&self.position, page, |page_id| {
-                self.page_cache.retrieve_sync(page_id, hint_fresh)
+                if hint_fresh {
+                    self.page_cache.insert(page_id, None)
+                } else {
+                    // UNWRAP: all pages on the path to the position are in the cache.
+                    get_page(&self.page_cache, page_id).unwrap()
+                }
             });
 
         match leaf_data {
@@ -561,7 +577,8 @@ impl<H: NodeHasher> PageWalker<H> {
         let mut cur_ancestor = page_id;
         let mut push_count = 0;
         while Some(&cur_ancestor) != target.as_ref() {
-            let page = self.page_cache.retrieve_sync(cur_ancestor.clone(), false);
+            // UNWRAP: all pages on the path to the terminal are cached.
+            let page = get_page(&self.page_cache, cur_ancestor.clone()).unwrap();
             self.stack.push((cur_ancestor.clone(), page));
             cur_ancestor = cur_ancestor.parent_page_id();
             push_count += 1;
@@ -576,6 +593,20 @@ impl<H: NodeHasher> PageWalker<H> {
         // make it ascending.
         self.stack[start_len..start_len + push_count].reverse();
     }
+}
+
+#[cfg(not(test))]
+fn get_page(page_cache: &PageCache, page_id: PageId) -> Option<Page> {
+    page_cache.get(page_id)
+}
+
+#[cfg(test)]
+fn get_page(page_cache: &PageCache, page_id: PageId) -> Option<Page> {
+    if let Some(page) = page_cache.get(page_id.clone()) {
+        return Some(page);
+    }
+
+    Some(page_cache.insert(page_id, None))
 }
 
 #[cfg(test)]
@@ -607,7 +638,9 @@ mod tests {
     #[should_panic]
     fn advance_backwards_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options::new());
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
+        // TODO: prepopulate page cache with everything on the path? or just mock it somehow
+        // so our `get`s don't fail...
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
@@ -621,7 +654,7 @@ mod tests {
     #[should_panic]
     fn advance_same_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options::new());
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
@@ -634,7 +667,7 @@ mod tests {
     #[should_panic]
     fn advance_to_parent_page_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options::new());
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
@@ -647,7 +680,7 @@ mod tests {
     #[should_panic]
     fn advance_to_root_with_parent_page_panics() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options::new());
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
@@ -658,7 +691,7 @@ mod tests {
     #[test]
     fn compacts_and_updates_root() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options::new());
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
@@ -707,7 +740,7 @@ mod tests {
     #[test]
     fn sets_child_page_roots() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options::new());
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
@@ -786,7 +819,7 @@ mod tests {
     #[test]
     fn tracks_sibling_prev_values() {
         let root = trie::TERMINATOR;
-        let page_cache = PageCache::new_mocked(&crate::Options::new());
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
         let mut write_pass = page_cache.new_write_pass();
 
         let path_1 = key_path![0, 0, 0, 0];

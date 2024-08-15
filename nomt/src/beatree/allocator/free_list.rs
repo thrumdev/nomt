@@ -86,7 +86,9 @@ impl FreeList {
     /// Get a set of all pages tracked in the free-list. This is all free pages plus all the
     /// free-list pages themselves.
     pub fn all_tracked_pages(&self) -> BTreeSet<PageNumber> {
-        let pns = self.portions.iter()
+        let pns = self
+            .portions
+            .iter()
             .map(|&(ref pn, ref pns)| std::iter::once(pn).chain(pns))
             .flatten()
             .copied();
@@ -182,7 +184,9 @@ impl FreeList {
         if let Some(pn) = self.pop() {
             match self.released_portions.pop() {
                 Some(x) => {
-                    if let Some((new_head_pn, new_head_pns)) = self.portions.last_mut()
+                    if let Some((new_head_pn, new_head_pns)) = self
+                        .portions
+                        .last_mut()
                         .filter(|p| p.1.len() == MAX_PNS_PER_PAGE - 1)
                     {
                         // fix up fragmentation. only the second-to-last page can be fragmented,
@@ -201,7 +205,7 @@ impl FreeList {
                         // new page has already been allocated for this batch.
                         i = MAX_PNS_PER_PAGE;
                     }
-                },
+                }
                 None => {
                     new_full_portion = false;
 
@@ -224,8 +228,8 @@ impl FreeList {
         // therefore, the loop condition asks "do we still have items beyond the last page?"
         // while accounting for pops and pushes within the loop.
         while i < to_push.len() {
-            if let Some((ref mut head_pn, ref mut head_pns))
-                = self.portions.last_mut().filter(|_| new_full_portion)
+            if let Some((ref mut head_pn, ref mut head_pns)) =
+                self.portions.last_mut().filter(|_| new_full_portion)
             {
                 // just popped into a new portion (which we will edit). prepare it for rewrite
                 to_push.push(*head_pn);
@@ -240,7 +244,7 @@ impl FreeList {
                 // this is inescapable and is what causes fragmentation.
                 i += 1;
 
-                continue
+                continue;
             }
 
             match self.pop() {
@@ -279,7 +283,10 @@ impl FreeList {
             // the second condition is checking for the fragmentation described in the commit
             // doc comment. fragmentation can only occur in the second page and the head page
             // has a single item.
-            let new_head = self.portions.last().map_or(true, |h| h.1.len() % MAX_PNS_PER_PAGE == 0)
+            let new_head = self
+                .portions
+                .last()
+                .map_or(true, |h| h.1.len() % MAX_PNS_PER_PAGE == 0)
                 || i + 2 == to_push.len() && new_pages.peek().is_some();
 
             if new_head {
@@ -298,10 +305,7 @@ impl FreeList {
         encoded
     }
 
-    fn push(
-        &mut self,
-        pn: PageNumber,
-    ) {
+    fn push(&mut self, pn: PageNumber) {
         // UNWRAP: `push` is only called when head is not full.
         let head = self.portions.last_mut().unwrap();
         assert!(head.1.len() < MAX_PNS_PER_PAGE);
@@ -310,7 +314,10 @@ impl FreeList {
 
     fn encode_head(&self) -> Option<(PageNumber, Box<Page>)> {
         if let Some((head_pn, head_pns)) = self.portions.last() {
-            let prev_pn = self.portions.len().checked_sub(2)
+            let prev_pn = self
+                .portions
+                .len()
+                .checked_sub(2)
                 .map_or(FREELIST_EMPTY, |i| self.portions[i].0);
 
             Some((*head_pn, encode_free_list_page(prev_pn, &head_pns)))

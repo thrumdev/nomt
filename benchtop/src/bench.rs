@@ -23,7 +23,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             .unwrap_or(0),
         common_params.workload.percentage_cold,
     )?;
-    let fetch_concurrency = common_params.workload.fetch_concurrency;
+    let commit_concurrency = common_params.workload.commit_concurrency;
     let num_rings = common_params.workload.num_rings;
 
     let backends = if common_params.backends.is_empty() {
@@ -39,7 +39,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             backends,
             params.iterations,
             true,
-            fetch_concurrency,
+            commit_concurrency,
             num_rings,
         )
         .map(|_| ()),
@@ -50,7 +50,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             params.op_limit,
             params.time_limit,
             true,
-            fetch_concurrency,
+            commit_concurrency,
             num_rings,
         )
         .map(|_| ()),
@@ -68,7 +68,7 @@ pub fn bench_isolate(
     backends: Vec<Backend>,
     iterations: u64,
     print: bool,
-    fetch_concurrency: usize,
+    commit_concurrency: usize,
     num_rings: usize,
 ) -> Result<Vec<u64>> {
     let mut mean_results = vec![];
@@ -76,7 +76,7 @@ pub fn bench_isolate(
         let mut timer = Timer::new(format!("{}", backend));
 
         for _ in 0..iterations {
-            let mut db = backend.instantiate(true, fetch_concurrency, num_rings);
+            let mut db = backend.instantiate(true, commit_concurrency, num_rings);
             db.execute(None, &mut init);
             db.execute(Some(&mut timer), &mut *workload);
             db.print_metrics();
@@ -104,7 +104,7 @@ pub fn bench_sequential(
     op_limit: Option<u64>,
     time_limit: Option<u64>,
     print: bool,
-    fetch_concurrency: usize,
+    commit_concurrency: usize,
     num_rings: usize,
 ) -> Result<Vec<u64>> {
     if let (None, None) = (op_limit, time_limit) {
@@ -115,7 +115,7 @@ pub fn bench_sequential(
 
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
-        let mut db = backend.instantiate(true, fetch_concurrency, num_rings);
+        let mut db = backend.instantiate(true, commit_concurrency, num_rings);
 
         let mut elapsed_time = 0;
         let mut op_count = 0;

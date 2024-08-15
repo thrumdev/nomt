@@ -16,10 +16,6 @@ use nomt_core::{
 };
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::{collections::hash_map::Entry, fmt, num::NonZeroUsize, sync::Arc};
-use threadpool::ThreadPool;
-
-#[cfg(test)]
-use dashmap::DashMap;
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
 // of the rootless sub-binary tree stored in a page following this formula:
@@ -229,63 +225,6 @@ pub fn locate_leaf_data(
     }
 }
 
-/// Represents a fetch that is currently in progress.
-///
-/// A fetch can be in one of the following states:
-/// - Scheduled. The fetch is scheduled for execution but has not started yet.
-/// - Started. The db request has been issued but still waiting for the response.
-/// - Completed. The page has been fetched and the waiters are notified with the fetched page.
-struct InflightFetch {
-    page: Mutex<Option<Page>>,
-    ready: Condvar,
-}
-
-impl InflightFetch {
-    fn new() -> Self {
-        Self {
-            page: Mutex::new(None),
-            ready: Condvar::new(),
-        }
-    }
-
-    /// Notifies all the waiting parties that the page has been fetched and destroys this handle.
-    fn complete_and_notify(&self, p: Page) {
-        let mut page = self.page.lock();
-        if page.is_some() {
-            return;
-        }
-        *page = Some(p);
-        self.ready.notify_all();
-    }
-
-    /// Waits until the page is fetched and returns it.
-    fn wait(&self) -> Page {
-        let mut page = self.page.lock();
-        loop {
-            if let Some(ref page) = &*page {
-                return page.clone();
-            }
-            self.ready.wait(&mut page);
-        }
-    }
-}
-
-enum PageStore {
-    Real(Store),
-    #[cfg(test)]
-    Mock(DashMap<PageId, Vec<u8>>),
-}
-
-impl PageStore {
-    fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
-        match self {
-            PageStore::Real(s) => s.load_page(page_id),
-            #[cfg(test)]
-            PageStore::Mock(map) => Ok(map.get(&page_id).map(|x| x.clone())),
-        }
-    }
-}
-
 // Each shard has its own domain and handles a sub-tree of the page tree, defined by a
 // continuous set of children of the root page.
 struct CacheShard {
@@ -295,7 +234,6 @@ struct CacheShard {
 }
 
 struct CacheShardLocked {
-    inflight: FxHashMap<PageId, Arc<InflightFetch>>,
     cached: LruCache<PageId, Arc<PageData>, FxBuildHasher>,
 }
 
@@ -311,11 +249,6 @@ struct Shared {
     shards: Vec<CacheShard>,
     root_page: RwLock<Arc<PageData>>,
     page_rw_pass_domain: RwPassDomain,
-    store: PageStore,
-    /// The thread pool used for fetching pages from the store.
-    ///
-    /// Used for limiting the number of concurrent page fetches.
-    fetch_tp: ThreadPool,
     metrics: Metrics,
 }
 
@@ -352,7 +285,6 @@ fn make_shards(num_shards: usize) -> Vec<CacheShard> {
         .map(|(region, count)| CacheShard {
             region,
             locked: Mutex::new(CacheShardLocked {
-                inflight: FxHashMap::default(),
                 cached: LruCache::unbounded_with_hasher(FxBuildHasher::default()),
             }),
             // UNWRAP: both factors are non-zero
@@ -370,8 +302,7 @@ pub enum ShardIndex {
     Shard(usize),
 }
 
-/// The page-cache provides an in-memory layer between the user and the underyling DB.
-/// It stores full pages and can be shared between threads.
+/// The page-cache stores full pages and can be shared between threads.
 ///
 /// It has a sharded representation for efficient concurrent access.
 #[derive(Clone)]
@@ -380,50 +311,24 @@ pub struct PageCache {
 }
 
 impl PageCache {
-    /// Create a new `PageCache` atop the provided [`Store`].
-    pub fn new(store: Store, o: &Options, metrics: Metrics) -> anyhow::Result<Self> {
-        let fetch_tp = threadpool::Builder::new()
-            .num_threads(o.fetch_concurrency)
-            .thread_name("nomt-page-fetch".to_string())
-            .build();
-
+    /// Create a new `PageCache`.
+    pub fn new(
+        root_page_data: Option<Vec<u8>>,
+        o: &Options,
+        metrics: impl Into<Option<Metrics>>,
+    ) -> Self {
         let domain = RwPassDomain::new();
-        let root_page = store.load_page(ROOT_PAGE_ID)?.map_or_else(
+        let root_page = root_page_data.map_or_else(
             || PageData::pristine_empty(&domain, ShardIndex::Root),
             |data| PageData::pristine_with_data(&domain, ShardIndex::Root, data),
         );
 
-        Ok(Self {
-            shared: Arc::new(Shared {
-                shards: make_shards(o.fetch_concurrency),
-                root_page: RwLock::new(Arc::new(root_page)),
-                page_rw_pass_domain: domain,
-                store: PageStore::Real(store),
-                fetch_tp,
-                metrics,
-            }),
-        })
-    }
-
-    /// Create a new `PageCache` with a mocked store for testing.
-    #[cfg(test)]
-    pub fn new_mocked(o: &Options) -> Self {
-        let fetch_tp = threadpool::Builder::new()
-            .num_threads(o.fetch_concurrency)
-            .thread_name("nomt-page-fetch".to_string())
-            .build();
-
-        let domain = RwPassDomain::new();
-        let root_page = PageData::pristine_empty(&domain, ShardIndex::Root);
-
         Self {
             shared: Arc::new(Shared {
-                shards: make_shards(o.fetch_concurrency),
+                shards: make_shards(o.commit_concurrency),
                 root_page: RwLock::new(Arc::new(root_page)),
                 page_rw_pass_domain: domain,
-                store: PageStore::Mock(DashMap::new()),
-                fetch_tp,
-                metrics: Metrics::new(false),
+                metrics: metrics.into().unwrap_or(Metrics::new(false)),
             }),
         }
     }
@@ -444,214 +349,61 @@ impl PageCache {
         }
     }
 
-    /// Initiates retrieval of the page data at the given [`PageId`] asynchronously.
+    /// Query the cache for the page data at the given [`PageId`].
     ///
-    /// If the page is already in the cache, this method does nothing. Otherwise, it fetches the
-    /// page from the underlying store and caches it.
-    pub fn prepopulate(&self, page_id: PageId) {
+    /// Returns `None` if not in the cache.
+    pub fn get(&self, page_id: PageId) -> Option<Page> {
         self.shared.metrics.count(Metric::PageRequests);
-
-        let shard_index = match self.shard_index_for(&page_id) {
-            None => return, // root is always populated.
-            Some(index) => index,
-        };
-
-        let mut shard = self.shard(shard_index).locked.lock();
-
-        if !shard.cached.contains(&page_id) {
-            let v = match shard.inflight.entry(page_id.clone()) {
-                Entry::Vacant(v) => v,
-                Entry::Occupied(_) => return, // fetch in-flight already.
-            };
-
-            self.shared.metrics.count(Metric::PageCacheMisses);
-
-            // Nope, then we need to fetch the page from the store.
-            let inflight = Arc::new(InflightFetch::new());
-            v.insert(inflight.clone());
-            let task = {
-                let shared = self.shared.clone();
-                move || {
-                    let _maybe_guard = shared.metrics.record(Metric::PageFetchTime);
-
-                    // the page fetch has been pre-empted in the meantime. avoid querying.
-                    if Arc::strong_count(&inflight) == 1 {
-                        return;
-                    }
-
-                    let entry = shared
-                        .store
-                        .load_page(page_id.clone())
-                        .expect("db load failed") // TODO: handle the error
-                        .map_or_else(
-                            || {
-                                PageData::pristine_empty(
-                                    &shared.page_rw_pass_domain,
-                                    ShardIndex::Shard(shard_index),
-                                )
-                            },
-                            |data| {
-                                PageData::pristine_with_data(
-                                    &shared.page_rw_pass_domain,
-                                    ShardIndex::Shard(shard_index),
-                                    data,
-                                )
-                            },
-                        );
-                    let entry = Arc::new(entry);
-
-                    let mut shard = shared.shards[shard_index].locked.lock();
-                    if shard.cached.contains(&page_id) {
-                        // We race against pre-emption in the case other code pre-empts us by
-                        // allocating an empty page.
-                        return;
-                    }
-
-                    // UNWRAP: if we haven't been pre-empted, this can not have been
-                    // removed.
-                    let inflight = shard.inflight.remove(&page_id).unwrap();
-
-                    shard.cached.push(page_id.clone(), entry.clone());
-                    inflight.complete_and_notify(Page { inner: entry });
-                }
-            };
-            self.shared.fetch_tp.execute(task);
-        }
-    }
-
-    /// Pre-empt a previously submitted prepopulation request on a best-effort basis by returning
-    /// an empty page to all waiters. This should only be called when it is known that the page
-    /// will definitely not exist.
-    ///
-    /// This is not guaranteed to cancel the request if it is already being processed by a
-    /// DB thread.
-    pub fn cancel_prepopulate(&self, page_id: PageId) {
-        let shard_index = match self.shard_index_for(&page_id) {
-            None => return, // root always populated.
-            Some(i) => i,
-        };
-
-        let mut shard = self.shard(shard_index).locked.lock();
-        let page_data = Arc::new(PageData::pristine_empty(
-            &self.shared.page_rw_pass_domain,
-            ShardIndex::Shard(shard_index),
-        ));
-
-        let Some(inflight) = shard.inflight.remove(&page_id) else {
-            return;
-        };
-
-        shard.cached.push(page_id.clone(), page_data.clone());
-        inflight.complete_and_notify(Page { inner: page_data });
-    }
-
-    /// Retrieves the page data at the given [`PageId`] synchronously.
-    ///
-    /// If the page is in the cache, it is returned immediately. If the page is not in the cache, it
-    /// is fetched from the underlying store and returned. If `hint_fresh` is true, this immediately
-    /// returns a blank page.
-    ///
-    /// This method is blocking, but doesn't suffer from the channel overhead.
-    pub fn retrieve_sync(&self, page_id: PageId, hint_fresh: bool) -> Page {
         let shard_index = match self.shard_index_for(&page_id) {
             None => {
                 let page_data = self.shared.root_page.read().clone();
-                return Page { inner: page_data };
+                return Some(Page { inner: page_data });
             }
             Some(i) => i,
         };
 
         let mut shard = self.shard(shard_index).locked.lock();
-        if let Some(page) = shard.cached.get(&page_id) {
-            return Page {
+        match shard.cached.get(&page_id) {
+            Some(page) => Some(Page {
                 inner: page.clone(),
-            };
+            }),
+            None => {
+                self.shared.metrics.record(Metric::PageCacheMisses);
+                None
+            }
         }
+    }
 
-        let shard_mut = &mut *shard;
-        let existing_inflight = if let Some(inflight) = shard_mut.inflight.get(&page_id) {
-            if hint_fresh {
-                // pre-empt stale fetch.
+    /// Insert a page into the cache by its data.
+    /// This overwrites any page which was already present. Returns the new `Page` object.
+    pub fn insert(&self, page_id: PageId, page: Option<Vec<u8>>) -> Page {
+        let domain = &self.shared.page_rw_pass_domain;
+        let shard_index = match self.shard_index_for(&page_id) {
+            None => {
+                let mut page_data = self.shared.root_page.write();
+                *page_data = page
+                    .map_or_else(
+                        || PageData::pristine_empty(domain, ShardIndex::Root),
+                        |data| PageData::pristine_with_data(domain, ShardIndex::Root, data),
+                    )
+                    .into();
 
-                let page_data = Arc::new(PageData::pristine_empty(
-                    &self.shared.page_rw_pass_domain,
-                    ShardIndex::Shard(shard_index),
-                ));
-
-                let fresh_page = Page {
+                return Page {
                     inner: page_data.clone(),
                 };
-
-                shard_mut.cached.push(page_id.clone(), page_data.clone());
-                inflight.complete_and_notify(fresh_page.clone());
-                shard_mut.inflight.remove(&page_id);
-                return fresh_page;
-            } else {
-                Some(inflight.clone())
             }
-        } else if hint_fresh {
-            let page_data = Arc::new(PageData::pristine_empty(
-                &self.shared.page_rw_pass_domain,
-                ShardIndex::Shard(shard_index),
-            ));
-
-            let fresh_page = Page {
-                inner: page_data.clone(),
-            };
-            shard_mut.cached.push(page_id, page_data);
-            return fresh_page;
-        } else {
-            None
+            Some(i) => i,
         };
 
-        // do not wait with shard lock held; deadlock
-        drop(shard);
-
-        if let Some(inflight) = existing_inflight {
-            let page = inflight.wait();
-            return page;
-        }
-
-        let entry = self
-            .shared
-            .store
-            .load_page(page_id.clone())
-            .expect("db load failed") // TODO: handle the error
-            .map_or_else(
-                || {
-                    PageData::pristine_empty(
-                        &self.shared.page_rw_pass_domain,
-                        ShardIndex::Shard(shard_index),
-                    )
-                },
-                |data| {
-                    PageData::pristine_with_data(
-                        &self.shared.page_rw_pass_domain,
-                        ShardIndex::Shard(shard_index),
-                        data,
-                    )
-                },
-            );
-
-        let entry = Arc::new(entry);
-
-        // re-acquire lock after doing I/O
         let mut shard = self.shard(shard_index).locked.lock();
+        let page_data = Arc::new(page.map_or_else(
+            || PageData::pristine_empty(domain, ShardIndex::Shard(shard_index)),
+            |data| PageData::pristine_with_data(domain, ShardIndex::Shard(shard_index), data),
+        ));
 
-        if let Some(page) = shard.cached.peek(&page_id) {
-            // pre-empted while lock wasn't held
-            return Page {
-                inner: page.clone(),
-            };
-        }
+        shard.cached.push(page_id, page_data.clone());
 
-        shard.cached.push(page_id.clone(), entry.clone());
-        if let Some(inflight) = shard.inflight.remove(&page_id) {
-            inflight.complete_and_notify(Page {
-                inner: entry.clone(),
-            });
-        }
-        Page { inner: entry }
+        Page { inner: page_data }
     }
 
     /// Acquire a read pass for all pages in the cache.

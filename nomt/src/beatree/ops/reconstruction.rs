@@ -40,7 +40,12 @@ pub fn reconstruct(
             continue;
         }
 
-        ensure!(view.bbn_pn() == pn, "pn mismatch {} != {}", view.bbn_pn(), pn);
+        ensure!(
+            view.bbn_pn() == pn,
+            "pn mismatch {} != {}",
+            view.bbn_pn(),
+            pn
+        );
 
         let new_branch_id = bnp.allocate();
 
@@ -60,7 +65,10 @@ pub fn reconstruct(
         }
 
         if let Some(_) = index.insert(separator, new_branch_id) {
-            bail!("2 branch nodes with same separator, separator={:?}", separator);
+            bail!(
+                "2 branch nodes with same separator, separator={:?}",
+                separator
+            );
         }
     }
     Ok(index)
