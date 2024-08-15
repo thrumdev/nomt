@@ -2208,7 +2208,6 @@ dependencies = [
  "nomt-core",
  "parking_lot",
  "rand",
- "rocksdb",
  "slab",
  "threadpool",
 ]

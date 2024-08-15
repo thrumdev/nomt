@@ -14,7 +14,6 @@ license.workspace = true
 anyhow = "1.0.81"
 nomt-core = { path = "../core", features = ["std"] }
 parking_lot = { version = "0.12.1", features = ["arc_lock", "send_guard"] }
-rocksdb = "0.21.0"
 threadpool = "1.8.1"
 bitvec = { version = "1" }
 blake3 = "1.5.1"
