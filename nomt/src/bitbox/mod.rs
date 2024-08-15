@@ -52,7 +52,7 @@ impl DB {
 
         if !db_path.is_file() {
             std::fs::create_dir_all(path).unwrap();
-            store::create(db_path.clone(), 2_000_000).unwrap();
+            store::create(db_path.clone(), 64_000).unwrap();
         }
 
         let (store, meta_page, meta_map) = match store::Store::open(db_path) {

@@ -178,7 +178,7 @@ impl FreeList {
 
         // allocate a new page for rewriting the head (if any).
         let mut new_full_portion = true;
-        let mut i = MAX_PNS_PER_PAGE;
+        let mut i;
         if let Some(pn) = self.pop() {
             match self.released_portions.pop() {
                 Some(x) => {
@@ -192,11 +192,14 @@ impl FreeList {
                         to_push.push(x);
                         *new_head_pn = pn;
                         new_full_portion = false;
-                        i -= new_head_pns.len();
+                        i = MAX_PNS_PER_PAGE - new_head_pns.len();
                     } else {
                         // previous page was full or doesn't exist.
                         to_push.push(x);
                         new_pages.push(pn);
+
+                        // new page has already been allocated for this batch.
+                        i = MAX_PNS_PER_PAGE;
                     }
                 },
                 None => {
@@ -209,9 +212,12 @@ impl FreeList {
 
                     // head is partially full. position cursor at the number of items needed to
                     // fill it.
-                    i -= head_pns.len();
+                    i = MAX_PNS_PER_PAGE - head_pns.len();
                 }
             }
+        } else {
+            // nothing popped, defer to loop to create the page for the next section.
+            i = 0;
         };
 
         // loop invariant: free list len + i is always divisible by MAX_PNS_PER_PAGE.
