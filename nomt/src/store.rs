@@ -6,11 +6,7 @@ use nomt_core::{
     trie::{KeyPath, Node, TERMINATOR},
 };
 use parking_lot::Mutex;
-use rocksdb::{self, ColumnFamilyDescriptor, WriteBatch};
 use std::sync::Arc;
-
-static FLAT_KV_CF: &str = "flat_kv";
-static METADATA_CF: &str = "metadata";
 
 /// This is a lightweight handle and can be cloned cheaply.
 #[derive(Clone)]
@@ -28,9 +24,7 @@ impl Store {
     /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options) -> anyhow::Result<Self> {
         let values = beatree::Tree::open(&o.path)?;
-
         let pages = bitbox::DB::open(o.num_rings, o.path.clone()).unwrap();
-
         Ok(Self {
             shared: Arc::new(Shared { values, pages, root: TERMINATOR.into() }),
         })
@@ -55,7 +49,6 @@ impl Store {
     /// Create a new transaction to be applied against this database.
     pub fn new_tx(&self) -> Transaction {
         Transaction {
-            shared: self.shared.clone(),
             batch: Vec::new(),
             new_pages: vec![],
             new_root: None,
@@ -79,7 +72,6 @@ impl Store {
 
 /// An atomic transaction to be applied against th estore with [`Store::commit`].
 pub struct Transaction {
-    shared: Arc<Shared>,
     batch: Vec<(KeyPath, Option<Vec<u8>>)>,
     new_pages: Vec<(PageId, Option<(Vec<u8>, PageDiff)>)>,
     new_root: Option<Node>,
