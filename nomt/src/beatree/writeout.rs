@@ -260,7 +260,6 @@ struct BbnWriteOut {
     free_list_pages: Vec<(PageNumber, Box<Page>)>,
     // Initially, set to the len of `bbn`. Each completion will decrement this.
     remaining: usize,
-    should_fsync: bool,
 }
 
 impl BbnWriteOut {
@@ -344,7 +343,6 @@ struct LnWriteOut {
     ln_extend_file_sz: Option<u64>,
     ln: Vec<(PageNumber, Box<Page>)>,
     ln_remaining: usize,
-    should_fsync: bool,
 }
 
 impl LnWriteOut {

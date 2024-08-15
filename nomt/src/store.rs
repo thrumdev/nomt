@@ -8,7 +8,6 @@ use nomt_core::{
 use parking_lot::Mutex;
 use rocksdb::{self, ColumnFamilyDescriptor, WriteBatch};
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 static FLAT_KV_CF: &str = "flat_kv";
 static METADATA_CF: &str = "metadata";
