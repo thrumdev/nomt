@@ -94,7 +94,7 @@ impl Store {
 }
 
 fn expected_file_len(num_pages: u32) -> u64 {
-    (num_meta_byte_pages(num_pages) + num_pages) as u64 * PAGE_SIZE as u64
+    (1 + num_meta_byte_pages(num_pages) + num_pages) as u64 * PAGE_SIZE as u64
 }
 
 fn num_meta_byte_pages(num_pages: u32) -> u32 {
@@ -111,8 +111,8 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     let store_path = path.join("ht");
     let mut file = OpenOptions::new().append(true).create(true).open(store_path)?;
 
-    // number of pages + pages required for meta bits.
-    let page_count = num_pages + num_meta_byte_pages(num_pages);
+    // dummy page + number of pages + pages required for meta bits.
+    let page_count = 1 + num_pages + num_meta_byte_pages(num_pages);
 
     let mut pages_remaining = page_count as usize;
     let zero_buf = vec![0u8; PAGE_SIZE * WRITE_BATCH_SIZE];
@@ -127,7 +127,7 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     file.sync_all()?;
     println!(
         "Created file with {} total pages in {}ms",
-        page_count + 1,
+        page_count,
         start.elapsed().as_millis()
     );
     Ok(())
