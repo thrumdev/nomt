@@ -1,10 +1,7 @@
 #[cfg(not(target_family = "unix"))]
 std::compile_error!("NOMT only supports Unix-based OSs");
 
-#[cfg(not(target_os = "linux"))]
-std::compile_error!("temporary until unix support is achieved");
-
-use crossbeam_channel::{Sender, Receiver};
+use crossbeam_channel::{Receiver, Sender};
 use std::{
     ops::{Deref, DerefMut},
     os::fd::RawFd,
@@ -12,6 +9,10 @@ use std::{
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
+mod platform;
+
+#[cfg(not(target_os = "linux"))]
+#[path = "unix.rs"]
 mod platform;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -38,7 +39,6 @@ impl Page {
         Self([0; PAGE_SIZE])
     }
 }
-
 
 pub type HandleIndex = usize;
 
