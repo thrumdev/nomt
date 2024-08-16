@@ -2,7 +2,7 @@ use crossbeam::channel::{Receiver, Sender};
 use nomt_core::page_id::PageId;
 use parking_lot::RwLock;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -26,9 +26,12 @@ mod store;
 mod wal;
 
 const LOAD_PAGE_HANDLE_INDEX: usize = 0;
-const LOAD_VALUE_HANDLE_INDEX: usize = 1;
-const COMMIT_HANDLE_INDEX: usize = 2;
-const N_WORKER: usize = 3;
+const COMMIT_HANDLE_INDEX: usize = 1;
+const NUM_IO_HANDLES: usize = 2;
+
+/// The index of a bucket within the map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketIndex(u64);
 
 pub struct DB {
     shared: Arc<Shared>,
@@ -39,7 +42,7 @@ pub struct Shared {
     // TODO: probably RwLock can be avoided being used only during commit
     wal: RwLock<WalWriter>,
     meta_map: RwLock<MetaMap>,
-    // channel used to send requrest to the dispatcher
+    // channel used to send requests to the dispatcher
     get_page_tx: Mutex<Sender<(u64 /*bucket*/, Sender<Page>)>>,
     io_sender: Sender<IoCommand>,
     commit_page_receiver: Receiver<CompleteIo>,
@@ -103,19 +106,18 @@ impl DB {
         };
 
         // Spawn io_workers
-        let (io_sender, io_receivers) = crate::io::start_io_worker(N_WORKER, num_rings);
+        let (io_sender, io_receivers) = crate::io::start_io_worker(NUM_IO_HANDLES, num_rings);
 
         let load_page_sender = io_sender.clone();
         let load_page_receiver = io_receivers[LOAD_PAGE_HANDLE_INDEX].clone();
-        let _load_value_receiver = io_receivers[LOAD_VALUE_HANDLE_INDEX].clone();
         let commit_page_receiver = io_receivers[COMMIT_HANDLE_INDEX].clone();
 
         // Spawn PageRequest dispatcher
         let (get_page_tx, get_page_rx) = crossbeam::channel::unbounded();
 
         let dispatcher_tp = threadpool::Builder::new()
-            .num_threads(N_WORKER)
-            .thread_name("nomt-io-dispather".to_string())
+            .num_threads(NUM_IO_HANDLES)
+            .thread_name("nomt-io-dispatcher".to_string())
             .build();
 
         dispatcher_tp.execute(page_dispatcher_task(
@@ -138,18 +140,21 @@ impl DB {
         })
     }
 
-    pub fn get(&self, page_id: &PageId) -> anyhow::Result<Option<Vec<u8>>> {
-        self.inner_get(&page_id).map(|(_bucket, data)| data)
+    /// Return a bucket allocator, used to determine the buckets which any newly inserted pages
+    /// will clear.
+    pub fn bucket_allocator(&self) -> BucketAllocator {
+        BucketAllocator {
+            shared: self.shared.clone(),
+            changed_buckets: HashMap::new(),
+        }
     }
 
-    // returns bucket and data
-    //
-    // looking for a key only the key itself or an empty bucket could stop the search
-    fn inner_get(&self, page_id: &PageId) -> anyhow::Result<(ProbeSequence, Option<Vec<u8>>)> {
+    pub fn get(&self, page_id: &PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
         let mut probe_seq = ProbeSequence::new(page_id, &self.shared.meta_map.read());
 
         loop {
             match probe_seq.next(&self.shared.meta_map.read()) {
+                ProbeResult::Tombstone(_) => continue,
                 ProbeResult::PossibleHit(bucket) => {
                     // if this could be a match we need to fetch the page and check its id
 
@@ -166,10 +171,10 @@ impl DB {
                     };
 
                     if &page[PAGE_SIZE - 32..] == page_id.encode() {
-                        break Ok((probe_seq, Some(page.to_vec())));
+                        break Ok(Some((page.to_vec(), BucketIndex(bucket))));
                     }
                 }
-                ProbeResult::Emtpy(_bucket) => break Ok((probe_seq, None)),
+                ProbeResult::Empty(_bucket) => break Ok(None),
             }
         }
     }
@@ -177,7 +182,7 @@ impl DB {
     // TODO: update with async sync apporach
     pub fn sync_begin(
         &self,
-        new_pages: Vec<(PageId, Option<(Vec<u8>, PageDiff)>)>,
+        changes: Vec<(PageId, BucketIndex, Option<(Vec<u8>, PageDiff)>)>,
         sync_seqn: u32,
     ) -> anyhow::Result<u64> {
         // Steps are:
@@ -190,12 +195,15 @@ impl DB {
         // 7. write meta page and fsync
         // 8. prune the wal
 
+        let mut wal = self.shared.wal.write();
+        let mut meta_map = self.shared.meta_map.write();
+
         let mut changed_meta_pages = HashSet::new();
         let next_sequence_number = sync_seqn as u64;
         let mut wal_batch = WalBatch::new(next_sequence_number);
         let mut bucket_writes = Vec::new();
 
-        for (page_id, page_info) in new_pages {
+        for (page_id, BucketIndex(bucket), page_info) in changes {
             // let's extract its bucket
             match page_info {
                 Some((raw_page, page_diff)) => {
@@ -205,28 +213,13 @@ impl DB {
                     page[..raw_page.len()].copy_from_slice(&raw_page);
                     page[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
 
-                    // This could be either an update or an insertion.
-                    // Thus, we first need to check if the key is present.
-                    // If so, it will be updated; otherwise, the page must be inserted
-                    // and it will be inserted into the first tombstone encountered
-                    // or in the first empty page found.
-
-                    let Ok((probe_seq, maybe_old_page)) = self.inner_get(&page_id) else {
-                        panic!("Impossible insert element into map")
-                    };
-
-                    let bucket = match maybe_old_page {
-                        Some(_) => probe_seq.bucket(),
-                        None => probe_seq.tombstone.unwrap_or_else(|| probe_seq.bucket()),
-                    };
-
                     // update meta map with new info
-                    self.shared
-                        .meta_map
-                        .write()
-                        .set_full(bucket as usize, probe_seq.hash);
-                    changed_meta_pages
-                        .insert(self.shared.meta_map.read().page_index(bucket as usize));
+                    let hash = hash_page_id(&page_id);
+                    let meta_map_changed = meta_map.hint_not_match(bucket as usize, hash);
+                    if meta_map_changed {
+                        meta_map.set_full(bucket as usize, hash);
+                        changed_meta_pages.insert(meta_map.page_index(bucket as usize));
+                    }
 
                     // fill the WalBatch and the pages that need to be written to disk
                     wal_batch.append_entry(WalEntry::Update {
@@ -239,13 +232,8 @@ impl DB {
                     bucket_writes.push((bucket, page));
                 }
                 None => {
-                    // the page must be deleted
-                    let Ok((probe_seq, Some(_old_page))) = self.inner_get(&page_id) else {
-                        panic!("Not existing pages is being eliminated");
-                    };
-                    let bucket = probe_seq.bucket() as usize;
-                    self.shared.meta_map.write().set_tombstone(bucket);
-                    changed_meta_pages.insert(self.shared.meta_map.read().page_index(bucket));
+                    meta_map.set_tombstone(bucket as usize);
+                    changed_meta_pages.insert(meta_map.page_index(bucket as usize));
 
                     wal_batch.append_entry(WalEntry::Clear {
                         bucket_index: bucket as u64,
@@ -254,9 +242,9 @@ impl DB {
             };
         }
 
-        let prev_wal_size = self.shared.wal.read().file_size();
+        let prev_wal_size = wal.file_size();
         wal_batch.data().len();
-        self.shared.wal.write().apply_batch(&wal_batch).unwrap();
+        wal.apply_batch(&wal_batch).unwrap();
 
         let mut submitted: u32 = 0;
         let mut completed: u32 = 0;
@@ -280,7 +268,7 @@ impl DB {
         // apply changed meta pages
         for changed_meta_page in changed_meta_pages {
             let mut buf = Box::new(Page::zeroed());
-            buf[..].copy_from_slice(self.shared.meta_map.read().page_slice(changed_meta_page));
+            buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
             let command = IoCommand {
                 kind: IoKind::Write(
                     self.shared.store.store_fd(),
@@ -333,8 +321,58 @@ impl DB {
 
     pub fn sync_end(&self, prev_wal_size: u64) -> anyhow::Result<()> {
         // clear the WAL.
-        self.shared.wal.read().prune_front(prev_wal_size);
+        let wal = self.shared.wal.write();
+        wal.prune_front(prev_wal_size);
         Ok(())
+    }
+}
+
+/// Helper used in constructing a transaction. Used for finding buckets in which to write pages.
+pub struct BucketAllocator {
+    shared: Arc<Shared>,
+    // true: occupied. false: vacated
+    changed_buckets: HashMap<u64, bool>,
+}
+
+impl BucketAllocator {
+    /// Allocate a bucket for a page which is known not to exist in the hash-table.
+    ///
+    /// `allocate` and `free` must be called in the same order that items are passed to `commit`,
+    /// or pages may silently disappear later.
+    pub fn allocate(&mut self, page_id: PageId) -> BucketIndex {
+        let meta_map = self.shared.meta_map.read();
+        let mut probe_seq = ProbeSequence::new(&page_id, &meta_map);
+
+        loop {
+            match probe_seq.next(&meta_map) {
+                ProbeResult::PossibleHit(bucket) => {
+                    if self
+                        .changed_buckets
+                        .get(&bucket)
+                        .map_or(false, |full| !full)
+                    {
+                        self.changed_buckets.insert(bucket, true);
+                        return BucketIndex(bucket);
+                    }
+                }
+                ProbeResult::Tombstone(bucket) => {
+                    if self.changed_buckets.get(&bucket).map_or(true, |full| !full) {
+                        self.changed_buckets.insert(bucket, true);
+                        return BucketIndex(bucket);
+                    }
+                }
+                ProbeResult::Empty(bucket) => {
+                    self.changed_buckets.insert(bucket, true);
+                    return BucketIndex(bucket);
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Free a bucket which is known to be occupied by the given page ID.
+    pub fn free(&mut self, bucket_index: BucketIndex) {
+        self.changed_buckets.insert(bucket_index.0, false);
     }
 }
 
@@ -408,33 +446,33 @@ fn page_dispatcher_task(
     }
 }
 
+fn hash_page_id(page_id: &PageId) -> u64 {
+    let mut buf = [0u8; 8];
+    // TODO: the seed of the store should be used
+    buf.copy_from_slice(&blake3::hash(&page_id.encode()).as_bytes()[..8]);
+    u64::from_le_bytes(buf)
+}
+
 #[derive(Clone, Copy)]
 struct ProbeSequence {
     hash: u64,
     bucket: u64,
     step: u64,
-    tombstone: Option<u64>,
 }
 
 pub enum ProbeResult {
     PossibleHit(u64),
-    Emtpy(u64),
+    Empty(u64),
+    Tombstone(u64),
 }
 
 impl ProbeSequence {
     pub fn new(page_id: &PageId, meta_map: &MetaMap) -> Self {
-        let hash = {
-            let mut buf = [0; 8];
-            // TODO: the seed of the store should be used
-            buf.copy_from_slice(&blake3::hash(&page_id.encode()).as_bytes()[..8]);
-            u64::from_le_bytes(buf)
-        };
-
+        let hash = hash_page_id(page_id);
         Self {
             hash,
             bucket: hash % meta_map.len() as u64,
             step: 0,
-            tombstone: None,
         }
     }
 
@@ -446,13 +484,12 @@ impl ProbeSequence {
             self.step += 1;
             self.bucket %= meta_map.len() as u64;
 
-            // if metamap is empty, return early
             if meta_map.hint_empty(self.bucket as usize) {
-                return ProbeResult::Emtpy(self.bucket);
+                return ProbeResult::Empty(self.bucket);
             }
 
             if meta_map.hint_tombstone(self.bucket as usize) {
-                self.tombstone = Some(self.bucket);
+                return ProbeResult::Tombstone(self.bucket);
             }
 
             if meta_map.hint_not_match(self.bucket as usize, self.hash) {

@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+pub use bitbox::BucketIndex;
+
 mod meta;
 mod writeout;
 
@@ -107,7 +109,7 @@ impl Store {
     }
 
     /// Loads the given page.
-    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<Vec<u8>>> {
+    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
         self.shared.pages.get(&page_id)
     }
 
@@ -116,6 +118,7 @@ impl Store {
         Transaction {
             batch: Vec::new(),
             new_pages: vec![],
+            bucket_allocator: self.shared.pages.bucket_allocator(),
             new_root: None,
         }
     }
@@ -174,7 +177,8 @@ impl Store {
 /// An atomic transaction to be applied against th estore with [`Store::commit`].
 pub struct Transaction {
     batch: Vec<(KeyPath, Option<Vec<u8>>)>,
-    new_pages: Vec<(PageId, Option<(Vec<u8>, PageDiff)>)>,
+    bucket_allocator: bitbox::BucketAllocator,
+    new_pages: Vec<(PageId, BucketIndex, Option<(Vec<u8>, PageDiff)>)>,
     new_root: Option<Node>,
 }
 
@@ -185,14 +189,23 @@ impl Transaction {
     }
 
     /// Write a page to storage in its entirety.
-    pub fn write_page(&mut self, page_id: PageId, page: &Vec<u8>, page_diff: PageDiff) {
+    pub fn write_page(
+        &mut self,
+        page_id: PageId,
+        bucket: Option<BucketIndex>,
+        page: &[u8],
+        page_diff: PageDiff,
+    ) -> BucketIndex {
+        let bucket_index =
+            bucket.unwrap_or_else(|| self.bucket_allocator.allocate(page_id.clone()));
         self.new_pages
-            .push((page_id, Some((page.clone(), page_diff))));
+            .push((page_id, bucket_index, Some((page.to_vec(), page_diff))));
+        bucket_index
     }
-
     /// Delete a page from storage.
-    pub fn delete_page(&mut self, page_id: PageId) {
-        self.new_pages.push((page_id, None));
+    pub fn delete_page(&mut self, page_id: PageId, bucket: BucketIndex) {
+        self.bucket_allocator.free(bucket);
+        self.new_pages.push((page_id, bucket, None));
     }
 
     /// Write the root to metadata.
