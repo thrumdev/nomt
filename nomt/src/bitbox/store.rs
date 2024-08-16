@@ -2,11 +2,7 @@ use super::meta_map::MetaMap;
 use crate::io::{Page, PAGE_SIZE};
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
-    os::{
-        fd::{AsRawFd, RawFd},
-        unix::fs::OpenOptionsExt,
-    },
+    io::{Read, Seek, Write},
     path::PathBuf,
     sync::Arc,
 };
@@ -18,7 +14,6 @@ pub struct Store {
 }
 
 struct Shared {
-    store_file: File,
     // the number of pages to add to a page number to find its real location in the file,
     // taking account of the meta page and meta byte pages.
     data_page_offset: u64,
@@ -27,15 +22,8 @@ struct Shared {
 impl Store {
     /// Create a new Store given the StoreOptions. Returns a handle to the store file plus the
     /// loaded meta-bits.
-    pub fn open(num_pages: u32, path: PathBuf) -> anyhow::Result<(Self, MetaMap)> {
-        let store_path = path.join("ht");
-        let mut store_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(store_path)?;
-
-        if store_file.metadata()?.len() != expected_file_len(num_pages) {
+    pub fn open(num_pages: u32, mut ht_fd: &File) -> anyhow::Result<(Self, MetaMap)> {
+        if ht_fd.metadata()?.len() != expected_file_len(num_pages) {
             anyhow::bail!("Store corrupted; unexpected file length");
         }
 
@@ -46,12 +34,12 @@ impl Store {
         //
         // We could try to be smart about this sure, but there is always a risk to outsmart yourself
         // pooping your own pants on the way.
+        ht_fd.seek(std::io::SeekFrom::Start(0))?;
         let num_meta_byte_pages = num_meta_byte_pages(num_pages) as usize;
-        let mut extra_meta_pages: Vec<Page> =
-            Vec::with_capacity(num_meta_byte_pages);
+        let mut extra_meta_pages: Vec<Page> = Vec::with_capacity(num_meta_byte_pages);
         for _ in 0..num_meta_byte_pages {
             let mut buf = Page::zeroed();
-            store_file.read_exact(&mut buf)?;
+            ht_fd.read_exact(&mut buf)?;
             extra_meta_pages.push(buf);
         }
         let mut meta_bytes = Vec::with_capacity(num_meta_byte_pages * PAGE_SIZE);
@@ -63,10 +51,7 @@ impl Store {
 
         Ok((
             Store {
-                shared: Arc::new(Shared {
-                    store_file,
-                    data_page_offset,
-                }),
+                shared: Arc::new(Shared { data_page_offset }),
             },
             MetaMap::from_bytes(meta_bytes, num_pages as usize),
         ))
@@ -87,10 +72,6 @@ impl Store {
     pub fn meta_bytes_index(&self, ix: u64) -> u64 {
         1 + ix
     }
-
-    pub fn store_fd(&self) -> RawFd {
-        self.shared.store_file.as_raw_fd()
-    }
 }
 
 fn expected_file_len(num_pages: u32) -> u64 {
@@ -108,8 +89,11 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     const WRITE_BATCH_SIZE: usize = PAGE_SIZE; // 16MB
 
     let start = std::time::Instant::now();
-    let store_path = path.join("ht");
-    let mut file = OpenOptions::new().append(true).create(true).open(store_path)?;
+    let ht_path = path.join("ht");
+    let mut ht_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(ht_path)?;
 
     // number of pages + pages required for meta bits.
     let page_count = num_pages + num_meta_byte_pages(num_pages);
@@ -119,12 +103,22 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     while pages_remaining > 0 {
         let pages_to_write = std::cmp::min(pages_remaining, WRITE_BATCH_SIZE);
         let buf = &zero_buf[0..pages_to_write * PAGE_SIZE];
-        file.write_all(buf)?;
+        ht_file.write_all(buf)?;
         pages_remaining -= pages_to_write;
     }
 
-    file.flush()?;
-    file.sync_all()?;
+    ht_file.flush()?;
+    ht_file.sync_all()?;
+    drop(ht_file);
+
+    let wal_path = path.join("wal");
+    let wal_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(wal_path)?;
+    wal_file.sync_all()?;
+    drop(wal_file);
+
     println!(
         "Created file with {} total pages in {}ms",
         page_count + 1,
