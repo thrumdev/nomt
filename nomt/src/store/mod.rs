@@ -9,9 +9,12 @@ use nomt_core::{
 use parking_lot::Mutex;
 use std::{
     fs::{File, OpenOptions},
-    os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _},
+    os::fd::AsRawFd as _,
     sync::Arc,
 };
+
+#[cfg(target_os="linux")]
+use std::os::unix::fs::OpenOptionsExt as _;
 
 pub use bitbox::BucketIndex;
 
@@ -54,21 +57,27 @@ impl Store {
             .read(true)
             .write(true)
             .open(&o.path.join("meta"))?;
-        let ln_fd = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&o.path.join("ln"))?;
-        let bbn_fd = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&o.path.join("bbn"))?;
-        let ht_fd = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&o.path.join("ht"))?;
+        let ln_fd = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(libc::O_DIRECT);
+            options.open(&o.path.join("ln"))?
+        };
+        let bbn_fd = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(libc::O_DIRECT);
+            options.open(&o.path.join("bbn"))?
+        };
+        let ht_fd = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(libc::O_DIRECT);
+            options.open(&o.path.join("ht"))?
+        };
         let wal_fd = OpenOptions::new()
             .read(true)
             .write(true)

@@ -1,5 +1,5 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Write},
     os::fd::AsRawFd,
     path::PathBuf,

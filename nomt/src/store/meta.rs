@@ -1,5 +1,4 @@
 /// The utility functions for handling the metadata file.
-
 use anyhow::Result;
 use std::{fs::File, io::Read as _};
 
@@ -22,7 +21,7 @@ pub struct Meta {
     /// Since the first page is reserved, this is always more than 1.
     pub bbn_bump: u32,
     /// The sequence number of the last sync.
-    /// 
+    ///
     /// 0 means there were no syncs and the DB is empty.
     pub sync_seqn: u32,
     /// The number of pages in the bitbox store.
