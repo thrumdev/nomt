@@ -1,4 +1,5 @@
 use crate::{
+    bitbox::BucketIndex,
     metrics::{Metric, Metrics},
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, Region, RegionContains, RwPassCell, RwPassDomain, WritePass},
@@ -225,6 +226,31 @@ pub fn locate_leaf_data(
     }
 }
 
+struct CacheEntry {
+    page_data: Arc<PageData>,
+    // the bucket index where this page is stored. `None` if it's a fresh page.
+    bucket_index: Option<BucketIndex>,
+}
+
+impl CacheEntry {
+    fn init(
+        domain: &RwPassDomain,
+        shard_index: ShardIndex,
+        maybe_page: Option<(Vec<u8>, BucketIndex)>,
+    ) -> Self {
+        match maybe_page {
+            Some((data, bucket_index)) => CacheEntry {
+                page_data: Arc::new(PageData::pristine_with_data(domain, shard_index, data)),
+                bucket_index: Some(bucket_index),
+            },
+            None => CacheEntry {
+                page_data: Arc::new(PageData::pristine_empty(domain, shard_index)),
+                bucket_index: None,
+            },
+        }
+    }
+}
+
 // Each shard has its own domain and handles a sub-tree of the page tree, defined by a
 // continuous set of children of the root page.
 struct CacheShard {
@@ -234,7 +260,7 @@ struct CacheShard {
 }
 
 struct CacheShardLocked {
-    cached: LruCache<PageId, Arc<PageData>, FxBuildHasher>,
+    cached: LruCache<PageId, CacheEntry, FxBuildHasher>,
 }
 
 impl CacheShardLocked {
@@ -247,7 +273,7 @@ impl CacheShardLocked {
 
 struct Shared {
     shards: Vec<CacheShard>,
-    root_page: RwLock<Arc<PageData>>,
+    root_page: RwLock<CacheEntry>,
     page_rw_pass_domain: RwPassDomain,
     metrics: Metrics,
 }
@@ -313,20 +339,15 @@ pub struct PageCache {
 impl PageCache {
     /// Create a new `PageCache`.
     pub fn new(
-        root_page_data: Option<Vec<u8>>,
+        root_page_data: Option<(Vec<u8>, BucketIndex)>,
         o: &Options,
         metrics: impl Into<Option<Metrics>>,
     ) -> Self {
         let domain = RwPassDomain::new();
-        let root_page = root_page_data.map_or_else(
-            || PageData::pristine_empty(&domain, ShardIndex::Root),
-            |data| PageData::pristine_with_data(&domain, ShardIndex::Root, data),
-        );
-
         Self {
             shared: Arc::new(Shared {
                 shards: make_shards(o.commit_concurrency),
-                root_page: RwLock::new(Arc::new(root_page)),
+                root_page: RwLock::new(CacheEntry::init(&domain, ShardIndex::Root, root_page_data)),
                 page_rw_pass_domain: domain,
                 metrics: metrics.into().unwrap_or(Metrics::new(false)),
             }),
@@ -356,7 +377,7 @@ impl PageCache {
         self.shared.metrics.count(Metric::PageRequests);
         let shard_index = match self.shard_index_for(&page_id) {
             None => {
-                let page_data = self.shared.root_page.read().clone();
+                let page_data = self.shared.root_page.read().page_data.clone();
                 return Some(Page { inner: page_data });
             }
             Some(i) => i,
@@ -365,7 +386,7 @@ impl PageCache {
         let mut shard = self.shard(shard_index).locked.lock();
         match shard.cached.get(&page_id) {
             Some(page) => Some(Page {
-                inner: page.clone(),
+                inner: page.page_data.clone(),
             }),
             None => {
                 self.shared.metrics.record(Metric::PageCacheMisses);
@@ -374,34 +395,29 @@ impl PageCache {
         }
     }
 
-    /// Insert a page into the cache by its data.
+    /// Insert a page into the cache by its data. If `Some`, provide the bucket index where the
+    /// page is stored.
+    ///
     /// This overwrites any page which was already present. Returns the new `Page` object.
-    pub fn insert(&self, page_id: PageId, page: Option<Vec<u8>>) -> Page {
+    pub fn insert(&self, page_id: PageId, page: Option<(Vec<u8>, BucketIndex)>) -> Page {
         let domain = &self.shared.page_rw_pass_domain;
         let shard_index = match self.shard_index_for(&page_id) {
             None => {
-                let mut page_data = self.shared.root_page.write();
-                *page_data = page
-                    .map_or_else(
-                        || PageData::pristine_empty(domain, ShardIndex::Root),
-                        |data| PageData::pristine_with_data(domain, ShardIndex::Root, data),
-                    )
-                    .into();
+                let mut entry = self.shared.root_page.write();
+                *entry = CacheEntry::init(domain, ShardIndex::Root, page);
 
                 return Page {
-                    inner: page_data.clone(),
+                    inner: entry.page_data.clone(),
                 };
             }
             Some(i) => i,
         };
 
         let mut shard = self.shard(shard_index).locked.lock();
-        let page_data = Arc::new(page.map_or_else(
-            || PageData::pristine_empty(domain, ShardIndex::Shard(shard_index)),
-            |data| PageData::pristine_with_data(domain, ShardIndex::Shard(shard_index), data),
-        ));
+        let cache_entry = CacheEntry::init(domain, ShardIndex::Shard(shard_index), page);
+        let page_data = cache_entry.page_data.clone();
 
-        shard.cached.push(page_id, page_data.clone());
+        shard.cached.push(page_id, cache_entry);
 
         Page { inner: page_data }
     }
@@ -446,25 +462,31 @@ impl PageCache {
         tx: &mut Transaction,
     ) {
         let read_pass = self.new_read_pass();
-        let mut apply_page = |page_id, page_data: Option<&Vec<u8>>, page_diff: PageDiff| {
-            // NOTE: no more merge logic
-            match page_data {
-                None => {
-                    tx.delete_page(page_id);
+        let mut apply_page = |page_id,
+                              bucket: &mut Option<BucketIndex>,
+                              page_data: Option<&Vec<u8>>,
+                              page_diff: PageDiff| {
+            match (page_data, *bucket) {
+                (None, Some(known_bucket)) => {
+                    tx.delete_page(page_id, known_bucket);
+                    *bucket = None;
                 }
-                Some(p) if page_is_empty(&p[..]) => {
-                    tx.delete_page(page_id);
+                (Some(page), Some(known_bucket)) if page_is_empty(&page[..]) => {
+                    tx.delete_page(page_id, known_bucket);
+                    *bucket = None;
                 }
-                Some(p) => {
-                    tx.write_page(page_id, p, page_diff);
+                (Some(page), maybe_bucket) => {
+                    let new_bucket = tx.write_page(page_id, maybe_bucket, page, page_diff);
+                    *bucket = Some(new_bucket);
                 }
+                _ => {} // empty pages which had no known bucket. don't write or delete.
             }
         };
 
         // helper for exploiting locality effects in the diffs to avoid searching through
         // shards constantly.
         let mut last_shard_index = None;
-        let shard_guards = self
+        let mut shard_guards = self
             .shared
             .shards
             .iter()
@@ -473,9 +495,11 @@ impl PageCache {
 
         for (page_id, page_diff) in page_diffs {
             if page_id == ROOT_PAGE_ID {
-                let page = self.shared.root_page.read();
-                let page_data = page.data.read(&read_pass);
-                apply_page(page_id, page_data.as_ref(), page_diff);
+                let mut root_page = self.shared.root_page.write();
+                let root_page = &mut *root_page;
+                let page_data = root_page.page_data.data.read(&read_pass);
+                let bucket = &mut root_page.bucket_index;
+                apply_page(page_id, bucket, page_data.as_ref(), page_diff);
                 continue;
             }
 
@@ -486,9 +510,10 @@ impl PageCache {
             };
             last_shard_index = Some(shard_index);
 
-            if let Some(ref page) = shard_guards[shard_index].cached.peek(&page_id) {
-                let page_data = page.data.read(&read_pass);
-                apply_page(page_id, page_data.as_ref(), page_diff);
+            if let Some(ref mut entry) = shard_guards[shard_index].cached.peek_mut(&page_id) {
+                let page_data = entry.page_data.data.read(&read_pass);
+                let bucket = &mut entry.bucket_index;
+                apply_page(page_id, bucket, page_data.as_ref(), page_diff);
             } else {
                 panic!("dirty page {:?} is missing", page_id);
             }
