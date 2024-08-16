@@ -65,14 +65,10 @@ impl WalWriter {
     /// No check with be performed if the file exists,
     /// it will only happend new batch to the end of the file
     /// and purge from the front
-    pub fn open(path: PathBuf) -> anyhow::Result<Self> {
-        let wal_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .append(true)
-            .open(&path)?;
-
+    pub fn open(wal_file: &File) -> anyhow::Result<Self> {
+        // TODO: remove this clone.
+        // Panic here for visibility.
+        let wal_file = wal_file.try_clone().unwrap();
         Ok(Self { wal_file })
     }
 
@@ -139,18 +135,7 @@ impl WalChecker {
     /// NOTE: Even though currently in the simulation each batch is pruned right after
     /// the success of the next one, the following method needs to be able to handle multiple
     /// records of different batches and validate them
-    pub fn open_and_recover(path: PathBuf) -> Self {
-        let mut wal_file = match OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(wal_file) => wal_file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                // a non-existing WAL is considered valid, with the assumed sequence number being zero
-                return Self { last_batch: None };
-            }
-            Err(_) => {
-                panic!("Error opening or creating the wal file ")
-            }
-        };
-
+    pub fn open_and_recover(mut wal_file: &std::fs::File) -> Self {
         let (last_records, last_records_position) = validate_records(&mut wal_file);
 
         // If not all the WAL was parsed correctly, then the recovery procedure means to remove
@@ -160,6 +145,12 @@ impl WalChecker {
             .metadata()
             .expect("Error extracting wal file len")
             .len();
+
+        if wal_file_len == 0 {
+            return Self {
+                last_batch: None,
+            };
+        }
 
         if last_records_position as u64 != wal_file_len {
             // cannot use fallocate + FALLOC_FL_COLLAPSE_RANGE
@@ -196,7 +187,7 @@ impl WalChecker {
     }
 }
 
-fn validate_records(wal_file: &mut File) -> (Vec<Record>, usize) {
+fn validate_records(mut wal_file: &File) -> (Vec<Record>, usize) {
     // contains the last set of valid records
     let mut last_records = vec![];
     // offset in the WAL file to the byte right after the end of the last parsed valid record

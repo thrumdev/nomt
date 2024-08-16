@@ -33,6 +33,8 @@ struct Shared {
     meta_fd: File,
     ln_fd: File,
     bbn_fd: File,
+    ht_fd: File,
+    wal_fd: File,
 }
 
 struct Sync {
@@ -62,6 +64,16 @@ impl Store {
             .write(true)
             .custom_flags(libc::O_DIRECT)
             .open(&o.path.join("bbn"))?;
+        let ht_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(&o.path.join("ht"))?;
+        let wal_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .append(true)
+            .open(&o.path.join("wal"))?;
         let meta = meta::Meta::read(&meta_fd)?;
         let values = beatree::Tree::open(
             meta.ln_freelist_pn,
@@ -75,7 +87,8 @@ impl Store {
             meta.sync_seqn,
             meta.bitbox_num_pages,
             o.num_rings,
-            o.path.clone(),
+            &ht_fd,
+            &wal_fd,
         )?;
         let (io_sender, mut receivers) = io::start_io_worker(1, 3);
         Ok(Self {
@@ -87,6 +100,8 @@ impl Store {
                 meta_fd,
                 ln_fd,
                 bbn_fd,
+                ht_fd,
+                wal_fd,
             }),
             sync: Arc::new(Mutex::new(Sync {
                 sync_seqn: meta.sync_seqn,
@@ -135,7 +150,10 @@ impl Store {
         let sync_seqn = sync.sync_seqn;
 
         self.shared.values.commit(tx.batch);
-        let prev_wal_size = self.shared.pages.sync_begin(tx.new_pages, sync_seqn)?;
+        let prev_wal_size =
+            self.shared
+                .pages
+                .sync_begin(tx.new_pages, sync_seqn, &self.shared.ht_fd)?;
         if let Some(new_root) = tx.new_root {
             *self.shared.root.lock() = new_root;
         }

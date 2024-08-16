@@ -3,7 +3,7 @@ use nomt_core::page_id::PageId;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    os::fd::AsRawFd,
     sync::{Arc, Mutex},
 };
 use threadpool::ThreadPool;
@@ -55,14 +55,13 @@ impl DB {
         sync_seqn: u32,
         num_pages: u32,
         num_rings: usize,
-        path: PathBuf,
+        ht_fd: &std::fs::File,
+        wal_fd: &std::fs::File,
     ) -> anyhow::Result<Self> {
         // TODO: refactor to use u32.
         let sync_seqn = sync_seqn as u64;
 
-        let wal_path = path.join("wal");
-
-        let (store, meta_map) = match store::Store::open(num_pages, path.clone()) {
+        let (store, meta_map) = match store::Store::open(num_pages, ht_fd) {
             Ok(x) => x,
             Err(e) => {
                 anyhow::bail!("encountered error in opening store: {e:?}");
@@ -70,7 +69,7 @@ impl DB {
         };
 
         // Open the WAL, check its integrity and make sure the store is consistent with it
-        let wal = wal::WalChecker::open_and_recover(wal_path.clone());
+        let wal = wal::WalChecker::open_and_recover(wal_fd);
         let _pending_batch = match wal.check_consistency(sync_seqn) {
             Ok(()) => {
                 println!("Wal and Store are consistent, last sequence number: {sync_seqn}");
@@ -98,7 +97,7 @@ impl DB {
         };
 
         // Create a WalWriter, able to append new batch and prune older ones
-        let wal = match wal::WalWriter::open(wal_path) {
+        let wal = match wal::WalWriter::open(wal_fd) {
             Ok(x) => x,
             Err(e) => {
                 anyhow::bail!("encountered error in opening wal: {e:?}")
@@ -122,6 +121,7 @@ impl DB {
 
         dispatcher_tp.execute(page_dispatcher_task(
             store.clone(),
+            ht_fd.as_raw_fd(),
             load_page_sender,
             load_page_receiver,
             get_page_rx,
@@ -184,6 +184,7 @@ impl DB {
         &self,
         changes: Vec<(PageId, BucketIndex, Option<(Vec<u8>, PageDiff)>)>,
         sync_seqn: u32,
+        ht_fd: &std::fs::File,
     ) -> anyhow::Result<u64> {
         // Steps are:
         // 0. Increase sequence number
@@ -253,7 +254,7 @@ impl DB {
         for (bucket, page) in bucket_writes {
             let command = IoCommand {
                 kind: IoKind::Write(
-                    self.shared.store.store_fd(),
+                    ht_fd.as_raw_fd(),
                     self.shared.store.data_page_index(bucket),
                     Box::new(page),
                 ),
@@ -271,7 +272,7 @@ impl DB {
             buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
             let command = IoCommand {
                 kind: IoKind::Write(
-                    self.shared.store.store_fd(),
+                    ht_fd.as_raw_fd(),
                     self.shared.store.meta_bytes_index(changed_meta_page as u64),
                     buf,
                 ),
@@ -299,7 +300,7 @@ impl DB {
             &self.shared.io_sender,
             &self.shared.commit_page_receiver,
             IoCommand {
-                kind: IoKind::Fsync(self.shared.store.store_fd()),
+                kind: IoKind::Fsync(ht_fd.as_raw_fd()),
                 handle: COMMIT_HANDLE_INDEX,
                 user_data: 0, // unimportant
             },
@@ -310,7 +311,7 @@ impl DB {
             &self.shared.io_sender,
             &self.shared.commit_page_receiver,
             IoCommand {
-                kind: IoKind::Fsync(self.shared.store.store_fd()),
+                kind: IoKind::Fsync(ht_fd.as_raw_fd()),
                 handle: COMMIT_HANDLE_INDEX,
                 user_data: 0, // unimportant
             },
@@ -407,6 +408,7 @@ fn get_changed(page: &Page, page_diff: &PageDiff) -> Vec<[u8; 32]> {
 // having to change the io_uring abstraction
 fn page_dispatcher_task(
     store: Store,
+    ht_fd: std::os::unix::io::RawFd,
     load_page_sender: Sender<IoCommand>,
     load_page_receiver: Receiver<CompleteIo>,
     get_page_rx: Receiver<(u64, Sender<Page>)>,
@@ -422,7 +424,7 @@ fn page_dispatcher_task(
 
                     let index = slab.insert(tx);
                     let command = IoCommand {
-                        kind: IoKind::Read(store.store_fd(), store.data_page_index(bucket), Box::new(Page::zeroed())),
+                        kind: IoKind::Read(ht_fd, store.data_page_index(bucket), Box::new(Page::zeroed())),
                         handle: LOAD_PAGE_HANDLE_INDEX,
                         user_data: index as u64,
                     };
