@@ -47,7 +47,7 @@ impl Store {
             meta_bytes.extend_from_slice(&*extra_meta_page);
         }
 
-        let data_page_offset = 1 + num_meta_byte_pages as u64;
+        let data_page_offset = num_meta_byte_pages as u64;
 
         Ok((
             Store {
@@ -70,7 +70,7 @@ impl Store {
 
     /// Returns the page number of the `ix`th item in the meta bytes section of the store.
     pub fn meta_bytes_index(&self, ix: u64) -> u64 {
-        1 + ix
+        ix
     }
 }
 
@@ -121,7 +121,7 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
 
     println!(
         "Created file with {} total pages in {}ms",
-        page_count + 1,
+        page_count,
         start.elapsed().as_millis()
     );
     Ok(())
