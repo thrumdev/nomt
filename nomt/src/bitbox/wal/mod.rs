@@ -87,7 +87,7 @@ impl WalWriter {
 
         // TODO: other UNIXes are going to need not a WAL but a WAL
         // file pool. FALLOC_FL_COLLAPSE_RANGE only works on Linux.
-        #[cfg(target_os="linux")]
+        #[cfg(target_os = "linux")]
         unsafe {
             let res = libc::fallocate(
                 self.wal_file.as_raw_fd(),
@@ -150,9 +150,7 @@ impl WalChecker {
             .len();
 
         if wal_file_len == 0 {
-            return Self {
-                last_batch: None,
-            };
+            return Self { last_batch: None };
         }
 
         if last_records_position as u64 != wal_file_len {

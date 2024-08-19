@@ -1,8 +1,4 @@
-use crate::{
-    io::Page,
-    io::{CompleteIo, IoCommand},
-};
-use crossbeam_channel::{Receiver, Sender};
+use crate::io::{IoPool, Page};
 
 use std::{collections::BTreeSet, fs::File};
 
@@ -25,18 +21,9 @@ pub fn create(
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
-    io_handle_index: usize,
-    io_sender: Sender<IoCommand>,
-    io_receiver: Receiver<CompleteIo>,
+    io_pool: &IoPool,
 ) -> (BbnStoreWriter, BTreeSet<PageNumber>) {
-    let allocator_writer = AllocatorWriter::new(
-        fd,
-        free_list_head,
-        bump,
-        io_handle_index,
-        io_sender,
-        io_receiver,
-    );
+    let allocator_writer = AllocatorWriter::new(fd, free_list_head, bump, io_pool.make_handle());
     let freelist = allocator_writer.free_list().all_tracked_pages();
 
     (

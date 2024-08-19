@@ -1,6 +1,10 @@
 //! A wrapper around RocksDB for avoiding prolifiration of RocksDB-specific code.
 
-use crate::{beatree, bitbox, io, page_cache::PageDiff};
+use crate::{
+    beatree, bitbox,
+    io::{self, IoPool},
+    page_cache::PageDiff,
+};
 use meta::Meta;
 use nomt_core::{
     page_id::PageId,
@@ -13,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt as _;
 
 pub use bitbox::BucketIndex;
@@ -33,6 +37,7 @@ struct Shared {
     bitbox_num_pages: u32,
     values: beatree::Tree,
     pages: bitbox::DB,
+    io_pool: IoPool,
     meta_fd: File,
     ln_fd: File,
     bbn_fd: File,
@@ -42,9 +47,7 @@ struct Shared {
 
 struct Sync {
     sync_seqn: u32,
-    io_sender: crossbeam_channel::Sender<io::IoCommand>,
-    io_handle_index: usize,
-    io_receiver: crossbeam_channel::Receiver<io::CompleteIo>,
+    io_handle: io::IoHandle,
 }
 
 impl Store {
@@ -99,7 +102,8 @@ impl Store {
             &ht_fd,
             &wal_fd,
         )?;
-        let (io_sender, mut receivers) = io::start_io_worker(1, 3);
+        let io_pool = io::start_io_pool(3);
+        let io_handle = io_pool.make_handle();
         Ok(Self {
             shared: Arc::new(Shared {
                 bitbox_num_pages: meta.bitbox_num_pages,
@@ -111,12 +115,11 @@ impl Store {
                 bbn_fd,
                 ht_fd,
                 wal_fd,
+                io_pool,
             }),
             sync: Arc::new(Mutex::new(Sync {
                 sync_seqn: meta.sync_seqn,
-                io_sender,
-                io_handle_index: 0,
-                io_receiver: receivers.remove(0),
+                io_handle,
             })),
         })
     }
@@ -135,6 +138,11 @@ impl Store {
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
         self.shared.pages.get(&page_id)
+    }
+
+    /// Access the underlying IoPool.
+    pub fn io_pool(&self) -> &IoPool {
+        &self.shared.io_pool
     }
 
     /// Create a new transaction to be applied against this database.
@@ -178,9 +186,7 @@ impl Store {
         };
 
         writeout::run(
-            sync.io_sender.clone(),
-            sync.io_handle_index,
-            sync.io_receiver.clone(),
+            sync.io_handle.clone(),
             self.shared.bbn_fd.as_raw_fd(),
             self.shared.ln_fd.as_raw_fd(),
             self.shared.meta_fd.as_raw_fd(),

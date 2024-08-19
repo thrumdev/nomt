@@ -90,10 +90,7 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
 
     let start = std::time::Instant::now();
     let ht_path = path.join("ht");
-    let mut ht_file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(ht_path)?;
+    let mut ht_file = OpenOptions::new().append(true).create(true).open(ht_path)?;
 
     // number of pages + pages required for meta bits.
     let page_count = num_pages + num_meta_byte_pages(num_pages);
@@ -112,10 +109,7 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     drop(ht_file);
 
     let wal_path = path.join("wal");
-    let wal_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(wal_path)?;
+    let wal_file = OpenOptions::new().write(true).create(true).open(wal_path)?;
     wal_file.sync_all()?;
     drop(wal_file);
 
