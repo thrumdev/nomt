@@ -115,12 +115,12 @@ pub struct WorkloadParams {
     #[clap(default_value = "1")]
     pub commit_concurrency: usize,
 
-    /// Number of io_uring instances. Only used with Nomt backend.
+    /// Number of io_uring instances (or I/O threads on non-Linux). Only used with Nomt backend.
     ///
     /// Default value is 3
-    #[arg(long = "num-rings", short)]
+    #[arg(long = "io-workers", short)]
     #[clap(default_value = "3")]
-    pub num_rings: usize,
+    pub io_workers: usize,
 }
 
 #[derive(Debug, Clone, Args)]

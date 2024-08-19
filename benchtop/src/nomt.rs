@@ -11,7 +11,7 @@ pub struct NomtDB {
 }
 
 impl NomtDB {
-    pub fn open(reset: bool, commit_concurrency: usize, num_rings: usize) -> Self {
+    pub fn open(reset: bool, commit_concurrency: usize, io_workers: usize) -> Self {
         if reset {
             // Delete previously existing db
             let _ = std::fs::remove_dir_all(NOMT_DB_FOLDER);
@@ -20,7 +20,7 @@ impl NomtDB {
         let mut opts = Options::new();
         opts.path(NOMT_DB_FOLDER);
         opts.commit_concurrency(commit_concurrency);
-        opts.num_rings(num_rings);
+        opts.io_workers(io_workers);
         opts.metrics(true);
 
         let nomt = Nomt::open(opts).unwrap();

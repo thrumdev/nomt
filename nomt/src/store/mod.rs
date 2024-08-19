@@ -57,7 +57,7 @@ impl Store {
             create(o)?;
         }
 
-        let io_pool = io::start_io_pool(o.num_rings);
+        let io_pool = io::start_io_pool(o.io_workers);
 
         let meta_fd = OpenOptions::new()
             .read(true)
