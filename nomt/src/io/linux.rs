@@ -1,10 +1,8 @@
+use super::{CompleteIo, IoCommand, IoKind, IoPacket, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
-use std::{
-    time::{Duration, Instant},
-};
-use super::{IoKind, IoCommand, CompleteIo, PAGE_SIZE};
+use std::time::{Duration, Instant};
 
 const RING_CAPACITY: u32 = 128;
 
@@ -13,44 +11,34 @@ const MAX_IN_FLIGHT: usize = RING_CAPACITY as usize;
 
 struct PendingIo {
     command: IoCommand,
+    completion_sender: Sender<CompleteIo>,
     start: Instant,
 }
 
-pub fn start_io_worker(
-    num_handles: usize,
-    num_rings: usize,
-) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
+pub fn start_io_worker(num_rings: usize) -> Sender<IoPacket> {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * 2);
-    let (handle_txs, handle_rxs) = (0..num_handles)
-        .map(|_| crossbeam_channel::unbounded())
-        .unzip();
 
     let _ = std::thread::Builder::new()
         .name("io_ingress".to_string())
-        .spawn(move || run_ingress(command_rx, handle_txs, num_rings))
+        .spawn(move || run_ingress(command_rx, num_rings))
         .unwrap();
 
-    (command_tx, handle_rxs)
+    command_tx
 }
 
-fn run_ingress(
-    command_rx: Receiver<IoCommand>,
-    handle_txs: Vec<Sender<CompleteIo>>,
-    num_rings: usize,
-) {
+fn run_ingress(command_rx: Receiver<IoPacket>, num_rings: usize) {
     if num_rings == 1 {
-        run_worker(command_rx, handle_txs);
+        run_worker(command_rx);
         return;
     }
 
     let mut worker_command_txs = Vec::with_capacity(num_rings);
     for i in 0..num_rings {
-        let handle_txs = handle_txs.clone();
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let _ = std::thread::Builder::new()
             .name(format!("io_worker-{i}"))
-            .spawn(move || run_worker(command_rx, handle_txs))
+            .spawn(move || run_worker(command_rx))
             .unwrap();
         worker_command_txs.push(command_tx);
     }
@@ -67,7 +55,7 @@ fn run_ingress(
     }
 }
 
-fn run_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>>) {
+fn run_worker(command_rx: Receiver<IoPacket>) {
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
@@ -88,12 +76,14 @@ fn run_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>
                 if pending.get(completion_event.user_data() as usize).is_none() {
                     continue;
                 }
-                let PendingIo { command, start } =
-                    pending.remove(completion_event.user_data() as usize);
+                let PendingIo {
+                    command,
+                    completion_sender,
+                    start,
+                } = pending.remove(completion_event.user_data() as usize);
 
                 stats.note_completion(start.elapsed().as_micros() as u64);
 
-                let handle_idx = command.handle;
                 let result = if completion_event.result() == -1 {
                     Err(std::io::Error::from_raw_os_error(completion_event.result()))
                 } else {
@@ -101,7 +91,7 @@ fn run_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>
                 };
                 let complete = CompleteIo { command, result };
 
-                if let Err(_) = handle_tx[handle_idx].send(complete) {
+                if let Err(_) = completion_sender.send(complete) {
                     // TODO: handle?
                     break;
                 }
@@ -130,7 +120,8 @@ fn run_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>
 
             to_submit = true;
             let pending_index = pending.insert(PendingIo {
-                command: next_io,
+                command: next_io.command,
+                completion_sender: next_io.completion_sender,
                 start: Instant::now(),
             });
 

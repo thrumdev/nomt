@@ -3,9 +3,8 @@ use crate::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },
-    io::{CompleteIo, IoCommand, Page},
+    io::{IoPool, Page},
 };
-use crossbeam_channel::{Receiver, Sender};
 
 use std::fs::File;
 
@@ -26,38 +25,19 @@ pub fn create(
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
-    rd_io_handle_index_shared: usize,
-    rd_io_sender_shared: Sender<IoCommand>,
-    rd_io_receiver_shared: Receiver<CompleteIo>,
-    rd_io_handle_index_sync: usize,
-    rd_io_sender_sync: Sender<IoCommand>,
-    rd_io_receiver_sync: Receiver<CompleteIo>,
-    wr_io_handle_index: usize,
-    wr_io_sender: Sender<IoCommand>,
-    wr_io_receiver: Receiver<CompleteIo>,
+    io_pool: &IoPool,
 ) -> (LeafStoreReader, LeafStoreReader, LeafStoreWriter) {
     let allocator_reader_shared = AllocatorReader::new(
         fd.try_clone().expect("failed to clone file"),
-        rd_io_handle_index_shared,
-        rd_io_sender_shared,
-        rd_io_receiver_shared,
+        io_pool.make_handle(),
     );
 
     let allocator_reader_sync = AllocatorReader::new(
         fd.try_clone().expect("failed to clone file"),
-        rd_io_handle_index_sync,
-        rd_io_sender_sync,
-        rd_io_receiver_sync,
+        io_pool.make_handle(),
     );
 
-    let allocator_writer = AllocatorWriter::new(
-        fd,
-        free_list_head,
-        bump,
-        wr_io_handle_index,
-        wr_io_sender,
-        wr_io_receiver,
-    );
+    let allocator_writer = AllocatorWriter::new(fd, free_list_head, bump, io_pool.make_handle());
 
     (
         LeafStoreReader {

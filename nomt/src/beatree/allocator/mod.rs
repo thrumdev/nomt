@@ -1,5 +1,5 @@
 use crate::{
-    io::{CompleteIo, IoCommand, IoKind},
+    io::{IoCommand, IoHandle, IoKind},
     io::{Page, PAGE_SIZE},
 };
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -35,9 +35,7 @@ pub const FREELIST_EMPTY: PageNumber = PageNumber(0);
 /// The AllocatorReader enables fetching pages from the store.
 pub struct AllocatorReader {
     store_file: File,
-    io_handle_index: usize,
-    io_sender: Sender<IoCommand>,
-    io_receiver: Receiver<CompleteIo>,
+    io_handle: IoHandle,
 }
 
 /// The AllocatorWriter enables dynamic allocation and release of Pages.
@@ -58,17 +56,10 @@ pub struct AllocatorWriter {
 
 impl AllocatorReader {
     /// creates an AllocatorReader over a possibly already existing File.
-    pub fn new(
-        fd: File,
-        io_handle_index: usize,
-        io_sender: Sender<IoCommand>,
-        io_receiver: Receiver<CompleteIo>,
-    ) -> Self {
+    pub fn new(fd: File, io_handle: IoHandle) -> Self {
         AllocatorReader {
             store_file: fd,
-            io_handle_index,
-            io_sender,
-            io_receiver,
+            io_handle,
         }
     }
 
@@ -78,12 +69,11 @@ impl AllocatorReader {
 
         let mut command = Some(IoCommand {
             kind: IoKind::Read(self.store_file.as_raw_fd(), pn.0 as u64, page),
-            handle: self.io_handle_index,
             user_data: 0,
         });
 
         while let Some(c) = command.take() {
-            match self.io_sender.try_send(c) {
+            match self.io_handle.try_send(c) {
                 Ok(()) => break,
                 Err(TrySendError::Disconnected(_)) => panic!("I/O store worker dropped"),
                 Err(TrySendError::Full(c)) => {
@@ -93,7 +83,7 @@ impl AllocatorReader {
         }
 
         // wait for completion
-        let completion = self.io_receiver.recv().expect("I/O store worker dropped");
+        let completion = self.io_handle.recv().expect("I/O store worker dropped");
         assert!(completion.result.is_ok());
         let page = completion.command.kind.unwrap_buf();
 
@@ -107,9 +97,7 @@ impl AllocatorWriter {
         fd: File,
         free_list_head: Option<PageNumber>,
         bump: PageNumber,
-        io_handle_index: usize,
-        io_sender: Sender<IoCommand>,
-        io_receiver: Receiver<CompleteIo>,
+        io_handle: IoHandle,
     ) -> Self {
         let file_size = fd
             .metadata()
@@ -117,13 +105,7 @@ impl AllocatorWriter {
             .size() as usize;
 
         AllocatorWriter {
-            free_list: FreeList::read(
-                &fd,
-                &io_sender,
-                io_handle_index,
-                &io_receiver,
-                free_list_head,
-            ),
+            free_list: FreeList::read(&fd, &io_handle, free_list_head),
             bump,
             file_max_bump: PageNumber((file_size / PAGE_SIZE) as u32),
             released: vec![],

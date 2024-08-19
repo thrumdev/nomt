@@ -9,7 +9,7 @@ use std::{
 use threadpool::ThreadPool;
 
 use crate::{
-    io::{CompleteIo, IoCommand, IoKind, Page, PAGE_SIZE},
+    io::{CompleteIo, IoCommand, IoHandle, IoKind, Page, PAGE_SIZE},
     page_cache::PageDiff,
 };
 
@@ -24,10 +24,6 @@ pub use self::store::create;
 mod meta_map;
 mod store;
 mod wal;
-
-const LOAD_PAGE_HANDLE_INDEX: usize = 0;
-const COMMIT_HANDLE_INDEX: usize = 1;
-const NUM_IO_HANDLES: usize = 2;
 
 /// The index of a bucket within the map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,8 +40,7 @@ pub struct Shared {
     meta_map: RwLock<MetaMap>,
     // channel used to send requests to the dispatcher
     get_page_tx: Mutex<Sender<(u64 /*bucket*/, Sender<Page>)>>,
-    io_sender: Sender<IoCommand>,
-    commit_page_receiver: Receiver<CompleteIo>,
+    io_handle: IoHandle,
     _dispatcher_tp: ThreadPool,
 }
 
@@ -104,38 +99,32 @@ impl DB {
             }
         };
 
-        // Spawn io_workers
-        let (io_sender, io_receivers) = crate::io::start_io_worker(NUM_IO_HANDLES, num_rings);
-
-        let load_page_sender = io_sender.clone();
-        let load_page_receiver = io_receivers[LOAD_PAGE_HANDLE_INDEX].clone();
-        let commit_page_receiver = io_receivers[COMMIT_HANDLE_INDEX].clone();
+        // Spawn io pool.
+        let io_pool = crate::io::start_io_pool(num_rings);
 
         // Spawn PageRequest dispatcher
         let (get_page_tx, get_page_rx) = crossbeam::channel::unbounded();
 
         let dispatcher_tp = threadpool::Builder::new()
-            .num_threads(NUM_IO_HANDLES)
+            .num_threads(1)
             .thread_name("nomt-io-dispatcher".to_string())
             .build();
 
         dispatcher_tp.execute(page_dispatcher_task(
             store.clone(),
             ht_fd.as_raw_fd(),
-            load_page_sender,
-            load_page_receiver,
+            io_pool.make_handle(),
             get_page_rx,
         ));
 
         Ok(Self {
             shared: Arc::new(Shared {
                 store,
-                commit_page_receiver,
                 wal: RwLock::new(wal),
                 meta_map: RwLock::new(meta_map),
                 get_page_tx: Mutex::new(get_page_tx),
                 _dispatcher_tp: dispatcher_tp,
-                io_sender,
+                io_handle: io_pool.make_handle(),
             }),
         })
     }
@@ -258,11 +247,10 @@ impl DB {
                     self.shared.store.data_page_index(bucket),
                     Box::new(page),
                 ),
-                handle: COMMIT_HANDLE_INDEX,
                 user_data: 0, // unimportant.
             };
             // TODO: handle error
-            self.shared.io_sender.send(command).unwrap();
+            self.shared.io_handle.send(command).unwrap();
             submitted += 1;
         }
 
@@ -276,32 +264,25 @@ impl DB {
                     self.shared.store.meta_bytes_index(changed_meta_page as u64),
                     buf,
                 ),
-                handle: COMMIT_HANDLE_INDEX,
                 user_data: 0, // unimportant
             };
             submitted += 1;
             // TODO: handle error
-            self.shared.io_sender.send(command).unwrap();
+            self.shared.io_handle.send(command).unwrap();
         }
 
         // wait for all writes command to be finished
         while completed < submitted {
-            let completion = self
-                .shared
-                .commit_page_receiver
-                .recv()
-                .expect("I/O worker dropped");
+            let completion = self.shared.io_handle.recv().expect("I/O worker dropped");
             assert!(completion.result.is_ok());
             completed += 1;
         }
 
         // sync all writes
         submit_and_wait_one(
-            &self.shared.io_sender,
-            &self.shared.commit_page_receiver,
+            &self.shared.io_handle,
             IoCommand {
                 kind: IoKind::Fsync(ht_fd.as_raw_fd()),
-                handle: COMMIT_HANDLE_INDEX,
                 user_data: 0, // unimportant
             },
         );
@@ -355,7 +336,6 @@ impl BucketAllocator {
                     self.changed_buckets.insert(bucket, true);
                     return BucketIndex(bucket);
                 }
-                _ => continue,
             }
         }
     }
@@ -367,13 +347,9 @@ impl BucketAllocator {
 }
 
 // call only when I/O queue is totally empty.
-fn submit_and_wait_one(
-    io_sender: &Sender<IoCommand>,
-    io_receiver: &Receiver<CompleteIo>,
-    command: IoCommand,
-) {
-    let _ = io_sender.send(command);
-    let _ = io_receiver.recv();
+fn submit_and_wait_one(io_handle: &IoHandle, command: IoCommand) {
+    let _ = io_handle.send(command);
+    let _ = io_handle.recv();
 }
 
 fn get_changed(page: &Page, page_diff: &PageDiff) -> Vec<[u8; 32]> {
@@ -398,8 +374,7 @@ fn get_changed(page: &Page, page_diff: &PageDiff) -> Vec<[u8; 32]> {
 fn page_dispatcher_task(
     store: Store,
     ht_fd: std::os::unix::io::RawFd,
-    load_page_sender: Sender<IoCommand>,
-    load_page_receiver: Receiver<CompleteIo>,
+    io_handle: IoHandle,
     get_page_rx: Receiver<(u64, Sender<Page>)>,
 ) -> impl Fn() {
     move || {
@@ -414,15 +389,14 @@ fn page_dispatcher_task(
                     let index = slab.insert(tx);
                     let command = IoCommand {
                         kind: IoKind::Read(ht_fd, store.data_page_index(bucket), Box::new(Page::zeroed())),
-                        handle: LOAD_PAGE_HANDLE_INDEX,
                         user_data: index as u64,
                     };
 
                     // send the command
-                    load_page_sender.send(command).unwrap();
+                    io_handle.send(command).unwrap();
 
                 },
-                recv(load_page_receiver) -> response => {
+                recv(io_handle.receiver()) -> response => {
                     let Ok(CompleteIo { command, result }) = response else {
                         panic!("TODO")
                     };

@@ -1,40 +1,29 @@
 use crossbeam_channel::{Receiver, Sender};
 
-use std::sync::Arc;
-
-use super::{CompleteIo, IoCommand, IoKind, PAGE_SIZE};
+use super::{CompleteIo, IoCommand, IoKind, IoPacket, PAGE_SIZE};
 
 const IO_THREADS: usize = 16;
 
 // max number of inflight requests is bounded by the threadpool.
 const MAX_IN_FLIGHT: usize = IO_THREADS;
 
-pub fn start_io_worker(
-    num_handles: usize,
-    _num_rings: usize,
-) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
+pub fn start_io_worker(_num_rings: usize) -> Sender<IoPacket> {
     let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT);
-    let (handle_txs, handle_rxs) = (0..num_handles)
-        .map(|_| crossbeam_channel::unbounded())
-        .unzip::<_, _, Vec<Sender<CompleteIo>>, _>();
-
-    let handle_txs = Arc::new(handle_txs);
 
     for _ in 0..IO_THREADS {
-        spawn_worker_thread(command_rx.clone(), handle_txs.clone());
+        spawn_worker_thread(command_rx.clone());
     }
 
-    (command_tx, handle_rxs)
+    command_tx
 }
 
-fn spawn_worker_thread(command_rx: Receiver<IoCommand>, handle_txs: Arc<Vec<Sender<CompleteIo>>>) {
+fn spawn_worker_thread(command_rx: Receiver<IoPacket>) {
     let work = move || loop {
-        let Ok(command) = command_rx.recv() else {
+        let Ok(packet) = command_rx.recv() else {
             break;
         };
-        let handle_index = command.handle;
-        let complete = execute(command);
-        let _ = handle_txs[handle_index].send(complete);
+        let complete = execute(packet.command);
+        let _ = packet.completion_sender.send(complete);
     };
 
     std::thread::Builder::new()

@@ -70,13 +70,7 @@ impl Tree {
         bbn_file: &File,
         ln_file: &File,
     ) -> Result<Tree> {
-        const IO_IX_RD_LN_SHARED: usize = 0;
-        const IO_IX_RD_LN_SYNC: usize = 1;
-        const IO_IX_WR_LN: usize = 2;
-        const IO_IX_BBN: usize = 3;
-        const NUM_IO_HANDLES: usize = 4;
-
-        let (io_sender, io_recv) = crate::io::start_io_worker(NUM_IO_HANDLES, 3);
+        let io_pool = crate::io::start_io_pool(3);
 
         let ln_freelist_pn = Some(ln_freelist_pn)
             .map(PageNumber)
@@ -90,45 +84,13 @@ impl Tree {
 
         let (leaf_store_rd_shared, leaf_store_rd_sync, leaf_store_wr) = {
             let ln_file = ln_file.try_clone().unwrap();
-            let rd_io_handle_index_shared = IO_IX_RD_LN_SHARED;
-            let rd_io_sender_shared = io_sender.clone();
-            let rd_io_receiver_shared = io_recv[rd_io_handle_index_shared].clone();
-            let rd_io_handle_index_sync = IO_IX_RD_LN_SYNC;
-            let rd_io_sender_sync = io_sender.clone();
-            let rd_io_receiver_sync = io_recv[rd_io_handle_index_sync].clone();
-            let wr_io_handle_index = IO_IX_WR_LN;
-            let wr_io_sender = io_sender.clone();
-            let wr_io_receiver = io_recv[wr_io_handle_index].clone();
 
-            leaf::store::create(
-                ln_file,
-                ln_freelist_pn,
-                ln_bump,
-                rd_io_handle_index_shared,
-                rd_io_sender_shared,
-                rd_io_receiver_shared,
-                rd_io_handle_index_sync,
-                rd_io_sender_sync,
-                rd_io_receiver_sync,
-                wr_io_handle_index,
-                wr_io_sender,
-                wr_io_receiver,
-            )
+            leaf::store::create(ln_file, ln_freelist_pn, ln_bump, &io_pool)
         };
 
         let (bbn_store_wr, bbn_freelist_tracked) = {
             let bbn_fd = bbn_file.try_clone().unwrap();
-            let io_handle_index = IO_IX_BBN;
-            let io_sender = io_sender.clone();
-            let io_receiver = io_recv[io_handle_index].clone();
-            bbn::create(
-                bbn_fd,
-                bbn_freelist_pn,
-                bbn_bump,
-                io_handle_index,
-                io_sender,
-                io_receiver,
-            )
+            bbn::create(bbn_fd, bbn_freelist_pn, bbn_bump, &io_pool)
         };
         let mut bnp = branch::BranchNodePool::new();
         let index = ops::reconstruct(

@@ -3,11 +3,11 @@ use std::{
     os::fd::{FromRawFd, IntoRawFd, RawFd},
 };
 
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::TrySendError;
 
 use crate::{
     io::Page,
-    io::{CompleteIo, IoCommand, IoKind},
+    io::{CompleteIo, IoCommand, IoHandle, IoKind},
 };
 
 use super::{
@@ -16,9 +16,7 @@ use super::{
 };
 
 pub fn run(
-    io_sender: Sender<IoCommand>,
-    io_handle_index: usize,
-    io_receiver: Receiver<CompleteIo>,
+    io_handle: IoHandle,
     bbn_fd: RawFd,
     ln_fd: RawFd,
     meta_fd: RawFd,
@@ -30,7 +28,7 @@ pub fn run(
     new_meta: Meta,
 ) {
     let now = std::time::Instant::now();
-    let io = IoDmux::new(io_sender, io_handle_index, io_receiver);
+    let io = IoDmux::new(io_handle);
     do_run(
         Cx {
             bbn_write_out: BbnWriteOut {
@@ -92,9 +90,7 @@ fn do_run(mut cx: Cx, mut io: IoDmux) {
 }
 
 struct IoDmux {
-    io_sender: Sender<IoCommand>,
-    io_handle_index: usize,
-    io_receiver: Receiver<CompleteIo>,
+    io_handle: IoHandle,
     bbn_inbox: Vec<CompleteIo>,
     ln_inbox: Vec<CompleteIo>,
     meta_inbox: Vec<CompleteIo>,
@@ -105,15 +101,9 @@ impl IoDmux {
     const LN_USER_DATA: u64 = 1;
     const META_USER_DATA: u64 = 2;
 
-    fn new(
-        io_sender: Sender<IoCommand>,
-        io_handle_index: usize,
-        io_receiver: Receiver<CompleteIo>,
-    ) -> Self {
+    fn new(io_handle: IoHandle) -> Self {
         Self {
-            io_sender,
-            io_handle_index,
-            io_receiver,
+            io_handle,
             bbn_inbox: Vec::new(),
             ln_inbox: Vec::new(),
             meta_inbox: Vec::new(),
@@ -180,17 +170,15 @@ impl IoDmux {
     }
 
     fn try_send_bbn(&mut self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
-        self.io_sender.try_send(IoCommand {
+        self.io_handle.try_send(IoCommand {
             kind,
-            handle: self.io_handle_index,
             user_data: Self::BBN_USER_DATA,
         })
     }
 
     fn try_send_ln(&mut self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
-        self.io_sender.try_send(IoCommand {
+        self.io_handle.try_send(IoCommand {
             kind,
-            handle: self.io_handle_index,
             user_data: Self::LN_USER_DATA,
         })
     }
@@ -203,9 +191,8 @@ impl IoDmux {
     }
 
     fn try_send_meta(&self, kind: IoKind) -> Result<(), TrySendError<IoCommand>> {
-        self.io_sender.try_send(IoCommand {
+        self.io_handle.try_send(IoCommand {
             kind,
-            handle: self.io_handle_index,
             user_data: Self::META_USER_DATA,
         })
     }
@@ -220,7 +207,7 @@ impl IoDmux {
     /// Try to receive a completion from the io channel. If the completion is for the given user
     /// data, it is immediately returned. Otherwise, it is pushed into the appropriate inbox.
     fn try_poll(&mut self, eager_ud: u64) -> Option<CompleteIo> {
-        match self.io_receiver.try_recv() {
+        match self.io_handle.try_recv() {
             Ok(io) => {
                 if io.command.user_data == eager_ud {
                     Some(io)

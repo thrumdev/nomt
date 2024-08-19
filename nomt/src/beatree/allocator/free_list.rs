@@ -1,9 +1,9 @@
 use crate::{
     beatree::FREELIST_EMPTY,
-    io::{CompleteIo, IoCommand, IoKind},
+    io::{IoCommand, IoHandle, IoKind},
     io::{Page, PAGE_SIZE},
 };
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::TrySendError;
 use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd};
 
 use super::PageNumber;
@@ -27,9 +27,7 @@ pub struct FreeList {
 impl FreeList {
     pub fn read(
         store_file: &File,
-        io_sender: &Sender<IoCommand>,
-        io_handle_index: usize,
-        io_receiver: &Receiver<CompleteIo>,
+        io_handle: &IoHandle,
         free_list_head: Option<PageNumber>,
     ) -> FreeList {
         let Some(mut free_list_pn) = free_list_head else {
@@ -51,12 +49,11 @@ impl FreeList {
 
             let mut command = Some(IoCommand {
                 kind: IoKind::Read(store_file.as_raw_fd(), free_list_pn.0 as u64, page),
-                handle: io_handle_index,
                 user_data: 0,
             });
 
             while let Some(c) = command.take() {
-                match io_sender.try_send(c) {
+                match io_handle.try_send(c) {
                     Ok(()) => break,
                     Err(TrySendError::Disconnected(_)) => panic!("I/O worker dropped"),
                     Err(TrySendError::Full(c)) => {
@@ -65,7 +62,7 @@ impl FreeList {
                 }
             }
 
-            let completion = io_receiver.recv().expect("I/O store worker dropped");
+            let completion = io_handle.recv().expect("I/O store worker dropped");
             assert!(completion.result.is_ok());
             let page = completion.command.kind.unwrap_buf();
 
