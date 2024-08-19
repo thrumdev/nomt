@@ -56,6 +56,9 @@ impl Store {
         if !o.path.exists() {
             create(o)?;
         }
+
+        let io_pool = io::start_io_pool(o.num_rings);
+
         let meta_fd = OpenOptions::new()
             .read(true)
             .write(true)
@@ -88,6 +91,7 @@ impl Store {
             .open(&o.path.join("wal"))?;
         let meta = meta::Meta::read(&meta_fd)?;
         let values = beatree::Tree::open(
+            &io_pool,
             meta.ln_freelist_pn,
             meta.bbn_freelist_pn,
             meta.ln_bump,
@@ -96,13 +100,12 @@ impl Store {
             &ln_fd,
         )?;
         let pages = bitbox::DB::open(
+            &io_pool,
             meta.sync_seqn,
             meta.bitbox_num_pages,
-            o.num_rings,
             &ht_fd,
             &wal_fd,
         )?;
-        let io_pool = io::start_io_pool(3);
         let io_handle = io_pool.make_handle();
         Ok(Self {
             shared: Arc::new(Shared {

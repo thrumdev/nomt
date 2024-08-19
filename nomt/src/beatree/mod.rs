@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::io::Page;
+use crate::io::{IoPool, Page};
 
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
 
@@ -63,6 +63,7 @@ impl Shared {
 
 impl Tree {
     pub fn open(
+        io_pool: &IoPool,
         ln_freelist_pn: u32,
         bbn_freelist_pn: u32,
         ln_bump: u32,
@@ -70,8 +71,6 @@ impl Tree {
         bbn_file: &File,
         ln_file: &File,
     ) -> Result<Tree> {
-        let io_pool = crate::io::start_io_pool(3);
-
         let ln_freelist_pn = Some(ln_freelist_pn)
             .map(PageNumber)
             .filter(|&x| x != FREELIST_EMPTY);
