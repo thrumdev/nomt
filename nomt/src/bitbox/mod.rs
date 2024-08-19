@@ -306,17 +306,6 @@ impl DB {
             },
         );
 
-        // sync meta page change.
-        submit_and_wait_one(
-            &self.shared.io_sender,
-            &self.shared.commit_page_receiver,
-            IoCommand {
-                kind: IoKind::Fsync(ht_fd.as_raw_fd()),
-                handle: COMMIT_HANDLE_INDEX,
-                user_data: 0, // unimportant
-            },
-        );
-
         Ok(prev_wal_size)
     }
 
