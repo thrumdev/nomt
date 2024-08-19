@@ -298,11 +298,11 @@ impl PageLoader {
 
         match self.io_handle.try_send(command) {
             Ok(()) => {
-                load.state = PageLoadState::Submitted(bucket);
+                load.state = PageLoadState::Submitted;
                 Ok(PageLoadAdvance::Submitted)
             }
             Err(TrySendError::Full(_)) => {
-                load.state = PageLoadState::Blocked(bucket);
+                load.state = PageLoadState::Blocked;
                 Ok(PageLoadAdvance::Blocked)
             }
             Err(TrySendError::Disconnected(_)) => anyhow::bail!("I/O pool hangup"),
@@ -342,7 +342,7 @@ impl PageLoader {
 
         match self.io_handle.send(command) {
             Ok(()) => {
-                load.state = PageLoadState::Submitted(bucket);
+                load.state = PageLoadState::Submitted;
                 Ok(true)
             }
             Err(_) => anyhow::bail!("I/O pool hangup"),
@@ -402,12 +402,11 @@ impl PageLoadCompletion {
 
     pub fn apply_to(self, load: &mut PageLoad) -> Option<(Vec<u8>, BucketIndex)> {
         assert!(load.needs_completion());
-        let PageLoadState::Submitted(bucket) = load.state else {
-            unreachable!()
-        };
-
         if self.page[PAGE_SIZE - 32..] == load.page_id.encode() {
-            Some((self.page.to_vec(), bucket))
+            Some((
+                self.page.to_vec(),
+                BucketIndex(load.probe_sequence.bucket()),
+            ))
         } else {
             load.state = PageLoadState::Pending;
             None
@@ -433,26 +432,23 @@ pub struct PageLoad {
 
 impl PageLoad {
     pub fn needs_completion(&self) -> bool {
-        match self.state {
-            PageLoadState::Submitted(_) => true,
-            _ => false,
-        }
+        self.state == PageLoadState::Submitted
     }
 
     fn take_blocked(&mut self) -> Option<BucketIndex> {
         match std::mem::replace(&mut self.state, PageLoadState::Pending) {
             PageLoadState::Pending => None,
-            PageLoadState::Blocked(b) => Some(b),
-            PageLoadState::Submitted(_) => panic!("attempted to re-submit page load"),
+            PageLoadState::Blocked => Some(BucketIndex(self.probe_sequence.bucket())),
+            PageLoadState::Submitted => panic!("attempted to re-submit page load"),
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum PageLoadState {
     Pending,
-    Blocked(BucketIndex),
-    Submitted(BucketIndex),
+    Blocked,
+    Submitted,
 }
 
 /// Helper used in constructing a transaction. Used for finding buckets in which to write pages.
