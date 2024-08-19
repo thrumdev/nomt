@@ -144,7 +144,8 @@ impl Store {
 
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
-        self.shared.pages.get(&page_id)
+        let page_loader = bitbox::PageLoader::new(&self.shared.pages, self.io_pool().make_handle());
+        page_loader.load_sync(self.shared.ht_fd.as_raw_fd(), &page_id)
     }
 
     /// Access the underlying IoPool.
