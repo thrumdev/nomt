@@ -145,7 +145,18 @@ impl Store {
     /// Loads the given page.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
         let page_loader = bitbox::PageLoader::new(&self.shared.pages, self.io_pool().make_handle());
-        page_loader.load_sync(self.shared.ht_fd.as_raw_fd(), &page_id)
+        let mut page_load = page_loader.start_load(page_id);
+        loop {
+            if !page_loader.advance(self.shared.ht_fd.as_raw_fd(), &mut page_load, 0)? {
+                return Ok(None);
+            }
+
+            let completion = page_loader.complete()?;
+            assert_eq!(completion.user_data(), 0);
+            if let Some(res) = completion.apply_to(&mut page_load) {
+                return Ok(Some(res));
+            }
+        }
     }
 
     /// Access the underlying IoPool.
