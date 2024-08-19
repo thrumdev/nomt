@@ -9,7 +9,7 @@ use std::{
 use threadpool::ThreadPool;
 
 use crate::{
-    io::{CompleteIo, IoCommand, IoHandle, IoKind, Page, PAGE_SIZE},
+    io::{CompleteIo, IoCommand, IoHandle, IoKind, IoPool, Page, PAGE_SIZE},
     page_cache::PageDiff,
 };
 
@@ -47,9 +47,9 @@ pub struct Shared {
 impl DB {
     /// Opens an existing bitbox database.
     pub fn open(
+        io_pool: &IoPool,
         sync_seqn: u32,
         num_pages: u32,
-        num_rings: usize,
         ht_fd: &std::fs::File,
         wal_fd: &std::fs::File,
     ) -> anyhow::Result<Self> {
@@ -98,9 +98,6 @@ impl DB {
                 anyhow::bail!("encountered error in opening wal: {e:?}")
             }
         };
-
-        // Spawn io pool.
-        let io_pool = crate::io::start_io_pool(num_rings);
 
         // Spawn PageRequest dispatcher
         let (get_page_tx, get_page_rx) = crossbeam::channel::unbounded();
