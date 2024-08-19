@@ -13,7 +13,7 @@ license.workspace = true
 [dependencies]
 anyhow = { version = "1.0.81", features = ["backtrace"] }
 nomt-core = { path = "../core", features = ["std"] }
-parking_lot = { version = "0.12.1", features = ["arc_lock", "send_guard"] }
+parking_lot = { version = "0.12.3", features = ["arc_lock", "send_guard"] }
 threadpool = "1.8.1"
 bitvec = { version = "1" }
 blake3 = "1.5.1"

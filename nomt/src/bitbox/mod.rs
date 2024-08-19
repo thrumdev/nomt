@@ -1,12 +1,12 @@
 use crossbeam::channel::{Receiver, Sender};
 use nomt_core::page_id::PageId;
-use parking_lot::RwLock;
+use parking_lot::{ArcRwLockReadGuard, RwLock};
 use std::{
     collections::{HashMap, HashSet},
-    os::fd::AsRawFd,
+    fs::File,
+    os::fd::{AsRawFd, RawFd},
     sync::{Arc, Mutex},
 };
-use threadpool::ThreadPool;
 
 use crate::{
     io::{CompleteIo, IoCommand, IoHandle, IoKind, IoPool, Page, PAGE_SIZE},
@@ -37,11 +37,8 @@ pub struct Shared {
     store: Store,
     // TODO: probably RwLock can be avoided being used only during commit
     wal: RwLock<WalWriter>,
-    meta_map: RwLock<MetaMap>,
-    // channel used to send requests to the dispatcher
-    get_page_tx: Mutex<Sender<(u64 /*bucket*/, Sender<Page>)>>,
+    meta_map: Arc<RwLock<MetaMap>>,
     io_handle: IoHandle,
-    _dispatcher_tp: ThreadPool,
 }
 
 impl DB {
@@ -50,8 +47,8 @@ impl DB {
         io_pool: &IoPool,
         sync_seqn: u32,
         num_pages: u32,
-        ht_fd: &std::fs::File,
-        wal_fd: &std::fs::File,
+        ht_fd: &File,
+        wal_fd: &File,
     ) -> anyhow::Result<Self> {
         // TODO: refactor to use u32.
         let sync_seqn = sync_seqn as u64;
@@ -99,28 +96,11 @@ impl DB {
             }
         };
 
-        // Spawn PageRequest dispatcher
-        let (get_page_tx, get_page_rx) = crossbeam::channel::unbounded();
-
-        let dispatcher_tp = threadpool::Builder::new()
-            .num_threads(1)
-            .thread_name("nomt-io-dispatcher".to_string())
-            .build();
-
-        dispatcher_tp.execute(page_dispatcher_task(
-            store.clone(),
-            ht_fd.as_raw_fd(),
-            io_pool.make_handle(),
-            get_page_rx,
-        ));
-
         Ok(Self {
             shared: Arc::new(Shared {
                 store,
                 wal: RwLock::new(wal),
-                meta_map: RwLock::new(meta_map),
-                get_page_tx: Mutex::new(get_page_tx),
-                _dispatcher_tp: dispatcher_tp,
+                meta_map: Arc::new(RwLock::new(meta_map)),
                 io_handle: io_pool.make_handle(),
             }),
         })
@@ -132,36 +112,6 @@ impl DB {
         BucketAllocator {
             shared: self.shared.clone(),
             changed_buckets: HashMap::new(),
-        }
-    }
-
-    pub fn get(&self, page_id: &PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
-        let mut probe_seq = ProbeSequence::new(page_id, &self.shared.meta_map.read());
-
-        loop {
-            match probe_seq.next(&self.shared.meta_map.read()) {
-                ProbeResult::Tombstone(_) => continue,
-                ProbeResult::PossibleHit(bucket) => {
-                    // if this could be a match we need to fetch the page and check its id
-
-                    // send the read command
-                    let (tx, rx) = crossbeam::channel::bounded::<Page>(1);
-                    {
-                        let get_page_tx = self.shared.get_page_tx.lock().unwrap();
-                        get_page_tx.send((bucket, tx)).unwrap();
-                    }
-
-                    // wait for the dispacther
-                    let Ok(page) = rx.recv() else {
-                        panic!("something went wrong requesting pages");
-                    };
-
-                    if &page[PAGE_SIZE - 32..] == page_id.encode() {
-                        break Ok(Some((page.to_vec(), BucketIndex(bucket))));
-                    }
-                }
-                ProbeResult::Empty(_bucket) => break Ok(None),
-            }
         }
     }
 
@@ -289,6 +239,72 @@ impl DB {
     }
 }
 
+/// A utility for loading pages from bitbox.
+pub struct PageLoader {
+    shared: Arc<Shared>,
+    meta_map: ArcRwLockReadGuard<parking_lot::RawRwLock, MetaMap>,
+    io_handle: IoHandle,
+}
+
+impl PageLoader {
+    /// Create a new page loader.
+    pub fn new(db: &DB, io_handle: IoHandle) -> Self {
+        PageLoader {
+            shared: db.shared.clone(),
+            meta_map: RwLock::read_arc(&db.shared.meta_map),
+            io_handle,
+        }
+    }
+
+    /// Load a page, blocking the current thread. Fails if the I/O pool is down.
+    pub fn load_sync(
+        &self,
+        ht_fd: RawFd,
+        page_id: &PageId,
+    ) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
+        let mut probe_seq = ProbeSequence::new(page_id, &self.meta_map);
+
+        let mut page_buffer = None;
+
+        loop {
+            match probe_seq.next(&self.meta_map) {
+                ProbeResult::Tombstone(_) => continue,
+                ProbeResult::PossibleHit(bucket) => {
+                    // if this could be a match we need to fetch the page and check its id
+                    let data_page_index = self.shared.store.data_page_index(bucket);
+                    let buffer = page_buffer.take().unwrap_or_else(|| Box::new(Page::zeroed()));
+
+                    // send the read command
+                    let command = IoCommand {
+                        kind: IoKind::Read(ht_fd, data_page_index, buffer),
+                        user_data: 0,
+                    };
+
+                    self.io_handle.send(command).map_err(|_| anyhow::anyhow!("I/O pool hangup"))?;
+                    let complete = self.io_handle.recv()?;
+
+                    complete.result?;
+
+                    match complete.command.kind {
+                        IoKind::Read(fd, page_index, buffer)
+                            if fd == ht_fd && page_index == data_page_index
+                        => {
+                            if buffer[PAGE_SIZE - 32..] == page_id.encode() {
+                                return Ok(Some((buffer.to_vec(), BucketIndex(bucket))));
+                            } else {
+                                // misprobe. continue
+                                page_buffer = Some(buffer);
+                            }
+                        },
+                        _ => panic!("unexpected response. check for incorrect IoHandle sharing"),
+                    }
+                }
+                ProbeResult::Empty(_) => break Ok(None),
+            }
+        }
+    }
+}
+
 /// Helper used in constructing a transaction. Used for finding buckets in which to write pages.
 pub struct BucketAllocator {
     shared: Arc<Shared>,
@@ -349,51 +365,6 @@ fn get_changed(page: &Page, page_diff: &PageDiff) -> Vec<[u8; 32]> {
             node
         })
         .collect()
-}
-
-// A task that will receive all page requests and send back the result
-// through the provided channel
-
-// NOTE: It's not the best solution, as initial integration it avoids
-// having to change the io_uring abstraction
-fn page_dispatcher_task(
-    store: Store,
-    ht_fd: std::os::unix::io::RawFd,
-    io_handle: IoHandle,
-    get_page_rx: Receiver<(u64, Sender<Page>)>,
-) -> impl Fn() {
-    move || {
-        let mut slab = slab::Slab::new();
-        loop {
-            crossbeam::select! {
-                recv(get_page_rx) -> req => {
-                    let Ok((bucket, tx)) = req else {
-                        break;
-                    };
-
-                    let index = slab.insert(tx);
-                    let command = IoCommand {
-                        kind: IoKind::Read(ht_fd, store.data_page_index(bucket), Box::new(Page::zeroed())),
-                        user_data: index as u64,
-                    };
-
-                    // send the command
-                    io_handle.send(command).unwrap();
-
-                },
-                recv(io_handle.receiver()) -> response => {
-                    let Ok(CompleteIo { command, result }) = response else {
-                        panic!("TODO")
-                    };
-
-                    assert!(result.is_ok());
-
-                    let tx: Sender<Page> = slab.remove(command.user_data as usize);
-                    tx.send(*command.kind.unwrap_buf()).unwrap();
-                }
-            }
-        }
-    }
 }
 
 fn hash_page_id(page_id: &PageId) -> u64 {
