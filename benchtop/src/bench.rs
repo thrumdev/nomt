@@ -24,7 +24,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
         common_params.workload.percentage_cold,
     )?;
     let commit_concurrency = common_params.workload.commit_concurrency;
-    let num_rings = common_params.workload.num_rings;
+    let io_workers = common_params.workload.io_workers;
 
     let backends = if common_params.backends.is_empty() {
         Backend::all_backends()
@@ -40,7 +40,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             params.iterations,
             true,
             commit_concurrency,
-            num_rings,
+            io_workers,
         )
         .map(|_| ()),
         BenchType::Sequential(params) => bench_sequential(
@@ -51,7 +51,7 @@ pub fn bench(bench_type: BenchType) -> Result<()> {
             params.time_limit,
             true,
             commit_concurrency,
-            num_rings,
+            io_workers,
         )
         .map(|_| ()),
     }
@@ -69,14 +69,14 @@ pub fn bench_isolate(
     iterations: u64,
     print: bool,
     commit_concurrency: usize,
-    num_rings: usize,
+    io_workers: usize,
 ) -> Result<Vec<u64>> {
     let mut mean_results = vec![];
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
 
         for _ in 0..iterations {
-            let mut db = backend.instantiate(true, commit_concurrency, num_rings);
+            let mut db = backend.instantiate(true, commit_concurrency, io_workers);
             db.execute(None, &mut init);
             db.execute(Some(&mut timer), &mut *workload);
             db.print_metrics();
@@ -105,7 +105,7 @@ pub fn bench_sequential(
     time_limit: Option<u64>,
     print: bool,
     commit_concurrency: usize,
-    num_rings: usize,
+    io_workers: usize,
 ) -> Result<Vec<u64>> {
     if let (None, None) = (op_limit, time_limit) {
         anyhow::bail!("You need to specify at least one limiter between operations and time")
@@ -115,7 +115,7 @@ pub fn bench_sequential(
 
     for backend in backends {
         let mut timer = Timer::new(format!("{}", backend));
-        let mut db = backend.instantiate(true, commit_concurrency, num_rings);
+        let mut db = backend.instantiate(true, commit_concurrency, io_workers);
 
         let mut elapsed_time = 0;
         let mut op_count = 0;

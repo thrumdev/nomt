@@ -6,8 +6,8 @@ pub struct Options {
     pub(crate) path: PathBuf,
     /// The number of commit workers. Values over 64 will be rounded down to 64.
     pub(crate) commit_concurrency: usize,
-    /// The number of io_uring instances
-    pub(crate) num_rings: usize,
+    /// The number of io_uring instances, or I/O threads on non-Linux platforms.
+    pub(crate) io_workers: usize,
     /// Enable or disable metrics collection.
     pub(crate) metrics: bool,
     pub(crate) bitbox_num_pages: u32,
@@ -18,7 +18,7 @@ impl Default for Options {
         Self {
             path: PathBuf::from("nomt_db"),
             commit_concurrency: 1,
-            num_rings: 3,
+            io_workers: 3,
             metrics: false,
             bitbox_num_pages: 64_000,
         }
@@ -55,8 +55,8 @@ impl Options {
     /// Set the number of io_uring instances.
     ///
     /// Must be more than 0
-    pub fn num_rings(&mut self, num_rings: usize) {
-        assert!(num_rings > 0);
-        self.num_rings = num_rings;
+    pub fn io_workers(&mut self, io_workers: usize) {
+        assert!(io_workers > 0);
+        self.io_workers = io_workers;
     }
 }

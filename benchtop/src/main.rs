@@ -38,7 +38,7 @@ pub fn init(params: InitParams) -> Result<()> {
     let mut db = params.backend.instantiate(
         true,
         workload_params.commit_concurrency,
-        workload_params.num_rings,
+        workload_params.io_workers,
     );
     db.execute(None, &mut *init);
 
@@ -61,7 +61,7 @@ pub fn run(params: RunParams) -> Result<()> {
     let mut db = params.backend.instantiate(
         params.reset,
         workload_params.commit_concurrency,
-        workload_params.num_rings,
+        workload_params.io_workers,
     );
     if params.reset {
         db.execute(None, &mut *init);
