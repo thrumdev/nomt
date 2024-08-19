@@ -20,9 +20,11 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt as _;
 
+pub use self::page_loader::{PageLoad, PageLoadAdvance, PageLoadCompletion, PageLoader};
 pub use bitbox::BucketIndex;
 
 mod meta;
+mod page_loader;
 mod writeout;
 
 /// This is a lightweight handle and can be cloned cheaply.
@@ -142,12 +144,12 @@ impl Store {
         Ok(self.shared.values.lookup(key))
     }
 
-    /// Loads the given page.
+    /// Loads the given page, blocking the current thread.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
-        let page_loader = bitbox::PageLoader::new(&self.shared.pages, self.io_pool().make_handle());
+        let page_loader = self.page_loader();
         let mut page_load = page_loader.start_load(page_id);
         loop {
-            if !page_loader.advance(self.shared.ht_fd.as_raw_fd(), &mut page_load, 0)? {
+            if !page_loader.advance(&mut page_load, 0)? {
                 return Ok(None);
             }
 
@@ -156,6 +158,15 @@ impl Store {
             if let Some(res) = completion.apply_to(&mut page_load) {
                 return Ok(Some(res));
             }
+        }
+    }
+
+    /// Creates a new [`PageLoader`].
+    pub fn page_loader(&self) -> PageLoader {
+        let page_loader = bitbox::PageLoader::new(&self.shared.pages, self.io_pool().make_handle());
+        PageLoader {
+            shared: self.shared.clone(),
+            inner: page_loader,
         }
     }
 
