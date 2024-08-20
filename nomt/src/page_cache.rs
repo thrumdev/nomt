@@ -398,28 +398,25 @@ impl PageCache {
     /// Insert a page into the cache by its data. If `Some`, provide the bucket index where the
     /// page is stored.
     ///
-    /// This overwrites any page which was already present. Returns the new `Page` object.
+    /// This ignores the inputs if the page was already present, and returns that.
     pub fn insert(&self, page_id: PageId, page: Option<(Vec<u8>, BucketIndex)>) -> Page {
         let domain = &self.shared.page_rw_pass_domain;
         let shard_index = match self.shard_index_for(&page_id) {
             None => {
-                let mut entry = self.shared.root_page.write();
-                *entry = CacheEntry::init(domain, ShardIndex::Root, page);
-
-                return Page {
-                    inner: entry.page_data.clone(),
-                };
+                let page_data = self.shared.root_page.read().page_data.clone();
+                return Page { inner: page_data };
             }
             Some(i) => i,
         };
 
         let mut shard = self.shard(shard_index).locked.lock();
-        let cache_entry = CacheEntry::init(domain, ShardIndex::Shard(shard_index), page);
-        let page_data = cache_entry.page_data.clone();
+        let cache_entry = shard.cached.get_or_insert(page_id, || {
+            CacheEntry::init(domain, ShardIndex::Shard(shard_index), page)
+        });
 
-        shard.cached.push(page_id, cache_entry);
-
-        Page { inner: page_data }
+        Page {
+            inner: cache_entry.page_data.clone(),
+        }
     }
 
     /// Acquire a read pass for all pages in the cache.
