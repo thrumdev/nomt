@@ -28,11 +28,11 @@ use super::{
 };
 
 use crate::{
-    new_seek::{Interrupt, Seek, Seeker as NewSeeker},
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
     page_walker::{Output, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
+    seek::{Interrupt, Seek, Seeker as NewSeeker},
     store::Store,
     PathProof, WitnessedPath,
 };
