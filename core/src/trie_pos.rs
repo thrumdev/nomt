@@ -317,6 +317,11 @@ impl ChildNodeIndices {
         ChildNodeIndices(left)
     }
 
+    /// Child node indices for the top two nodes of a page.
+    pub fn next_page() -> Self {
+        Self::from_left(0)
+    }
+
     /// Get the index of the left child.
     pub fn left(&self) -> usize {
         self.0

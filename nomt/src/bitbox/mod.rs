@@ -435,6 +435,10 @@ impl PageLoad {
         self.state == PageLoadState::Submitted
     }
 
+    pub fn page_id(&self) -> &PageId {
+        &self.page_id
+    }
+
     fn take_blocked(&mut self) -> Option<BucketIndex> {
         match std::mem::replace(&mut self.state, PageLoadState::Pending) {
             PageLoadState::Pending => None,
