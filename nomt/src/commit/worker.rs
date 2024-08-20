@@ -12,7 +12,7 @@
 //! Updates are performed while the next fetch is pending, unless all fetches in
 //! the range have completed.
 
-use crossbeam::channel::{Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, TryRecvError};
 
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
@@ -33,6 +33,7 @@ use crate::{
     page_walker::{Output, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
     seek::{SeekOptions, Seeker},
+    new_seek::{Seeker as NewSeeker, Interrupt},
     store::Store,
     PathProof, WitnessedPath,
 };
@@ -58,32 +59,15 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
         barrier,
     } = params;
 
-    let mut read_pass = Some(page_cache.new_read_pass());
+    let read_pass = page_cache.new_read_pass();
     barrier.wait();
 
-    loop {
-        crossbeam::select! {
-            recv(comms.commit_rx) -> msg => match msg {
-                Ok(ToWorker::Prepare) => {
-                    let _ = read_pass.take();
-                    break
-                }
-                // UNWRAP: `Commit` only sent after Prepare.
-                Ok(ToWorker::Commit(_)) => unreachable!(),
-                Err(_) => return,
-            },
-            recv(comms.warmup_rx) -> msg => match msg {
-                Ok(command) => warm_up(
-                    read_pass.as_ref().unwrap(),
-                    root,
-                    page_cache.clone(),
-                    store.clone(),
-                    command,
-                ),
-                Err(_) => return,
-            },
-        }
-    }
+    let page_loader = store.page_loader();
+    let seeker = NewSeeker::new(root, page_cache.clone(), store.page_loader(), false);
+
+    if let Err(_) = warm_up_phase(&comms, read_pass, seeker) {
+        return
+    };
 
     match comms.commit_rx.recv() {
         Err(_) => return, // early exit only.
@@ -96,24 +80,53 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
     }
 }
 
-fn warm_up(
-    read_pass: &ReadPass<ShardIndex>,
-    root: Node,
-    page_cache: PageCache,
-    store: Store,
-    command: WarmUpCommand,
-) {
-    let WarmUpCommand { key_path, delete } = command;
+fn warm_up_phase(
+    comms: &Comms,
+    read_pass: ReadPass<ShardIndex>,
+    mut seeker: NewSeeker,
+) -> anyhow::Result<()> {
+    let mut preparing = false;
+    loop {
+        let (block, push) = match seeker.advance(&read_pass)? {
+            Interrupt::NoMoreWork => if preparing { return Ok(()) } else { (true, true) },
+            Interrupt::HasRoom => if preparing { (false, false) } else { (false, true) },
+            Interrupt::Completion(_) | Interrupt::SpecialPageCompletion => (false, false),
+        };
 
-    let seeker = Seeker::new(root, page_cache, store);
-    let _seek_result = seeker.seek(
-        key_path,
-        SeekOptions {
-            retrieve_sibling_leaf_children: delete,
-            record_siblings: false,
-        },
-        read_pass,
-    );
+        if preparing || !push { continue }
+
+        let (commit_msg, warmup_msg) = if block {
+            crossbeam_channel::select! {
+                recv(comms.commit_rx) -> msg => (Some(msg?), None),
+                recv(comms.warmup_rx) -> msg => (None, Some(msg?)),
+            }
+        } else {
+            (
+                match comms.commit_rx.try_recv() {
+                    Ok(msg) => Some(msg),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => anyhow::bail!(TryRecvError::Disconnected),
+                },
+                match comms.warmup_rx.try_recv() {
+                    Ok(msg) => Some(msg),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => anyhow::bail!(TryRecvError::Disconnected),
+                }
+            )
+        };
+
+        match commit_msg {
+            None => {}
+            Some(ToWorker::Prepare) => { preparing = true; continue }
+            // prepare is always sent before commit.
+            Some(ToWorker::Commit(_)) => unreachable!(),
+        }
+
+        match warmup_msg {
+            None => {}
+            Some(warm_up) => seeker.push(warm_up.key_path),
+        }
+    }
 }
 
 fn commit<H: NodeHasher>(
