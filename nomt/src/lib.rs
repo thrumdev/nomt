@@ -38,6 +38,8 @@ mod rw_pass_cell;
 mod seek;
 mod store;
 
+mod new_seek;
+
 mod io;
 
 const MAX_COMMIT_CONCURRENCY: usize = 64;
