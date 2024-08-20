@@ -17,7 +17,7 @@ pub(crate) fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usi
 pub fn leaf_ops_spliced(
     leaf: Option<LeafData>,
     ops: &[(KeyPath, Option<ValueHash>)],
-) -> impl Iterator<Item = (KeyPath, ValueHash)> + '_ {
+) -> impl Iterator<Item = (KeyPath, ValueHash)> + Clone + '_ {
     let splice_index = leaf
         .as_ref()
         .and_then(|leaf| ops.binary_search_by_key(&leaf.key_path, |x| x.0).err());

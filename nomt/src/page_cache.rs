@@ -202,28 +202,28 @@ impl fmt::Debug for Page {
 /// Given a trie position and a current page corresponding to that trie position (None at the root)
 /// along with a function for synchronously loading a new page, get the page and indices where the
 /// leaf data for a leaf at `trie_pos` should be stored.
-pub fn locate_leaf_data(
+pub fn locate_leaf_data<E>(
     trie_pos: &TriePosition,
     current_page: Option<&(PageId, Page)>,
-    load: impl Fn(PageId) -> Page,
-) -> (Page, PageId, ChildNodeIndices) {
-    match current_page {
+    load: impl Fn(PageId) -> Result<Page, E>,
+) -> Result<(Page, PageId, ChildNodeIndices), E> {
+    Ok(match current_page {
         None => {
             assert!(trie_pos.is_root());
-            let page = load(ROOT_PAGE_ID);
+            let page = load(ROOT_PAGE_ID)?;
             (page, ROOT_PAGE_ID, ChildNodeIndices::from_left(0))
         }
         Some((ref page_id, ref page)) => {
             let depth_in_page = trie_pos.depth_in_page();
             if depth_in_page == DEPTH {
                 let child_page_id = page_id.child_page_id(trie_pos.child_page_index()).unwrap();
-                let child_page = load(child_page_id.clone());
+                let child_page = load(child_page_id.clone())?;
                 (child_page, child_page_id, ChildNodeIndices::from_left(0))
             } else {
                 (page.clone(), page_id.clone(), trie_pos.child_node_indices())
             }
         }
-    }
+    })
 }
 
 struct CacheEntry {
