@@ -28,12 +28,11 @@ use super::{
 };
 
 use crate::{
+    new_seek::{Interrupt, Seek, Seeker as NewSeeker},
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
     page_walker::{Output, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
-    seek::{SeekOptions, Seeker},
-    new_seek::{Seeker as NewSeeker, Interrupt},
     store::Store,
     PathProof, WitnessedPath,
 };
@@ -62,19 +61,24 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
     let read_pass = page_cache.new_read_pass();
     barrier.wait();
 
-    let page_loader = store.page_loader();
     let seeker = NewSeeker::new(root, page_cache.clone(), store.page_loader(), false);
 
     if let Err(_) = warm_up_phase(&comms, read_pass, seeker) {
-        return
+        return;
     };
+
+    // TODO: whether to record siblings should be a parameter on `CommitCommand`.
+    let seeker = NewSeeker::new(root, page_cache.clone(), store.page_loader(), true);
 
     match comms.commit_rx.recv() {
         Err(_) => return, // early exit only.
         // UNWRAP: Commit always sent after Prepare.
         Ok(ToWorker::Prepare) => unreachable!(),
         Ok(ToWorker::Commit(command)) => {
-            let output = commit::<H>(root, page_cache, store, command);
+            let output = match commit::<H>(root, page_cache, seeker, command) {
+                Err(_) => return,
+                Ok(o) => o,
+            };
             let _ = comms.output_tx.send(output);
         }
     }
@@ -88,12 +92,26 @@ fn warm_up_phase(
     let mut preparing = false;
     loop {
         let (block, push) = match seeker.advance(&read_pass)? {
-            Interrupt::NoMoreWork => if preparing { return Ok(()) } else { (true, true) },
-            Interrupt::HasRoom => if preparing { (false, false) } else { (false, true) },
+            Interrupt::NoMoreWork => {
+                if preparing {
+                    return Ok(());
+                } else {
+                    (true, true)
+                }
+            }
+            Interrupt::HasRoom => {
+                if preparing {
+                    (false, false)
+                } else {
+                    (false, true)
+                }
+            }
             Interrupt::Completion(_) | Interrupt::SpecialPageCompletion => (false, false),
         };
 
-        if preparing || !push { continue }
+        if preparing || !push {
+            continue;
+        }
 
         let (commit_msg, warmup_msg) = if block {
             crossbeam_channel::select! {
@@ -111,13 +129,16 @@ fn warm_up_phase(
                     Ok(msg) => Some(msg),
                     Err(TryRecvError::Empty) => None,
                     Err(TryRecvError::Disconnected) => anyhow::bail!(TryRecvError::Disconnected),
-                }
+                },
             )
         };
 
         match commit_msg {
             None => {}
-            Some(ToWorker::Prepare) => { preparing = true; continue }
+            Some(ToWorker::Prepare) => {
+                preparing = true;
+                continue;
+            }
             // prepare is always sent before commit.
             Some(ToWorker::Commit(_)) => unreachable!(),
         }
@@ -132,29 +153,19 @@ fn warm_up_phase(
 fn commit<H: NodeHasher>(
     root: Node,
     page_cache: PageCache,
-    store: Store,
+    mut seeker: NewSeeker,
     command: CommitCommand,
-) -> WorkerOutput {
+) -> anyhow::Result<WorkerOutput> {
     let CommitCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
 
     let mut output = WorkerOutput::new(shared.witness);
 
-    let mut committer = RangeCommitter::<H>::new(
-        root,
-        shared.clone(),
-        write_pass,
-        page_cache.clone(),
-        store.clone(),
-    );
-
-    while !committer.is_done() {
-        committer.consume_terminal(&mut output);
-    }
+    let committer = RangeCommitter::<H>::new(root, shared.clone(), write_pass, &page_cache);
 
     // one lucky thread gets the master write pass.
-    let mut write_pass = match committer.conclude(&mut output) {
-        None => return output,
+    let mut write_pass = match committer.commit(&mut seeker, &mut output)? {
+        None => return Ok(output),
         Some(write_pass) => write_pass,
     };
 
@@ -189,7 +200,7 @@ fn commit<H: NodeHasher>(
         Output::ChildPageRoots(_, _) => unreachable!(),
     }
 
-    output
+    Ok(output)
 }
 
 // helper for iterating all paths in the range and performing
@@ -202,11 +213,9 @@ struct RangeCommitter<H> {
     write_pass: WritePass<ShardIndex>,
     region: PageRegion,
     page_walker: PageWalker<H>,
-    page_cache: PageCache,
-    store: Store,
     range_start: usize,
     range_end: usize,
-    cur_index: usize,
+    saved_advance: Option<SavedAdvance>,
 }
 
 impl<H: NodeHasher> RangeCommitter<H> {
@@ -214,8 +223,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
         root: Node,
         shared: Arc<CommitShared>,
         write_pass: WritePass<ShardIndex>,
-        page_cache: PageCache,
-        store: Store,
+        page_cache: &PageCache,
     ) -> Self {
         let region = match write_pass.region() {
             ShardIndex::Root => PageRegion::universe(),
@@ -240,37 +248,22 @@ impl<H: NodeHasher> RangeCommitter<H> {
             write_pass,
             region,
             page_walker: PageWalker::<H>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID)),
-            page_cache,
-            store,
             range_start,
             range_end,
-            cur_index: range_start,
+            saved_advance: None,
         }
     }
 
-    fn is_done(&self) -> bool {
-        self.cur_index >= self.range_end
-    }
-
-    fn consume_terminal(&mut self, output: &mut WorkerOutput) {
-        assert!(!self.is_done());
-
-        // TODO: it'd be slightly more efficient but more complex to interleave page fetches
-        // and page updates, such that while we're waiting on a page fetch we process the previous
-        // terminal, and so on.
-
-        let seeker = Seeker::new(self.root, self.page_cache.clone(), self.store.clone());
-        let start_index = self.cur_index;
-        let seek_result = seeker.seek(
-            self.shared.read_write[start_index].0,
-            SeekOptions {
-                // note: this is a very imperfect heuristic because multiple entries could
-                // map to the same terminal node.
-                retrieve_sibling_leaf_children: self.shared.read_write[start_index].1.is_delete(),
-                record_siblings: true,
-            },
-            self.write_pass.downgrade(),
-        );
+    // returns the end index of the batch. returns the end index of the batches covered by
+    // this terminal.
+    fn handle_completion(
+        &mut self,
+        seeker: &mut NewSeeker,
+        output: &mut WorkerOutput,
+        start_index: usize,
+        seek_result: Seek,
+    ) -> usize {
+        assert!(self.saved_advance.is_none());
 
         // note that this is only true when the seek result is in the shared area - so multiple
         // workers will encounter it. we use this to defer to the first worker.
@@ -297,12 +290,11 @@ impl<H: NodeHasher> RangeCommitter<H> {
         };
 
         let next_index = start_index + batch_size;
-        self.cur_index = next_index;
 
         // witness / pushing pending responsibility falls on the worker whose range this falls
         // inside.
         if !batch_starts_in_our_range {
-            return;
+            return next_index;
         }
 
         let is_non_exclusive = seek_result
@@ -317,27 +309,70 @@ impl<H: NodeHasher> RangeCommitter<H> {
                 next_index,
                 seek_result.terminal.clone(),
             );
+
+            if let Some(ref mut witnessed_paths) = output.witnessed_paths {
+                let path = WitnessedPath {
+                    inner: PathProof {
+                        // if the terminal lands in the non-exclusive area, then the path to it is
+                        // guaranteed not to have been altered by anything we've done so far.
+                        siblings: seek_result.siblings,
+                        terminal: match seek_result.terminal.clone() {
+                            Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
+                            None => PathProofTerminal::Terminator(
+                                seek_result.position.path().to_bitvec(),
+                            ),
+                        },
+                    },
+                    path: seek_result.position.path().to_bitvec(),
+                };
+                witnessed_paths.push((path, seek_result.terminal, batch_size));
+            }
+
+            return next_index;
+        }
+
+        // attempt to advance the trie walker. if it fails, pocket away for later.
+        let ops = if has_writes {
+            Some(subtrie_ops(
+                &self.shared.read_write[start_index..next_index],
+            ))
         } else {
-            if !has_writes {
-                self.page_walker
-                    .advance(&mut self.write_pass, seek_result.position.clone());
-            } else {
-                let ops = subtrie_ops(&self.shared.read_write[start_index..next_index]);
+            None
+        };
+        self.attempt_advance(seeker, output, seek_result, ops, batch_size);
+
+        next_index
+    }
+
+    // attempt to advance the trie walker. if this fails, it submits a special page request to
+    // the seeker and stores the `SavedAdvance`. if this succeeds, it updates the output.
+    fn attempt_advance(
+        &mut self,
+        seeker: &mut NewSeeker,
+        output: &mut WorkerOutput,
+        seek_result: Seek,
+        ops: Option<Vec<(KeyPath, Option<ValueHash>)>>,
+        batch_size: usize,
+    ) {
+        let res = match ops {
+            None => self
+                .page_walker
+                .advance(&mut self.write_pass, seek_result.position.clone()),
+            Some(ops) => {
                 let ops = nomt_core::update::leaf_ops_spliced(seek_result.terminal.clone(), &ops);
                 self.page_walker.advance_and_replace(
                     &mut self.write_pass,
                     seek_result.position.clone(),
                     ops,
-                );
+                )
             }
         };
 
+        // TODO: introduce an error in page walker and handle it by setting `SavedAdvance` to
+        // some, scheduling the page load in the seeker, and returning.
+
         if let Some(ref mut witnessed_paths) = output.witnessed_paths {
-            let siblings = if is_non_exclusive {
-                // if the terminal lands in the non-exclusive area, then the path to it is guaranteed
-                // not to have been altered by anything we've done so far.
-                seek_result.siblings
-            } else {
+            let siblings = {
                 // nodes may have been altered prior to seeking - the page walker tracks which ones.
                 let mut siblings = seek_result.siblings;
                 for (actual_sibling, depth) in self.page_walker.siblings() {
@@ -362,19 +397,80 @@ impl<H: NodeHasher> RangeCommitter<H> {
         }
     }
 
-    fn conclude(mut self, output: &mut WorkerOutput) -> Option<WritePass<ShardIndex>> {
-        // PANIC: walker was configured with a parent page.
-        let (new_nodes, diffs) = match self.page_walker.conclude(&mut self.write_pass) {
-            Output::Root(_, _) => unreachable!(),
-            Output::ChildPageRoots(new_nodes, diffs) => (new_nodes, diffs),
-        };
+    fn reattempt_advance(&mut self, seeker: &mut NewSeeker, output: &mut WorkerOutput) {
+        // UNWRAP: guaranteed by behavior of seeker / commit / advance.
+        let SavedAdvance {
+            ops,
+            seek_result,
+            batch_size,
+        } = self.saved_advance.take().unwrap();
+        self.attempt_advance(seeker, output, seek_result, ops, batch_size);
+    }
 
-        assert!(!diffs.contains_key(&ROOT_PAGE_ID));
-        output.page_diffs = diffs;
+    fn commit(
+        mut self,
+        seeker: &mut NewSeeker,
+        output: &mut WorkerOutput,
+    ) -> anyhow::Result<Option<WritePass<ShardIndex>>> {
+        let mut start_index = self.range_start;
+        let mut pushes = 0;
+        let mut skips = 0;
 
-        self.shared.push_pending_root_nodes(new_nodes);
+        let mut conclude_needs_extra = false;
 
-        self.write_pass.consume()
+        loop {
+            if start_index >= self.range_end && !conclude_needs_extra {
+                // PANIC: walker was configured with a parent page.
+                let (new_nodes, diffs) = match self.page_walker.conclude(&mut self.write_pass) {
+                    Output::Root(_, _) => unreachable!(),
+                    Output::ChildPageRoots(new_nodes, diffs) => (new_nodes, diffs),
+                    // TODO: handle need for extra page.
+                };
+
+                assert!(!diffs.contains_key(&ROOT_PAGE_ID));
+                output.page_diffs = diffs;
+
+                self.shared.push_pending_root_nodes(new_nodes);
+
+                return Ok(self.write_pass.consume());
+            }
+
+            match seeker.advance(self.write_pass.downgrade())? {
+                Interrupt::NoMoreWork | Interrupt::HasRoom => {
+                    let next_push = start_index + pushes;
+                    if next_push < self.range_end {
+                        seeker.push(self.shared.read_write[next_push].0);
+                        pushes += 1;
+                    }
+                }
+                Interrupt::Completion(seek_result) => {
+                    // skip completions until we're past the end of the last batch.
+                    if skips > 0 {
+                        skips -= 1;
+                        continue;
+                    }
+
+                    let end_index =
+                        self.handle_completion(seeker, output, start_index, seek_result);
+
+                    // account for stuff we pushed that was already covered by the terminal
+                    // we just popped off.
+                    let batch_size = end_index - start_index;
+                    // note: pushes and batch size are both at least 1.
+                    skips = std::cmp::min(pushes, batch_size) - 1;
+                    pushes = pushes.saturating_sub(batch_size);
+
+                    start_index = end_index;
+                }
+                Interrupt::SpecialPageCompletion => {
+                    if conclude_needs_extra {
+                        conclude_needs_extra = false;
+                    } else {
+                        self.reattempt_advance(seeker, output);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -388,4 +484,11 @@ fn subtrie_ops(read_write: &[(KeyPath, KeyReadWrite)]) -> Vec<(KeyPath, Option<V
             KeyReadWrite::Read => None,
         })
         .collect::<Vec<_>>()
+}
+
+struct SavedAdvance {
+    // none: no writes
+    ops: Option<Vec<(KeyPath, Option<ValueHash>)>>,
+    seek_result: Seek,
+    batch_size: usize,
 }

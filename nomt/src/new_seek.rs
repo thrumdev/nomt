@@ -225,7 +225,7 @@ impl Seeker {
 
                 return Ok(Interrupt::Completion(Seek {
                     key: request.key,
-                    trie_pos: request.position,
+                    position: request.position,
                     page_id: request.page_id,
                     siblings: request.siblings,
                     terminal,
@@ -315,7 +315,9 @@ impl Seeker {
 
                 if let Some(page) = self.page_cache.get(page_id.clone()) {
                     request.continue_seek(read_pass, page_id, &page, self.record_siblings);
-                    if request.is_completed() { break }
+                    if request.is_completed() {
+                        break;
+                    }
                     continue;
                 }
 
@@ -411,7 +413,7 @@ pub struct Seek {
     /// The key being sought.
     pub key: KeyPath,
     /// The position in the trie where the terminal node was found.
-    pub trie_pos: TriePosition,
+    pub position: TriePosition,
     /// The page ID where the terminal node was found. `None` at root.
     pub page_id: Option<PageId>,
     /// The siblings along the path to the terminal, including the terminal's sibling.
