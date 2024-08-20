@@ -15,7 +15,7 @@
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
 
 use nomt_core::{
-    page_id::ROOT_PAGE_ID,
+    page_id::{PageId, ROOT_PAGE_ID},
     proof::PathProofTerminal,
     trie::{KeyPath, Node, NodeHasher, ValueHash},
 };
@@ -30,9 +30,9 @@ use super::{
 use crate::{
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
-    page_walker::{Output, PageWalker},
+    page_walker::{NeedsPage, Output, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
-    seek::{Interrupt, Seek, Seeker as NewSeeker},
+    seek::{Interrupt, Seek, Seeker},
     store::Store,
     PathProof, WitnessedPath,
 };
@@ -61,14 +61,14 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
     let read_pass = page_cache.new_read_pass();
     barrier.wait();
 
-    let seeker = NewSeeker::new(root, page_cache.clone(), store.page_loader(), false);
+    let seeker = Seeker::new(root, page_cache.clone(), store.page_loader(), false);
 
     if let Err(_) = warm_up_phase(&comms, read_pass, seeker) {
         return;
     };
 
     // TODO: whether to record siblings should be a parameter on `CommitCommand`.
-    let seeker = NewSeeker::new(root, page_cache.clone(), store.page_loader(), true);
+    let seeker = Seeker::new(root, page_cache.clone(), store.page_loader(), true);
 
     match comms.commit_rx.recv() {
         Err(_) => return, // early exit only.
@@ -87,7 +87,7 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
 fn warm_up_phase(
     comms: &Comms,
     read_pass: ReadPass<ShardIndex>,
-    mut seeker: NewSeeker,
+    mut seeker: Seeker,
 ) -> anyhow::Result<()> {
     let mut preparing = false;
     loop {
@@ -153,7 +153,7 @@ fn warm_up_phase(
 fn commit<H: NodeHasher>(
     root: Node,
     page_cache: PageCache,
-    mut seeker: NewSeeker,
+    mut seeker: Seeker,
     command: CommitCommand,
 ) -> anyhow::Result<WorkerOutput> {
     let CommitCommand { shared, write_pass } = command;
@@ -171,11 +171,20 @@ fn commit<H: NodeHasher>(
 
     let pending_ops = shared.take_root_pending();
     let mut root_page_committer = PageWalker::<H>::new(root, page_cache.clone(), None);
+
     for (trie_pos, pending_op) in pending_ops {
         match pending_op {
-            RootPagePending::Node(node) => {
-                root_page_committer.advance_and_place_node(&mut write_pass, trie_pos, node);
-            }
+            RootPagePending::Node(node) => loop {
+                let page = match root_page_committer.advance_and_place_node(
+                    &mut write_pass,
+                    trie_pos.clone(),
+                    node,
+                ) {
+                    Err(NeedsPage(page)) => page,
+                    Ok(()) => break,
+                };
+                drive_page_fetch(&mut seeker, write_pass.downgrade(), page)?;
+            },
             RootPagePending::SubTrie {
                 range_start,
                 range_end,
@@ -183,24 +192,57 @@ fn commit<H: NodeHasher>(
             } => {
                 let ops = subtrie_ops(&shared.read_write[range_start..range_end]);
                 let ops = nomt_core::update::leaf_ops_spliced(prev_terminal, &ops);
-                root_page_committer.advance_and_replace(&mut write_pass, trie_pos, ops);
+                loop {
+                    let page = match root_page_committer.advance_and_replace(
+                        &mut write_pass,
+                        trie_pos.clone(),
+                        ops.clone(),
+                    ) {
+                        Err(NeedsPage(page)) => page,
+                        Ok(()) => break,
+                    };
+                    drive_page_fetch(&mut seeker, write_pass.downgrade(), page)?;
+                }
             }
         }
     }
 
     // PANIC: output is always root when no parent page is specified.
-    match root_page_committer.conclude(&mut write_pass) {
-        Output::Root(new_root, diffs) => {
-            for (page_id, page_diff) in diffs {
-                output.page_diffs.insert(page_id, page_diff);
-            }
+    loop {
+        let page = match root_page_committer.conclude(&mut write_pass) {
+            Ok(Output::Root(new_root, diffs)) => {
+                for (page_id, page_diff) in diffs {
+                    output.page_diffs.insert(page_id, page_diff);
+                }
 
-            output.root = Some(new_root);
-        }
-        Output::ChildPageRoots(_, _) => unreachable!(),
+                output.root = Some(new_root);
+                break;
+            }
+            Ok(Output::ChildPageRoots(_, _)) => unreachable!(),
+            Err((NeedsPage(page), page_walker)) => {
+                root_page_committer = page_walker;
+                page
+            }
+        };
+        drive_page_fetch(&mut seeker, write_pass.downgrade(), page)?;
     }
 
     Ok(output)
+}
+
+fn drive_page_fetch(
+    seeker: &mut Seeker,
+    read_pass: &ReadPass<ShardIndex>,
+    page: PageId,
+) -> anyhow::Result<()> {
+    seeker.push_single_request(page);
+    loop {
+        match seeker.advance(read_pass) {
+            Err(e) => return Err(e),
+            Ok(Interrupt::SpecialPageCompletion) => return Ok(()),
+            _ => continue,
+        }
+    }
 }
 
 // helper for iterating all paths in the range and performing
@@ -258,7 +300,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
     // this terminal.
     fn handle_completion(
         &mut self,
-        seeker: &mut NewSeeker,
+        seeker: &mut Seeker,
         output: &mut WorkerOutput,
         start_index: usize,
         seek_result: Seek,
@@ -348,7 +390,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
     // the seeker and stores the `SavedAdvance`. if this succeeds, it updates the output.
     fn attempt_advance(
         &mut self,
-        seeker: &mut NewSeeker,
+        seeker: &mut Seeker,
         output: &mut WorkerOutput,
         seek_result: Seek,
         ops: Option<Vec<(KeyPath, Option<ValueHash>)>>,
@@ -358,7 +400,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
             None => self
                 .page_walker
                 .advance(&mut self.write_pass, seek_result.position.clone()),
-            Some(ops) => {
+            Some(ref ops) => {
                 let ops = nomt_core::update::leaf_ops_spliced(seek_result.terminal.clone(), &ops);
                 self.page_walker.advance_and_replace(
                     &mut self.write_pass,
@@ -368,8 +410,15 @@ impl<H: NodeHasher> RangeCommitter<H> {
             }
         };
 
-        // TODO: introduce an error in page walker and handle it by setting `SavedAdvance` to
-        // some, scheduling the page load in the seeker, and returning.
+        if let Err(NeedsPage(page)) = res {
+            seeker.push_single_request(page);
+            self.saved_advance = Some(SavedAdvance {
+                seek_result,
+                ops,
+                batch_size,
+            });
+            return;
+        }
 
         if let Some(ref mut witnessed_paths) = output.witnessed_paths {
             let siblings = {
@@ -397,7 +446,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
         }
     }
 
-    fn reattempt_advance(&mut self, seeker: &mut NewSeeker, output: &mut WorkerOutput) {
+    fn reattempt_advance(&mut self, seeker: &mut Seeker, output: &mut WorkerOutput) {
         // UNWRAP: guaranteed by behavior of seeker / commit / advance.
         let SavedAdvance {
             ops,
@@ -409,7 +458,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
 
     fn commit(
         mut self,
-        seeker: &mut NewSeeker,
+        seeker: &mut Seeker,
         output: &mut WorkerOutput,
     ) -> anyhow::Result<Option<WritePass<ShardIndex>>> {
         let mut start_index = self.range_start;
@@ -422,9 +471,14 @@ impl<H: NodeHasher> RangeCommitter<H> {
             if start_index >= self.range_end && !conclude_needs_extra {
                 // PANIC: walker was configured with a parent page.
                 let (new_nodes, diffs) = match self.page_walker.conclude(&mut self.write_pass) {
-                    Output::Root(_, _) => unreachable!(),
-                    Output::ChildPageRoots(new_nodes, diffs) => (new_nodes, diffs),
-                    // TODO: handle need for extra page.
+                    Ok(Output::Root(_, _)) => unreachable!(),
+                    Ok(Output::ChildPageRoots(new_nodes, diffs)) => (new_nodes, diffs),
+                    Err((NeedsPage(page), page_walker)) => {
+                        self.page_walker = page_walker;
+                        seeker.push_single_request(page);
+                        conclude_needs_extra = true;
+                        continue;
+                    }
                 };
 
                 assert!(!diffs.contains_key(&ROOT_PAGE_ID));
