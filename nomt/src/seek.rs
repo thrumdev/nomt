@@ -21,6 +21,7 @@ use std::collections::{
 use bitvec::prelude::*;
 use slab::Slab;
 
+const MAX_REQUESTS: usize = 64;
 const MAX_PARALLEL_LOADS: usize = 32;
 const SINGLE_PAGE_REQUEST_INDEX: usize = usize::MAX;
 
@@ -30,6 +31,7 @@ struct SeekRequest {
     page_id: Option<PageId>,
     siblings: Vec<Node>,
     state: RequestState,
+    continuations: usize,
 }
 
 impl SeekRequest {
@@ -46,6 +48,7 @@ impl SeekRequest {
             page_id: None,
             siblings: Vec::new(),
             state,
+            continuations: 0,
         }
     }
 
@@ -76,6 +79,10 @@ impl SeekRequest {
         let RequestState::Seeking(mut cur_node) = self.state else {
             panic!("seek past end")
         };
+
+        self.continuations += 1;
+
+        assert!(self.continuations < 10);
 
         // terminator should have yielded completion.
         assert!(!trie::is_terminator(&cur_node));
@@ -242,7 +249,7 @@ impl Seeker {
                 self.handle_completion(read_pass, completion);
             } else if self.requests.is_empty() {
                 return Ok(Interrupt::NoMoreWork);
-            } else if !blocked && self.page_load_slab.len() < MAX_PARALLEL_LOADS {
+            } else if !blocked && self.page_load_slab.len() < MAX_PARALLEL_LOADS && self.requests.len() < MAX_REQUESTS {
                 // no completion, not blocked, slab not full, more requests might exist.
                 return Ok(Interrupt::HasRoom);
             }
@@ -302,22 +309,18 @@ impl Seeker {
             .requests
             .iter_mut()
             .enumerate()
-            .filter(|(_, (is_requesting, request))| !is_requesting && !request.is_completed())
         {
-            if self.page_load_slab.len() == MAX_PARALLEL_LOADS {
-                return;
-            }
+            while !*is_requesting && !request.is_completed() {
+                if self.page_load_slab.len() == MAX_PARALLEL_LOADS {
+                    return;
+                }
 
-            loop {
                 let request_index = self.processed + i;
 
                 let page_id: PageId = request.next_page_id();
 
                 if let Some(page) = self.page_cache.get(page_id.clone()) {
                     request.continue_seek(read_pass, page_id, &page, self.record_siblings);
-                    if request.is_completed() {
-                        break;
-                    }
                     continue;
                 }
 
@@ -385,6 +388,8 @@ impl Seeker {
             }
             let idx = waiting_request - self.processed;
             let (ref mut is_requesting, ref mut request) = &mut self.requests[idx];
+            assert!(!request.is_completed());
+
             *is_requesting = false;
             request.continue_seek(
                 read_pass,
