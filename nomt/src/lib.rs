@@ -351,7 +351,7 @@ impl Session {
     /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
     pub fn tentative_read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         // UNWRAP: committer always `Some` during lifecycle.
-        self.committer.as_mut().unwrap().warm_up(path, false);
+        self.committer.as_mut().unwrap().warm_up(path);
 
         let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
 
@@ -359,11 +359,10 @@ impl Session {
         Ok(value)
     }
 
-    /// Signals that the given key is going to be written to. Set `delete` to true when the
-    /// key is likely being deleted.
-    pub fn tentative_write_slot(&mut self, path: KeyPath, delete: bool) {
+    /// Signals that the given key is going to be written to.
+    pub fn tentative_write_slot(&mut self, path: KeyPath) {
         // UNWRAP: committer always `Some` during lifecycle.
-        self.committer.as_mut().unwrap().warm_up(path, delete);
+        self.committer.as_mut().unwrap().warm_up(path);
     }
 }
 

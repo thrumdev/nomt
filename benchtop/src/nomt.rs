@@ -79,7 +79,6 @@ impl<'a> Transaction for Tx<'a> {
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let key_path = sha2::Sha256::digest(key).into();
         let value = value.map(|v| std::rc::Rc::new(v.to_vec()));
-        let is_delete = value.is_none();
 
         match self.access.entry(key_path) {
             Entry::Occupied(mut o) => {
@@ -90,6 +89,6 @@ impl<'a> Transaction for Tx<'a> {
             }
         }
 
-        self.session.tentative_write_slot(key_path, is_delete);
+        self.session.tentative_write_slot(key_path);
     }
 }

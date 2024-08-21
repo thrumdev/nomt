@@ -321,7 +321,7 @@ impl Seeker {
                     continue;
                 }
 
-                let mut vacant_entry = match self.page_loads.entry(page_id.clone()) {
+                let vacant_entry = match self.page_loads.entry(page_id.clone()) {
                     Entry::Occupied(mut occupied) => {
                         occupied.get_mut().push(request_index);
                         *is_requesting = true;

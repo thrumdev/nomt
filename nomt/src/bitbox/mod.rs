@@ -1,15 +1,15 @@
-use crossbeam::channel::{Receiver, Sender, TryRecvError, TrySendError};
+use crossbeam::channel::{TryRecvError, TrySendError};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, RwLock};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
     os::fd::{AsRawFd, RawFd},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use crate::{
-    io::{CompleteIo, IoCommand, IoHandle, IoKind, IoPool, Page, PAGE_SIZE},
+    io::{IoCommand, IoHandle, IoKind, IoPool, Page, PAGE_SIZE},
     page_cache::PageDiff,
 };
 

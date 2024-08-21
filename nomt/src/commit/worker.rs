@@ -67,14 +67,18 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
         return;
     };
 
-    // TODO: whether to record siblings should be a parameter on `CommitCommand`.
-    let seeker = Seeker::new(root, page_cache.clone(), store.page_loader(), true);
-
     match comms.commit_rx.recv() {
         Err(_) => return, // early exit only.
         // UNWRAP: Commit always sent after Prepare.
         Ok(ToWorker::Prepare) => unreachable!(),
         Ok(ToWorker::Commit(command)) => {
+            let seeker = Seeker::new(
+                root,
+                page_cache.clone(),
+                store.page_loader(),
+                command.shared.witness,
+            );
+
             let output = match commit::<H>(root, page_cache, seeker, command) {
                 Err(_) => return,
                 Ok(o) => o,
@@ -250,7 +254,6 @@ fn drive_page_fetch(
 //
 // anything that touches the root page is deferred via `shared.pending`.
 struct RangeCommitter<H> {
-    root: Node,
     shared: Arc<CommitShared>,
     write_pass: WritePass<ShardIndex>,
     region: PageRegion,
@@ -285,7 +288,6 @@ impl<H: NodeHasher> RangeCommitter<H> {
             .unwrap_or_else(|i| i);
 
         RangeCommitter {
-            root,
             shared,
             write_pass,
             region,

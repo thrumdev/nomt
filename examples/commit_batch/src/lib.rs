@@ -41,8 +41,8 @@ impl NomtDB {
         // As we can observe, the value is not being written at the moment.
         // NOMT is just advertised here to inform that those keys
         // will be written during the commit and prove stage
-        session.tentative_write_slot(key_path_1, true);
-        session.tentative_write_slot(key_path_2, false);
+        session.tentative_write_slot(key_path_1);
+        session.tentative_write_slot(key_path_2);
 
         // Retrieve the previous value of the root before committing changes
         let prev_root = nomt.root();
