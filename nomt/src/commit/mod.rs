@@ -51,13 +51,6 @@ impl KeyReadWrite {
         }
     }
 
-    fn is_delete(&self) -> bool {
-        match self {
-            KeyReadWrite::Read => false,
-            KeyReadWrite::Write(val) | KeyReadWrite::ReadThenWrite(val) => val.is_none(),
-        }
-    }
-
     fn written_value(&self) -> Option<Option<ValueHash>> {
         match self {
             KeyReadWrite::Read => None,
@@ -142,16 +135,14 @@ pub struct Committer {
 
 impl Committer {
     /// Warm up the given key-path by pre-fetching the relevant pages.
-    ///
-    /// Set `delete` to true when the key path may be deleted.
-    pub fn warm_up(&mut self, key_path: KeyPath, delete: bool) {
+    pub fn warm_up(&mut self, key_path: KeyPath) {
         let worker = self.worker_round_robin;
         self.worker_round_robin += 1;
         self.worker_round_robin %= self.workers.len();
 
         let _ = self.workers[worker]
             .warmup_tx
-            .send(WarmUpCommand { key_path, delete });
+            .send(WarmUpCommand { key_path });
     }
 
     /// Commit the given key-value read/write operations. Key-paths should be in sorted order
@@ -332,7 +323,6 @@ struct CommitCommand {
 
 struct WarmUpCommand {
     key_path: KeyPath,
-    delete: bool,
 }
 
 enum RootPagePending {

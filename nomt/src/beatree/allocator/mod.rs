@@ -2,7 +2,7 @@ use crate::{
     io::{IoCommand, IoHandle, IoKind},
     io::{Page, PAGE_SIZE},
 };
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::TrySendError;
 
 use std::{
     fs::File,
