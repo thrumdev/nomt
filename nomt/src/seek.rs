@@ -13,16 +13,18 @@ use nomt_core::{
     trie_pos::{ChildNodeIndices, TriePosition},
 };
 
-use std::collections::{
-    hash_map::{Entry, HashMap},
-    VecDeque,
+use std::{
+    collections::{
+        hash_map::{Entry, HashMap},
+        VecDeque,
+    },
+    time::{Duration, Instant},
 };
 
 use bitvec::prelude::*;
 use slab::Slab;
 
-const MAX_REQUESTS: usize = 64;
-const MAX_PARALLEL_LOADS: usize = 32;
+const MAX_INFLIGHT: usize = 1024;
 const SINGLE_PAGE_REQUEST_INDEX: usize = usize::MAX;
 
 struct SeekRequest {
@@ -31,7 +33,7 @@ struct SeekRequest {
     page_id: Option<PageId>,
     siblings: Vec<Node>,
     state: RequestState,
-    continuations: usize,
+    page_loads: usize,
 }
 
 impl SeekRequest {
@@ -48,8 +50,12 @@ impl SeekRequest {
             page_id: None,
             siblings: Vec::new(),
             state,
-            continuations: 0,
+            page_loads: 0,
         }
+    }
+
+    fn note_page_load(&mut self) {
+        self.page_loads += 1;
     }
 
     fn is_completed(&self) -> bool {
@@ -79,10 +85,6 @@ impl SeekRequest {
         let RequestState::Seeking(mut cur_node) = self.state else {
             panic!("seek past end")
         };
-
-        self.continuations += 1;
-
-        assert!(self.continuations < 10);
 
         // terminator should have yielded completion.
         assert!(!trie::is_terminator(&cur_node));
@@ -165,11 +167,13 @@ pub struct Seeker {
     page_cache: PageCache,
     page_loader: PageLoader,
     processed: usize,
-    requests: VecDeque<(bool, SeekRequest)>,
+    requests: VecDeque<SeekRequest>,
     page_loads: HashMap<PageId, Vec<usize>>,
     page_load_slab: Slab<PageLoad>,
+    /// FIFO, pushed onto back.
+    idle_requests: VecDeque<usize>,
     /// FIFO, pushed onto back, except when trying the front item and getting blocked.
-    slab_retries: VecDeque<usize>,
+    idle_page_loads: VecDeque<usize>,
     record_siblings: bool,
     single_page_request: Option<SinglePageRequestState>,
 }
@@ -189,77 +193,85 @@ impl Seeker {
             processed: 0,
             requests: VecDeque::new(),
             page_loads: HashMap::new(),
-            page_load_slab: Slab::with_capacity(MAX_PARALLEL_LOADS),
-            slab_retries: VecDeque::new(),
+            page_load_slab: Slab::new(),
+            idle_requests: VecDeque::new(),
+            idle_page_loads: VecDeque::new(),
             record_siblings,
             single_page_request: None,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.requests.is_empty()
+        self.requests.is_empty() && self.single_page_request.is_none()
+    }
+
+    pub fn advance_deadline(
+        &mut self,
+        read_pass: &ReadPass<ShardIndex>,
+        deadline: Duration,
+    ) -> anyhow::Result<Interrupt> {
+        let deadline = std::time::Instant::now() + deadline;
+        self.advance_inner(read_pass, Some(deadline))
     }
 
     /// Advance the dispatcher until it's interrupted for some reason or an error occurs.
-    ///
-    /// When `Interrupt::HasRoom` is returned, call `push` if new work is available. Otherwise,
-    /// don't block.
-    /// When `Interrupt::NoMoreWork` is returned, call `push` if new work is available. Block if
-    /// necessary.
     pub fn advance(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<Interrupt> {
+        self.advance_inner(read_pass, None)
+    }
+
+    fn advance_inner(
+        &mut self,
+        read_pass: &ReadPass<ShardIndex>,
+        deadline: Option<Instant>,
+    ) -> anyhow::Result<Interrupt> {
         loop {
-            self.queue_page_requests(read_pass);
-            let blocked = self.submit_slab_requests(read_pass)?;
-
-            if let Some(SinglePageRequestState::Completed) = self.single_page_request {
-                self.single_page_request = None;
-                return Ok(Interrupt::SpecialPageCompletion);
+            if deadline.map_or(false, |d| Instant::now() > d) {
+                return Ok(Interrupt::Deadline);
             }
 
-            if self
-                .requests
-                .front()
-                .map_or(false, |(_, r)| r.is_completed())
-            {
-                // UNWRAP: just checked existence.
-                let request = self.requests.pop_front().unwrap().1;
-                // PANIC: checked above.
-                let RequestState::Completed(terminal) = request.state else {
-                    unreachable!()
-                };
-
-                self.processed += 1;
-
-                return Ok(Interrupt::Completion(Seek {
-                    key: request.key,
-                    position: request.position,
-                    page_id: request.page_id,
-                    siblings: request.siblings,
-                    terminal,
-                }));
+            // resubmit stuff already in the slab until blocked.
+            // at every point past here, everything in the slab is queued.
+            if self.submit_idle_page_loads(read_pass)? {
+                continue;
             }
 
-            let completion = if blocked {
-                Some(self.page_loader.complete()?)
-            } else {
-                self.page_loader.try_complete()?
-            };
+            // prioritize single page request to enter the slab.
+            if self.submit_single_page_request(read_pass)? {
+                continue;
+            }
 
-            if let Some(completion) = completion {
+            // advance idle key path requests until blocked.
+            if self.submit_idle_key_path_requests(read_pass)? {
+                continue;
+            }
+
+            // handle completions only when blocked.
+            if let Some(completion) = self.page_loader.try_complete()? {
                 self.handle_completion(read_pass, completion);
-            } else if self.requests.is_empty() {
-                return Ok(Interrupt::NoMoreWork);
-            } else if !blocked && self.page_load_slab.len() < MAX_PARALLEL_LOADS && self.requests.len() < MAX_REQUESTS {
-                // no completion, not blocked, slab not full, more requests might exist.
-                return Ok(Interrupt::HasRoom);
+                continue;
             }
+
+            // hand work over only when blocked.
+            if let Some(interrupt) = self.take_completion() {
+                return Ok(interrupt);
+            }
+
+            assert!(self.idle_page_loads.is_empty() && self.idle_requests.is_empty());
+
+            // finally, attempt to take more work.
+            if self.page_load_slab.len() >= MAX_INFLIGHT {
+                continue;
+            }
+
+            return Ok(Interrupt::HasRoom);
         }
     }
 
     /// Push a request for key path.
     pub fn push(&mut self, key: KeyPath) {
-        self.requests
-            .push_back((false, SeekRequest::new(key, self.root)));
+        let request_index = self.processed + self.requests.len();
+        self.requests.push_back(SeekRequest::new(key, self.root));
+        self.idle_requests.push_back(request_index);
     }
 
     /// Push a request for a single page to jump the line. Panics if another special page
@@ -269,77 +281,154 @@ impl Seeker {
         self.single_page_request = Some(SinglePageRequestState::Pending(page_id));
     }
 
-    fn submit_slab_requests(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<bool> {
-        while let Some(slab_index) = self.slab_retries.pop_front() {
-            let page_load = &mut self.page_load_slab[slab_index];
-            assert!(!page_load.needs_completion());
-            match self.page_loader.try_advance(page_load, slab_index as u64)? {
-                PageLoadAdvance::Blocked => {
-                    self.slab_retries.push_front(slab_index);
-                    return Ok(true);
-                }
-                PageLoadAdvance::Submitted => {}
-                PageLoadAdvance::GuaranteedFresh => {
-                    self.remove_and_continue_seeks(read_pass, slab_index, None)
-                }
+    fn take_completion(&mut self) -> Option<Interrupt> {
+        if let Some(SinglePageRequestState::Completed) = self.single_page_request {
+            self.single_page_request = None;
+            return Some(Interrupt::SpecialPageCompletion);
+        }
+
+        if self.requests.front().map_or(false, |r| r.is_completed()) {
+            // UNWRAP: just checked existence.
+            let request = self.requests.pop_front().unwrap();
+            // PANIC: checked above.
+            let RequestState::Completed(terminal) = request.state else {
+                unreachable!()
+            };
+
+            self.processed += 1;
+
+            return Some(Interrupt::Completion(Seek {
+                key: request.key,
+                position: request.position,
+                page_id: request.page_id,
+                siblings: request.siblings,
+                page_loads: request.page_loads,
+                terminal,
+            }));
+        }
+
+        None
+    }
+
+    // resubmit all idle page loads until blocked or no more remain. returns true if blocked
+    fn submit_idle_page_loads(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<bool> {
+        while let Some(slab_index) = self.idle_page_loads.pop_front() {
+            let blocked = self.submit_page_load(read_pass, slab_index, true)?;
+            if blocked {
+                return Ok(blocked);
             }
         }
 
         Ok(false)
     }
 
-    fn queue_page_requests(&mut self, read_pass: &ReadPass<ShardIndex>) {
-        if self.page_load_slab.len() == MAX_PARALLEL_LOADS {
-            return;
-        }
-
-        if let Some(SinglePageRequestState::Pending(ref page_id)) = self.single_page_request {
-            let page_id = page_id.clone();
-            self.page_loads
-                .entry(page_id.clone())
-                .or_default()
-                .push(SINGLE_PAGE_REQUEST_INDEX);
-            let page_load = self.page_loader.start_load(page_id);
-            let slab_index = self.page_load_slab.insert(page_load);
-            self.slab_retries.push_front(slab_index);
-            self.single_page_request = Some(SinglePageRequestState::Submitted);
-        }
-
-        'a: for (i, (ref mut is_requesting, ref mut request)) in self
-            .requests
-            .iter_mut()
-            .enumerate()
-        {
-            while !*is_requesting && !request.is_completed() {
-                if self.page_load_slab.len() == MAX_PARALLEL_LOADS {
-                    return;
-                }
-
-                let request_index = self.processed + i;
-
-                let page_id: PageId = request.next_page_id();
-
-                if let Some(page) = self.page_cache.get(page_id.clone()) {
-                    request.continue_seek(read_pass, page_id, &page, self.record_siblings);
-                    continue;
-                }
-
-                let vacant_entry = match self.page_loads.entry(page_id.clone()) {
-                    Entry::Occupied(mut occupied) => {
-                        occupied.get_mut().push(request_index);
-                        *is_requesting = true;
-                        continue 'a;
-                    }
-                    Entry::Vacant(vacant) => vacant,
-                };
-
-                let load = self.page_loader.start_load(page_id.clone());
-                vacant_entry.insert(vec![request_index]);
-                *is_requesting = true;
-                let slab_index = self.page_load_slab.insert(load);
-                self.slab_retries.push_back(slab_index);
+    // submit the next page for each idle key path request until blocked or no more remain.
+    // returns true if blocked.
+    fn submit_idle_key_path_requests(
+        &mut self,
+        read_pass: &ReadPass<ShardIndex>,
+    ) -> anyhow::Result<bool> {
+        while let Some(request_index) = self.idle_requests.pop_front() {
+            let blocked = self.submit_key_path_request(read_pass, request_index)?;
+            if blocked {
+                return Ok(blocked);
             }
         }
+
+        Ok(false)
+    }
+
+    // submit a page load which is currently in the slab, but idle. returns true if blocked.
+    fn submit_page_load(
+        &mut self,
+        read_pass: &ReadPass<ShardIndex>,
+        slab_index: usize,
+        front: bool,
+    ) -> anyhow::Result<bool> {
+        let page_load = &mut self.page_load_slab[slab_index];
+        assert!(!page_load.needs_completion());
+        match self.page_loader.try_advance(page_load, slab_index as u64)? {
+            PageLoadAdvance::Blocked => {
+                assert!(!page_load.needs_completion());
+
+                if front {
+                    self.idle_page_loads.push_front(slab_index);
+                } else {
+                    self.idle_page_loads.push_back(slab_index)
+                }
+                Ok(true)
+            }
+            PageLoadAdvance::Submitted => Ok(false),
+            PageLoadAdvance::GuaranteedFresh => {
+                self.remove_and_continue_seeks(read_pass, slab_index, None);
+                Ok(false)
+            }
+        }
+    }
+
+    // submit a single page request, if any exists. returns true if blocked.
+    fn submit_single_page_request(
+        &mut self,
+        read_pass: &ReadPass<ShardIndex>,
+    ) -> anyhow::Result<bool> {
+        if let Some(SinglePageRequestState::Pending(ref page_id)) = self.single_page_request {
+            let page_id = page_id.clone();
+            let waiters = self.page_loads.entry(page_id.clone()).or_default();
+
+            waiters.push(SINGLE_PAGE_REQUEST_INDEX);
+
+            self.single_page_request = Some(SinglePageRequestState::Submitted);
+
+            if waiters.len() == 1 {
+                let page_load = self.page_loader.start_load(page_id);
+                let slab_index = self.page_load_slab.insert(page_load);
+                return self.submit_page_load(read_pass, slab_index, false);
+            }
+        }
+
+        Ok(false)
+    }
+
+    // submit the next page for this key path request. return true if blocked.
+    fn submit_key_path_request(
+        &mut self,
+        read_pass: &ReadPass<ShardIndex>,
+        request_index: usize,
+    ) -> anyhow::Result<bool> {
+        let i = if request_index < self.processed {
+            return Ok(false);
+        } else {
+            request_index - self.processed
+        };
+
+        let request = &mut self.requests[i];
+
+        while !request.is_completed() {
+            let page_id: PageId = request.next_page_id();
+
+            if let Some(page) = self.page_cache.get(page_id.clone()) {
+                request.continue_seek(read_pass, page_id, &page, self.record_siblings);
+                continue;
+            }
+
+            let vacant_entry = match self.page_loads.entry(page_id.clone()) {
+                Entry::Occupied(mut occupied) => {
+                    assert!(!occupied.get().contains(&request_index));
+                    occupied.get_mut().push(request_index);
+                    break;
+                }
+                Entry::Vacant(vacant) => vacant,
+            };
+
+            request.note_page_load();
+
+            let load = self.page_loader.start_load(page_id.clone());
+            vacant_entry.insert(vec![request_index]);
+            let slab_index = self.page_load_slab.insert(load);
+            return self.submit_page_load(read_pass, slab_index, false);
+        }
+
+        Ok(false)
     }
 
     fn handle_completion(
@@ -356,7 +445,7 @@ impl Seeker {
         match completion.apply_to(page_load) {
             Some(p) => self.remove_and_continue_seeks(read_pass, slab_index, Some(p)),
             None => {
-                self.slab_retries.push_back(slab_index);
+                self.idle_page_loads.push_back(slab_index);
                 return;
             }
         }
@@ -387,30 +476,34 @@ impl Seeker {
                 continue;
             }
             let idx = waiting_request - self.processed;
-            let (ref mut is_requesting, ref mut request) = &mut self.requests[idx];
+            let request = &mut self.requests[idx];
             assert!(!request.is_completed());
 
-            *is_requesting = false;
             request.continue_seek(
                 read_pass,
                 page_load.page_id().clone(),
                 &page,
                 self.record_siblings,
             );
+
+            if !request.is_completed() {
+                self.idle_requests.push_back(waiting_request);
+            }
         }
     }
 }
 
 /// Interrupts during the advancement of the `Seeker`.
 pub enum Interrupt {
-    /// There is room to push a key, if any are available.
-    HasRoom,
-    /// There is no more work to perform at the moment.
-    NoMoreWork,
     /// A request was completed.
     Completion(Seek),
     /// The request for a single page completed.
     SpecialPageCompletion,
+    /// The deadline for advancement was received.
+    Deadline,
+    /// The seeker has room for more work. Unless the seeker is empty, don't block on more
+    /// work.
+    HasRoom,
 }
 
 /// The result of a seek.
@@ -426,4 +519,8 @@ pub struct Seek {
     pub siblings: Vec<Node>,
     /// The terminal node encountered.
     pub terminal: Option<trie::LeafData>,
+    /// The number of fresh pages loaded uniquely for this `Seek`.
+    /// This does not include pages loaded from the cache, or pages which were already requested
+    /// for another seek.
+    pub page_loads: usize,
 }
