@@ -35,7 +35,6 @@ pub struct Store {
 }
 
 struct Shared {
-    root: Mutex<Node>,
     bitbox_num_pages: u32,
     values: beatree::Tree,
     pages: bitbox::DB,
@@ -118,7 +117,6 @@ impl Store {
                 bitbox_num_pages: meta.bitbox_num_pages,
                 values,
                 pages,
-                root: TERMINATOR.into(),
                 meta_fd,
                 ln_fd,
                 bbn_fd,
@@ -131,12 +129,6 @@ impl Store {
                 io_handle,
             })),
         })
-    }
-
-    /// Load the root node from the database. Fails only on I/O.
-    /// Returns [`nomt_core::trie::TERMINATOR`] on an empty trie.
-    pub fn load_root(&self) -> anyhow::Result<Node> {
-        Ok(self.shared.root.lock().clone())
     }
 
     /// Loads the flat value stored under the given key.
@@ -181,7 +173,6 @@ impl Store {
             batch: Vec::new(),
             new_pages: vec![],
             bucket_allocator: self.shared.pages.bucket_allocator(),
-            new_root: None,
         }
     }
 
@@ -201,9 +192,6 @@ impl Store {
             self.shared
                 .pages
                 .sync_begin(tx.new_pages, sync_seqn, &self.shared.ht_fd)?;
-        if let Some(new_root) = tx.new_root {
-            *self.shared.root.lock() = new_root;
-        }
         let data = self.shared.values.prepare_sync();
 
         let new_meta = Meta {
@@ -242,7 +230,6 @@ pub struct Transaction {
     batch: Vec<(KeyPath, Option<Vec<u8>>)>,
     bucket_allocator: bitbox::BucketAllocator,
     new_pages: Vec<(PageId, BucketIndex, Option<(Vec<u8>, PageDiff)>)>,
-    new_root: Option<Node>,
 }
 
 impl Transaction {
@@ -269,11 +256,6 @@ impl Transaction {
     pub fn delete_page(&mut self, page_id: PageId, bucket: BucketIndex) {
         self.bucket_allocator.free(bucket);
         self.new_pages.push((page_id, bucket, None));
-    }
-
-    /// Write the root to metadata.
-    pub fn write_root(&mut self, root: Node) {
-        self.new_root = Some(root);
     }
 }
 

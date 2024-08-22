@@ -14,7 +14,7 @@ use commit::{CommitPool, Committer};
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
-    trie::{NodeHasher, ValueHash, TERMINATOR},
+    trie::{NodeHasher, NodeHasherExt, InternalData, ValueHash, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -182,7 +182,7 @@ impl Nomt {
         let store = Store::open(&o)?;
         let root_page = store.load_page(ROOT_PAGE_ID)?;
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
-        let root = store.load_root()?;
+        let root = compute_root_node::<Blake3Hasher>(&page_cache);
         Ok(Self {
             commit_pool: CommitPool::new(o.commit_concurrency),
             page_cache,
@@ -299,8 +299,6 @@ impl Nomt {
         self.page_cache
             .commit(commit.page_diffs.into_iter().flatten(), &mut tx);
         self.shared.lock().root = new_root;
-        tx.write_root(new_root);
-
         self.store.commit(tx)?;
 
         Ok((new_root, commit.witness, commit.witnessed_operations))
@@ -372,5 +370,28 @@ impl Drop for Session {
             .session_cnt
             .swap(0, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(prev, 1, "expected one active session at commit time");
+    }
+}
+
+fn compute_root_node<H: NodeHasher>(page_cache: &PageCache) -> Node {
+    let Some(root_page) = page_cache.get(ROOT_PAGE_ID) else { return TERMINATOR };
+    let read_pass = page_cache.new_read_pass();
+
+    // 3 cases.
+    // 1: root page is empty. in this case, root is the TERMINATOR.
+    // 2: root page has top two slots filled, but _their_ children are empty. root is a leaf.
+    //    this is because internal nodes and leaf nodes would have items below.
+    // 3: root is an internal node.
+    let is_empty = |node_index| root_page.node(&read_pass, node_index) == TERMINATOR;
+
+    let left = root_page.node(&read_pass, 0);
+    let right = root_page.node(&read_pass, 1);
+
+    if is_empty(0) && is_empty(1) {
+        TERMINATOR
+    } else if (2..6usize).all(is_empty) {
+        H::hash_leaf(&LeafData { key_path: left, value_hash: right })
+    } else {
+        H::hash_internal(&InternalData { left, right })
     }
 }
