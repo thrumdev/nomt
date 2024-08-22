@@ -196,7 +196,7 @@ impl DB {
                 Some((raw_page, page_diff)) => {
                     // the page_id must be written into the page itself
                     assert!(raw_page.len() == PAGE_SIZE);
-                    let mut page = crate::bitbox::Page::zeroed();
+                    let mut page = Box::new(crate::bitbox::Page::zeroed());
                     page[..raw_page.len()].copy_from_slice(&raw_page);
                     page[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
 
@@ -242,7 +242,7 @@ impl DB {
                 kind: IoKind::Write(
                     ht_fd.as_raw_fd(),
                     self.shared.store.data_page_index(bucket),
-                    Box::new(page),
+                    page,
                 ),
                 user_data: 0, // unimportant.
             };
