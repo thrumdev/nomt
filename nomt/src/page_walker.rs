@@ -225,9 +225,12 @@ impl<H: NodeHasher> PageWalker<H> {
 
         // clear leaf children before overwriting terminal, but the leaf-children page
         // is only guaranteed to be in cache if the previous node is a leaf.
-        if trie::is_leaf(&node) {
+        let was_leaf = trie::is_leaf(&node);
+        if was_leaf {
             self.write_leaf_children(write_pass, None, false);
         }
+
+        let start_position = self.position.clone();
 
         // replace sub-trie at the given position
         nomt_core::update::build_trie::<H>(
@@ -261,7 +264,8 @@ impl<H: NodeHasher> PageWalker<H> {
                 }
 
                 if let Some(leaf_data) = leaf_data {
-                    self.write_leaf_children(write_pass, Some(leaf_data), true);
+                    let leaf_children_fresh = !was_leaf || self.position != start_position;
+                    self.write_leaf_children(write_pass, Some(leaf_data), leaf_children_fresh);
                 }
             },
         );
