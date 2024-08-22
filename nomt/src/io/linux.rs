@@ -138,6 +138,7 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
                     Err(TryRecvError::Disconnected) => break, // TODO: wait on pending I/O?
                 }
             };
+
             stats.note_arrival();
 
             to_submit = true;
@@ -233,7 +234,6 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-        IoKind::Fsync(fd) => opcode::Fsync::new(types::Fd(fd)).build(),
         IoKind::WriteRaw(fd, page_index, ptr, size) => {
             opcode::Write::new(types::Fd(fd), ptr, size as u32)
                 .offset(page_index * PAGE_SIZE as u64)
