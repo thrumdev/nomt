@@ -59,10 +59,14 @@ impl Store {
 
         let io_pool = io::start_io_pool(o.io_workers);
 
-        let meta_fd = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&o.path.join("meta"))?;
+        let meta_fd = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(libc::O_DIRECT);
+            options.open(&o.path.join("meta"))?
+        };
+
         let ln_fd = {
             let mut options = OpenOptions::new();
             options.read(true).write(true);

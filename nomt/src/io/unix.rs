@@ -57,7 +57,6 @@ fn execute(mut command: IoCommand) -> CompleteIo {
                     (page_index * PAGE_SIZE as u64) as libc::off_t,
                 )
             },
-            IoKind::Fsync(fd) => unsafe { libc::fsync(fd) },
         };
 
         match command.kind.get_result(res) {

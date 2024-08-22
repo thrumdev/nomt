@@ -75,8 +75,8 @@ fn do_run(mut cx: Cx, mut io: IoDmux) {
     cx.bbn_write_out.wait_writes(&mut io);
     cx.ln_write_out.wait_writes(&mut io);
 
-    cx.bbn_write_out.fsync(&mut io);
-    cx.ln_write_out.fsync(&mut io);
+    cx.bbn_write_out.fsync();
+    cx.ln_write_out.fsync();
 
     loop {
         // At this point, the BBN and LN files are fully synced. We can now update the meta file.
@@ -130,38 +130,12 @@ impl IoDmux {
         }
     }
 
-    fn recv_bbn_fsync(&mut self) {
-        loop {
-            if let Some(CompleteIo { command, result }) = self.try_recv_bbn() {
-                assert!(result.is_ok());
-                match command.kind {
-                    IoKind::Fsync(_) => {}
-                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
-                }
-                break;
-            }
-        }
-    }
-
     fn recv_ln_write(&mut self) {
         loop {
             if let Some(CompleteIo { command, result }) = self.try_recv_ln() {
                 assert!(result.is_ok());
                 match command.kind {
                     IoKind::Write(_, _, _) => {}
-                    _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
-                }
-                break;
-            }
-        }
-    }
-
-    fn recv_ln_fsync(&mut self) {
-        loop {
-            if let Some(CompleteIo { command, result }) = self.try_recv_ln() {
-                assert!(result.is_ok());
-                match command.kind {
-                    IoKind::Fsync(_) => {}
                     _ => panic!("unexpected completion kind, expected: Write or WriteRaw"),
                 }
                 break;
@@ -322,9 +296,12 @@ impl BbnWriteOut {
         }
     }
 
-    fn fsync(&mut self, io: &mut IoDmux) {
-        while !io.try_send_bbn(IoKind::Fsync(self.bbn_fd)).is_ok() {}
-        io.recv_bbn_fsync();
+    fn fsync(&mut self) {
+        unsafe {
+            let f = File::from_raw_fd(self.bbn_fd);
+            f.sync_all().expect("bnn file: error performing fsync");
+            let _ = f.into_raw_fd();
+        }
     }
 }
 
@@ -382,9 +359,12 @@ impl LnWriteOut {
         }
     }
 
-    fn fsync(&mut self, io: &mut IoDmux) {
-        while !io.try_send_ln(IoKind::Fsync(self.ln_fd)).is_ok() {}
-        io.recv_ln_fsync();
+    fn fsync(&mut self) {
+        unsafe {
+            let f = File::from_raw_fd(self.ln_fd);
+            f.sync_all().expect("ln file: error performing fsync");
+            let _ = f.into_raw_fd();
+        }
     }
 }
 
@@ -404,15 +384,16 @@ impl MetaSwap {
 
             if let Err(_) = io.try_send_meta(IoKind::Write(self.meta_fd, 0, page)) {
                 self.new_meta = Some(new_meta);
-                return false;
             }
         }
 
         if self.should_fsync {
-            if let Err(_) = io.try_send_meta(IoKind::Fsync(self.meta_fd)) {
-                return false;
+            unsafe {
+                let f = File::from_raw_fd(self.meta_fd);
+                f.sync_all().unwrap();
+                let _ = f.into_raw_fd();
             }
-            self.should_fsync = false;
+            return true;
         }
 
         // Reap the completions.
@@ -422,10 +403,6 @@ impl MetaSwap {
                 IoKind::Write(_, _, _) => {
                     self.should_fsync = true;
                     continue;
-                }
-                IoKind::Fsync(_) => {
-                    // done
-                    return true;
                 }
                 _ => panic!("unexpected completion kind"),
             }

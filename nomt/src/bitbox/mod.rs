@@ -276,13 +276,7 @@ impl DB {
         }
 
         // sync all writes
-        submit_and_wait_one(
-            &self.shared.io_handle,
-            IoCommand {
-                kind: IoKind::Fsync(ht_fd.as_raw_fd()),
-                user_data: 0, // unimportant
-            },
-        );
+        ht_fd.sync_all().expect("ht file: error performing fsync");
 
         Ok(prev_wal_size)
     }
@@ -341,12 +335,6 @@ impl BucketAllocator {
     pub fn free(&mut self, bucket_index: BucketIndex) {
         self.changed_buckets.insert(bucket_index.0, false);
     }
-}
-
-// call only when I/O queue is totally empty.
-fn submit_and_wait_one(io_handle: &IoHandle, command: IoCommand) {
-    let _ = io_handle.send(command);
-    let _ = io_handle.recv();
 }
 
 fn get_changed(page: &Page, page_diff: &PageDiff) -> Vec<[u8; 32]> {

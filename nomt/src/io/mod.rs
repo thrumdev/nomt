@@ -45,7 +45,6 @@ pub enum IoKind {
     Read(RawFd, u64, Box<Page>),
     Write(RawFd, u64, Box<Page>),
     WriteRaw(RawFd, u64, *const u8, usize),
-    Fsync(RawFd),
 }
 
 pub enum IoKindResult {
@@ -59,20 +58,11 @@ impl IoKind {
         match self {
             IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
             IoKind::WriteRaw(_, _, _, _) => panic!("attempted to extract buf from write_raw"),
-            IoKind::Fsync(_) => panic!("attempted to extract buf from fsync"),
         }
     }
 
     pub fn get_result(&self, res: i32) -> IoKindResult {
         match self {
-            // fsync returns either -1 on failure or 0 on success
-            IoKind::Fsync(_) if res == 0 => IoKindResult::Ok,
-            // pread and pwrite return the number of bytes read or written
-            IoKind::Read(_, _, _) | IoKind::Write(_, _, _) | IoKind::Write(_, _, _)
-                if res == PAGE_SIZE as i32 =>
-            {
-                IoKindResult::Ok
-            }
             // pread returns 0 if the file has been read till the end of file
             //
             // This could be a failure because the end of the file could be smaller than PAGE_SIZE.
@@ -80,6 +70,8 @@ impl IoKind {
             // there should be no unexpected end-of-file that is not aligned with PAGE_SIZE
             // when all previous writes have succeeded.
             IoKind::Read(_, _, _) if res == 0 => IoKindResult::Ok,
+            // pread and pwrite return the number of bytes read or written
+            _ if res == PAGE_SIZE as i32 => IoKindResult::Ok,
             _ if res == -1 => IoKindResult::Err,
             _ => IoKindResult::Retry,
         }
