@@ -389,7 +389,7 @@ impl PageCache {
                 inner: page.page_data.clone(),
             }),
             None => {
-                self.shared.metrics.record(Metric::PageCacheMisses);
+                self.shared.metrics.count(Metric::PageCacheMisses);
                 None
             }
         }
