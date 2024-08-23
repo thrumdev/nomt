@@ -1,242 +1,132 @@
-use std::{
-    fs::File,
-    io::{Read, Write},
-    os::fd::AsRawFd,
-};
+use crate::io::PAGE_SIZE;
+use std::sync::Arc;
 
-mod batch;
-mod entry;
-mod record;
-
-pub use self::{batch::Batch, entry::Entry};
-
-use self::record::Record;
-
-// WAL format:
-//
-// series of 256KB records
-// each record contains a sequence number, a checksum, a number of entries, and the entries
-// themselves. entries never span records.
-//
-// Record format:
-//   sequence number (8 bytes)
-//   checksum (4 bytes) (magic number ++ last ++ data)
-//   entry count (2 bytes)
-//   LAST (1 byte) | 0xFF if the last record for the sequence, 0x00 otherwise.
-//   data: [Entry]
-//
-// Entry format:
-// kind: u8
-//   1 => updated bucket
-//   2 => cleared bucket
-// data: (variable based on kind)
-//  bucket update:
-//    page ID (16 bytes)
-//    diff (16 bytes)
-//    changed [[u8; 32]] (len with diff)
-//    bucket index (8 bytes)
-//  bucket cleared:
-//    bucket index (8 bytes)
-//
-// Multiple records are expected to have the same sequence number if they are part of the same
-// transaction.
-// e.g. [0 0 0 1 1 2 2 2 2 3 3 4 4 4 4] might be the order of sequence numbers in a WAL.
-// this can be used to compare against the sequence number in the database's metadata file to
-// determine which WAL entries need to be reapplied.
-//
-// WAL entries imply writing buckets and the meta-map. when recovering from a crash, do both.
-
-const WAL_RECORD_SIZE: usize = 256 * 1024;
-// walawala
-const WAL_CHECKSUM_MAGIC: u32 = 0x00a10a1a;
-
-// Open a WAL file and append encoded batch of writes to the end,
-// and prune previous ones if the current succeeded.
-//
-// It does not perform any check on the state of the WAL file
-pub struct WalWriter {
-    wal_file: File,
+struct Mmap {
+    ptr: *mut u8,
+    size: usize,
 }
 
-impl WalWriter {
-    /// Open a WAL file if it exists, otherwise, create a new empty one.
-    ///
-    /// No check with be performed if the file exists,
-    /// it will only happend new batch to the end of the file
-    /// and purge from the front
-    pub fn open(wal_file: &File) -> anyhow::Result<Self> {
-        // TODO: remove this clone.
-        // Panic here for visibility.
-        let wal_file = wal_file.try_clone().unwrap();
-        Ok(Self { wal_file })
-    }
-
-    /// Get the current length of the file.
-    pub fn file_size(&self) -> u64 {
-        self.wal_file.metadata().unwrap().len()
-    }
-
-    /// Clean up the first n bytes of the file.
-    pub fn prune_front(&self, n: u64) {
-        // fallocate call with flag FALLOC_FL_COLLAPSE_RANGE
-        // returns an error if you're trying to collapse 0 bytes
-        if n == 0 {
-            return;
-        }
-
-        // TODO: other UNIXes are going to need not a WAL but a WAL
-        // file pool. FALLOC_FL_COLLAPSE_RANGE only works on Linux.
-        #[cfg(target_os = "linux")]
-        unsafe {
-            let res = libc::fallocate(
-                self.wal_file.as_raw_fd(),
-                libc::FALLOC_FL_COLLAPSE_RANGE,
+impl Mmap {
+    fn new(size: usize) -> Self {
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                -1,
                 0,
-                n as libc::off_t,
-            );
-
-            assert!(res == 0, "WAL Collapse Range Failed");
+            )
+        } as *mut u8;
+        if ptr == libc::MAP_FAILED as *mut u8 {
+            panic!("mmap failed");
         }
-
-        self.wal_file.sync_all().unwrap();
-    }
-
-    // apply a batch of changes to the WAL file. returns only after FSYNC has completed.
-    pub fn apply_batch(&mut self, batch: &Batch) -> anyhow::Result<()> {
-        let records: Vec<_> = batch.to_records();
-
-        for record in records {
-            let raw_record = record.to_bytes();
-
-            self.wal_file.write_all(&raw_record)?;
-        }
-
-        self.wal_file.flush()?;
-        self.wal_file.sync_all()?;
-
-        Ok(())
+        Self { ptr, size }
     }
 }
 
-/// Open a WAL file and check the integrity of the file, it decodes
-/// all records and make sure they are coherent with the WAL format.
-pub struct WalChecker {
-    last_batch: Option<Batch>,
+impl Drop for Mmap {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::munmap(self.ptr as *mut libc::c_void, self.size);
+        }
+    }
 }
 
-pub enum ConsistencyError {
-    LastBatchCrashed(Batch),
-    NotConsistent(u64),
+pub struct WalBlobBuilder {
+    mmap: Arc<Mmap>,
+    cur: usize,
 }
 
-impl WalChecker {
-    /// Open a WAL file and check its integrity, if a problem is found then the
-    /// wal is restored to its last valid state, thus it updates the WAL file
-    /// by removing everything after the last valid record.
-    ///
-    /// NOTE: Even though currently in the simulation each batch is pruned right after
-    /// the success of the next one, the following method needs to be able to handle multiple
-    /// records of different batches and validate them
-    pub fn open_and_recover(mut wal_file: &std::fs::File) -> Self {
-        let (last_records, last_records_position) = validate_records(&mut wal_file);
-
-        // If not all the WAL was parsed correctly, then the recovery procedure means to remove
-        // all incorrect records from the last valid one
-
-        let wal_file_len = wal_file
-            .metadata()
-            .expect("Error extracting wal file len")
-            .len();
-
-        if wal_file_len == 0 {
-            return Self { last_batch: None };
-        }
-
-        if last_records_position as u64 != wal_file_len {
-            // cannot use fallocate + FALLOC_FL_COLLAPSE_RANGE
-            // because it requires offset and len to be multiple of the
-            // filesystem block size, and len could be different from a multiple of a record size
-            unsafe {
-                let res =
-                    libc::ftruncate(wal_file.as_raw_fd(), last_records_position as libc::off_t);
-                assert!(res == 0, "WAL Recovery: ftruncate failed");
-            }
-
-            wal_file.sync_all().unwrap();
-        }
-
+impl WalBlobBuilder {
+    pub fn new() -> Self {
+        // 128 GiB / 4 KiB = 33554432.
+        //
+        // 128 GiB is the maximum size of a single commit in WAL after which we panic. This seems
+        // to be enough for now. We should explore making this elastic in the future.
+        let mmap = Mmap::new(33554432);
         Self {
-            last_batch: Some(Batch::from_records(last_records)),
+            mmap: Arc::new(mmap),
+            cur: 0,
         }
     }
 
-    pub fn check_consistency(self, store_sequence_number: u64) -> Result<(), ConsistencyError> {
-        let wal_sequence_number = self
-            .last_batch
-            .as_ref()
-            .map(|batch| batch.sequence_number())
-            .unwrap_or(0);
-
-        if wal_sequence_number == store_sequence_number {
-            Ok(())
-        } else if wal_sequence_number == store_sequence_number + 1 {
-            Err(ConsistencyError::LastBatchCrashed(self.last_batch.unwrap()))
-        } else {
-            Err(ConsistencyError::NotConsistent(wal_sequence_number))
+    pub fn write_clear(&mut self, bucket_index: u64) {
+        unsafe {
+            self.write_byte(0);
+            self.write(&bucket_index.to_le_bytes());
         }
     }
-}
 
-fn validate_records(mut wal_file: &File) -> (Vec<Record>, usize) {
-    // contains the last set of valid records
-    let mut last_records = vec![];
-    // offset in the WAL file to the byte right after the end of the last parsed valid record
-    let mut last_records_position = 0;
-
-    let mut curr_records = vec![];
-    let mut sequence_number = None;
-
-    // Rules to be respected:
-    //  1. all records must stored in chunks of WAL_RECORD_SIZE bytes
-    //  2. all records must be well formatted
-    //  3. each record sequence number must be equal to the previous one or equal to previous +1
-    //  4. only the last record in a batch must have the 'last' flag to 0xFF, others 0x00
-
-    let record_iter = std::iter::from_fn(|| {
-        let mut buf = [0; WAL_RECORD_SIZE];
-
-        let read_bytes = wal_file
-            .read(&mut buf)
-            .expect("Error reading from wal file");
-
-        match read_bytes {
-            // ends the iterator if the read bytes are not exactly the expected
-            // size of a record entry or if it was not properly encoded
-            WAL_RECORD_SIZE => Some(Record::from_bytes(buf).ok()?),
-            _ => None,
-        }
-    });
-
-    for (record_index, record) in record_iter.enumerate() {
-        let is_last = record.last();
-        let seq_num = record.sequence_number();
-        curr_records.push(record);
-
-        // NOTE: this has been changed, how was it working before?
-
-        if let Some(expected_seqn) = sequence_number {
-            if expected_seqn != seq_num {
-                break;
+    pub fn write_update(
+        &mut self,
+        page_id: [u8; 32],
+        page_diff: [u8; 16],
+        changed: Vec<[u8; 32]>,
+        bucket_index: u64,
+    ) {
+        unsafe {
+            // SAFETY: Those do not overlap with the mmap. Potentially, the `changed` slices could
+            // overlap with the mmap, but I would argue expecting that (as well as doing that) would
+            // be schizo.
+            self.write_byte(1);
+            self.write(&page_id);
+            self.write(&page_diff);
+            for changed in changed {
+                self.write(&changed);
             }
-        };
-
-        if is_last {
-            // sequence_number is expected to be increased from the next record
-            sequence_number = Some(seq_num + 1);
-            last_records = std::mem::replace(&mut curr_records, vec![]);
-            last_records_position = WAL_RECORD_SIZE * (record_index + 1);
+            self.write(&bucket_index.to_le_bytes());
         }
     }
 
-    (last_records, last_records_position)
+    fn write_byte(&mut self, byte: u8) {
+        unsafe {
+            self.write(&[byte]);
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The `bytes` mut not overlap with the mmap.
+    unsafe fn write(&mut self, bytes: &[u8]) {
+        let pos = self.cur;
+        let new_cur = self.cur.checked_add(bytes.len()).unwrap();
+        if new_cur > self.mmap.size {
+            panic!("WAL blob too large");
+        }
+        self.cur = new_cur;
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.mmap.ptr.add(pos), bytes.len());
+        }
+    }
+
+    pub fn reset(&mut self) {
+        // Note we don't madvise(DONTNEED) or any other tricks for now. If we did, then each time
+        // we write a page it would need to be mounted and thus zero filled.
+        //
+        // The hope is that should there be memory  pressure, the memory would be swapped out as
+        // needed.
+        self.cur = 0;
+    }
+
+    /// Returns a pointer to the start of the blob.
+    ///
+    /// The caller must ensure that the blob is not dropped before the pointer is no longer
+    /// used.
+    ///
+    /// It's possible to overwrite the data in the blob after calling this function so don't keep
+    /// the pointer around for too long.
+    ///
+    /// The pointer is aligned to the page size.
+    pub fn ptr(&self) -> *mut u8 {
+        self.mmap.ptr
+    }
+
+    /// The length of the blob. The size is a multiple of the page size.
+    pub fn len(&self) -> usize {
+        // round up to the next page size.
+        (self.cur + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE
+    }
 }
+
+unsafe impl Send for WalBlobBuilder {}

@@ -47,6 +47,7 @@ struct Shared {
 
 struct Sync {
     sync_seqn: u32,
+    wal_blob_builder: bitbox::WalBlobBuilder,
     io_handle: io::IoHandle,
 }
 
@@ -88,11 +89,13 @@ impl Store {
             options.custom_flags(libc::O_DIRECT);
             options.open(&o.path.join("ht"))?
         };
-        let wal_fd = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .append(true)
-            .open(&o.path.join("wal"))?;
+        let wal_fd = {
+            let options = &mut OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(libc::O_DIRECT);
+            options.open(&o.path.join("wal"))?
+        };
         let meta = meta::Meta::read(&meta_fd)?;
         let values = beatree::Tree::open(
             &io_pool,
@@ -111,6 +114,7 @@ impl Store {
             &wal_fd,
         )?;
         let io_handle = io_pool.make_handle();
+        let wal_blob_builder = bitbox::WalBlobBuilder::new();
         Ok(Self {
             shared: Arc::new(Shared {
                 bitbox_num_pages: meta.bitbox_num_pages,
@@ -126,6 +130,7 @@ impl Store {
             sync: Arc::new(Mutex::new(Sync {
                 sync_seqn: meta.sync_seqn,
                 io_handle,
+                wal_blob_builder,
             })),
         })
     }
@@ -187,38 +192,46 @@ impl Store {
         let sync_seqn = sync.sync_seqn;
 
         self.shared.values.commit(tx.batch);
-        let prev_wal_size =
-            self.shared
-                .pages
-                .sync_begin(tx.new_pages, sync_seqn, &self.shared.ht_fd)?;
-        let data = self.shared.values.prepare_sync();
+
+        let bitbox_writeout_data = self
+            .shared
+            .pages
+            .prepare_sync(tx.new_pages, &mut sync.wal_blob_builder)?;
+        let beatree_writeout_data = self.shared.values.prepare_sync();
 
         let new_meta = Meta {
-            ln_freelist_pn: data.ln_freelist_pn,
-            ln_bump: data.ln_bump,
-            bbn_freelist_pn: data.bbn_freelist_pn,
-            bbn_bump: data.bbn_bump,
+            ln_freelist_pn: beatree_writeout_data.ln_freelist_pn,
+            ln_bump: beatree_writeout_data.ln_bump,
+            bbn_freelist_pn: beatree_writeout_data.bbn_freelist_pn,
+            bbn_bump: beatree_writeout_data.bbn_bump,
             sync_seqn,
             bitbox_num_pages: self.shared.bitbox_num_pages,
         };
 
+        let bitbox_wal_blob = (sync.wal_blob_builder.ptr(), sync.wal_blob_builder.len());
         writeout::run(
             sync.io_handle.clone(),
+            self.shared.wal_fd.as_raw_fd(),
             self.shared.bbn_fd.as_raw_fd(),
             self.shared.ln_fd.as_raw_fd(),
+            self.shared.ht_fd.as_raw_fd(),
             self.shared.meta_fd.as_raw_fd(),
-            data.bbn,
-            data.bbn_freelist_pages,
-            data.bbn_extend_file_sz,
-            data.ln,
-            data.ln_extend_file_sz,
+            bitbox_wal_blob,
+            beatree_writeout_data.bbn,
+            beatree_writeout_data.bbn_freelist_pages,
+            beatree_writeout_data.bbn_extend_file_sz,
+            beatree_writeout_data.ln,
+            beatree_writeout_data.ln_extend_file_sz,
+            bitbox_writeout_data.ht_pages,
             new_meta,
         );
 
-        self.shared.pages.sync_end(prev_wal_size)?;
-        self.shared
-            .values
-            .finish_sync(data.bbn_index, data.obsolete_branches);
+        sync.wal_blob_builder.reset();
+
+        self.shared.values.finish_sync(
+            beatree_writeout_data.bbn_index,
+            beatree_writeout_data.obsolete_branches,
+        );
 
         Ok(())
     }

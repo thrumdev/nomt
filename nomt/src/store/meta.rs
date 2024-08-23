@@ -5,6 +5,7 @@ use std::{fs::File, io::Read as _};
 use crate::io::Page;
 
 /// This data structure describes the state of the btree.
+#[derive(Clone)]
 pub struct Meta {
     /// The page number of the head of the freelist of the leaf storage file. 0 means the freelist
     /// is empty.
