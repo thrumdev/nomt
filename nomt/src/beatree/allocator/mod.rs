@@ -63,24 +63,16 @@ impl AllocatorReader {
         }
     }
 
-    /// Returns the page with the specified page number.
+    /// Returns the page with the specified page number. Blocks the current thread.
     pub fn query(&self, pn: PageNumber) -> Box<Page> {
         let page = Box::new(Page::zeroed());
 
-        let mut command = Some(IoCommand {
+        let command = IoCommand {
             kind: IoKind::Read(self.store_file.as_raw_fd(), pn.0 as u64, page),
             user_data: 0,
-        });
+        };
 
-        while let Some(c) = command.take() {
-            match self.io_handle.try_send(c) {
-                Ok(()) => break,
-                Err(TrySendError::Disconnected(_)) => panic!("I/O store worker dropped"),
-                Err(TrySendError::Full(c)) => {
-                    command = Some(c);
-                }
-            }
-        }
+        self.io_handle.send(command).expect("I/O store worker dropped");
 
         // wait for completion
         let completion = self.io_handle.recv().expect("I/O store worker dropped");
