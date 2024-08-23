@@ -298,9 +298,8 @@ impl BbnWriteOut {
 
     fn fsync(&mut self) {
         unsafe {
-            let f = File::from_raw_fd(self.bbn_fd);
-            f.sync_all().expect("bnn file: error performing fsync");
-            let _ = f.into_raw_fd();
+            let fsync_res = libc::fsync(self.bbn_fd);
+            assert!(fsync_res == 0);
         }
     }
 }
@@ -361,9 +360,8 @@ impl LnWriteOut {
 
     fn fsync(&mut self) {
         unsafe {
-            let f = File::from_raw_fd(self.ln_fd);
-            f.sync_all().expect("ln file: error performing fsync");
-            let _ = f.into_raw_fd();
+            let fsync_res = libc::fsync(self.ln_fd);
+            assert!(fsync_res == 0);
         }
     }
 }
