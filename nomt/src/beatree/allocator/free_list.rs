@@ -16,6 +16,7 @@ const MAX_PNS_PER_PAGE: usize = (PAGE_SIZE - 6) / 4;
 ///
 /// Pages that are freed due to the fetch of free pages are automatically added back during the encode phase,
 /// which also covers the addition of new free pages.
+#[derive(Clone)]
 pub struct FreeList {
     // head is last portion.
     portions: Vec<(PageNumber, Vec<PageNumber>)>,
@@ -157,10 +158,16 @@ impl FreeList {
         if !self.pop && to_push.is_empty() {
             return vec![];
         }
-        self.pop = false;
 
         // append the released free list pages
         to_push.extend(self.released_portions.drain(..));
+
+        if self.pop && to_push.is_empty() {
+            // note: empty vec when head is empty.
+            return self.encode_head().into_iter().collect();
+        }
+
+        self.pop = false;
 
         let new_pages = self.preallocate(&mut to_push, bump);
         self.push_and_encode(&to_push, new_pages)
@@ -179,6 +186,7 @@ impl FreeList {
         let mut new_full_portion = true;
         let mut i;
         if let Some(pn) = self.pop() {
+            // check if this freed a page and handle that
             match self.released_portions.pop() {
                 Some(x) => {
                     if let Some((new_head_pn, new_head_pns)) = self
@@ -217,7 +225,8 @@ impl FreeList {
                 }
             }
         } else {
-            // nothing popped, defer to loop to create the page for the next section.
+            // nothing popped, free list was totally empty.
+            // defer to loop to create the page for the next section.
             i = 0;
         };
 
@@ -228,11 +237,14 @@ impl FreeList {
             if let Some((ref mut head_pn, ref mut head_pns)) =
                 self.portions.last_mut().filter(|_| new_full_portion)
             {
-                // just popped into a new portion (which we will edit). prepare it for rewrite
+                // just popped into a new portion (which we will edit). prepare it for rewrite,
+                // because we are about to pop from it and alter it.
                 to_push.push(*head_pn);
 
                 // UNWRAP: new_full_portion guarantees that the new portion is full.
                 *head_pn = head_pns.pop().unwrap();
+
+                new_full_portion = false;
 
                 // pop reduces free list length, we adjust i to compensate.
                 // however, we must unconditionally rewrite this page even if i equals the previous
@@ -244,6 +256,8 @@ impl FreeList {
                 continue;
             }
 
+            // loop invariant: from this point on, the head page (if any) always has a head_pn which
+            // was itself drawn from the free-list.
             match self.pop() {
                 Some(pn) => {
                     new_pages.push(pn);
@@ -251,9 +265,11 @@ impl FreeList {
                     i += 1;
 
                     if let Some(released) = self.released_portions.pop() {
-                        // note: this is the PN we took out of the new portion.
-                        to_push.push(released);
                         new_full_portion = true;
+                        // note: this is the PN we took out of the new portion; it's fresh.
+                        //
+                        // if i now equals to_push.len(), we have a forced fragmentation.
+                        new_pages.push(released);
                     }
                 }
                 None => {
@@ -280,13 +296,19 @@ impl FreeList {
             // the second condition is checking for the fragmentation described in the commit
             // doc comment. fragmentation can only occur in the second page and the head page
             // has a single item.
-            let new_head = self
+            let head_full = self
                 .portions
                 .last()
-                .map_or(true, |h| h.1.len() % MAX_PNS_PER_PAGE == 0)
-                || i + 2 == to_push.len() && new_pages.peek().is_some();
+                .map_or(true, |h| h.1.len() == MAX_PNS_PER_PAGE);
 
-            if new_head {
+            let fragmentation = self
+                .portions
+                .last()
+                .map_or(false, |h| h.1.len() == MAX_PNS_PER_PAGE - 1)
+                && new_pages.peek().is_some()
+                && i + 1 == to_push.len();
+
+            if head_full || fragmentation {
                 encoded.extend(self.encode_head());
                 // UNWRAP: we've always allocated enough PNs for all appended PNs.
                 let new_head_pn = new_pages.next().unwrap();
@@ -372,4 +394,207 @@ fn encode_free_list_page(prev: PageNumber, pns: &[PageNumber]) -> Box<Page> {
     }
 
     Box::new(page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pop_into_next_portion_one_page_needed() {
+        let mut free_list = FreeList {
+            portions: vec![(PageNumber(1), vec![PageNumber(2)])],
+            pop: false,
+            released_portions: Vec::new(),
+        };
+
+        // expected order of events:
+        //   1. first (2) is popped for the new head.
+        //   2. This exhausts the head. We use (2) for a new head and push (1) to the end.
+        let result = free_list.commit(
+            (3..).take(1).map(PageNumber).collect::<Vec<_>>(),
+            &mut PageNumber(10000),
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, PageNumber(2));
+
+        assert_eq!(free_list.portions.len(), 1);
+        assert_eq!(free_list.portions[0].0, PageNumber(2));
+        assert_eq!(free_list.portions[0].1, vec![PageNumber(3), PageNumber(1)]);
+    }
+
+    #[test]
+    fn pop_into_next_portion_fragmentation() {
+        let mut free_list = FreeList {
+            portions: vec![(PageNumber(1), vec![PageNumber(2), PageNumber(3)])],
+            pop: false,
+            released_portions: Vec::new(),
+        };
+
+        // expected order of events:
+        //   1. first (3) is popped for the new head and (1) is pushed.
+        //   2. We now need a new page to store all the items. (2) is popped.
+        //   3. This empties the head portion, leaving (3) dangling. to_push == MAX
+        //   4. We use (3) as a new page for writing the last item, fragmentation was forced.
+        //      If we had pushed (3) to the end of the free-list instead, to_push would be MAX+1
+        //      and we'd need to take a new page from bump or the previous head, dirtying it and
+        //      allocating unnecessarily.
+        let result = free_list.commit(
+            (4..)
+                .take(MAX_PNS_PER_PAGE - 1)
+                .map(PageNumber)
+                .collect::<Vec<_>>(),
+            &mut PageNumber(10000),
+        );
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, PageNumber(2));
+        assert_eq!(result[1].0, PageNumber(3));
+
+        assert_eq!(free_list.portions.len(), 2);
+        assert_eq!(free_list.portions[0].0, PageNumber(2));
+        assert_eq!(free_list.portions[1].0, PageNumber(3));
+        assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE - 1);
+        assert_eq!(free_list.portions[1].1.len(), 1);
+    }
+
+    #[test]
+    fn pop_into_next_portion_without_fragmentation() {
+        let mut free_list = FreeList {
+            portions: vec![(PageNumber(1), vec![PageNumber(2), PageNumber(3)])],
+            pop: false,
+            released_portions: Vec::new(),
+        };
+
+        // expected order of events:
+        //   1. first (3) is popped for the new head and (1) is pushed.
+        //   2. We now need a new page to store all the items. (2) is popped.
+        //   3. This empties the head portion, leaving (3) dangling. to_push = MAX + 1
+        //   4. We push (2) for the first new page and (3) for the next. (2) is completely full,
+        //      and (3) has the last item.
+        let result = free_list.commit(
+            (4..)
+                .take(MAX_PNS_PER_PAGE)
+                .map(PageNumber)
+                .collect::<Vec<_>>(),
+            &mut PageNumber(10000),
+        );
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, PageNumber(2));
+        assert_eq!(result[1].0, PageNumber(3));
+
+        assert_eq!(free_list.portions.len(), 2);
+        assert_eq!(free_list.portions[0].0, PageNumber(2));
+        assert_eq!(free_list.portions[1].0, PageNumber(3));
+        assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE);
+        assert_eq!(free_list.portions[1].1.len(), 1);
+    }
+
+    #[test]
+    fn fragmentation_handled() {
+        let full_portion = (10000..)
+            .take(MAX_PNS_PER_PAGE - 2)
+            .chain(Some(2))
+            .chain(Some(3))
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+        let mut free_list = FreeList {
+            portions: vec![
+                (PageNumber(1), full_portion),
+                (PageNumber(4), vec![PageNumber(5)]),
+            ],
+            pop: false,
+            released_portions: Vec::new(),
+        };
+
+        // expected order of events:
+        //   1. first (5) is popped for the new head and (4) is pushed. to_push == MAX+1.
+        //   2. This vacates the head page. (5) is used as a fresh page.
+        //   2. We need a new page to store all the items. We need to pop into the previously
+        //      full page.
+        //   3. Its previous head (1) is pushed and (3) is taken to overwrite it. to_push == MAX+2
+        //   4. (2) is popped to handle the new page.
+        //   5. One of the to_push items is written into the full page. to_push == MAX+1
+        //   6. We can't write MAX items into the next page and 1 into another, because we'd need
+        //      to pop a new page for that but wouldn't be able to use it.
+        //   7. The only solution is to pop the next page (69) and have the second-to-last page
+        //      fragmented.
+
+        let result = free_list.commit(
+            (20000..)
+                .take(MAX_PNS_PER_PAGE)
+                .map(PageNumber)
+                .collect::<Vec<_>>(),
+            &mut PageNumber(100000),
+        );
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, PageNumber(3));
+        assert_eq!(result[1].0, PageNumber(5));
+        assert_eq!(result[2].0, PageNumber(2));
+
+        assert_eq!(free_list.portions.len(), 3);
+
+        assert_eq!(free_list.portions[0].0, PageNumber(3));
+        assert_eq!(free_list.portions[1].0, PageNumber(5));
+        assert_eq!(free_list.portions[2].0, PageNumber(2));
+
+        assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE);
+        assert_eq!(free_list.portions[1].1.len(), MAX_PNS_PER_PAGE - 1);
+        assert_eq!(free_list.portions[2].1.len(), 1);
+    }
+
+    #[test]
+    fn clean_up_fragmentation() {
+        let fragmented_portion = (10000..)
+            .take(MAX_PNS_PER_PAGE - 3)
+            .chain(Some(2))
+            .chain(Some(3))
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+
+        let mut free_list = FreeList {
+            portions: vec![
+                (PageNumber(1), fragmented_portion),
+                (PageNumber(4), vec![PageNumber(5)]),
+            ],
+            pop: false,
+            released_portions: Vec::new(),
+        };
+
+        // expected order of operations:
+        //   1. 5 is popped to rewrite the head. This vacates the head.
+        //   2. Because the previous portion is fragmented, 5 is taken as its new head and its old
+        //      head and the outdated (1) and (4) are pushed.
+        //   3. A new page (3) is popped for the new items.
+        //   4. The fragmented (5) is filled out and the rest of the items are pushed into (3)
+        let result = free_list.commit(vec![PageNumber(6)], &mut PageNumber(10000));
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, PageNumber(5));
+        assert_eq!(result[1].0, PageNumber(3));
+
+        assert_eq!(free_list.portions.len(), 2);
+
+        assert_eq!(free_list.portions[0].0, PageNumber(5));
+        assert_eq!(free_list.portions[1].0, PageNumber(3));
+
+        assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE);
+        assert_eq!(free_list.portions[1].1.len(), 1);
+    }
+
+    #[test]
+    fn rewrite_head_after_pop_only() {
+        let mut free_list = FreeList {
+            portions: vec![(PageNumber(1), vec![PageNumber(2)])],
+            pop: true,
+            released_portions: Vec::new(),
+        };
+
+        let result = free_list.commit(Vec::new(), &mut PageNumber(10000));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, PageNumber(1));
+    }
 }
