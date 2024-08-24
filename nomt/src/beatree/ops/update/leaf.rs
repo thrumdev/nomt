@@ -1,5 +1,5 @@
 use bitvec::prelude::*;
-use std::{cmp::Ordering, io::Read};
+use std::cmp::Ordering;
 
 use crate::beatree::{
     allocator::PageNumber,

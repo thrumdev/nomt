@@ -58,10 +58,6 @@ impl BranchNode {
         slice[0..4].copy_from_slice(&pn.to_le_bytes());
     }
 
-    pub fn is_bbn(&self) -> bool {
-        self.view().is_bbn()
-    }
-
     pub fn n(&self) -> u16 {
         self.view().n()
     }
@@ -87,10 +83,6 @@ impl BranchNode {
     pub fn set_separator_len(&mut self, len: u8) {
         let slice = self.as_mut_slice();
         slice[7] = len;
-    }
-
-    fn varbits(&self) -> &BitSlice<u8, Msb0> {
-        self.view().varbits()
     }
 
     fn varbits_mut(&mut self) -> &mut BitSlice<u8, Msb0> {
@@ -152,10 +144,6 @@ impl<'a> BranchNodeView<'a> {
         u32::from_le_bytes(self.inner[0..4].try_into().unwrap())
     }
 
-    pub fn is_bbn(&self) -> bool {
-        self.bbn_pn() == 0
-    }
-
     pub fn n(&self) -> u16 {
         u16::from_le_bytes(self.inner[4..6].try_into().unwrap())
     }
@@ -198,10 +186,6 @@ pub fn body_size(prefix_len: usize, separator_len: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round
     // up to the next byte boundary and then follow by the node pointers.
     (prefix_len + (separator_len * n) + 7) / 8 + (4 * n)
-}
-
-pub fn body_fullness(prefix_len: usize, separator_len: usize, n: usize) -> f32 {
-    body_size(prefix_len, separator_len, n) as f32 / BRANCH_NODE_BODY_SIZE as f32
 }
 
 pub struct BranchNodeBuilder {

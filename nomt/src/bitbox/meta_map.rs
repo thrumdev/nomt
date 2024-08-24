@@ -23,6 +23,7 @@ impl MetaMap {
         }
     }
 
+    #[allow(unused)]
     pub fn full_count(&self) -> usize {
         self.bitvec
             .iter()
@@ -38,11 +39,6 @@ impl MetaMap {
         self.bitvec[bucket] = full_entry(hash);
     }
 
-    pub fn set_empty(&mut self, bucket: usize) {
-        self.bitvec[bucket] = EMPTY;
-    }
-
-    #[allow(unused)]
     pub fn set_tombstone(&mut self, bucket: usize) {
         self.bitvec[bucket] = TOMBSTONE;
     }
