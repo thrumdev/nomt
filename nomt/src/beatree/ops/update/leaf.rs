@@ -142,7 +142,7 @@ impl LeafUpdater {
             let node = self.build_leaf(&self.ops[last_ops_start..]);
             let separator = self.separator();
 
-            let pn = leaf_writer.allocate(node);
+            let pn = leaf_writer.write(node);
             branch_updater.ingest(separator, pn);
 
             self.ops.clear();
@@ -264,7 +264,7 @@ impl LeafUpdater {
             }
 
             // write the node and provide it to the branch above.
-            let pn = leaf_writer.allocate(new_node);
+            let pn = leaf_writer.write(new_node);
             branch_updater.ingest(separator, pn);
 
             start += item_count;
@@ -319,7 +319,7 @@ impl LeafUpdater {
 
         let left_leaf = self.build_leaf(left_ops);
 
-        let left_pn = leaf_writer.allocate(left_leaf);
+        let left_pn = leaf_writer.write(left_leaf);
 
         branch_updater.ingest(left_separator, left_pn);
 
@@ -335,7 +335,7 @@ impl LeafUpdater {
 
         if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
-            let right_pn = leaf_writer.allocate(right_leaf);
+            let right_pn = leaf_writer.write(right_leaf);
             branch_updater.ingest(right_separator, right_pn);
 
             self.ops.clear();
