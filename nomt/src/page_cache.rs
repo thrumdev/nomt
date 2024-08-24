@@ -7,7 +7,7 @@ use crate::{
     Options,
 };
 use bitvec::prelude::*;
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxBuildHasher;
 use lru::LruCache;
 use nomt_core::{
     page::DEPTH,
@@ -15,7 +15,7 @@ use nomt_core::{
     trie::{LeafData, Node},
     trie_pos::{ChildNodeIndices, TriePosition},
 };
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
 use std::{fmt, num::NonZeroUsize, sync::Arc};
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`

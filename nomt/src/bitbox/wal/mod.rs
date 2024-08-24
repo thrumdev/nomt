@@ -2,7 +2,6 @@ use std::{
     fs::File,
     io::{Read, Write},
     os::fd::AsRawFd,
-    path::PathBuf,
 };
 
 mod batch;

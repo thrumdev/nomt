@@ -8,7 +8,7 @@ use crate::{
 use meta::Meta;
 use nomt_core::{
     page_id::PageId,
-    trie::{KeyPath, Node, TERMINATOR},
+    trie::KeyPath,
 };
 use parking_lot::Mutex;
 use std::{
@@ -43,6 +43,8 @@ struct Shared {
     ln_fd: File,
     bbn_fd: File,
     ht_fd: File,
+    // keep alive.
+    #[allow(unused)]
     wal_fd: File,
 }
 
