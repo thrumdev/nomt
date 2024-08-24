@@ -71,7 +71,9 @@ impl AllocatorReader {
             user_data: 0,
         };
 
-        self.io_handle.send(command).expect("I/O store worker dropped");
+        self.io_handle
+            .send(command)
+            .expect("I/O store worker dropped");
 
         // wait for completion
         let completion = self.io_handle.recv().expect("I/O store worker dropped");

@@ -98,11 +98,7 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
                 };
 
                 let complete = CompleteIo { command, result };
-
-                if let Err(_) = completion_sender.send(complete) {
-                    // TODO: handle?
-                    break;
-                }
+                let _ = completion_sender.send(complete);
             }
         }
 

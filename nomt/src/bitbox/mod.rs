@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crossbeam::channel::{TryRecvError, TrySendError};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, RwLock};
@@ -115,7 +116,6 @@ impl DB {
         }
     }
 
-    // TODO: update with async sync apporach
     pub fn sync_begin(
         &self,
         changes: Vec<(PageId, BucketIndex, Option<(Vec<u8>, PageDiff)>)>,
@@ -196,8 +196,10 @@ impl DB {
                 ),
                 user_data: 0, // unimportant.
             };
-            // TODO: handle error
-            self.shared.io_handle.send(command).unwrap();
+            self.shared
+                .io_handle
+                .send(command)
+                .map_err(|_| anyhow::anyhow!("I/O Pool Disconnected"))?;
             submitted += 1;
         }
 
@@ -214,19 +216,23 @@ impl DB {
                 user_data: 0, // unimportant
             };
             submitted += 1;
-            // TODO: handle error
-            self.shared.io_handle.send(command).unwrap();
+            self.shared
+                .io_handle
+                .send(command)
+                .map_err(|_| anyhow::anyhow!("I/O Pool Disconnected"))?;
         }
 
         // wait for all writes command to be finished
         while completed < submitted {
-            let completion = self.shared.io_handle.recv().expect("I/O worker dropped");
+            let completion = self.shared.io_handle.recv()?;
             assert!(completion.result.is_ok());
             completed += 1;
         }
 
         // sync all writes
-        ht_fd.sync_all().expect("ht file: error performing fsync");
+        ht_fd
+            .sync_all()
+            .context("ht file: error performing fsync")?;
 
         Ok(prev_wal_size)
     }

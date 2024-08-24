@@ -678,8 +678,6 @@ mod tests {
     fn advance_backwards_panics() {
         let root = trie::TERMINATOR;
         let page_cache = PageCache::new(None, &crate::Options::new(), None);
-        // TODO: prepopulate page cache with everything on the path? or just mock it somehow
-        // so our `get`s don't fail...
 
         let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
