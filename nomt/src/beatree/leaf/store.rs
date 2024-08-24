@@ -55,18 +55,27 @@ pub fn create(
 
 impl LeafStoreReader {
     /// Returns the leaf page with the specified page number.
-    pub fn query(&self, pn: PageNumber) -> LeafNode {
-        let page = self.allocator_reader.query(pn);
-
-        LeafNode { inner: page }
+    pub fn query(&self, pn: PageNumber) -> Box<Page> {
+        self.allocator_reader.query(pn)
     }
 }
 
 impl LeafStoreWriter {
-    pub fn allocate(&mut self, leaf_page: LeafNode) -> PageNumber {
+    /// Preallocate a page number.
+    pub fn preallocate(&mut self) -> PageNumber {
+        self.allocator_writer.allocate()
+    }
+
+    /// Write a leaf node, allocating a page number.
+    pub fn write(&mut self, leaf_page: LeafNode) -> PageNumber {
         let pn = self.allocator_writer.allocate();
-        self.pending.push((pn, leaf_page.inner));
+        self.write_preallocated(pn, leaf_page.inner);
         pn
+    }
+
+    /// Write a page under a preallocated page number.
+    pub fn write_preallocated(&mut self, pn: PageNumber, page: Box<Page>) {
+        self.pending.push((pn, page));
     }
 
     pub fn release(&mut self, id: PageNumber) {

@@ -9,7 +9,8 @@ use super::{
     allocator::PageNumber,
     branch::{self, BranchId},
     index::Index,
-    leaf, Key,
+    leaf::{self, node::LeafNode},
+    Key,
 };
 
 mod reconstruction;
@@ -39,7 +40,11 @@ pub fn lookup(
         Some((_, leaf_pn)) => leaf_pn,
     };
 
-    let leaf = leaf_store.query(leaf_pn);
+    let leaf = LeafNode {
+        inner: leaf_store.query(leaf_pn),
+    };
+
+    // TODO: handle overflow.
     Ok(leaf.get(&key).map(|v| v.to_vec()))
 }
 

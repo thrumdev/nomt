@@ -9,7 +9,7 @@ use crate::beatree::{
     branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},
     index::Index,
     leaf::{
-        node::LEAF_NODE_BODY_SIZE,
+        node::{LeafNode, LEAF_NODE_BODY_SIZE},
         store::{LeafStoreReader, LeafStoreWriter},
     },
     Key,
@@ -115,7 +115,9 @@ impl Updater {
             })
             .map(|(id, separator)| BaseLeaf {
                 id,
-                node: ctx.leaf_reader.query(id),
+                node: LeafNode {
+                    inner: ctx.leaf_reader.query(id),
+                },
                 iter_pos: 0,
                 separator,
             });
@@ -207,7 +209,9 @@ impl Updater {
     fn reset_leaf_base(&mut self, target: Key, ctx: &Ctx) -> Result<(), ()> {
         let branch = self.branch_updater.base().ok_or(())?;
         let (i, leaf_pn) = super::search_branch(&branch.node, target).ok_or(())?;
-        let leaf = ctx.leaf_reader.query(leaf_pn);
+        let leaf = LeafNode {
+            inner: ctx.leaf_reader.query(leaf_pn),
+        };
 
         let separator = reconstruct_key(branch.node.prefix(), branch.node.separator(i));
 

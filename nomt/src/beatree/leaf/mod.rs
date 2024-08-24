@@ -10,4 +10,5 @@
 // be required to access the data again.
 
 pub mod node;
+pub mod overflow;
 pub mod store;

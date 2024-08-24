@@ -1,28 +1,30 @@
-// Here is the layout of a leaf node:
-//
-// ```rust,ignore
-// n: u16
-// cell_pointers: [(key ++ offset); n]
-// padding: [u8] // empty space between cell_pointers and cells
-// cells: [[u8]; n]
-// ```
-//
-// | n | [(key ++ offset); n] | ----  | [[u8]; n] |
-//
-// Where key is an [u8; 32], and offset is the byte offset in the node
-// to the beginning of the value.
-//
-// Cell pointers are saved in order of the key, and consequently, so are the cells.
-// The length of the value is determined by the difference between the start offsets
-// of this value and the next.
-//
-// Cells are left-aligned and thus the last value is always attached to the end.
-//
-// The offset of the first cell also serves to detect potential overlap
-// between the growth of cell_pointers and cells.
-//
-// Overflow pages: TODO
-
+/// Here is the layout of a leaf node:
+///
+/// ```rust,ignore
+/// n: u16
+/// cell_pointers: [(key ++ offset); n]
+/// padding: [u8] // empty space between cell_pointers and cells
+/// cells: [Cell; n]
+/// value cell: [u8]
+/// overflow cell: (u64, [NodePointer]) | semantically, (value_size, [NodePointer]).
+/// ```
+///
+/// | n | [(key ++ offset); n] | ----  | [[u8]; n] |
+///
+/// Where key is an [u8; 32], and offset is the byte offset in the node
+/// to the beginning of the value.
+///
+/// Cell pointers are saved in order of the key, and consequently, so are the cells.
+/// The length of the value is determined by the difference between the start offsets
+/// of this value and the next.
+///
+/// When a cell is an overflow cell, the high bit in the offset is set to `1`. Only the low
+/// 15 bits should count when considering the offset.
+///
+/// Cells are left-aligned and thus the last value is always attached to the end.
+///
+/// The offset of the first cell also serves to detect potential overlap
+/// between the growth of cell_pointers and cells.
 use std::ops::Range;
 
 use crate::{
@@ -30,7 +32,16 @@ use crate::{
     io::{Page, PAGE_SIZE},
 };
 
+/// The size of the leaf node body: everything excluding the mandatory header.
 pub const LEAF_NODE_BODY_SIZE: usize = PAGE_SIZE - 2;
+
+/// The maximum value size before overflow pages are used.
+pub const MAX_LEAF_VALUE_SIZE: usize = (LEAF_NODE_BODY_SIZE / 3) - 32;
+
+/// The maximum number of node pointers which may appear directly in an overflow cell.
+///
+/// Note that this gives an overflow value cell maximum size of 100 bytes.
+pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 23;
 
 pub struct LeafNode {
     pub inner: Box<Page>,

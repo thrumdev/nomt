@@ -12,7 +12,7 @@ use free_list::FreeList;
 
 mod free_list;
 
-/// The number of a page
+/// The number of a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageNumber(pub u32);
 
