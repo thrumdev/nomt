@@ -2,10 +2,7 @@ use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
 
 const RING_CAPACITY: u32 = 128;
 
@@ -15,7 +12,6 @@ const MAX_IN_FLIGHT: usize = RING_CAPACITY as usize;
 struct PendingIo {
     command: IoCommand,
     completion_sender: Sender<CompleteIo>,
-    start: Instant,
 }
 
 pub fn start_io_worker(io_workers: usize) -> Sender<IoPacket> {
@@ -67,12 +63,9 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
         .expect("Error building io_uring");
 
     let (submitter, mut submit_queue, mut complete_queue) = ring.split();
-    let mut stats = Stats::new();
     let mut retries = VecDeque::<IoPacket>::new();
 
     loop {
-        stats.log();
-
         // 1. process completions.
         if !pending.is_empty() {
             complete_queue.sync();
@@ -83,10 +76,7 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
                 let PendingIo {
                     command,
                     completion_sender,
-                    start,
                 } = pending.remove(completion_event.user_data() as usize);
-
-                stats.note_completion(start.elapsed().as_micros() as u64);
 
                 // io_uring never uses errno to pass back error information.
                 // Instead, completion_event.result() will contain what the equivalent
@@ -139,13 +129,10 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
                 }
             };
 
-            stats.note_arrival();
-
             to_submit = true;
             let pending_index = pending.insert(PendingIo {
                 command: next_io.command,
                 completion_sender: next_io.completion_sender,
-                start: Instant::now(),
             });
 
             let entry = submission_entry(&mut pending.get_mut(pending_index).unwrap().command)
@@ -163,62 +150,6 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
         let wait = if pending.len() == MAX_IN_FLIGHT { 1 } else { 0 };
 
         submitter.submit_and_wait(wait).unwrap();
-    }
-}
-
-struct Stats {
-    last_log: Instant,
-    total_inflight_us: u64,
-    completions: usize,
-    arrivals: usize,
-}
-
-impl Stats {
-    fn new() -> Self {
-        Stats {
-            last_log: Instant::now(),
-            total_inflight_us: 0,
-            completions: 0,
-            arrivals: 0,
-        }
-    }
-
-    fn note_completion(&mut self, inflight_us: u64) {
-        self.completions += 1;
-        self.total_inflight_us += inflight_us;
-    }
-
-    fn note_arrival(&mut self) {
-        self.arrivals += 1;
-    }
-
-    fn log(&mut self) {
-        const LOG_DURATION: Duration = Duration::from_millis(1000);
-
-        let elapsed = self.last_log.elapsed();
-        if elapsed < LOG_DURATION {
-            return;
-        }
-
-        self.last_log = Instant::now();
-        let arrival_rate = self.arrivals as f64 * 1000.0 / elapsed.as_millis() as f64;
-        let average_inflight = self.total_inflight_us as f64 / self.completions as f64;
-        println!(
-            "arrivals={} (rate {}/s) completions={} avg_inflight={}us | {}ms",
-            self.arrivals,
-            arrival_rate as usize,
-            self.completions,
-            average_inflight as usize,
-            elapsed.as_millis(),
-        );
-        println!(
-            "  estimated-QD={:.1}",
-            arrival_rate * average_inflight / 1_000_000.0
-        );
-
-        self.completions = 0;
-        self.arrivals = 0;
-        self.total_inflight_us = 0;
     }
 }
 
