@@ -27,7 +27,6 @@ pub fn run(
     ln_extend_file_sz: Option<u64>,
     new_meta: Meta,
 ) {
-    let now = std::time::Instant::now();
     let io = IoDmux::new(io_handle);
     do_run(
         Cx {
@@ -52,7 +51,6 @@ pub fn run(
         },
         io,
     );
-    println!("writeout {}us", now.elapsed().as_micros());
 }
 
 fn do_run(mut cx: Cx, mut io: IoDmux) {

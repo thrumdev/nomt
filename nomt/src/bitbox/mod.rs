@@ -471,7 +471,10 @@ impl BucketAllocator {
         let meta_map = self.shared.meta_map.read();
         let mut probe_seq = ProbeSequence::new(&page_id, &meta_map);
 
+        let mut i = 0;
         loop {
+            i += 1;
+            assert!(i < 10000, "hash-table full");
             match probe_seq.next(&meta_map) {
                 ProbeResult::PossibleHit(bucket) => {
                     // skip unless another page has freed the bucket.
