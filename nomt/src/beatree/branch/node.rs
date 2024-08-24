@@ -110,16 +110,6 @@ impl BranchNode {
         let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
         self.as_mut_slice()[offset..offset + 4].copy_from_slice(&node_pointer.to_le_bytes());
     }
-
-    // TODO: modification.
-    //
-    // Coming up with the right API for this is tricky:
-    // - The offsets depend on `n`, `prefix_len` and `separator_len`, which suggests that it should
-    //   be supplied all at once.
-    // - At the same time, we want to avoid materializing the structure in memory.
-    //
-    // It all depends on how the caller wants to use this. Ideally, the caller would be able to
-    // build the new node in a single pass.
 }
 
 impl Drop for BranchNode {

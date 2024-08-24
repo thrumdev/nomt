@@ -14,7 +14,7 @@ use commit::{CommitPool, Committer};
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
-    trie::{NodeHasher, NodeHasherExt, InternalData, ValueHash, TERMINATOR},
+    trie::{InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -374,7 +374,9 @@ impl Drop for Session {
 }
 
 fn compute_root_node<H: NodeHasher>(page_cache: &PageCache) -> Node {
-    let Some(root_page) = page_cache.get(ROOT_PAGE_ID) else { return TERMINATOR };
+    let Some(root_page) = page_cache.get(ROOT_PAGE_ID) else {
+        return TERMINATOR;
+    };
     let read_pass = page_cache.new_read_pass();
 
     // 3 cases.
@@ -390,7 +392,10 @@ fn compute_root_node<H: NodeHasher>(page_cache: &PageCache) -> Node {
     if is_empty(0) && is_empty(1) {
         TERMINATOR
     } else if (2..6usize).all(is_empty) {
-        H::hash_leaf(&LeafData { key_path: left, value_hash: right })
+        H::hash_leaf(&LeafData {
+            key_path: left,
+            value_hash: right,
+        })
     } else {
         H::hash_internal(&InternalData { left, right })
     }

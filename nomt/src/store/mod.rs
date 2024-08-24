@@ -6,10 +6,7 @@ use crate::{
     page_cache::PageDiff,
 };
 use meta::Meta;
-use nomt_core::{
-    page_id::PageId,
-    trie::KeyPath,
-};
+use nomt_core::{page_id::PageId, trie::KeyPath};
 use parking_lot::Mutex;
 use std::{
     fs::{File, OpenOptions},
