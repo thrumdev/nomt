@@ -3,7 +3,7 @@ use crate::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },
-    io::{IoPool, Page},
+    io::{IoPool, IoCommand, IoHandle, Page},
 };
 
 use std::fs::File;
@@ -57,6 +57,15 @@ impl LeafStoreReader {
     /// Returns the leaf page with the specified page number.
     pub fn query(&self, pn: PageNumber) -> Box<Page> {
         self.allocator_reader.query(pn)
+    }
+
+    pub fn io_handle(&self) -> &IoHandle {
+        self.allocator_reader.io_handle()
+    }
+
+    /// Create an I/O command for querying a page by number.
+    pub fn io_command(&self, pn: PageNumber, user_data: u64) -> IoCommand {
+        self.allocator_reader.io_command(pn, user_data)
     }
 }
 

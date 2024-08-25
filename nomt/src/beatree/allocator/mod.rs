@@ -12,8 +12,8 @@ use free_list::FreeList;
 
 mod free_list;
 
-/// The number of a page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// The number of a page
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageNumber(pub u32);
 
 impl PageNumber {
@@ -64,15 +64,8 @@ impl AllocatorReader {
 
     /// Returns the page with the specified page number. Blocks the current thread.
     pub fn query(&self, pn: PageNumber) -> Box<Page> {
-        let page = Box::new(Page::zeroed());
-
-        let command = IoCommand {
-            kind: IoKind::Read(self.store_file.as_raw_fd(), pn.0 as u64, page),
-            user_data: 0,
-        };
-
         self.io_handle
-            .send(command)
+            .send(self.io_command(pn, 0))
             .expect("I/O store worker dropped");
 
         // wait for completion
@@ -81,6 +74,21 @@ impl AllocatorReader {
         let page = completion.command.kind.unwrap_buf();
 
         page
+    }
+
+    /// Get a reference to the I/O handle.
+    pub fn io_handle(&self) -> &IoHandle {
+        &self.io_handle
+    }
+
+    /// Create an I/O command for querying a page by number.
+    pub fn io_command(&self, pn: PageNumber, user_data: u64) -> IoCommand {
+        let page = Box::new(Page::zeroed());
+
+        IoCommand {
+            kind: IoKind::Read(self.store_file.as_raw_fd(), pn.0 as u64, page),
+            user_data,
+        }
     }
 }
 
