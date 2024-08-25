@@ -155,14 +155,16 @@ impl Updater {
             .filter(|v| v.len() > MAX_LEAF_VALUE_SIZE)
         {
             let pages = overflow::chunk(large_value, &mut ctx.leaf_writer);
-            (Some(overflow::encode_cell(&pages)), true)
+            (Some(overflow::encode_cell(large_value.len(), &pages)), true)
         } else {
             (value_change, false)
         };
 
-        // TODO: delete or schedule delete of all pages used by the given overflow cell.
+        let delete_overflow = |overflow_cell: &[u8]| {
+            overflow::delete(overflow_cell, &ctx.leaf_reader, &mut ctx.leaf_writer)
+        };
         self.leaf_updater
-            .ingest(key, value_change, overflow, |_overflow_cell| {});
+            .ingest(key, value_change, overflow, delete_overflow);
     }
 
     fn complete(&mut self, ctx: &mut Ctx) {
