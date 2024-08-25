@@ -9,7 +9,8 @@ use crate::beatree::{
     branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},
     index::Index,
     leaf::{
-        node::{LeafNode, LEAF_NODE_BODY_SIZE},
+        node::{LeafNode, LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
+        overflow,
         store::{LeafStoreReader, LeafStoreWriter},
     },
     Key,
@@ -148,7 +149,20 @@ impl Updater {
 
     fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>, ctx: &mut Ctx) {
         self.digest_until(Some(key), ctx);
-        self.leaf_updater.ingest(key, value_change);
+
+        let (value_change, overflow) = if let Some(ref large_value) = value_change
+            .as_ref()
+            .filter(|v| v.len() > MAX_LEAF_VALUE_SIZE)
+        {
+            let pages = overflow::chunk(large_value, &mut ctx.leaf_writer);
+            (Some(overflow::encode_cell(&pages)), true)
+        } else {
+            (value_change, false)
+        };
+
+        // TODO: delete or schedule delete of all pages used by the given overflow cell.
+        self.leaf_updater
+            .ingest(key, value_change, overflow, |_overflow_cell| {});
     }
 
     fn complete(&mut self, ctx: &mut Ctx) {

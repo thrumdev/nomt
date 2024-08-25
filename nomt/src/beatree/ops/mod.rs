@@ -45,7 +45,8 @@ pub fn lookup(
     };
 
     // TODO: handle overflow.
-    Ok(leaf.get(&key).map(|v| v.to_vec()))
+    let maybe_value = leaf.get(&key).map(|(v, _is_overflow)| v.to_vec());
+    Ok(maybe_value)
 }
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
