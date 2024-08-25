@@ -44,8 +44,14 @@ pub fn lookup(
         inner: leaf_store.query(leaf_pn),
     };
 
-    // TODO: handle overflow.
-    let maybe_value = leaf.get(&key).map(|(v, _is_overflow)| v.to_vec());
+    let maybe_value = leaf.get(&key).map(|(v, is_overflow)| {
+        if is_overflow {
+            leaf::overflow::read(v, leaf_store)
+        } else {
+            v.to_vec()
+        }
+    });
+
     Ok(maybe_value)
 }
 
