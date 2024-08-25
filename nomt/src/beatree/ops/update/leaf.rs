@@ -34,11 +34,12 @@ impl BaseLeaf {
         self.node.key(i)
     }
 
-    fn key_value(&self, i: usize) -> (Key, &[u8]) {
-        (self.node.key(i), self.node.value(i))
+    fn key_cell(&self, i: usize) -> (Key, &[u8], bool) {
+        let (value, overflow) = self.node.value(i);
+        (self.node.key(i), value, overflow)
     }
 
-    fn next_value(&self) -> &[u8] {
+    fn next_cell(&self) -> (&[u8], bool) {
         self.node.value(self.iter_pos)
     }
 
@@ -48,7 +49,7 @@ impl BaseLeaf {
 }
 
 enum LeafOp {
-    Insert(Key, Vec<u8>),
+    Insert(Key, Vec<u8>, bool),
     Keep(usize, usize),
 }
 
@@ -95,11 +96,19 @@ impl LeafUpdater {
         self.cutoff = cutoff;
     }
 
-    pub fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>) {
-        self.keep_up_to(Some(&key));
+    /// Ingest a key/cell pair. Provide a callback which is called if this deletes an existing
+    /// overflow cell.
+    pub fn ingest(
+        &mut self,
+        key: Key,
+        value_change: Option<Vec<u8>>,
+        overflow: bool,
+        with_deleted_overflow: impl FnMut(&[u8]),
+    ) {
+        self.keep_up_to(Some(&key), with_deleted_overflow);
 
         if let Some(value) = value_change {
-            self.ops.push(LeafOp::Insert(key, value));
+            self.ops.push(LeafOp::Insert(key, value, overflow));
             self.bulk_split_step(self.ops.len() - 1);
         }
     }
@@ -116,7 +125,8 @@ impl LeafUpdater {
             branch_updater.possibly_delete(base.separator);
         }
 
-        self.keep_up_to(None);
+        // no cells are going to be deleted from this point onwards - this keeps everything.
+        self.keep_up_to(None, |_| {});
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
@@ -163,7 +173,7 @@ impl LeafUpdater {
         }
     }
 
-    fn keep_up_to(&mut self, up_to: Option<&Key>) {
+    fn keep_up_to(&mut self, up_to: Option<&Key>, mut with_deleted_overflow: impl FnMut(&[u8])) {
         while let Some(next_key) = self.base.as_ref().and_then(|b| b.next_key()) {
             let Some(ref mut base_node) = self.base else {
                 return;
@@ -175,12 +185,15 @@ impl LeafUpdater {
                 break;
             }
 
+            let (val, overflow) = base_node.next_cell();
             if order == Ordering::Greater {
-                let size = base_node.next_value().len();
-                self.ops.push(LeafOp::Keep(base_node.iter_pos, size));
+                self.ops.push(LeafOp::Keep(base_node.iter_pos, val.len()));
                 base_node.advance_iter();
                 self.bulk_split_step(self.ops.len() - 1);
             } else {
+                if overflow {
+                    with_deleted_overflow(val);
+                }
                 base_node.advance_iter();
             }
         }
@@ -191,7 +204,7 @@ impl LeafUpdater {
     fn bulk_split_step(&mut self, op_index: usize) {
         let item_size = match self.ops[op_index] {
             LeafOp::Keep(_, size) => size,
-            LeafOp::Insert(_, ref val) => val.len(),
+            LeafOp::Insert(_, ref val, _) => val.len(),
         };
 
         let body_size_after = self.gauge.body_size_after(item_size);
@@ -292,7 +305,7 @@ impl LeafUpdater {
         while left_gauge.body_size() < midpoint {
             let item_size = match self.ops[split_point] {
                 LeafOp::Keep(_, size) => size,
-                LeafOp::Insert(_, ref val) => val.len(),
+                LeafOp::Insert(_, ref val, _) => val.len(),
             };
 
             if left_gauge.body_size_after(item_size) > LEAF_NODE_BODY_SIZE {
@@ -327,7 +340,7 @@ impl LeafUpdater {
         for op in &self.ops[split_point..] {
             let item_size = match op {
                 LeafOp::Keep(_, size) => *size,
-                LeafOp::Insert(_, ref val) => val.len(),
+                LeafOp::Insert(_, ref val, _) => val.len(),
             };
 
             right_gauge.ingest(item_size);
@@ -365,24 +378,24 @@ impl LeafUpdater {
         // then replace `Keep` ops with pure key-value ops, preparing for the base to be changed.
         for op in self.ops.iter_mut() {
             let LeafOp::Keep(i, _) = *op else { continue };
-            let (k, v) = base.key_value(i);
-            *op = LeafOp::Insert(k, v.to_vec());
+            let (k, v, o) = base.key_cell(i);
+            *op = LeafOp::Insert(k, v.to_vec(), o);
         }
     }
 
     fn op_key(&self, leaf_op: &LeafOp) -> Key {
         // UNWRAP: `Keep` leaf ops only exist when base is `Some`.
         match leaf_op {
-            LeafOp::Insert(k, _) => *k,
+            LeafOp::Insert(k, _, _) => *k,
             LeafOp::Keep(i, _) => self.base.as_ref().unwrap().key(*i),
         }
     }
 
-    fn op_key_value<'a>(&'a self, leaf_op: &'a LeafOp) -> (Key, &'a [u8]) {
+    fn op_cell<'a>(&'a self, leaf_op: &'a LeafOp) -> (Key, &'a [u8], bool) {
         // UNWRAP: `Keep` leaf ops only exist when base is `Some`.
         match leaf_op {
-            LeafOp::Insert(k, v) => (*k, &v[..]),
-            LeafOp::Keep(i, _) => self.base.as_ref().unwrap().key_value(*i),
+            LeafOp::Insert(k, v, o) => (*k, &v[..], *o),
+            LeafOp::Keep(i, _) => self.base.as_ref().unwrap().key_cell(*i),
         }
     }
 
@@ -391,15 +404,15 @@ impl LeafUpdater {
             .iter()
             .map(|op| match op {
                 LeafOp::Keep(_, size) => *size,
-                LeafOp::Insert(_, v) => v.len(),
+                LeafOp::Insert(_, v, _) => v.len(),
             })
             .sum();
 
         let mut leaf_builder = LeafBuilder::new(ops.len(), total_value_size);
         for op in ops {
-            let (k, v) = self.op_key_value(op);
+            let (k, v, o) = self.op_cell(op);
 
-            leaf_builder.push(k, v);
+            leaf_builder.push_cell(k, v, o);
         }
         leaf_builder.finish()
     }

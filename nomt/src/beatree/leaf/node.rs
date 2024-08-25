@@ -43,6 +43,9 @@ pub const MAX_LEAF_VALUE_SIZE: usize = (LEAF_NODE_BODY_SIZE / 3) - 32;
 /// Note that this gives an overflow value cell maximum size of 100 bytes.
 pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 23;
 
+/// We use the high bit to encode whether a cell is an overflow cell.
+const OVERFLOW_BIT: u16 = 1 << 15;
+
 pub struct LeafNode {
     pub inner: Box<Page>,
 }
@@ -62,29 +65,30 @@ impl LeafNode {
         key
     }
 
-    pub fn value(&self, i: usize) -> &[u8] {
-        let range = self.value_range(self.cell_pointers(), i);
-        &self.inner[range]
+    pub fn value(&self, i: usize) -> (&[u8], bool) {
+        let (range, overflow) = self.value_range(self.cell_pointers(), i);
+        (&self.inner[range], overflow)
     }
 
-    pub fn get(&self, key: &Key) -> Option<&[u8]> {
+    pub fn get(&self, key: &Key) -> Option<(&[u8], bool)> {
         let cell_pointers = self.cell_pointers();
 
         search(cell_pointers, key)
             .ok()
-            .map(|index| &self.inner[self.value_range(cell_pointers, index)])
+            .map(|index| self.value_range(cell_pointers, index))
+            .map(|(range, overflow)| (&self.inner[range], overflow))
     }
 
     // returns the range at which the value of a cell is stored
-    fn value_range(&self, cell_pointers: &[[u8; 34]], index: usize) -> Range<usize> {
-        let start = cell_offset(cell_pointers, index);
+    fn value_range(&self, cell_pointers: &[[u8; 34]], index: usize) -> (Range<usize>, bool) {
+        let (start, overflow) = cell_offset(cell_pointers, index);
         let end = if index == cell_pointers.len() - 1 {
             PAGE_SIZE
         } else {
-            cell_offset(cell_pointers, index + 1)
+            cell_offset(cell_pointers, index + 1).0
         };
 
-        start..end
+        (start..end, overflow)
     }
 
     fn cell_pointers(&self) -> &[[u8; 34]] {
@@ -122,13 +126,13 @@ impl LeafBuilder {
         }
     }
 
-    pub fn push(&mut self, key: Key, value: &[u8]) {
+    pub fn push_cell(&mut self, key: Key, value: &[u8], overflow: bool) {
         assert!(self.index < self.leaf.n());
 
         let offset = PAGE_SIZE - self.remaining_value_size;
         let cell_pointer = &mut self.leaf.cell_pointers_mut()[self.index];
 
-        encode_cell_pointer(&mut cell_pointer[..], key, offset);
+        encode_cell_pointer(&mut cell_pointer[..], key, offset, overflow);
         self.leaf.inner[offset..][..value.len()].copy_from_slice(value);
 
         self.index += 1;
@@ -145,16 +149,28 @@ pub fn body_size(n: usize, value_size_sum: usize) -> usize {
     n * 34 + value_size_sum
 }
 
-fn cell_offset(cell_pointers: &[[u8; 34]], index: usize) -> usize {
+// get the cell offset and whether the cell is an overflow cell.
+fn cell_offset(cell_pointers: &[[u8; 34]], index: usize) -> (usize, bool) {
     let mut buf = [0; 2];
     buf.copy_from_slice(&cell_pointers[index][32..34]);
-    u16::from_le_bytes(buf) as usize
+    let val = u16::from_le_bytes(buf);
+    (
+        (val & !OVERFLOW_BIT) as usize,
+        val & OVERFLOW_BIT == OVERFLOW_BIT,
+    )
 }
 
-// panics if offset is bigger then u16 or `cell` length is less than 34.
-fn encode_cell_pointer(cell: &mut [u8], key: [u8; 32], offset: usize) {
+// panics if offset is bigger than 2^15 - 1.
+fn encode_cell_pointer(cell: &mut [u8], key: [u8; 32], offset: usize, overflow: bool) {
+    let mut val = u16::try_from(offset).unwrap();
+    assert!(val < OVERFLOW_BIT);
+
+    if overflow {
+        val |= OVERFLOW_BIT;
+    }
+
     cell[0..32].copy_from_slice(&key);
-    cell[32..34].copy_from_slice(&(u16::try_from(offset).unwrap()).to_le_bytes());
+    cell[32..34].copy_from_slice(&val.to_le_bytes());
 }
 
 // look for key in the node. the return value has the same semantics as std binary_search*.

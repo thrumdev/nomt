@@ -73,6 +73,16 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
     cell
 }
 
+/// Encode a list of page numbers into an overflow cell.
+pub fn encode_cell(pages: &[PageNumber]) -> Vec<u8> {
+    let mut v = vec![0u8; pages.len() * 4];
+    for (pn, slice) in pages.iter().zip(v.chunks_mut(4)) {
+        slice.copy_from_slice(&pn.0.to_le_bytes());
+    }
+
+    v
+}
+
 fn total_needed_pages(value_size: usize) -> usize {
     let mut encoded_size = value_size;
     let mut total_pages = needed_pages(encoded_size);
