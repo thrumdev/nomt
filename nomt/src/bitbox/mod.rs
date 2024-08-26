@@ -292,6 +292,11 @@ impl PageLoader {
             Err(_) => anyhow::bail!("I/O pool hangup"),
         }
     }
+
+    /// Get the underlying I/O handle.
+    pub fn io_handle(&self) -> &IoHandle {
+        &self.io_handle
+    }
 }
 
 /// Represents the completion of a page load.
