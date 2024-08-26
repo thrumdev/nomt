@@ -15,10 +15,21 @@ impl Backend {
     // If reset is true, then erase any previous backend's database
     // and restart from an empty database.
     // Otherwise, use the already present database.
-    pub fn instantiate(&self, reset: bool, commit_concurrency: usize, io_workers: usize) -> DB {
+    pub fn instantiate(
+        &self,
+        reset: bool,
+        commit_concurrency: usize,
+        io_workers: usize,
+        hashtable_buckets: Option<u32>,
+    ) -> DB {
         match self {
             Backend::SovDB => DB::Sov(SovDB::open(reset)),
-            Backend::Nomt => DB::Nomt(NomtDB::open(reset, commit_concurrency, io_workers)),
+            Backend::Nomt => DB::Nomt(NomtDB::open(
+                reset,
+                commit_concurrency,
+                io_workers,
+                hashtable_buckets,
+            )),
             Backend::SpTrie => DB::SpTrie(SpTrieDB::open(reset)),
         }
     }
