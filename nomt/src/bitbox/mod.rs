@@ -1,3 +1,4 @@
+use bitvec::{order::Lsb0, view::BitView};
 use crossbeam::channel::{TryRecvError, TrySendError};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, RwLock};
@@ -9,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    io::{IoCommand, IoHandle, IoKind, IoPool, Page, PAGE_SIZE},
+    io::{IoCommand, IoHandle, IoKind, Page, PAGE_SIZE},
     page_cache::PageDiff,
 };
 
@@ -34,38 +35,32 @@ pub struct Shared {
     store: HTOffsets,
     seed: [u8; 16],
     meta_map: Arc<RwLock<MetaMap>>,
-    io_handle: IoHandle,
 }
 
 impl DB {
     /// Opens an existing bitbox database.
     pub fn open(
-        io_pool: &IoPool,
-        sync_seqn: u32,
         num_pages: u32,
         seed: [u8; 16],
         ht_fd: &File,
         wal_fd: &File,
     ) -> anyhow::Result<Self> {
-        // TODO: refactor to use u32.
-        let sync_seqn = sync_seqn as u64;
-
-        let (store, meta_map) = match ht_file::open(num_pages, ht_fd) {
+        let (store, mut meta_map) = match ht_file::open(num_pages, ht_fd) {
             Ok(x) => x,
             Err(e) => {
                 anyhow::bail!("encountered error in opening store: {e:?}");
             }
         };
 
-        // TODO: implement WAL recovery.
-        let _ = (sync_seqn, wal_fd);
+        if wal_fd.metadata()?.len() > 0 {
+            recover(ht_fd, wal_fd, &store, &mut meta_map, seed)?;
+        }
 
         Ok(Self {
             shared: Arc::new(Shared {
                 store,
                 seed,
                 meta_map: Arc::new(RwLock::new(meta_map)),
-                io_handle: io_pool.make_handle(),
             }),
         })
     }
@@ -148,6 +143,87 @@ impl DB {
 
         Ok(WriteoutData { ht_pages })
     }
+}
+
+/// Perform recovery by applying the WAL to the HT file.
+fn recover(
+    mut ht_fd: &File,
+    mut wal_fd: &File,
+    ht_offsets: &HTOffsets,
+    meta_map: &mut MetaMap,
+    seed: [u8; 16],
+) -> anyhow::Result<()> {
+    use crate::bitbox::wal::WalBlobReader;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    wal_fd.seek(SeekFrom::Start(0))?;
+
+    // The indicies of pages (in the metabits page space) that were changed and require updates.
+    // Note those are not ht page numbers yet and still require additional conversion.
+    let mut changed_meta_page_ixs = HashSet::new();
+    let mut wal_reader = WalBlobReader::new(wal_fd)?;
+
+    while let Some(entry) = wal_reader.read_entry()? {
+        match entry {
+            wal::WalEntry::Clear { bucket } => {
+                meta_map.set_tombstone(bucket as usize);
+
+                // Note that the meta page requires update.
+                changed_meta_page_ixs.insert(meta_map.page_index(bucket as usize));
+            }
+            wal::WalEntry::Update {
+                page_id,
+                page_diff,
+                changed_nodes,
+                bucket,
+            } => {
+                let hash = hash_raw_page_id(page_id, &seed);
+                let meta_map_changed = meta_map.hint_not_match(bucket as usize, hash);
+                if meta_map_changed {
+                    meta_map.set_full(bucket as usize, hash);
+                    // Note that the meta page requires update.
+                    changed_meta_page_ixs.insert(meta_map.page_index(bucket as usize));
+                }
+
+                // Apply the diff to the page in the ht file.
+                //
+                // The algorithm is:
+                // - read the bucket page from the ht file.
+                // - for each index of a bit in a diff that equals to 1, copy the changed node into
+                //   the page.
+                // - store the changed page.
+                let pn = ht_offsets.data_page_index(bucket);
+                let mut page = Page::zeroed();
+                ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
+                ht_fd.read_exact(&mut page)?;
+
+                for i in page_diff.view_bits::<Lsb0>().iter_ones() {
+                    let node = &changed_nodes[i];
+                    page[i * 32..(i + 1) * 32].copy_from_slice(node);
+                }
+
+                ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
+                ht_fd.write_all(&page)?;
+            }
+        }
+    }
+
+    // Now that we have applied all the updates, we know precisely which meta pages have been
+    // updated.
+    //
+    // We now write those pages out to the HT file.
+    for changed_meta_page_ix in changed_meta_page_ixs {
+        let mut page = Page::zeroed();
+        page[..].copy_from_slice(meta_map.page_slice(changed_meta_page_ix));
+        let pn = ht_offsets.meta_bytes_index(changed_meta_page_ix as u64);
+        ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
+        ht_fd.write_all(&page)?;
+    }
+
+    // Finally, we collapse the WAL file.
+    wal_fd.set_len(0)?;
+
+    Ok(())
 }
 
 pub struct WriteoutData {
@@ -324,10 +400,7 @@ impl PageLoadCompletion {
     pub fn apply_to(self, load: &mut PageLoad) -> Option<(Box<Page>, BucketIndex)> {
         assert!(load.needs_completion());
         if self.page[PAGE_SIZE - 32..] == load.page_id.encode() {
-            Some((
-                self.page,
-                BucketIndex(load.probe_sequence.bucket()),
-            ))
+            Some((self.page, BucketIndex(load.probe_sequence.bucket())))
         } else {
             load.state = PageLoadState::Pending;
             None
@@ -434,9 +507,13 @@ fn get_changed<'a>(page: &'a Page, page_diff: &PageDiff) -> impl Iterator<Item =
 }
 
 fn hash_page_id(page_id: &PageId, seed: &[u8; 16]) -> u64 {
+    hash_raw_page_id(page_id.encode(), seed)
+}
+
+fn hash_raw_page_id(page_id: [u8; 32], seed: &[u8; 16]) -> u64 {
     let mut buf = [0u8; 8];
     let mut hasher = blake3::Hasher::new();
-    hasher.update(&page_id.encode());
+    hasher.update(&page_id);
     hasher.update(&seed[..]);
     buf.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
     u64::from_le_bytes(buf)

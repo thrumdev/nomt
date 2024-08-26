@@ -108,14 +108,7 @@ impl Store {
             &bbn_fd,
             &ln_fd,
         )?;
-        let pages = bitbox::DB::open(
-            &io_pool,
-            meta.sync_seqn,
-            meta.bitbox_num_pages,
-            meta.bitbox_seed,
-            &ht_fd,
-            &wal_fd,
-        )?;
+        let pages = bitbox::DB::open(meta.bitbox_num_pages, meta.bitbox_seed, &ht_fd, &wal_fd)?;
         let io_handle = io_pool.make_handle();
         let wal_blob_builder = bitbox::WalBlobBuilder::new();
         Ok(Self {
@@ -263,8 +256,11 @@ impl Transaction {
     ) -> BucketIndex {
         let bucket_index =
             bucket.unwrap_or_else(|| self.bucket_allocator.allocate(page_id.clone()));
-        self.new_pages
-            .push((page_id, bucket_index, Some((Box::new(page.clone()), page_diff))));
+        self.new_pages.push((
+            page_id,
+            bucket_index,
+            Some((Box::new(page.clone()), page_diff)),
+        ));
         bucket_index
     }
     /// Delete a page from storage.
