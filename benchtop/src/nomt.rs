@@ -11,7 +11,12 @@ pub struct NomtDB {
 }
 
 impl NomtDB {
-    pub fn open(reset: bool, commit_concurrency: usize, io_workers: usize) -> Self {
+    pub fn open(
+        reset: bool,
+        commit_concurrency: usize,
+        io_workers: usize,
+        hashtable_buckets: Option<u32>,
+    ) -> Self {
         if reset {
             // Delete previously existing db
             let _ = std::fs::remove_dir_all(NOMT_DB_FOLDER);
@@ -22,6 +27,9 @@ impl NomtDB {
         opts.commit_concurrency(commit_concurrency);
         opts.io_workers(io_workers);
         opts.metrics(true);
+        if let Some(buckets) = hashtable_buckets {
+            opts.hashtable_buckets(buckets);
+        }
 
         let nomt = Nomt::open(opts).unwrap();
         Self { nomt }

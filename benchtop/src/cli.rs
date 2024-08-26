@@ -108,19 +108,24 @@ pub struct WorkloadParams {
     #[clap(value_parser=clap::value_parser!(u8).range(0..64))]
     pub initial_capacity: Option<u8>,
 
-    /// Number of concurrent fetches to perform. Only used with Nomt backend.
+    /// Number of concurrent fetches to perform. Only used with the Nomt backend.
     ///
     /// Default value is 1
     #[arg(long = "fetch-concurrency", short)]
     #[clap(default_value = "1")]
     pub commit_concurrency: usize,
 
-    /// Number of io_uring instances (or I/O threads on non-Linux). Only used with Nomt backend.
+    /// Number of io_uring instances (or I/O threads on non-Linux). Only used with the Nomt backend.
     ///
     /// Default value is 3
     #[arg(long = "io-workers", short)]
     #[clap(default_value = "3")]
     pub io_workers: usize,
+
+    /// The number of hash-table buckets to create the database with. Only used with the Nomt
+    /// backend
+    #[arg(long = "buckets")]
+    pub hashtable_buckets: Option<u32>,
 }
 
 #[derive(Debug, Clone, Args)]

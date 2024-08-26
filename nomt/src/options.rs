@@ -59,4 +59,9 @@ impl Options {
         assert!(io_workers > 0);
         self.io_workers = io_workers;
     }
+
+    /// Set the number of hashtable buckets to use when creating the database.
+    pub fn hashtable_buckets(&mut self, hashtable_buckets: u32) {
+        self.bitbox_num_pages = hashtable_buckets;
+    }
 }

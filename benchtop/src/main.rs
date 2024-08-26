@@ -39,6 +39,7 @@ pub fn init(params: InitParams) -> Result<()> {
         true,
         workload_params.commit_concurrency,
         workload_params.io_workers,
+        workload_params.hashtable_buckets,
     );
     db.execute(None, &mut *init);
 
@@ -62,7 +63,9 @@ pub fn run(params: RunParams) -> Result<()> {
         params.reset,
         workload_params.commit_concurrency,
         workload_params.io_workers,
+        workload_params.hashtable_buckets,
     );
+
     if params.reset {
         db.execute(None, &mut *init);
     }
