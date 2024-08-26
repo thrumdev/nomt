@@ -311,25 +311,6 @@ impl Nomt {
     }
 }
 
-/// The results of a seek operation.
-// TODO: remove
-#[derive(Debug, Clone)]
-pub struct Seek {
-    /// The siblings encountered along the path, in ascending order by depth.
-    ///
-    /// The number of siblings is equal to the depth of the sought key.
-    pub siblings: Vec<Node>,
-    /// The terminal node encountered.
-    pub terminal: Option<nomt_core::trie::LeafData>,
-}
-
-impl Seek {
-    /// Get the depth of the terminal node.
-    pub fn depth(&self) -> usize {
-        self.siblings.len()
-    }
-}
-
 /// A session presents a way of interaction with the trie.
 ///
 /// During a session the application is assumed to perform a zero or more reads and writes. When
