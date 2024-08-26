@@ -551,6 +551,7 @@ impl HtWriteOut {
                 {
                     // That's alright. We will retry after trying to get something out of the cqueue
                     io.recv_ht_write();
+                    self.ht_remaining = self.ht_remaining.checked_sub(1).unwrap();
                     self.ht.push((pn, page));
                 }
             }
