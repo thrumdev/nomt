@@ -1,4 +1,3 @@
-use anyhow::Context;
 use crossbeam::channel::{TryRecvError, TrySendError};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, RwLock};
@@ -14,13 +13,13 @@ use crate::{
     page_cache::PageDiff,
 };
 
-use self::{meta_map::MetaMap, store::Store};
+use self::{ht_file::HTOffsets, meta_map::MetaMap};
 
-pub use self::store::create;
+pub use self::ht_file::create;
 pub use wal::WalBlobBuilder;
 
+mod ht_file;
 mod meta_map;
-mod store;
 mod wal;
 
 /// The index of a bucket within the map.
@@ -32,7 +31,7 @@ pub struct DB {
 }
 
 pub struct Shared {
-    store: Store,
+    store: HTOffsets,
     meta_map: Arc<RwLock<MetaMap>>,
     io_handle: IoHandle,
 }
@@ -49,7 +48,7 @@ impl DB {
         // TODO: refactor to use u32.
         let sync_seqn = sync_seqn as u64;
 
-        let (store, meta_map) = match store::Store::open(num_pages, ht_fd) {
+        let (store, meta_map) = match ht_file::open(num_pages, ht_fd) {
             Ok(x) => x,
             Err(e) => {
                 anyhow::bail!("encountered error in opening store: {e:?}");
