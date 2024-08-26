@@ -1,7 +1,6 @@
 /// The HT file.
 ///
 /// The file that stores the hash-table buckets and the meta map.
-
 use super::meta_map::MetaMap;
 use crate::io::{Page, PAGE_SIZE};
 use std::{

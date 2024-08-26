@@ -42,7 +42,7 @@ pub struct WalBlobBuilder {
 
 impl WalBlobBuilder {
     pub fn new() -> Self {
-        // 128 GiB = 17179869184 bytes. 
+        // 128 GiB = 17179869184 bytes.
         //
         // 128 GiB is the maximum size of a single commit in WAL after which we panic. This seems
         // to be enough for now. We should explore making this elastic in the future.
