@@ -59,9 +59,9 @@ impl Test {
         }
     }
 
-    pub fn write(&mut self, id: u64, value: Option<u64>) {
+    pub fn write(&mut self, id: u64, value: Option<Vec<u8>>) {
         let path = account_path(id);
-        let value = value.map(|v| Rc::new(v.to_le_bytes().to_vec()));
+        let value = value.map(Rc::new);
         match self.access.entry(path) {
             Entry::Occupied(mut o) => {
                 o.get_mut().write(value);
@@ -74,10 +74,9 @@ impl Test {
     }
 
     #[allow(unused)]
-    pub fn read(&mut self, id: u64) -> Option<u64> {
+    pub fn read(&mut self, id: u64) -> Option<Rc<Vec<u8>>> {
         let path = account_path(id);
-        let to_u64 = |v: Option<&[u8]>| v.map(|v| u64::from_le_bytes(v.try_into().unwrap()));
-        let value = match self.access.entry(path) {
+        match self.access.entry(path) {
             Entry::Occupied(o) => o.get().last_value().cloned(),
             Entry::Vacant(v) => {
                 let value = self
@@ -89,8 +88,7 @@ impl Test {
                 v.insert(KeyReadWrite::Read(value.clone()));
                 value
             }
-        };
-        to_u64(value.as_ref().map(|v| &v[..]))
+        }
     }
 
     pub fn commit(&mut self) -> (Node, Witness, WitnessedOperations) {
@@ -103,19 +101,24 @@ impl Test {
     }
 }
 
+pub fn read_balance(t: &mut Test, id: u64) -> Option<u64> {
+    t.read(id)
+        .map(|v| u64::from_le_bytes(v[..].try_into().unwrap()))
+}
+
 pub fn set_balance(t: &mut Test, id: u64, balance: u64) {
-    t.write(id, Some(balance));
+    t.write(id, Some(balance.to_le_bytes().to_vec()));
 }
 
 #[allow(unused)]
 pub fn transfer(t: &mut Test, from: u64, to: u64, amount: u64) {
-    let from = t.read(from).unwrap_or(0);
-    let to = t.read(to).unwrap_or(0);
-    if from < amount {
+    let from_balance = read_balance(t, from).unwrap_or(0);
+    let to_balance = read_balance(t, to).unwrap_or(0);
+    if from_balance < amount {
         return;
     }
-    t.write(from, Some(from - amount));
-    t.write(to, Some(to + amount));
+    set_balance(t, from, from_balance - amount);
+    set_balance(t, to, to_balance + amount);
 }
 
 pub fn kill(t: &mut Test, from: u64) {

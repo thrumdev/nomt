@@ -21,6 +21,7 @@ use super::{
 
 const BODY_SIZE: usize = PAGE_SIZE - 4;
 const MAX_PNS: usize = BODY_SIZE / 4;
+const HEADER_SIZE: usize = 4;
 
 /// Encode a large value into freshly allocated overflow pages. Returns a vector of page pointers.
 pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber> {
@@ -51,7 +52,7 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         // write as many page numbers as possible.
         while pns_written < MAX_PNS {
             let Some(pn) = to_write.next() else { break };
-            let start = 4 + pns_written * 4;
+            let start = HEADER_SIZE + pns_written * 4;
             let end = start + 4;
             page[start..end].copy_from_slice(&pn.0.to_le_bytes());
             pns_written += 1;
@@ -64,7 +65,7 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         page[0..2].copy_from_slice(&(pns_written as u16).to_le_bytes());
         page[2..4].copy_from_slice(&(bytes as u16).to_le_bytes());
 
-        let start = 4 + pns_written * 4;
+        let start = HEADER_SIZE + pns_written * 4;
         let end = start + bytes;
         page[start..end].copy_from_slice(&value[..bytes]);
         value = &value[bytes..];
@@ -72,6 +73,7 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         // write the page.
         leaf_writer.write_preallocated(pn, page);
     }
+    assert!(value.is_empty());
 
     cell
 }
@@ -94,7 +96,7 @@ pub fn decode_cell<'a>(raw: &'a [u8]) -> (usize, impl Iterator<Item = PageNumber
 pub fn encode_cell(value_size: usize, pages: &[PageNumber]) -> Vec<u8> {
     let mut v = vec![0u8; 8 + pages.len() * 4];
     v[0..8].copy_from_slice(&(value_size as u64).to_le_bytes());
-    for (pn, slice) in pages[8..].iter().zip(v.chunks_mut(4)) {
+    for (pn, slice) in pages.iter().zip(v[8..].chunks_mut(4)) {
         slice.copy_from_slice(&pn.0.to_le_bytes());
     }
 
@@ -104,6 +106,7 @@ pub fn encode_cell(value_size: usize, pages: &[PageNumber]) -> Vec<u8> {
 fn total_needed_pages(value_size: usize) -> usize {
     let mut encoded_size = value_size;
     let mut total_pages = needed_pages(encoded_size);
+    let mut last_pages_in_pages = 0;
 
     // the encoded size is equal to the size of the value plus the number of node pointers that
     // will appear in pages.
@@ -112,8 +115,8 @@ fn total_needed_pages(value_size: usize) -> usize {
         // account for the fact that some of the pages are going to be in the cell and not
         // in pages, therefore they don't increase the payload size.
         let pages_in_pages = total_pages.saturating_sub(MAX_OVERFLOW_CELL_NODE_POINTERS);
-
-        encoded_size += pages_in_pages * 4;
+        encoded_size += (pages_in_pages - last_pages_in_pages) * 4;
+        last_pages_in_pages = pages_in_pages;
         let new_total = needed_pages(encoded_size);
         if new_total == total_pages {
             break;
@@ -180,10 +183,72 @@ fn read_page<'a>(page: &'a Page) -> (impl Iterator<Item = PageNumber> + 'a, &'a 
     let n_pages = u16::from_le_bytes(page[0..2].try_into().unwrap()) as usize;
     let n_bytes = u16::from_le_bytes(page[2..4].try_into().unwrap()) as usize;
 
-    let iter = page[2..][..n_pages * 4]
+    let iter = page[HEADER_SIZE..][..n_pages * 4]
         .chunks(4)
         .map(|slice| PageNumber(u32::from_le_bytes(slice.try_into().unwrap())));
 
-    let bytes = &page[2 + n_pages * 4..][..n_bytes];
+    let bytes = &page[HEADER_SIZE + n_pages * 4..][..n_bytes];
     (iter, bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn total_needed_pages_all_in_cell() {
+        for i in 1..=MAX_OVERFLOW_CELL_NODE_POINTERS {
+            assert_eq!(total_needed_pages(BODY_SIZE * i), i);
+        }
+    }
+
+    #[test]
+    fn total_needed_pages_one_out_of_cell() {
+        let size = BODY_SIZE * MAX_OVERFLOW_CELL_NODE_POINTERS + 1;
+        assert_eq!(
+            total_needed_pages(size),
+            MAX_OVERFLOW_CELL_NODE_POINTERS + 1
+        );
+    }
+
+    #[test]
+    fn total_needed_pages_encoded_page_adds_more() {
+        // last page is totally full
+        let size = BODY_SIZE * (MAX_OVERFLOW_CELL_NODE_POINTERS + 1) - 4;
+        assert_eq!(
+            total_needed_pages(size),
+            MAX_OVERFLOW_CELL_NODE_POINTERS + 1
+        );
+
+        // last page not full
+        let size = BODY_SIZE * (MAX_OVERFLOW_CELL_NODE_POINTERS + 1) - 3;
+        assert_eq!(
+            total_needed_pages(size),
+            MAX_OVERFLOW_CELL_NODE_POINTERS + 2
+        );
+    }
+
+    #[test]
+    fn total_needed_pages_really_big() {
+        let size = 1 << 30;
+
+        // this many pages for the value
+        let pages0 = 262401;
+        assert_eq!(needed_pages(size), pages0);
+
+        let pages_in_pages0 = pages0 - MAX_OVERFLOW_CELL_NODE_POINTERS;
+
+        // this many pages for the value plus those pages
+        let size1 = size + pages_in_pages0 * 4;
+        let pages1 = needed_pages(size1);
+
+        let pages_in_pages1 = pages1 - MAX_OVERFLOW_CELL_NODE_POINTERS - pages_in_pages0;
+
+        // this many pages for the value plus _those_ pages
+        let size2 = size1 + pages_in_pages1 * 4;
+        let pages2 = needed_pages(size2);
+
+        assert_eq!(pages1, pages2);
+        assert_eq!(pages1, total_needed_pages(size));
+    }
 }
