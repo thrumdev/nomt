@@ -138,6 +138,14 @@ impl DB {
             ht_pages.push((pn, buf));
         }
 
+        if cfg!(debug_assertions) {
+            // Make sure that there are no duplicate pages.
+            let orig_len = ht_pages.len();
+            ht_pages.sort_unstable_by_key(|(pn, _)| *pn);
+            ht_pages.dedup_by_key(|(pn, _)| *pn);
+            assert_eq!(orig_len, ht_pages.len());
+        }
+
         Ok(WriteoutData { ht_pages })
     }
 }
