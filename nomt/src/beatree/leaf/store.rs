@@ -3,7 +3,7 @@ use crate::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },
-    io::{IoPool, IoCommand, IoHandle, Page},
+    io::{IoCommand, IoHandle, IoPool, Page},
 };
 
 use std::fs::File;

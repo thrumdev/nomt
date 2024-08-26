@@ -119,8 +119,9 @@ impl Updater {
             })
             .map(|(id, separator)| BaseLeaf {
                 id,
-                node: leaf_pages.remove(&id)
-                    .unwrap_or_else(|| LeafNode { inner: ctx.leaf_reader.query(id) }),
+                node: leaf_pages.remove(&id).unwrap_or_else(|| LeafNode {
+                    inner: ctx.leaf_reader.query(id),
+                }),
                 iter_pos: 0,
                 separator,
             });
@@ -228,8 +229,12 @@ impl Updater {
     fn reset_leaf_base(&mut self, target: Key, ctx: &Ctx) -> Result<(), ()> {
         let branch = self.branch_updater.base().ok_or(())?;
         let (i, leaf_pn) = super::search_branch(&branch.node, target).ok_or(())?;
-        let leaf = self.leaf_pages.remove(&leaf_pn)
-            .unwrap_or_else(|| LeafNode { inner: ctx.leaf_reader.query(leaf_pn) });
+        let leaf = self
+            .leaf_pages
+            .remove(&leaf_pn)
+            .unwrap_or_else(|| LeafNode {
+                inner: ctx.leaf_reader.query(leaf_pn),
+            });
 
         let separator = reconstruct_key(branch.node.prefix(), branch.node.separator(i));
 
@@ -281,27 +286,38 @@ fn preload_leaves(
     leaf_reader: &LeafStoreReader,
     bbn_index: &Index,
     bnp: &BranchNodePool,
-    keys: impl IntoIterator<Item=Key>,
+    keys: impl IntoIterator<Item = Key>,
 ) -> Result<HashMap<PageNumber, LeafNode>> {
     let mut leaf_pages = HashMap::new();
     let mut last_pn = None;
 
     let mut submissions = 0;
     for key in keys {
-        let Some(branch_id) = bbn_index.lookup(key) else { continue };
+        let Some(branch_id) = bbn_index.lookup(key) else {
+            continue;
+        };
         // UNWRAP: all branches in index exist.
         let branch = bnp.checkout(branch_id).unwrap();
-        let Some((_, leaf_pn)) = super::search_branch(&branch, key) else { continue };
-        if last_pn == Some(leaf_pn) { continue }
+        let Some((_, leaf_pn)) = super::search_branch(&branch, key) else {
+            continue;
+        };
+        if last_pn == Some(leaf_pn) {
+            continue;
+        }
         last_pn = Some(leaf_pn);
-        leaf_reader.io_handle().send(leaf_reader.io_command(leaf_pn, leaf_pn.0 as u64))
+        leaf_reader
+            .io_handle()
+            .send(leaf_reader.io_command(leaf_pn, leaf_pn.0 as u64))
             .expect("I/O Pool Disconnected");
 
         submissions += 1;
     }
 
     for _ in 0..submissions {
-        let completion = leaf_reader.io_handle().recv().expect("I/O Pool Disconnected");
+        let completion = leaf_reader
+            .io_handle()
+            .recv()
+            .expect("I/O Pool Disconnected");
         completion.result?;
         let pn = PageNumber(completion.command.user_data as u32);
         let page = completion.command.kind.unwrap_buf();
