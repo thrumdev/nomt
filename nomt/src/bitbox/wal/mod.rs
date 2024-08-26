@@ -42,14 +42,14 @@ pub struct WalBlobBuilder {
 
 impl WalBlobBuilder {
     pub fn new() -> Self {
-        // 128 GiB / 4 KiB = 33554432.
+        // 128 GiB = 17179869184 bytes. 
         //
         // 128 GiB is the maximum size of a single commit in WAL after which we panic. This seems
         // to be enough for now. We should explore making this elastic in the future.
         //
         // Note that here we allocate virtual memory unbacked by physical pages. Those pages will
         // become backed by physical pages on first write to each page.
-        let mmap = Mmap::new(33554432);
+        let mmap = Mmap::new(17179869184);
         Self {
             mmap: Arc::new(mmap),
             cur: 0,
