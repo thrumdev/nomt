@@ -22,7 +22,6 @@ use nomt_core::{
 
 use std::{
     sync::{Arc, Barrier},
-    time::Duration,
 };
 
 use super::{
@@ -35,7 +34,7 @@ use crate::{
     page_region::PageRegion,
     page_walker::{NeedsPage, Output, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
-    seek::{Interrupt, Seek, Seeker},
+    seek::{Completion, Seek, Seeker},
     store::Store,
     PathProof, WitnessedPath,
 };
@@ -64,9 +63,11 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
     let read_pass = page_cache.new_read_pass();
     barrier.wait();
 
-    let seeker = Seeker::new(root, page_cache.clone(), store.page_loader(), false);
+    let page_loader = store.page_loader();
+    let page_io_receiver = page_loader.io_handle().receiver().clone();
+    let seeker = Seeker::new(root, page_cache.clone(), page_loader, false);
 
-    if let Err(_) = warm_up_phase(&comms, read_pass, seeker) {
+    if let Err(_) = warm_up_phase(&comms, read_pass, page_io_receiver, seeker) {
         return;
     };
 
@@ -94,58 +95,65 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
 fn warm_up_phase(
     comms: &Comms,
     read_pass: ReadPass<ShardIndex>,
+    page_io_receiver: Receiver<crate::io::CompleteIo>,
     mut seeker: Seeker,
 ) -> anyhow::Result<()> {
-    const CHECK_PREPARE_DURATION: Duration = Duration::from_micros(250);
+    let mut select_all = Select::new();
+    let warmup_idx = select_all.recv(&comms.warmup_rx);
+    let commit_idx = select_all.recv(&comms.commit_rx);
+    let page_idx = select_all.recv(&page_io_receiver);
 
-    let mut preparing = false;
+    let mut select_no_work = Select::new();
+    let commit_no_work_idx = select_no_work.recv(&comms.commit_rx);
+    let page_no_work_idx = select_no_work.recv(&page_io_receiver);
+
     loop {
-        match seeker.advance_deadline(&read_pass, CHECK_PREPARE_DURATION)? {
-            Interrupt::HasRoom => {
-                let is_empty = seeker.is_empty();
-                if preparing && is_empty {
-                    return Ok(());
-                } else if preparing {
-                    continue;
+        if let Some(_) = seeker.take_completion() {
+            continue
+        }
+
+        let blocked = seeker.submit_all(&read_pass)?;
+        if blocked || !seeker.has_room() {
+            // block on interrupt or next page ready.
+            let index = select_no_work.ready();
+            if index == commit_no_work_idx {
+                match comms.commit_rx.recv()? {
+                    ToWorker::Prepare => break,
+                    ToWorker::Commit(_) => unreachable!(),
                 }
-
-                let mut select = Select::new();
-                let commit_idx = select.recv(&comms.commit_rx);
-                let _ = select.recv(&comms.warmup_rx);
-
-                let selected = if is_empty {
-                    select.select()
-                } else {
-                    match select.try_select() {
-                        Err(_) => continue,
-                        Ok(selected) => selected,
-                    }
-                };
-
-                if selected.index() == commit_idx {
-                    match selected.recv(&comms.commit_rx)? {
-                        ToWorker::Prepare => {
-                            preparing = true;
-                            if is_empty {
-                                return Ok(());
-                            } else {
-                                continue;
-                            }
-                        }
-                        ToWorker::Commit(_) => unreachable!(),
-                    }
-                } else {
-                    seeker.push(selected.recv(&comms.warmup_rx)?.key_path)
-                }
+            } else if index == page_no_work_idx {
+                seeker.recv_page(&read_pass)?;
+            } else {
+                unreachable!()
             }
-            Interrupt::Deadline if !preparing => {
-                if let Ok(ToWorker::Prepare) = comms.commit_rx.try_recv() {
-                    preparing = true;
+        } else {
+            // not blocked and has room. select on everything, pushing new work as available.
+            let index = select_all.ready();
+            if index == commit_idx {
+                match comms.commit_rx.recv()? {
+                    ToWorker::Prepare => break,
+                    ToWorker::Commit(_) => unreachable!(),
                 }
+            } else if index == warmup_idx {
+                let warm_up_command = comms.warmup_rx.recv()?;
+                seeker.push(warm_up_command.key_path);
+            } else if index == page_idx {
+                seeker.recv_page(&read_pass)?;
+            } else {
+                unreachable!()
             }
-            _ => continue,
-        };
+        }
     }
+
+    while !seeker.is_empty() {
+        if let Some(_) = seeker.take_completion() {
+            continue
+        }
+        seeker.submit_all(&read_pass)?;
+        seeker.recv_page(&read_pass)?;
+    }
+
+    Ok(())
 }
 
 fn commit<H: NodeHasher>(
@@ -235,10 +243,15 @@ fn drive_page_fetch(
 ) -> anyhow::Result<()> {
     seeker.push_single_request(page);
     loop {
-        match seeker.advance(read_pass) {
-            Err(e) => return Err(e),
-            Ok(Interrupt::SpecialPageCompletion) => return Ok(()),
-            _ => continue,
+        match seeker.take_completion() {
+            Some(Completion::SinglePage) => return Ok(()),
+            Some(_) => continue,
+            None => {
+                let blocked = seeker.submit_all(read_pass)?;
+                if !blocked {
+                    seeker.recv_page(read_pass)?;
+                }
+            }
         }
     }
 }
@@ -462,40 +475,51 @@ impl<H: NodeHasher> RangeCommitter<H> {
         let mut skips = 0;
 
         // 1. drive until work is done.
-        loop {
-            match seeker.advance(self.write_pass.downgrade())? {
-                Interrupt::HasRoom => {
-                    let next_push = start_index + pushes;
-                    if next_push < self.range_end {
-                        pushes += 1;
-                        seeker.push(self.shared.read_write[next_push].0);
-                    } else if seeker.is_empty() {
-                        break;
-                    }
-                }
-                Interrupt::Deadline => {}
-                Interrupt::Completion(seek_result) => {
+        while start_index < self.range_end || !seeker.is_empty() {
+            // handle a single completion (only when blocked / at max capacity)
+            match seeker.take_completion() {
+                None => {}
+                Some(Completion::Seek(seek_result)) => {
                     // skip completions until we're past the end of the last batch.
                     if skips > 0 {
                         skips -= 1;
-                        continue;
+                    } else {
+                        let end_index =
+                            self.handle_completion(seeker, output, start_index, seek_result);
+
+                        // account for stuff we pushed that was already covered by the terminal
+                        // we just popped off.
+                        let batch_size = end_index - start_index;
+                        // note: pushes and batch size are both at least 1.
+                        skips = std::cmp::min(pushes, batch_size) - 1;
+                        pushes = pushes.saturating_sub(batch_size);
+
+                        start_index = end_index;
                     }
-
-                    let end_index =
-                        self.handle_completion(seeker, output, start_index, seek_result);
-
-                    // account for stuff we pushed that was already covered by the terminal
-                    // we just popped off.
-                    let batch_size = end_index - start_index;
-                    // note: pushes and batch size are both at least 1.
-                    skips = std::cmp::min(pushes, batch_size) - 1;
-                    pushes = pushes.saturating_sub(batch_size);
-
-                    start_index = end_index;
                 }
-                Interrupt::SpecialPageCompletion => {
+                Some(Completion::SinglePage) => {
                     self.reattempt_advance(seeker, output);
                 }
+            }
+
+            let blocked = seeker.submit_all(self.write_pass.downgrade())?;
+            if !seeker.has_room() {
+                // no way to push work until at least one page fetch has concluded.
+                seeker.recv_page(self.write_pass.downgrade())?;
+                continue
+            } else if blocked {
+                // blocked, so try to make progress, but no problem if we can't. stay busy.
+                seeker.try_recv_page(self.write_pass.downgrade())?;
+                continue
+            }
+
+            // push work until blocked or out of work.
+            while seeker.has_room() && start_index + pushes < self.range_end {
+                let next_push = start_index + pushes;
+                pushes += 1;
+                seeker.push(self.shared.read_write[next_push].0);
+                let blocked = seeker.submit_all(self.write_pass.downgrade())?;
+                if blocked { break }
             }
         }
 

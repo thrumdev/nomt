@@ -173,4 +173,9 @@ impl IoHandle {
     pub fn try_recv(&self) -> Result<CompleteIo, TryRecvError> {
         self.completion_receiver.try_recv()
     }
+
+    /// Get the underlying receiver.
+    pub fn receiver(&self) -> &Receiver<CompleteIo> {
+        &self.completion_receiver
+    }
 }

@@ -19,7 +19,6 @@ use std::{
         hash_map::{Entry, HashMap},
         VecDeque,
     },
-    time::{Duration, Instant},
 };
 
 use bitvec::prelude::*;
@@ -206,66 +205,64 @@ impl Seeker {
         self.requests.is_empty() && self.single_page_request.is_none()
     }
 
-    pub fn advance_deadline(
-        &mut self,
-        read_pass: &ReadPass<ShardIndex>,
-        deadline: Duration,
-    ) -> anyhow::Result<Interrupt> {
-        let deadline = std::time::Instant::now() + deadline;
-        self.advance_inner(read_pass, Some(deadline))
+    pub fn has_room(&self) -> bool {
+        self.page_loads.len() < MAX_INFLIGHT
     }
 
-    /// Advance the dispatcher until it's interrupted for some reason or an error occurs.
-    pub fn advance(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<Interrupt> {
-        self.advance_inner(read_pass, None)
+    /// Try to submit as many requests as possible. Returns `true` if blocked.
+    pub fn submit_all(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<bool> {
+        let blocked = self.submit_idle_page_loads(read_pass)?
+            || self.submit_single_page_request(read_pass)?
+            || self.submit_idle_key_path_requests(read_pass)?;
+
+        Ok(blocked)
     }
 
-    fn advance_inner(
-        &mut self,
-        read_pass: &ReadPass<ShardIndex>,
-        deadline: Option<Instant>,
-    ) -> anyhow::Result<Interrupt> {
-        loop {
-            if deadline.map_or(false, |d| Instant::now() > d) {
-                return Ok(Interrupt::Deadline);
-            }
-
-            // resubmit stuff already in the slab until blocked.
-            // at every point past here, everything in the slab is queued.
-            if self.submit_idle_page_loads(read_pass)? {
-                continue;
-            }
-
-            // prioritize single page request to enter the slab.
-            if self.submit_single_page_request(read_pass)? {
-                continue;
-            }
-
-            // advance idle key path requests until blocked.
-            if self.submit_idle_key_path_requests(read_pass)? {
-                continue;
-            }
-
-            // handle completions only when blocked.
-            if let Some(completion) = self.page_loader.try_complete()? {
-                self.handle_completion(read_pass, completion);
-                continue;
-            }
-
-            // hand work over only when blocked.
-            if let Some(interrupt) = self.take_completion() {
-                return Ok(interrupt);
-            }
-
-            assert!(self.idle_page_loads.is_empty() && self.idle_requests.is_empty());
-
-            // finally, attempt to take more work.
-            if self.page_load_slab.len() >= MAX_INFLIGHT {
-                continue;
-            }
-
-            return Ok(Interrupt::HasRoom);
+    /// Take the result of a complete request.
+    pub fn take_completion(&mut self) -> Option<Completion> {
+        if let Some(SinglePageRequestState::Completed) = self.single_page_request {
+            self.single_page_request = None;
+            return Some(Completion::SinglePage);
         }
+
+        if self.requests.front().map_or(false, |r| r.is_completed()) {
+            // UNWRAP: just checked existence.
+            let request = self.requests.pop_front().unwrap();
+            // PANIC: checked above.
+            let RequestState::Completed(terminal) = request.state else {
+                unreachable!()
+            };
+
+            self.processed += 1;
+
+            return Some(Completion::Seek(Seek {
+                key: request.key,
+                position: request.position,
+                page_id: request.page_id,
+                siblings: request.siblings,
+                page_loads: request.page_loads,
+                terminal,
+            }));
+        }
+
+        None
+    }
+
+    /// Try to process the next I/O. Does not block the current thread. Returns `true` if
+    /// a completion was processed.
+    pub fn try_recv_page(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<()> {
+        if let Some(completion) = self.page_loader.try_complete()? {
+            self.handle_completion(read_pass, completion);
+        }
+
+        Ok(())
+    }
+
+    /// Block on processing the next I/O. Blocks the current thread.
+    pub fn recv_page(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<()> {
+        let completion = self.page_loader.complete()?;
+        self.handle_completion(read_pass, completion);
+        Ok(())
     }
 
     /// Push a request for key path.
@@ -280,35 +277,6 @@ impl Seeker {
     pub fn push_single_request(&mut self, page_id: PageId) {
         assert!(self.single_page_request.is_none());
         self.single_page_request = Some(SinglePageRequestState::Pending(page_id));
-    }
-
-    fn take_completion(&mut self) -> Option<Interrupt> {
-        if let Some(SinglePageRequestState::Completed) = self.single_page_request {
-            self.single_page_request = None;
-            return Some(Interrupt::SpecialPageCompletion);
-        }
-
-        if self.requests.front().map_or(false, |r| r.is_completed()) {
-            // UNWRAP: just checked existence.
-            let request = self.requests.pop_front().unwrap();
-            // PANIC: checked above.
-            let RequestState::Completed(terminal) = request.state else {
-                unreachable!()
-            };
-
-            self.processed += 1;
-
-            return Some(Interrupt::Completion(Seek {
-                key: request.key,
-                position: request.position,
-                page_id: request.page_id,
-                siblings: request.siblings,
-                page_loads: request.page_loads,
-                terminal,
-            }));
-        }
-
-        None
     }
 
     // resubmit all idle page loads until blocked or no more remain. returns true if blocked
@@ -494,17 +462,12 @@ impl Seeker {
     }
 }
 
-/// Interrupts during the advancement of the `Seeker`.
-pub enum Interrupt {
-    /// A request was completed.
-    Completion(Seek),
-    /// The request for a single page completed.
-    SpecialPageCompletion,
-    /// The deadline for advancement was received.
-    Deadline,
-    /// The seeker has room for more work. Unless the seeker is empty, don't block on more
-    /// work.
-    HasRoom,
+/// Complete requests.
+pub enum Completion {
+    /// A seek request was completed.
+    Seek(Seek),
+    /// The single page request was completed.
+    SinglePage,
 }
 
 /// The result of a seek.

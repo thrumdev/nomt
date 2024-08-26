@@ -59,4 +59,9 @@ impl PageLoader {
     pub fn complete(&self) -> anyhow::Result<PageLoadCompletion> {
         self.inner.complete()
     }
+
+    /// Get the underlying I/O handle.
+    pub fn io_handle(&self) -> &crate::io::IoHandle {
+        self.inner.io_handle()
+    }
 }
