@@ -32,6 +32,7 @@ pub struct DB {
 
 pub struct Shared {
     store: HTOffsets,
+    seed: [u8; 16],
     meta_map: Arc<RwLock<MetaMap>>,
     io_handle: IoHandle,
 }
@@ -42,6 +43,7 @@ impl DB {
         io_pool: &IoPool,
         sync_seqn: u32,
         num_pages: u32,
+        seed: [u8; 16],
         ht_fd: &File,
         wal_fd: &File,
     ) -> anyhow::Result<Self> {
@@ -61,6 +63,7 @@ impl DB {
         Ok(Self {
             shared: Arc::new(Shared {
                 store,
+                seed,
                 meta_map: Arc::new(RwLock::new(meta_map)),
                 io_handle: io_pool.make_handle(),
             }),
@@ -103,7 +106,7 @@ impl DB {
                     page[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
 
                     // update meta map with new info
-                    let hash = hash_page_id(&page_id);
+                    let hash = hash_page_id(&page_id, &self.shared.seed);
                     let meta_map_changed = meta_map.hint_not_match(bucket as usize, hash);
                     if meta_map_changed {
                         meta_map.set_full(bucket as usize, hash);
@@ -164,7 +167,7 @@ impl PageLoader {
     /// Create a new page load.
     pub fn start_load(&self, page_id: PageId) -> PageLoad {
         PageLoad {
-            probe_sequence: ProbeSequence::new(&page_id, &self.meta_map),
+            probe_sequence: ProbeSequence::new(&page_id, &self.meta_map, &self.shared.seed),
             page_id,
             state: PageLoadState::Pending,
         }
@@ -379,7 +382,7 @@ impl BucketAllocator {
     /// or pages may silently disappear later.
     pub fn allocate(&mut self, page_id: PageId) -> BucketIndex {
         let meta_map = self.shared.meta_map.read();
-        let mut probe_seq = ProbeSequence::new(&page_id, &meta_map);
+        let mut probe_seq = ProbeSequence::new(&page_id, &meta_map, &self.shared.seed);
 
         let mut i = 0;
         loop {
@@ -422,10 +425,12 @@ fn get_changed<'a>(page: &'a Page, page_diff: &PageDiff) -> impl Iterator<Item =
     })
 }
 
-fn hash_page_id(page_id: &PageId) -> u64 {
+fn hash_page_id(page_id: &PageId, seed: &[u8; 16]) -> u64 {
     let mut buf = [0u8; 8];
-    // TODO: the seed of the store should be used
-    buf.copy_from_slice(&blake3::hash(&page_id.encode()).as_bytes()[..8]);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&page_id.encode());
+    hasher.update(&seed[..]);
+    buf.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
     u64::from_le_bytes(buf)
 }
 
@@ -436,15 +441,15 @@ struct ProbeSequence {
     step: u64,
 }
 
-pub enum ProbeResult {
+enum ProbeResult {
     PossibleHit(u64),
     Empty(u64),
     Tombstone(u64),
 }
 
 impl ProbeSequence {
-    pub fn new(page_id: &PageId, meta_map: &MetaMap) -> Self {
-        let hash = hash_page_id(page_id);
+    fn new(page_id: &PageId, meta_map: &MetaMap, seed: &[u8; 16]) -> Self {
+        let hash = hash_page_id(page_id, seed);
         Self {
             hash,
             bucket: hash % meta_map.len() as u64,
@@ -453,7 +458,7 @@ impl ProbeSequence {
     }
 
     // probe until there is a possible hit or an empty bucket is found
-    pub fn next(&mut self, meta_map: &MetaMap) -> ProbeResult {
+    fn next(&mut self, meta_map: &MetaMap) -> ProbeResult {
         loop {
             // Triangular probing
             self.bucket += self.step;
@@ -476,7 +481,7 @@ impl ProbeSequence {
         }
     }
 
-    pub fn bucket(&self) -> u64 {
+    fn bucket(&self) -> u64 {
         self.bucket
     }
 }

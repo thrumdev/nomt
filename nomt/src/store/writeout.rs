@@ -587,7 +587,7 @@ impl MetaSwap {
             // Oh god, there is a special place in hell for this. Will do for now though.
             let mut page = Box::new(Page::zeroed());
 
-            new_meta.encode_to(&mut page.as_mut()[..24]);
+            new_meta.encode_to(&mut page.as_mut()[..40]);
 
             if let Err(_) = io.try_send_meta(IoKind::Write(self.meta_fd, 0, page)) {
                 self.new_meta = Some(new_meta);
