@@ -79,16 +79,6 @@ impl DB {
         changes: Vec<(PageId, BucketIndex, Option<(Box<Page>, PageDiff)>)>,
         wal_blob_builder: &mut WalBlobBuilder,
     ) -> anyhow::Result<WriteoutData> {
-        // Steps are:
-        // 0. Increase sequence number
-        // 1. compute the WalBatch
-        // 2. append WalBatch to wal and fsync
-        // 4. write new pages
-        // 5. write meta map
-        // 6. fsync
-        // 7. write meta page and fsync
-        // 8. prune the wal
-
         let mut meta_map = self.shared.meta_map.write();
 
         let mut changed_meta_pages = HashSet::new();
