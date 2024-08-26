@@ -27,17 +27,20 @@ pub struct Meta {
     pub sync_seqn: u32,
     /// The number of pages in the bitbox store.
     pub bitbox_num_pages: u32,
+    /// The random seed used for populating the hash-table in a unique way.
+    pub bitbox_seed: [u8; 16],
 }
 
 impl Meta {
     pub fn encode_to(&self, buf: &mut [u8]) {
-        assert_eq!(buf.len(), 24);
+        assert_eq!(buf.len(), 40);
         buf[0..4].copy_from_slice(&self.ln_freelist_pn.to_le_bytes());
         buf[4..8].copy_from_slice(&self.ln_bump.to_le_bytes());
         buf[8..12].copy_from_slice(&self.bbn_freelist_pn.to_le_bytes());
         buf[12..16].copy_from_slice(&self.bbn_bump.to_le_bytes());
         buf[16..20].copy_from_slice(&self.sync_seqn.to_le_bytes());
         buf[20..24].copy_from_slice(&self.bitbox_num_pages.to_le_bytes());
+        buf[24..40].copy_from_slice(&self.bitbox_seed);
     }
 
     pub fn decode(buf: &[u8]) -> Self {
@@ -47,6 +50,7 @@ impl Meta {
         let bbn_bump = u32::from_le_bytes(buf[12..16].try_into().unwrap());
         let sync_seqn = u32::from_le_bytes(buf[16..20].try_into().unwrap());
         let bitbox_num_pages = u32::from_le_bytes(buf[20..24].try_into().unwrap());
+        let bitbox_seed = buf[24..40].try_into().unwrap();
         Self {
             ln_freelist_pn,
             ln_bump,
@@ -54,6 +58,7 @@ impl Meta {
             bbn_bump,
             sync_seqn,
             bitbox_num_pages,
+            bitbox_seed,
         }
     }
 
