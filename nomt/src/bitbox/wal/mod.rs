@@ -33,6 +33,7 @@ impl Drop for Mmap {
     }
 }
 
+/// A builder for a WAL blob.
 pub struct WalBlobBuilder {
     mmap: Arc<Mmap>,
     cur: usize,
