@@ -115,11 +115,10 @@ impl DB {
                         changed_meta_pages.insert(meta_map.page_index(bucket as usize));
                     }
 
-                    let changed = get_changed(&page, &page_diff);
                     wal_blob_builder.write_update(
                         page_id.encode(),
                         page_diff.get_raw(),
-                        changed,
+                        get_changed(&page, &page_diff),
                         bucket,
                     );
 
@@ -415,18 +414,12 @@ impl BucketAllocator {
     }
 }
 
-fn get_changed(page: &Page, page_diff: &PageDiff) -> Vec<[u8; 32]> {
-    page_diff
-        .get_changed()
-        .into_iter()
-        .map(|changed| {
-            let start = changed * 32;
-            let end = start + 32;
-            let mut node = [0; 32];
-            node.copy_from_slice(&page[start..end]);
-            node
-        })
-        .collect()
+fn get_changed<'a>(page: &'a Page, page_diff: &PageDiff) -> impl Iterator<Item = [u8; 32]> + 'a {
+    page_diff.get_changed().into_iter().map(|changed| {
+        let start = changed * 32;
+        let end = start + 32;
+        page[start..end].try_into().unwrap()
+    })
 }
 
 fn hash_page_id(page_id: &PageId) -> u64 {
