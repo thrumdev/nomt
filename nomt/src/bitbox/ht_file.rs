@@ -6,7 +6,7 @@ use super::meta_map::MetaMap;
 use crate::io::{Page, PAGE_SIZE};
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, Write},
+    io::{Read, Seek},
     path::PathBuf,
 };
 
@@ -75,25 +75,14 @@ pub fn open(num_pages: u32, mut ht_fd: &File) -> anyhow::Result<(HTOffsets, Meta
 ///
 /// Lays out the meta page, and fills the file with zeroes.
 pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
-    const WRITE_BATCH_SIZE: usize = PAGE_SIZE; // 16MB
-
     let start = std::time::Instant::now();
     let ht_path = path.join("ht");
-    let mut ht_file = OpenOptions::new().append(true).create(true).open(ht_path)?;
+    let ht_file = OpenOptions::new().write(true).create(true).open(ht_path)?;
 
     // number of pages + pages required for meta bits.
     let page_count = num_pages + num_meta_byte_pages(num_pages);
-
-    let mut pages_remaining = page_count as usize;
-    let zero_buf = vec![0u8; PAGE_SIZE * WRITE_BATCH_SIZE];
-    while pages_remaining > 0 {
-        let pages_to_write = std::cmp::min(pages_remaining, WRITE_BATCH_SIZE);
-        let buf = &zero_buf[0..pages_to_write * PAGE_SIZE];
-        ht_file.write_all(buf)?;
-        pages_remaining -= pages_to_write;
-    }
-
-    ht_file.flush()?;
+    let len = page_count as usize * PAGE_SIZE;
+    ht_file.set_len(len as u64)?;
     ht_file.sync_all()?;
     drop(ht_file);
 
