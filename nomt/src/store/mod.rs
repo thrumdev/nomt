@@ -2,7 +2,7 @@
 
 use crate::{
     beatree, bitbox,
-    io::{self, IoPool},
+    io::{self, IoPool, Page},
     page_cache::PageDiff,
 };
 use meta::Meta;
@@ -141,7 +141,7 @@ impl Store {
     }
 
     /// Loads the given page, blocking the current thread.
-    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Vec<u8>, BucketIndex)>> {
+    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Box<Page>, BucketIndex)>> {
         let page_loader = self.page_loader();
         let mut page_load = page_loader.start_load(page_id);
         loop {
@@ -239,7 +239,7 @@ impl Store {
 pub struct Transaction {
     batch: Vec<(KeyPath, Option<Vec<u8>>)>,
     bucket_allocator: bitbox::BucketAllocator,
-    new_pages: Vec<(PageId, BucketIndex, Option<(Vec<u8>, PageDiff)>)>,
+    new_pages: Vec<(PageId, BucketIndex, Option<(Box<Page>, PageDiff)>)>,
 }
 
 impl Transaction {
@@ -253,13 +253,13 @@ impl Transaction {
         &mut self,
         page_id: PageId,
         bucket: Option<BucketIndex>,
-        page: &[u8],
+        page: &Page,
         page_diff: PageDiff,
     ) -> BucketIndex {
         let bucket_index =
             bucket.unwrap_or_else(|| self.bucket_allocator.allocate(page_id.clone()));
         self.new_pages
-            .push((page_id, bucket_index, Some((page.to_vec(), page_diff))));
+            .push((page_id, bucket_index, Some((Box::new(page.clone()), page_diff))));
         bucket_index
     }
     /// Delete a page from storage.
