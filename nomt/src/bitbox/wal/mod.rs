@@ -36,6 +36,7 @@ impl Drop for Mmap {
 /// A builder for a WAL blob.
 pub struct WalBlobBuilder {
     mmap: Arc<Mmap>,
+    /// The position at which the next byte will be written. Never reaches `mmap.size`.
     cur: usize,
 }
 
@@ -45,6 +46,9 @@ impl WalBlobBuilder {
         //
         // 128 GiB is the maximum size of a single commit in WAL after which we panic. This seems
         // to be enough for now. We should explore making this elastic in the future.
+        //
+        // Note that here we allocate virtual memory unbacked by physical pages. Those pages will
+        // become backed by physical pages on first write to each page.
         let mmap = Mmap::new(33554432);
         Self {
             mmap: Arc::new(mmap),
@@ -54,7 +58,7 @@ impl WalBlobBuilder {
 
     pub fn write_clear(&mut self, bucket_index: u64) {
         unsafe {
-            self.write_byte(0);
+            self.write_byte(1);
             self.write(&bucket_index.to_le_bytes());
         }
     }
@@ -67,10 +71,8 @@ impl WalBlobBuilder {
         bucket_index: u64,
     ) {
         unsafe {
-            // SAFETY: Those do not overlap with the mmap. Potentially, the `changed` slices could
-            // overlap with the mmap, but I would argue expecting that (as well as doing that) would
-            // be schizo.
-            self.write_byte(1);
+            // SAFETY: Those do not overlap with the mmap.
+            self.write_byte(2);
             self.write(&page_id);
             self.write(&page_diff);
             for changed in changed {
@@ -82,6 +84,7 @@ impl WalBlobBuilder {
 
     fn write_byte(&mut self, byte: u8) {
         unsafe {
+            // SAFETY: This slice trivially does not overlap with the mmap.
             self.write(&[byte]);
         }
     }
@@ -92,7 +95,7 @@ impl WalBlobBuilder {
     unsafe fn write(&mut self, bytes: &[u8]) {
         let pos = self.cur;
         let new_cur = self.cur.checked_add(bytes.len()).unwrap();
-        if new_cur > self.mmap.size {
+        if new_cur >= self.mmap.size {
             panic!("WAL blob too large");
         }
         self.cur = new_cur;
@@ -101,16 +104,9 @@ impl WalBlobBuilder {
         }
     }
 
-    pub fn reset(&mut self) {
-        // Note we don't madvise(DONTNEED) or any other tricks for now. If we did, then each time
-        // we write a page it would need to be mounted and thus zero filled.
-        //
-        // The hope is that should there be memory  pressure, the memory would be swapped out as
-        // needed.
-        self.cur = 0;
-    }
-
-    /// Returns a pointer to the start of the blob.
+    /// Finalizes the builder and returns the pointer to the start of the blob and its length.
+    ///
+    /// This also resets the builder preparing it for a new batch of writes.
     ///
     /// The caller must ensure that the blob is not dropped before the pointer is no longer
     /// used.
@@ -119,14 +115,34 @@ impl WalBlobBuilder {
     /// the pointer around for too long.
     ///
     /// The pointer is aligned to the page size.
-    pub fn ptr(&self) -> *mut u8 {
-        self.mmap.ptr
-    }
+    pub fn finalize(&mut self) -> (*mut u8, usize) {
+        let ptr = self.mmap.ptr;
+        // round up to the nearest page size.
+        let len = (self.cur + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
 
-    /// The length of the blob. The size is a multiple of the page size.
-    pub fn len(&self) -> usize {
-        // round up to the next page size.
-        (self.cur + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE
+        // Note we don't madvise(DONTNEED) or any other tricks for now. If we did, then each time
+        // we write a page it would need to be mounted and thus zero filled.
+        //
+        // The hope is that should there be memory  pressure, the memory would be swapped out as
+        // needed.
+        let cur = self.cur;
+        unsafe {
+            // Zero memory from `cur` to the end of the blob (which is `len`).
+            let dst = ptr.add(cur);
+            let count = len - cur;
+            if count > 0 {
+                // SAFETY:
+                // - `dst` is never null.
+                // - `dst` is always naturally aligned because it's a byte.
+                // - `cur` is always less than the size of the mmap. Thus `dst + count` never lands
+                //   past the end of the mmap.
+                // - `0` is a valid value for `u8`.
+                std::ptr::write_bytes(dst, 0, count);
+            }
+        }
+
+        self.cur = 0;
+        (ptr, len)
     }
 }
 

@@ -208,7 +208,7 @@ impl Store {
             bitbox_num_pages: self.shared.bitbox_num_pages,
         };
 
-        let bitbox_wal_blob = (sync.wal_blob_builder.ptr(), sync.wal_blob_builder.len());
+        let bitbox_wal_blob = sync.wal_blob_builder.finalize();
         writeout::run(
             sync.io_handle.clone(),
             self.shared.wal_fd.as_raw_fd(),
@@ -225,8 +225,6 @@ impl Store {
             bitbox_writeout_data.ht_pages,
             new_meta,
         );
-
-        sync.wal_blob_builder.reset();
 
         self.shared.values.finish_sync(
             beatree_writeout_data.bbn_index,
