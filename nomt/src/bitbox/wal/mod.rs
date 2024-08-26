@@ -62,7 +62,7 @@ impl WalBlobBuilder {
         &mut self,
         page_id: [u8; 32],
         page_diff: [u8; 16],
-        changed: Vec<[u8; 32]>,
+        changed: impl Iterator<Item = [u8; 32]>,
         bucket_index: u64,
     ) {
         unsafe {

@@ -140,7 +140,7 @@ impl PageDiff {
     }
 
     /// Get raw bytes representing the PageDiff
-    pub fn get_raw(self) -> [u8; 16] {
+    pub fn get_raw(&self) -> [u8; 16] {
         self.updated_slots.data
     }
 }
