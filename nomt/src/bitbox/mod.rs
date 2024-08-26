@@ -78,7 +78,7 @@ impl DB {
 
     pub fn prepare_sync(
         &self,
-        changes: Vec<(PageId, BucketIndex, Option<(Vec<u8>, PageDiff)>)>,
+        changes: Vec<(PageId, BucketIndex, Option<(Box<Page>, PageDiff)>)>,
         wal_blob_builder: &mut WalBlobBuilder,
     ) -> anyhow::Result<WriteoutData> {
         // Steps are:
@@ -99,11 +99,7 @@ impl DB {
         for (page_id, BucketIndex(bucket), page_info) in changes {
             // let's extract its bucket
             match page_info {
-                Some((raw_page, page_diff)) => {
-                    // the page_id must be written into the page itself
-                    assert!(raw_page.len() == PAGE_SIZE);
-                    let mut page = Box::new(crate::bitbox::Page::zeroed());
-                    page[..raw_page.len()].copy_from_slice(&raw_page);
+                Some((mut page, page_diff)) => {
                     page[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
 
                     // update meta map with new info
@@ -309,11 +305,11 @@ impl PageLoadCompletion {
         self.user_data
     }
 
-    pub fn apply_to(self, load: &mut PageLoad) -> Option<(Vec<u8>, BucketIndex)> {
+    pub fn apply_to(self, load: &mut PageLoad) -> Option<(Box<Page>, BucketIndex)> {
         assert!(load.needs_completion());
         if self.page[PAGE_SIZE - 32..] == load.page_id.encode() {
             Some((
-                self.page.to_vec(),
+                self.page,
                 BucketIndex(load.probe_sequence.bucket()),
             ))
         } else {
