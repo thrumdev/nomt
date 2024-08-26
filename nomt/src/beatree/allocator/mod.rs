@@ -64,14 +64,19 @@ impl AllocatorReader {
 
     /// Returns the page with the specified page number. Blocks the current thread.
     pub fn query(&self, pn: PageNumber) -> Box<Page> {
-        self.io_handle
-            .send(self.io_command(pn, 0))
-            .expect("I/O store worker dropped");
-
-        // wait for completion
-        let completion = self.io_handle.recv().expect("I/O store worker dropped");
-        assert!(completion.result.is_ok());
-        let page = completion.command.kind.unwrap_buf();
+        let mut page = Box::new(Page::zeroed());
+        loop {
+            let res = unsafe {
+                libc::pread(
+                    self.store_file.as_raw_fd(),
+                    page.as_mut_ptr() as *mut libc::c_void,
+                    PAGE_SIZE as libc::size_t,
+                    (pn.0 as usize * PAGE_SIZE) as libc::off_t,
+                )
+            };
+            assert!(res != -1);
+            if res as usize == PAGE_SIZE { break }
+        }
 
         page
     }
