@@ -521,6 +521,8 @@ impl<H: NodeHasher> RangeCommitter<H> {
                     break;
                 }
             }
+
+            seeker.try_recv_page(self.write_pass.downgrade())?;
         }
 
         // 2. conclude, driving additional page fetches as necessary.
