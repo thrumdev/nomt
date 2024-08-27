@@ -20,6 +20,7 @@ pub fn account_path(id: u64) -> KeyPath {
     path
 }
 
+#[allow(dead_code)]
 pub fn expected_root(accounts: u64) -> Node {
     let mut ops = (0..accounts)
         .map(account_path)
@@ -121,6 +122,7 @@ pub fn transfer(t: &mut Test, from: u64, to: u64, amount: u64) {
     set_balance(t, to, to_balance + amount);
 }
 
+#[allow(unused)]
 pub fn kill(t: &mut Test, from: u64) {
     t.write(from, None);
 }
