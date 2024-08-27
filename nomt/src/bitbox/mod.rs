@@ -389,17 +389,7 @@ impl BucketAllocator {
             i += 1;
             assert!(i < 10000, "hash-table full");
             match probe_seq.next(&meta_map) {
-                ProbeResult::PossibleHit(bucket) => {
-                    // skip unless another page has freed the bucket.
-                    if self
-                        .changed_buckets
-                        .get(&bucket)
-                        .map_or(false, |full| !full)
-                    {
-                        self.changed_buckets.insert(bucket, true);
-                        return BucketIndex(bucket);
-                    }
-                }
+                ProbeResult::PossibleHit(_) => continue,
                 ProbeResult::Tombstone(bucket) | ProbeResult::Empty(bucket) => {
                     // unless some other page has taken the bucket, fill it.
                     if self.changed_buckets.get(&bucket).map_or(true, |full| !full) {
