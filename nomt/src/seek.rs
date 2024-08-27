@@ -1,7 +1,7 @@
 //! Multiplexer for page requests.
 
 use crate::{
-    io::Page as AlignedPage,
+    io,
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::ReadPass,
     store::{BucketIndex, PageLoad, PageLoadAdvance, PageLoadCompletion, PageLoader},
@@ -422,7 +422,7 @@ impl Seeker {
         &mut self,
         read_pass: &ReadPass<ShardIndex>,
         slab_index: usize,
-        page_data: Option<(Box<AlignedPage>, BucketIndex)>,
+        page_data: Option<(Box<io::Page>, BucketIndex)>,
     ) {
         let page_load = self.page_load_slab.remove(slab_index);
         let page = self

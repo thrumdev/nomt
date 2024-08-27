@@ -1,6 +1,6 @@
 use crate::{
     bitbox::BucketIndex,
-    io::Page as AlignedPage,
+    io,
     metrics::{Metric, Metrics},
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, Region, RegionContains, RwPassCell, RwPassDomain, WritePass},
@@ -29,7 +29,7 @@ const CACHE_PAGE_LIMIT: usize = 256 * 256;
 const PAGE_LIMIT_PER_ROOT_CHILD: usize = CACHE_PAGE_LIMIT / 64;
 
 struct PageData {
-    data: RwPassCell<Option<Box<AlignedPage>>, ShardIndex>,
+    data: RwPassCell<Option<Box<io::Page>>, ShardIndex>,
 }
 
 impl PageData {
@@ -37,7 +37,7 @@ impl PageData {
     fn pristine_with_data(
         domain: &RwPassDomain,
         shard_index: ShardIndex,
-        data: Box<AlignedPage>,
+        data: Box<io::Page>,
     ) -> Self {
         Self {
             data: domain.protect_with_id(Some(data), shard_index),
@@ -73,7 +73,7 @@ impl PageData {
     ) {
         assert!(index < NODES_PER_PAGE, "index out of bounds");
         let mut data = self.data.write(write_pass);
-        let data = data.get_or_insert_with(|| Box::new(AlignedPage::zeroed()));
+        let data = data.get_or_insert_with(|| Box::new(io::Page::zeroed()));
         let start = index * 32;
         let end = start + 32;
         data[start..end].copy_from_slice(&node);
@@ -88,7 +88,7 @@ impl PageData {
         let left_index = children.left();
         assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
         let mut data = self.data.write(write_pass);
-        let data = data.get_or_insert_with(|| Box::new(AlignedPage::zeroed()));
+        let data = data.get_or_insert_with(|| Box::new(io::Page::zeroed()));
         let start = left_index * 32;
         let end = start + 64;
 
@@ -104,7 +104,7 @@ impl PageData {
         assert!(left_index < NODES_PER_PAGE - 1, "index out of bounds");
 
         let mut data = self.data.write(write_pass);
-        let data = data.get_or_insert_with(|| Box::new(AlignedPage::zeroed()));
+        let data = data.get_or_insert_with(|| Box::new(io::Page::zeroed()));
 
         let start = left_index * 32;
         let l_end = start + 32;
@@ -241,7 +241,7 @@ impl CacheEntry {
     fn init(
         domain: &RwPassDomain,
         shard_index: ShardIndex,
-        maybe_page: Option<(Box<AlignedPage>, BucketIndex)>,
+        maybe_page: Option<(Box<io::Page>, BucketIndex)>,
     ) -> Self {
         match maybe_page {
             Some((data, bucket_index)) => CacheEntry {
@@ -344,7 +344,7 @@ pub struct PageCache {
 impl PageCache {
     /// Create a new `PageCache`.
     pub fn new(
-        root_page_data: Option<(Box<AlignedPage>, BucketIndex)>,
+        root_page_data: Option<(Box<io::Page>, BucketIndex)>,
         o: &Options,
         metrics: impl Into<Option<Metrics>>,
     ) -> Self {
@@ -404,7 +404,7 @@ impl PageCache {
     /// page is stored.
     ///
     /// This ignores the inputs if the page was already present, and returns that.
-    pub fn insert(&self, page_id: PageId, page: Option<(Box<AlignedPage>, BucketIndex)>) -> Page {
+    pub fn insert(&self, page_id: PageId, page: Option<(Box<io::Page>, BucketIndex)>) -> Page {
         let domain = &self.shared.page_rw_pass_domain;
         let shard_index = match self.shard_index_for(&page_id) {
             None => {
@@ -466,7 +466,7 @@ impl PageCache {
         let read_pass = self.new_read_pass();
         let mut apply_page = |page_id,
                               bucket: &mut Option<BucketIndex>,
-                              page_data: Option<&Box<AlignedPage>>,
+                              page_data: Option<&Box<io::Page>>,
                               page_diff: PageDiff| {
             match (page_data, *bucket) {
                 (None, Some(known_bucket)) => {
