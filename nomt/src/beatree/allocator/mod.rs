@@ -75,7 +75,9 @@ impl AllocatorReader {
                 )
             };
             assert!(res != -1);
-            if res as usize == PAGE_SIZE { break }
+            if res as usize == PAGE_SIZE {
+                break;
+            }
         }
 
         page

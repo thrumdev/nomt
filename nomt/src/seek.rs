@@ -14,11 +14,9 @@ use nomt_core::{
     trie_pos::{ChildNodeIndices, TriePosition},
 };
 
-use std::{
-    collections::{
-        hash_map::{Entry, HashMap},
-        VecDeque,
-    },
+use std::collections::{
+    hash_map::{Entry, HashMap},
+    VecDeque,
 };
 
 use bitvec::prelude::*;
