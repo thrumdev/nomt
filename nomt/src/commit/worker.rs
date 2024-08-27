@@ -215,10 +215,7 @@ fn commit<H: NodeHasher>(
     loop {
         let page = match root_page_committer.conclude(&mut write_pass) {
             Ok(Output::Root(new_root, diffs)) => {
-                for (page_id, page_diff) in diffs {
-                    output.page_diffs.insert(page_id, page_diff);
-                }
-
+                output.page_diffs.extend(diffs);
                 output.root = Some(new_root);
                 break;
             }
@@ -538,7 +535,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
                 }
             };
 
-            assert!(!diffs.contains_key(&ROOT_PAGE_ID));
+            assert!(!diffs.iter().any(|item| item.0 == ROOT_PAGE_ID));
             output.page_diffs = diffs;
 
             self.shared.push_pending_root_nodes(new_nodes);
