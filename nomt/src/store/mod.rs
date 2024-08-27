@@ -35,6 +35,7 @@ pub struct Store {
 struct Shared {
     bitbox_num_pages: u32,
     bitbox_seed: [u8; 16],
+    panic_on_sync: bool,
     values: beatree::Tree,
     pages: bitbox::DB,
     io_pool: IoPool,
@@ -115,6 +116,7 @@ impl Store {
             shared: Arc::new(Shared {
                 bitbox_num_pages: meta.bitbox_num_pages,
                 bitbox_seed: meta.bitbox_seed,
+                panic_on_sync: o.panic_on_sync,
                 values,
                 pages,
                 meta_fd,
@@ -222,6 +224,7 @@ impl Store {
             beatree_writeout_data.ln_extend_file_sz,
             bitbox_writeout_data.ht_pages,
             new_meta,
+            self.shared.panic_on_sync,
         );
 
         self.shared.values.finish_sync(

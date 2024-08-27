@@ -11,6 +11,7 @@ pub struct Options {
     /// Enable or disable metrics collection.
     pub(crate) metrics: bool,
     pub(crate) bitbox_num_pages: u32,
+    pub(crate) panic_on_sync: bool,
 }
 
 impl Default for Options {
@@ -21,6 +22,7 @@ impl Default for Options {
             io_workers: 3,
             metrics: false,
             bitbox_num_pages: 64_000,
+            panic_on_sync: false,
         }
     }
 }
@@ -63,5 +65,13 @@ impl Options {
     /// Set the number of hashtable buckets to use when creating the database.
     pub fn hashtable_buckets(&mut self, hashtable_buckets: u32) {
         self.bitbox_num_pages = hashtable_buckets;
+    }
+
+    /// Set to `true` to panic on sync after writing the WAL file and updating the manifest, but
+    /// before the data has been written to the HT file.
+    /// 
+    /// Useful to test WAL recovery.
+    pub fn panic_on_sync(&mut self, panic_on_sync: bool) {
+        self.panic_on_sync = panic_on_sync;
     }
 }

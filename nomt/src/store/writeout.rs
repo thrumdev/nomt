@@ -28,6 +28,7 @@ pub fn run(
     ln_extend_file_sz: Option<u64>,
     ht: Vec<(u64, Box<Page>)>,
     new_meta: Meta,
+    panic_on_sync: bool,
 ) {
     let io = IoDmux::new(io_handle);
     do_run(
@@ -56,6 +57,7 @@ pub fn run(
                 new_meta: Some(new_meta),
                 should_fsync: false,
             }),
+            panic_on_sync,
         },
         io,
     );
@@ -102,6 +104,10 @@ fn do_run(mut cx: Cx, mut io: IoDmux) {
                 break;
             }
         }
+    }
+
+    if cx.panic_on_sync {
+        panic!("panic_on_sync triggered");
     }
 
     // Dump the metabits and bucket pages.
@@ -310,6 +316,7 @@ struct Cx {
     ln_write_out: LnWriteOut,
     ht_write_out: HtWriteOut,
     meta_swap: Option<MetaSwap>,
+    panic_on_sync: bool,
 }
 
 struct WalWriteOut {
