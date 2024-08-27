@@ -49,7 +49,6 @@ use nomt_core::{
     trie::{self, KeyPath, Node, NodeHasher, NodeHasherExt, NodeKind, ValueHash},
     trie_pos::TriePosition,
 };
-use std::collections::HashMap;
 
 use crate::{
     page_cache::{Page, PageCache, PageDiff, ShardIndex},
@@ -69,12 +68,18 @@ pub enum Output {
     /// A new root node.
     ///
     /// This is always the output when no parent page is supplied to the walker.
-    Root(Node, HashMap<PageId, PageDiff>),
+    Root(Node, Vec<(PageId, PageDiff)>),
     /// Nodes to set in the bottom layer of the parent page, indexed by the position of the node
     /// to set.
     ///
     /// This is always the output when a parent page is supplied to the walker.
-    ChildPageRoots(Vec<(TriePosition, Node)>, HashMap<PageId, PageDiff>),
+    ChildPageRoots(Vec<(TriePosition, Node)>, Vec<(PageId, PageDiff)>),
+}
+
+struct StackItem {
+    page_id: PageId,
+    page: Page,
+    diff: PageDiff,
 }
 
 /// Left-to-right updating walker over the page tree.
@@ -87,10 +92,10 @@ pub struct PageWalker<H> {
     parent_page: Option<(PageId, Page)>,
     child_page_roots: Vec<(TriePosition, Node)>,
     root: Node,
-    diffs: HashMap<PageId, PageDiff>,
+    diffs: Vec<(PageId, PageDiff)>,
 
     // the stack contains pages (ascending) which are descendants of the parent page, if any.
-    stack: Vec<(PageId, Page)>,
+    stack: Vec<StackItem>,
 
     // the sibling stack contains the previous node values of siblings on the path to the current
     // position, annotated with their depths.
@@ -114,7 +119,7 @@ impl<H: NodeHasher> PageWalker<H> {
             parent_page,
             child_page_roots: Vec::new(),
             root,
-            diffs: HashMap::new(),
+            diffs: Vec::new(),
             stack: Vec::new(),
             sibling_stack: Vec::new(),
             prev_node: None,
@@ -282,7 +287,14 @@ impl<H: NodeHasher> PageWalker<H> {
                     }
                 }
 
-                self.down_fresh(control.down);
+                let not_fresh = was_leaf && self.position == start_position;
+                if not_fresh && !control.down.is_empty() {
+                    // first bit is definitely not a fresh page. after that, definitely is.
+                    self.down(&control.down[..1], false);
+                    self.down(&control.down[1..], true);
+                } else {
+                    self.down(&control.down, true);
+                }
 
                 if self.position.is_root() {
                     self.root = node;
@@ -291,8 +303,8 @@ impl<H: NodeHasher> PageWalker<H> {
                 }
 
                 if let Some(leaf_data) = leaf_data {
-                    let leaf_children_fresh = !was_leaf || self.position != start_position;
-                    self.write_leaf_children(write_pass, Some(leaf_data), leaf_children_fresh);
+                    let fresh = !was_leaf || self.position != start_position;
+                    self.write_leaf_children(write_pass, Some(leaf_data), fresh);
                 }
             },
         );
@@ -300,7 +312,7 @@ impl<H: NodeHasher> PageWalker<H> {
         // build_trie should always return us to the original position.
         if !self.position.is_root() {
             assert_eq!(
-                self.stack.last().unwrap().0,
+                self.stack.last().unwrap().page_id,
                 self.position.page_id().unwrap()
             );
         } else {
@@ -311,33 +323,52 @@ impl<H: NodeHasher> PageWalker<H> {
     // move the current position up.
     fn up(&mut self) {
         if self.position.depth_in_page() == 1 {
-            assert!(self.stack.pop().is_some());
+            // UNWRAP: we never move up beyond the root / parent page.
+            let stack_item = self.stack.pop().unwrap();
+            self.diffs.push((stack_item.page_id, stack_item.diff));
         }
         self.position.up(1);
     }
 
-    // move the current position down into "fresh" territory: pages guaranteed not to exist yet.
-    fn down_fresh(&mut self, bit_path: &BitSlice<u8, Msb0>) {
+    // move the current position down, hinting whether the location is guaranteed to be fresh.
+    fn down(&mut self, bit_path: &BitSlice<u8, Msb0>, fresh: bool) {
         for bit in bit_path.iter().by_vals() {
             if self.position.is_root() {
                 // UNWRAP: all pages on the path to the node should be in the cache.
-                self.stack.push((
-                    ROOT_PAGE_ID,
-                    get_page(&self.page_cache, ROOT_PAGE_ID).unwrap(),
-                ));
+                self.stack.push(StackItem {
+                    page_id: ROOT_PAGE_ID,
+                    page: get_page(&self.page_cache, ROOT_PAGE_ID).unwrap(),
+                    diff: PageDiff::default(),
+                });
             } else if self.position.depth_in_page() == DEPTH {
                 // UNWRAP: the only legal positions are below the "parent" (root or parent_page)
                 //         and stack always contains all pages to position.
-                let parent_page_id = &self.stack.last().unwrap().0;
+                let parent_page_id = &self.stack.last().unwrap().page_id;
                 let child_page_index = self.position.child_page_index();
 
                 // UNWRAP: we never overflow the page stack.
                 let child_page_id = parent_page_id.child_page_id(child_page_index).unwrap();
 
-                self.stack.push((
-                    child_page_id.clone(),
-                    self.page_cache.insert(child_page_id, None),
-                ));
+                let (page, diff) = if fresh {
+                    (self.page_cache.insert(child_page_id.clone(), None), PageDiff::default())
+                } else {
+                    // UNWRAP: all non-fresh pages should be in the cache.
+                    let diff = if self.diffs.last().map_or(false, |d| d.0 == child_page_id) {
+                        // UNWRAP: just checked
+                        self.diffs.pop().unwrap().1
+                    } else {
+                        PageDiff::default()
+                    };
+                    let page = get_page(&self.page_cache, child_page_id.clone()).unwrap();
+
+                    (page, diff)
+                };
+
+                self.stack.push(StackItem {
+                    page_id: child_page_id,
+                    page,
+                    diff,
+                });
             }
             self.position.down(bit);
         }
@@ -501,15 +532,15 @@ impl<H: NodeHasher> PageWalker<H> {
     // read the node at the current position. panics if no current page.
     fn node(&self, read_pass: &ReadPass<impl RegionContains<ShardIndex>>) -> Node {
         let node_index = self.position.node_index();
-        let page = self.stack.last().unwrap();
-        page.1.node(read_pass, node_index)
+        let stack_top = self.stack.last().unwrap();
+        stack_top.page.node(read_pass, node_index)
     }
 
     // read the sibling node at the current position. panics if no current page.
     fn sibling_node(&self, read_pass: &ReadPass<impl RegionContains<ShardIndex>>) -> Node {
         let node_index = self.position.sibling_index();
-        let page = self.stack.last().unwrap();
-        page.1.node(read_pass, node_index)
+        let stack_top = self.stack.last().unwrap();
+        stack_top.page.node(read_pass, node_index)
     }
 
     // set a node in the current page at the given index. panics if no current page.
@@ -519,13 +550,9 @@ impl<H: NodeHasher> PageWalker<H> {
         node: Node,
     ) {
         let node_index = self.position.node_index();
-        let page = self.stack.last().unwrap();
-        page.1.set_node(write_pass, node_index, node);
-
-        self.diffs
-            .entry(page.0.clone())
-            .or_default()
-            .set_changed(node_index);
+        let stack_top = self.stack.last_mut().unwrap();
+        stack_top.page.set_node(write_pass, node_index, node);
+        stack_top.diff.set_changed(node_index);
     }
 
     // read the leaf children of a node in the current page at the given position.
@@ -533,9 +560,12 @@ impl<H: NodeHasher> PageWalker<H> {
         &self,
         read_pass: &ReadPass<impl RegionContains<ShardIndex>>,
     ) -> Result<trie::LeafData, NeedsPage> {
-        let page = self.stack.last().or(self.parent_page.as_ref());
+        let cur_page = self.stack.last()
+            .map(|stack_item| (&stack_item.page_id, &stack_item.page))
+            .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
+
         let (page, _, children) =
-            crate::page_cache::locate_leaf_data::<NeedsPage>(&self.position, page, |page_id| {
+            crate::page_cache::locate_leaf_data::<NeedsPage>(&self.position, cur_page, |page_id| {
                 get_page(&self.page_cache, page_id.clone()).ok_or_else(move || NeedsPage(page_id))
             })?;
 
@@ -552,28 +582,46 @@ impl<H: NodeHasher> PageWalker<H> {
         leaf_data: Option<trie::LeafData>,
         hint_fresh: bool,
     ) {
-        let page = self.stack.last().or(self.parent_page.as_ref());
-        let (page, page_id, children) =
-            crate::page_cache::locate_leaf_data::<()>(&self.position, page, |page_id| {
-                if hint_fresh {
-                    Ok(self.page_cache.insert(page_id, None))
-                } else {
-                    // UNWRAP: all pages on the path to the position are in the cache,
-                    // and we never write sibling leaf children without reading them first, which
-                    // protects this.
-                    Ok(get_page(&self.page_cache, page_id).unwrap())
-                }
-            })
-            .unwrap();
+        let (page_id, children) = {
+            let cur_page = self.stack.last()
+                .map(|stack_item| (&stack_item.page_id, &stack_item.page))
+                .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
 
-        match leaf_data {
-            None => page.clear_leaf_data(write_pass, children),
-            Some(leaf) => page.set_leaf_data(write_pass, children, leaf),
+            let (page, page_id, children) =
+                crate::page_cache::locate_leaf_data::<()>(&self.position, cur_page, |page_id| {
+                    if hint_fresh {
+                        Ok(self.page_cache.insert(page_id, None))
+                    } else {
+                        // UNWRAP: all pages on the path to the position are in the cache,
+                        // and we never write sibling leaf children without reading them first, which
+                        // protects this.
+                        Ok(get_page(&self.page_cache, page_id).unwrap())
+                    }
+                })
+                .unwrap();
+
+            match leaf_data {
+                None => page.clear_leaf_data(write_pass, children),
+                Some(leaf) => page.set_leaf_data(write_pass, children, leaf),
+            }
+
+            (page_id, children)
+        };
+
+        if let Some(stack_item) = self.stack.last_mut().filter(|item| item.page_id == page_id) {
+            stack_item.diff.set_changed(children.left());
+            stack_item.diff.set_changed(children.right());
+        } else if let Some((_, diff)) = self.diffs.last_mut().filter(|item| item.0 == page_id) {
+            // it's possible for us to revisit a page which was just popped off the stack, for
+            // example, when compacting up.
+            diff.set_changed(children.left());
+            diff.set_changed(children.right());
+        } else {
+            let mut diff = PageDiff::default();
+            diff.set_changed(children.left());
+            diff.set_changed(children.right());
+            self.diffs.push((page_id, diff));
         }
-
-        let diff = self.diffs.entry(page_id.clone()).or_default();
-        diff.set_changed(children.left());
-        diff.set_changed(children.right());
     }
 
     fn assert_page_in_scope(&self, page_id: Option<&PageId>) {
@@ -598,7 +646,9 @@ impl<H: NodeHasher> PageWalker<H> {
 
         self.position = position;
         let Some(page_id) = new_page_id else {
-            self.stack.clear();
+            for stack_item in self.stack.drain(..) {
+                self.diffs.push((stack_item.page_id, stack_item.diff));
+            }
             return;
         };
 
@@ -610,15 +660,20 @@ impl<H: NodeHasher> PageWalker<H> {
         let target = self
             .stack
             .last()
-            .or(self.parent_page.as_ref())
-            .map(|(id, _)| id.clone());
+            .map(|item| item.page_id.clone())
+            .or(self.parent_page.as_ref().map(|p| p.0.clone()));
+
         let start_len = self.stack.len();
         let mut cur_ancestor = page_id;
         let mut push_count = 0;
         while Some(&cur_ancestor) != target.as_ref() {
             // UNWRAP: all pages on the path to the terminal are cached.
             let page = get_page(&self.page_cache, cur_ancestor.clone()).unwrap();
-            self.stack.push((cur_ancestor.clone(), page));
+            self.stack.push(StackItem {
+                page_id: cur_ancestor.clone(),
+                page,
+                diff: PageDiff::default(),
+            });
             cur_ancestor = cur_ancestor.parent_page_id();
             push_count += 1;
 
@@ -774,7 +829,7 @@ mod tests {
                     )
                 );
                 assert_eq!(diffs.len(), 1);
-                assert!(diffs.contains_key(&ROOT_PAGE_ID));
+                assert_eq!(&diffs[0].0, &ROOT_PAGE_ID);
             }
             Ok(Output::ChildPageRoots(_, _)) | Err(_) => unreachable!(),
         }
@@ -835,8 +890,9 @@ mod tests {
                     .child_page_id(ChildPageIndex::new(1).unwrap())
                     .unwrap();
 
-                assert!(diffs.contains_key(&left_page_id));
-                assert!(diffs.contains_key(&right_page_id));
+                let diffed_ids = diffs.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                assert!(diffed_ids.contains(&left_page_id));
+                assert!(diffed_ids.contains(&right_page_id));
                 assert_eq!(page_roots[0].0, trie_pos![0, 0, 0, 0, 0, 0]);
                 assert_eq!(page_roots[1].0, trie_pos![0, 0, 0, 0, 0, 1]);
 

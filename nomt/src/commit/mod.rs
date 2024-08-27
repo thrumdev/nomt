@@ -11,7 +11,6 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 
-use std::collections::HashMap;
 use std::sync::{Arc, Barrier};
 
 use threadpool::ThreadPool;
@@ -302,7 +301,7 @@ pub struct Output {
     /// The new root.
     pub root: Node,
     /// All page-diffs from all worker threads. The covered sets of pages are disjoint.
-    pub page_diffs: Vec<HashMap<PageId, PageDiff>>,
+    pub page_diffs: Vec<Vec<(PageId, PageDiff)>>,
     /// Optional witness
     pub witness: Option<Witness>,
     /// Optional list of all witnessed operations.
@@ -337,7 +336,7 @@ enum RootPagePending {
 struct WorkerOutput {
     root: Option<Node>,
     witnessed_paths: Option<Vec<(WitnessedPath, Option<trie::LeafData>, usize)>>,
-    page_diffs: HashMap<PageId, PageDiff>,
+    page_diffs: Vec<(PageId, PageDiff)>,
 }
 
 impl WorkerOutput {
@@ -345,7 +344,7 @@ impl WorkerOutput {
         WorkerOutput {
             root: None,
             witnessed_paths: if witness { Some(Vec::new()) } else { None },
-            page_diffs: HashMap::new(),
+            page_diffs: Vec::new(),
         }
     }
 }
