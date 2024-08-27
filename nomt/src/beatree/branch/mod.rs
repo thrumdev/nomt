@@ -29,12 +29,13 @@ pub const BRANCH_NODE_SIZE: usize = 4096;
 
 /// Handle. Cheap to clone.
 pub struct BranchNodePool {
-    /// The pointer to the beginning of the pool allocation.
-    pool_base_ptr: *mut u8,
     inner: Arc<Mutex<BranchNodePoolInner>>,
 }
 
 struct BranchNodePoolInner {
+    /// The pointer to the beginning of the pool allocation.
+    pool_base_ptr: *mut u8,
+
     /// The next index in the pool available for allocation.
     bump: u32,
 
@@ -45,11 +46,23 @@ struct BranchNodePoolInner {
     checked_out: Vec<BranchId>,
 }
 
+impl Drop for BranchNodePoolInner {
+    fn drop(&mut self) {
+        unsafe {
+            let res = libc::munmap(self.pool_base_ptr as *mut _, BNP_MMAP_SIZE as usize);
+            if res != 0 {
+                panic!("munmap failed");
+            }
+        }
+    }
+}
+
+// Should be 16 TiB.
+const BNP_MMAP_SIZE: u64 = BRANCH_NODE_SIZE as u64 * u32::MAX as u64;
+
 impl BranchNodePool {
     pub fn new() -> BranchNodePool {
         let pool_base_ptr = unsafe {
-            // Should be 16 TiB.
-            let len = BRANCH_NODE_SIZE as u64 * u32::MAX as u64;
             // On Linux this is ignored for MAP_ANON, but on macOS it's used to specify flags for
             // Mach VM, so be explicit here.
             let fd = -1;
@@ -58,7 +71,7 @@ impl BranchNodePool {
             let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
             libc::mmap(
                 ptr::null_mut(),
-                len as usize,
+                BNP_MMAP_SIZE as usize,
                 libc::PROT_READ | libc::PROT_WRITE,
                 flags,
                 fd,
@@ -70,8 +83,8 @@ impl BranchNodePool {
         }
         let pool_base_ptr = pool_base_ptr as *mut u8;
         BranchNodePool {
-            pool_base_ptr,
             inner: Arc::new(Mutex::new(BranchNodePoolInner {
+                pool_base_ptr,
                 bump: 0,
                 freelist: Vec::new(),
                 checked_out: Vec::new(),
@@ -115,7 +128,7 @@ impl BranchNodePool {
         inner.checked_out.push(id);
         unsafe {
             let offset = id.0 as usize * BRANCH_NODE_SIZE;
-            let ptr = self.pool_base_ptr.offset(offset as isize);
+            let ptr = inner.pool_base_ptr.offset(offset as isize);
             Some(BranchNode {
                 ptr,
                 pool: self.inner.clone(),
@@ -128,7 +141,6 @@ impl BranchNodePool {
 impl Clone for BranchNodePool {
     fn clone(&self) -> Self {
         Self {
-            pool_base_ptr: self.pool_base_ptr,
             inner: self.inner.clone(),
         }
     }
