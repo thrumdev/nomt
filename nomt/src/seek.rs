@@ -471,6 +471,7 @@ pub enum Completion {
 /// The result of a seek.
 pub struct Seek {
     /// The key being sought.
+    #[allow(dead_code)]
     pub key: KeyPath,
     /// The position in the trie where the terminal node was found.
     pub position: TriePosition,
@@ -484,5 +485,6 @@ pub struct Seek {
     /// The number of fresh pages loaded uniquely for this `Seek`.
     /// This does not include pages loaded from the cache, or pages which were already requested
     /// for another seek.
+    #[allow(dead_code)]
     pub page_loads: usize,
 }

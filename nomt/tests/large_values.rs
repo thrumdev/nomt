@@ -1,14 +1,11 @@
 mod common;
 
 use common::Test;
-use hex_literal::hex;
-use nomt::Node;
 
 #[test]
 fn large_values() {
     let mut t = Test::new("large_values");
 
-    let mut root = Node::default();
     let large1 = vec![1; 4096 * 128];
     let large2 = vec![2; 4096 * 80 - 1245];
 
