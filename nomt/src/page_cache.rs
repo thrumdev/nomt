@@ -34,7 +34,11 @@ struct PageData {
 
 impl PageData {
     /// Creates a page with the given data.
-    fn pristine_with_data(domain: &RwPassDomain, shard_index: ShardIndex, data: Box<AlignedPage>) -> Self {
+    fn pristine_with_data(
+        domain: &RwPassDomain,
+        shard_index: ShardIndex,
+        data: Box<AlignedPage>,
+    ) -> Self {
         Self {
             data: domain.protect_with_id(Some(data), shard_index),
         }

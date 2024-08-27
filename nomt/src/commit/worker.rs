@@ -20,9 +20,7 @@ use nomt_core::{
     trie::{KeyPath, Node, NodeHasher, ValueHash},
 };
 
-use std::{
-    sync::{Arc, Barrier},
-};
+use std::sync::{Arc, Barrier};
 
 use super::{
     CommitCommand, CommitShared, KeyReadWrite, RootPagePending, ToWorker, WarmUpCommand,
@@ -109,7 +107,7 @@ fn warm_up_phase(
 
     loop {
         if let Some(_) = seeker.take_completion() {
-            continue
+            continue;
         }
 
         let blocked = seeker.submit_all(&read_pass)?;
@@ -147,7 +145,7 @@ fn warm_up_phase(
 
     while !seeker.is_empty() {
         if let Some(_) = seeker.take_completion() {
-            continue
+            continue;
         }
         seeker.submit_all(&read_pass)?;
         seeker.recv_page(&read_pass)?;
@@ -506,11 +504,11 @@ impl<H: NodeHasher> RangeCommitter<H> {
             if !seeker.has_room() {
                 // no way to push work until at least one page fetch has concluded.
                 seeker.recv_page(self.write_pass.downgrade())?;
-                continue
+                continue;
             } else if blocked {
                 // blocked, so try to make progress, but no problem if we can't. stay busy.
                 seeker.try_recv_page(self.write_pass.downgrade())?;
-                continue
+                continue;
             }
 
             // push work until blocked or out of work.
@@ -519,7 +517,9 @@ impl<H: NodeHasher> RangeCommitter<H> {
                 pushes += 1;
                 seeker.push(self.shared.read_write[next_push].0);
                 let blocked = seeker.submit_all(self.write_pass.downgrade())?;
-                if blocked { break }
+                if blocked {
+                    break;
+                }
             }
         }
 
