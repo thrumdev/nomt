@@ -11,26 +11,26 @@ pub struct Options {
     /// Enable or disable metrics collection.
     pub(crate) metrics: bool,
     pub(crate) bitbox_num_pages: u32,
+    pub(crate) bitbox_seed: [u8; 16],
     pub(crate) panic_on_sync: bool,
 }
 
-impl Default for Options {
-    fn default() -> Self {
+impl Options {
+    /// Create a new `Options` instance with the default values and a random bitbox seed.
+    pub fn new() -> Self {
+        use rand::Rng as _;
+        let mut bitbox_seed = [0u8; 16];
+        rand::rngs::OsRng.fill(&mut bitbox_seed);
+
         Self {
             path: PathBuf::from("nomt_db"),
             commit_concurrency: 1,
             io_workers: 3,
             metrics: false,
             bitbox_num_pages: 64_000,
+            bitbox_seed,
             panic_on_sync: false,
         }
-    }
-}
-
-impl Options {
-    /// Create a new `Options` instance with the default values.
-    pub fn new() -> Self {
-        Self::default()
     }
 
     /// Set the path to the directory where the trie is stored.
@@ -65,6 +65,13 @@ impl Options {
     /// Set the number of hashtable buckets to use when creating the database.
     pub fn hashtable_buckets(&mut self, hashtable_buckets: u32) {
         self.bitbox_num_pages = hashtable_buckets;
+    }
+
+    /// Set the seed for the hash function used by the bitbox store.
+    /// 
+    /// Useful for reproducibility.
+    pub fn bitbox_seed(&mut self, bitbox_seed: [u8; 16]) {
+        self.bitbox_seed = bitbox_seed;
     }
 
     /// Set to `true` to panic on sync after writing the WAL file and updating the manifest, but

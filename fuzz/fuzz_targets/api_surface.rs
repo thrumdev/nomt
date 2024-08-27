@@ -240,7 +240,7 @@ impl<'a> Arbitrary<'a> for NomtCalls {
 fn open_db(commit_concurrency: usize) -> Nomt {
     let tempfile = tempfile::tempdir().unwrap();
     let db_path = tempfile.path().join("db");
-    let mut options = Options::default();
+    let mut options = Options::new();
     options.path(db_path);
     options.commit_concurrency(commit_concurrency);
     Nomt::open(options).unwrap()

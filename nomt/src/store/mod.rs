@@ -8,7 +8,6 @@ use crate::{
 use meta::Meta;
 use nomt_core::{page_id::PageId, trie::KeyPath};
 use parking_lot::Mutex;
-use rand::prelude::*;
 use std::{
     fs::{File, OpenOptions},
     os::fd::AsRawFd as _,
@@ -281,8 +280,6 @@ fn create(o: &crate::Options) -> anyhow::Result<()> {
 
     let mut meta_fd = std::fs::File::create(o.path.join("meta"))?;
     let mut buf = [0u8; 4096];
-    let mut bitbox_seed = [0u8; 16];
-    rand::rngs::OsRng.fill(&mut bitbox_seed);
     Meta {
         ln_freelist_pn: 0,
         ln_bump: 1,
@@ -290,7 +287,7 @@ fn create(o: &crate::Options) -> anyhow::Result<()> {
         bbn_bump: 1,
         sync_seqn: 0,
         bitbox_num_pages: o.bitbox_num_pages,
-        bitbox_seed,
+        bitbox_seed: o.bitbox_seed,
     }
     .encode_to(&mut buf[0..40]);
     meta_fd.write_all(&buf)?;
