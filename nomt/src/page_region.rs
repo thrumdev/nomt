@@ -10,7 +10,7 @@
 //!
 //! That is, a region either implies this:
 //!
-//! ```ignore
+//! ```text
 //!                             ┌─┐
 //!                             └┼┘
 //!                              │
@@ -26,7 +26,7 @@
 //!
 //! or this:
 //!
-//! ```ignore
+//! ```text
 //!                             ┌─┐
 //!                             └┼┘
 //!                              │
