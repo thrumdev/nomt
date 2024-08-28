@@ -470,7 +470,7 @@ fn separate(a: &Key, b: &Key) -> Key {
 
 #[cfg(feature = "benchmarks")]
 pub mod benches {
-    use crate::beatree::Key;
+    use crate::beatree::benches::get_keys;
     use criterion::{BenchmarkId, Criterion};
 
     pub fn separate_benchmark(c: &mut Criterion) {
@@ -484,20 +484,5 @@ pub mod benches {
         }
 
         group.finish();
-    }
-
-    // returns two keys a and b where b > a and b shares the first n bits with a
-    fn get_keys(shared_bytes: usize) -> (Key, Key) {
-        use rand::RngCore;
-
-        let mut rand = rand::thread_rng();
-        let mut a = [0; 32];
-        rand.fill_bytes(&mut a[0..shared_bytes]);
-
-        // b > a
-        let mut b = a.clone();
-        b[shared_bytes] = 1;
-
-        (a, b)
     }
 }
