@@ -187,9 +187,10 @@ fn recover(
                 ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
                 ht_fd.read_exact(&mut page)?;
 
-                for i in page_diff.view_bits::<Lsb0>().iter_ones() {
-                    let node = &changed_nodes[i];
-                    page[i * 32..(i + 1) * 32].copy_from_slice(node);
+                for (i, node) in page_diff.view_bits::<Lsb0>().iter_ones().zip(changed_nodes) {
+                    let start = i * 32;
+                    let end = start + 32;
+                    page[start..end].copy_from_slice(&node[..]);
                 }
 
                 ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
