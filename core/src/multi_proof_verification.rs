@@ -6,7 +6,7 @@ use crate::{
 use bitvec::prelude::*;
 use core::cmp::Ordering;
 
-#[cfg(not(features = "std"))]
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 /// Errors in multi-proof verification.

@@ -6,7 +6,7 @@ use crate::trie::{
 
 use bitvec::prelude::*;
 
-#[cfg(not(features = "std"))]
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 /// Wrapper for a terminal node, it will store the LeafData if it is a leaf node,

@@ -4,7 +4,7 @@ use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, Valu
 
 use bitvec::prelude::*;
 
-#[cfg(not(features = "std"))]
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 // TODO: feels extremely out of place.
