@@ -569,6 +569,7 @@ dependencies = [
  "rand",
  "rand_pcg",
  "slab",
+ "tempfile",
  "threadpool",
 ]
 

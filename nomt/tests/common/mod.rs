@@ -44,13 +44,22 @@ pub struct Test {
 
 impl Test {
     pub fn new(name: impl AsRef<Path>) -> Self {
+        Self::new_with_params(name, false, true)
+    }
+
+    pub fn new_with_params(name: impl AsRef<Path>, panic_on_sync: bool, cleanup_dir: bool) -> Self {
         let path = {
             let mut p = PathBuf::from("test");
             p.push(name);
             p
         };
-        let _ = std::fs::remove_dir_all(&path);
-        let nomt = Nomt::open(opts(path)).unwrap();
+        if cleanup_dir {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        let mut o = opts(path);
+        o.panic_on_sync(panic_on_sync);
+        o.bitbox_seed([0; 16]);
+        let nomt = Nomt::open(o).unwrap();
         let session = nomt.begin_session();
         Self {
             nomt,
