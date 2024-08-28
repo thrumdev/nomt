@@ -467,3 +467,37 @@ fn separate(a: &Key, b: &Key) -> Key {
     separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
     separator
 }
+
+#[cfg(feature = "benchmarks")]
+pub mod benches {
+    use crate::beatree::Key;
+    use criterion::{BenchmarkId, Criterion};
+
+    pub fn separate_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("separate");
+
+        for shared_bytes in [0, 4, 8, 12, 16] {
+            let (key1, key2) = get_keys(shared_bytes);
+            group.bench_function(BenchmarkId::new("shared_bytes", shared_bytes), |b| {
+                b.iter(|| super::separate(&key1, &key2));
+            });
+        }
+
+        group.finish();
+    }
+
+    // returns two keys a and b where b > a and b shares the first n bits with a
+    fn get_keys(shared_bytes: usize) -> (Key, Key) {
+        use rand::RngCore;
+
+        let mut rand = rand::thread_rng();
+        let mut a = [0; 32];
+        rand.fill_bytes(&mut a[0..shared_bytes]);
+
+        // b > a
+        let mut b = a.clone();
+        b[shared_bytes] = 1;
+
+        (a, b)
+    }
+}

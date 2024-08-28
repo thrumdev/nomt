@@ -26,7 +26,13 @@ pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node};
 pub use options::Options;
 
+// beatree module needs to be exposed to be benchmarked
+#[cfg(feature = "benchmarks")]
+#[allow(missing_docs)]
+pub mod beatree;
+#[cfg(not(feature = "benchmarks"))]
 mod beatree;
+
 mod bitbox;
 mod commit;
 mod metrics;

@@ -21,7 +21,7 @@ use branch::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
 use leaf::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater};
 
 mod branch;
-mod leaf;
+pub(crate) mod leaf;
 
 // All nodes less than this body size will be merged with a neighboring node.
 const BRANCH_MERGE_THRESHOLD: usize = BRANCH_NODE_BODY_SIZE / 2;

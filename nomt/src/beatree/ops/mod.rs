@@ -14,7 +14,7 @@ use super::{
 };
 
 mod reconstruction;
-mod update;
+pub(crate) mod update;
 
 pub use reconstruction::reconstruct;
 pub use update::update;

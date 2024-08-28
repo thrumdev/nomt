@@ -28,6 +28,7 @@ im = "15.1.0"
 lru = "0.12.3"
 libc = "0.2.155"
 itertools = "0.13.0"
+criterion = { version = "0.3", optional = true }
 
 [target.'cfg(target_os="linux")'.dependencies]
 io-uring = "0.6.4"
@@ -39,6 +40,14 @@ loom = { version = "0.7", features = ["checkpoint"] }
 rand_pcg = "0.3.1"
 hex-literal = "0.4"
 tempfile = "3.8.1"
+criterion = "0.3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[[bench]]
+name = "beatree"
+harness = false
+
+[features]
+benchmarks = ["dep:criterion"]
