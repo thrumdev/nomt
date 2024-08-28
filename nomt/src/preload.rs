@@ -9,7 +9,7 @@ use crate::{
 
 use nomt_core::{
     page::DEPTH,
-    page_id::{PageId, ROOT_PAGE_ID},
+    page_id::{PageId, PageIdsIterator, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node},
     trie_pos::{ChildNodeIndices, TriePosition},
 };
@@ -20,33 +20,25 @@ use std::collections::{
 };
 
 use bitvec::prelude::*;
+use crossbeam_channel::Receiver;
 use slab::Slab;
 
 const MAX_INFLIGHT: usize = 1024;
 const SINGLE_PAGE_REQUEST_INDEX: usize = usize::MAX;
 
 struct SeekRequest {
-    key: KeyPath,
-    position: TriePosition,
-    page_id: Option<PageId>,
-    siblings: Vec<Node>,
-    state: RequestState,
+    iter: PageIdsIterator,
+    completed: bool,
     page_loads: usize,
 }
 
 impl SeekRequest {
     fn new(key: KeyPath, root: Node) -> SeekRequest {
-        let state = if trie::is_terminator(&root) {
-            RequestState::Completed(None)
-        } else {
-            RequestState::Seeking(root)
-        };
+        let completed = trie::is_terminator(&root);
 
         SeekRequest {
-            key,
-            position: TriePosition::new(),
-            page_id: None,
-            siblings: Vec::new(),
+            iter: PageIdsIterator::new(key),
+            completed,
             state,
             page_loads: 0,
         }
@@ -56,97 +48,37 @@ impl SeekRequest {
         self.page_loads += 1;
     }
 
+    fn set_completed(&mut self) {
+        self.completed = true;
+    }
+
     fn is_completed(&self) -> bool {
-        match self.state {
-            RequestState::Seeking(_) => false,
-            RequestState::Completed(_) => true,
-        }
+        self.completed
     }
 
-    fn next_page_id(&self) -> PageId {
-        match self.page_id {
-            None => ROOT_PAGE_ID,
-            // UNWRAP: all page IDs for key paths are in scope.
-            Some(ref page_id) => page_id
-                .child_page_id(self.position.child_page_index())
-                .unwrap(),
-        }
+    fn next_page_id(&mut self) -> PageId {
+        self.iter.next()
     }
-
-    fn continue_seek(
-        &mut self,
-        read_pass: &ReadPass<ShardIndex>,
-        page_id: PageId,
-        page: &Page,
-        record_siblings: bool,
-    ) {
-        let RequestState::Seeking(mut cur_node) = self.state else {
-            panic!("seek past end")
-        };
-
-        // terminator should have yielded completion.
-        assert!(!trie::is_terminator(&cur_node));
-        assert!(self.position.depth() as usize % DEPTH == 0);
-
-        // don't set this when cur node is leaf, as we loaded this page just to get the leaf
-        // children.
-        if !trie::is_leaf(&cur_node) {
-            self.page_id = Some(page_id);
-        }
-
-        // take enough bits to get us to the end of this page.
-        let bits = self.key.view_bits::<Msb0>()[self.position.depth() as usize..]
-            .iter()
-            .by_vals()
-            .take(DEPTH);
-
-        for bit in bits {
-            if trie::is_leaf(&cur_node) {
-                let children = if self.position.depth() as usize % DEPTH > 0 {
-                    self.position.child_node_indices()
-                } else {
-                    // note: the only time this is true in this loop is in the first iteration,
-                    // because we only take `DEPTH` bits.
-                    ChildNodeIndices::next_page()
-                };
-
-                self.state = RequestState::Completed(Some(trie::LeafData {
-                    key_path: page.node(&read_pass, children.left()),
-                    value_hash: page.node(&read_pass, children.right()),
-                }));
-                return;
-            }
-
-            self.position.down(bit);
-
-            cur_node = page.node(&read_pass, self.position.node_index());
-            if record_siblings {
-                self.siblings
-                    .push(page.node(&read_pass, self.position.sibling_index()));
-            }
-
-            if trie::is_terminator(&cur_node) {
-                self.state = RequestState::Completed(None);
-                return;
-            }
-
-            // leaf is handled in next iteration _or_ if this is the last iteration, in the next
-            // `continue_seek`.
-        }
-
-        self.state = RequestState::Seeking(cur_node);
-    }
-}
-
-enum RequestState {
-    Seeking(Node),
-    Completed(Option<trie::LeafData>),
 }
 
 enum SinglePageRequestState {
     Pending(PageId),
     Submitted,
     Completed,
+}
+
+pub enum Command {
+    WarmUp(KeyPath),
+    Commit(Vec<KeyPath>),
+    Fetch(PageId),
+}
+
+pub fn preload(
+    cache: PageCache,
+    root: PageId,
+    commands: Receiver<Command>,
+) {
+
 }
 
 /// The `Seeker` seeks for the terminal nodes of multiple keys simultaneously, multiplexing requests
@@ -172,7 +104,6 @@ pub struct Seeker {
     idle_requests: VecDeque<usize>,
     /// FIFO, pushed onto back, except when trying the front item and getting blocked.
     idle_page_loads: VecDeque<usize>,
-    record_siblings: bool,
     single_page_request: Option<SinglePageRequestState>,
 }
 
@@ -182,7 +113,6 @@ impl Seeker {
         root: Node,
         page_cache: PageCache,
         page_loader: PageLoader,
-        record_siblings: bool,
     ) -> Self {
         Seeker {
             root,
@@ -194,7 +124,6 @@ impl Seeker {
             page_load_slab: Slab::new(),
             idle_requests: VecDeque::new(),
             idle_page_loads: VecDeque::new(),
-            record_siblings,
             single_page_request: None,
         }
     }
@@ -237,7 +166,6 @@ impl Seeker {
                 key: request.key,
                 position: request.position,
                 page_id: request.page_id,
-                siblings: request.siblings,
                 page_loads: request.page_loads,
                 terminal,
             }));
@@ -374,7 +302,7 @@ impl Seeker {
             let page_id: PageId = request.next_page_id();
 
             if let Some(page) = self.page_cache.get(page_id.clone()) {
-                request.continue_seek(read_pass, page_id, &page, self.record_siblings);
+                request.continue_seek(read_pass, page_id, &page);
                 continue;
             }
 
@@ -450,7 +378,6 @@ impl Seeker {
                 read_pass,
                 page_load.page_id().clone(),
                 &page,
-                self.record_siblings,
             );
 
             if !request.is_completed() {

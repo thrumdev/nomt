@@ -63,19 +63,6 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct NeedsPage(pub PageId);
 
-/// The output of the page walker.
-pub enum Output {
-    /// A new root node.
-    ///
-    /// This is always the output when no parent page is supplied to the walker.
-    Root(Node, Vec<(PageId, PageDiff)>),
-    /// Nodes to set in the bottom layer of the parent page, indexed by the position of the node
-    /// to set.
-    ///
-    /// This is always the output when a parent page is supplied to the walker.
-    ChildPageRoots(Vec<(TriePosition, Node)>, Vec<(PageId, PageDiff)>),
-}
-
 struct StackItem {
     page_id: PageId,
     page: Page,
@@ -89,7 +76,6 @@ pub struct PageWalker<H> {
     last_position: Option<TriePosition>,
     // actual position
     position: TriePosition,
-    parent_page: Option<(PageId, Page)>,
     child_page_roots: Vec<(TriePosition, Node)>,
     root: Node,
     diffs: Vec<(PageId, PageDiff)>,
@@ -108,15 +94,11 @@ pub struct PageWalker<H> {
 impl<H: NodeHasher> PageWalker<H> {
     /// Create a new [`PageWalker`], with an optional parent page for constraining operations
     /// to a subsection of the page tree.
-    pub fn new(root: Node, page_cache: PageCache, parent_page: Option<PageId>) -> Self {
-        // UNWRAP: the parent page must be cached.
-        let parent_page = parent_page.map(|id| (id.clone(), page_cache.get(id).unwrap()));
-
+    pub fn new(root: Node, page_cache: PageCache) -> Self {
         PageWalker {
             page_cache,
             last_position: None,
             position: TriePosition::new(),
-            parent_page,
             child_page_roots: Vec::new(),
             root,
             diffs: Vec::new(),
@@ -221,7 +203,6 @@ impl<H: NodeHasher> PageWalker<H> {
         }
 
         let page_id = new_pos.page_id();
-        self.assert_page_in_scope(page_id.as_ref());
         self.last_position = Some(new_pos);
         Ok(())
     }
@@ -389,15 +370,11 @@ impl<H: NodeHasher> PageWalker<H> {
     pub fn conclude(
         mut self,
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
-    ) -> Result<Output, (NeedsPage, Self)> {
+    ) -> Result<(Node, Vec<(PageId, PageDiff)>), (NeedsPage, Self)> {
         if let Err(p) = self.compact_up(write_pass, None) {
             return Err((p, self));
         }
-        if self.parent_page.is_none() {
-            Ok(Output::Root(self.root, self.diffs))
-        } else {
-            Ok(Output::ChildPageRoots(self.child_page_roots, self.diffs))
-        }
+        ((self.root, self.diffs))
     }
 
     fn compact_up(
@@ -453,14 +430,7 @@ impl<H: NodeHasher> PageWalker<H> {
             }
 
             if self.stack.is_empty() {
-                if self.parent_page.is_none() {
-                    self.root = next_node;
-                } else {
-                    // though there are more layers to compact, we are all done. track the node
-                    // to place into the parent page and stop compacting.
-                    self.child_page_roots
-                        .push((self.position.clone(), next_node));
-                }
+                self.root = next_node;
 
                 break;
             } else {
@@ -561,8 +531,7 @@ impl<H: NodeHasher> PageWalker<H> {
         read_pass: &ReadPass<impl RegionContains<ShardIndex>>,
     ) -> Result<trie::LeafData, NeedsPage> {
         let cur_page = self.stack.last()
-            .map(|stack_item| (&stack_item.page_id, &stack_item.page))
-            .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
+            .map(|stack_item| (&stack_item.page_id, &stack_item.page));
 
         let (page, _, children) =
             crate::page_cache::locate_leaf_data::<NeedsPage>(&self.position, cur_page, |page_id| {
@@ -584,8 +553,7 @@ impl<H: NodeHasher> PageWalker<H> {
     ) {
         let (page_id, children) = {
             let cur_page = self.stack.last()
-                .map(|stack_item| (&stack_item.page_id, &stack_item.page))
-                .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
+                .map(|stack_item| (&stack_item.page_id, &stack_item.page));
 
             let (page, page_id, children) =
                 crate::page_cache::locate_leaf_data::<()>(&self.position, cur_page, |page_id| {
@@ -624,18 +592,6 @@ impl<H: NodeHasher> PageWalker<H> {
         }
     }
 
-    fn assert_page_in_scope(&self, page_id: Option<&PageId>) {
-        match page_id {
-            Some(page_id) => {
-                if let Some(ref parent_page) = self.parent_page {
-                    assert!(page_id != &parent_page.0);
-                    assert!(page_id.is_descendant_of(&parent_page.0));
-                }
-            }
-            None => assert!(self.parent_page.is_none()),
-        }
-    }
-
     // Build the stack to target a particular position.
     //
     // Precondition: the stack is either empty or contains an ancestor of the page ID the position
@@ -660,8 +616,7 @@ impl<H: NodeHasher> PageWalker<H> {
         let target = self
             .stack
             .last()
-            .map(|item| item.page_id.clone())
-            .or(self.parent_page.as_ref().map(|p| p.0.clone()));
+            .map(|item| item.page_id.clone());
 
         let start_len = self.stack.len();
         let mut cur_ancestor = page_id;
@@ -734,7 +689,7 @@ mod tests {
         let root = trie::TERMINATOR;
         let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
-        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone());
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![1];
         let trie_pos_b = trie_pos![0];
@@ -748,7 +703,7 @@ mod tests {
         let root = trie::TERMINATOR;
         let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
-        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone());
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![0];
         walker.advance(&mut write_pass, trie_pos_a.clone()).unwrap();
@@ -756,38 +711,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn advance_to_parent_page_panics() {
-        let root = trie::TERMINATOR;
-        let page_cache = PageCache::new(None, &crate::Options::new(), None);
-
-        let mut walker =
-            PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
-        let mut write_pass = page_cache.new_write_pass();
-        let trie_pos_a = trie_pos![0, 0, 0, 0, 0, 0];
-        walker.advance(&mut write_pass, trie_pos_a).unwrap();
-    }
-
-    #[test]
-    #[should_panic]
-    fn advance_to_root_with_parent_page_panics() {
-        let root = trie::TERMINATOR;
-        let page_cache = PageCache::new(None, &crate::Options::new(), None);
-
-        let mut walker =
-            PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
-        let mut write_pass = page_cache.new_write_pass();
-        walker
-            .advance(&mut write_pass, TriePosition::new())
-            .unwrap();
-    }
-
-    #[test]
     fn compacts_and_updates_root() {
         let root = trie::TERMINATOR;
         let page_cache = PageCache::new(None, &crate::Options::new(), None);
 
-        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone());
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![0, 0];
         walker
@@ -836,94 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn sets_child_page_roots() {
-        let root = trie::TERMINATOR;
-        let page_cache = PageCache::new(None, &crate::Options::new(), None);
-
-        let mut walker =
-            PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID));
-        let mut write_pass = page_cache.new_write_pass();
-        let trie_pos_a = trie_pos![0, 0, 0, 0, 0, 0, 0];
-
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_a.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 0, 0], val(1))],
-            )
-            .unwrap();
-        let trie_pos_b = trie_pos![0, 0, 0, 0, 0, 0, 1];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_b.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 0, 1], val(2))],
-            )
-            .unwrap();
-
-        let trie_pos_c = trie_pos![0, 0, 0, 0, 0, 1, 0];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_c.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 1, 0], val(3))],
-            )
-            .unwrap();
-        let trie_pos_d = trie_pos![0, 0, 0, 0, 0, 1, 1];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_d.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 1, 1], val(4))],
-            )
-            .unwrap();
-
-        match walker.conclude(&mut write_pass) {
-            Ok(Output::Root(_, _)) | Err(_) => unreachable!(),
-            Ok(Output::ChildPageRoots(page_roots, diffs)) => {
-                assert_eq!(page_roots.len(), 2);
-                assert_eq!(diffs.len(), 2);
-                let left_page_id = ROOT_PAGE_ID
-                    .child_page_id(ChildPageIndex::new(0).unwrap())
-                    .unwrap();
-                let right_page_id = ROOT_PAGE_ID
-                    .child_page_id(ChildPageIndex::new(1).unwrap())
-                    .unwrap();
-
-                let diffed_ids = diffs.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-                assert!(diffed_ids.contains(&left_page_id));
-                assert!(diffed_ids.contains(&right_page_id));
-                assert_eq!(page_roots[0].0, trie_pos![0, 0, 0, 0, 0, 0]);
-                assert_eq!(page_roots[1].0, trie_pos![0, 0, 0, 0, 0, 1]);
-
-                assert_eq!(
-                    page_roots[0].1,
-                    nomt_core::update::build_trie::<Blake3Hasher>(
-                        6,
-                        vec![
-                            (key_path![0, 0, 0, 0, 0, 0, 0], val(1)),
-                            (key_path![0, 0, 0, 0, 0, 0, 1], val(2)),
-                        ],
-                        |_, _, _| {}
-                    )
-                );
-
-                assert_eq!(
-                    page_roots[1].1,
-                    nomt_core::update::build_trie::<Blake3Hasher>(
-                        6,
-                        vec![
-                            (key_path![0, 0, 0, 0, 0, 1, 0], val(3)),
-                            (key_path![0, 0, 0, 0, 0, 1, 1], val(4)),
-                        ],
-                        |_, _, _| {}
-                    )
-                );
-            }
-        }
-    }
-
-    #[test]
     fn tracks_sibling_prev_values() {
         let root = trie::TERMINATOR;
         let page_cache = PageCache::new(None, &crate::Options::new(), None);
@@ -938,7 +778,7 @@ mod tests {
         // first build a trie with these 5 key-value pairs. it happens to have the property that
         // all the "left" nodes are leaves.
         let root = {
-            let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+            let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone());
             walker
                 .advance_and_replace(
                     &mut write_pass,
@@ -959,7 +799,7 @@ mod tests {
             }
         };
 
-        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), None);
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, page_cache.clone());
 
         let node_hash = |key_path, val| {
             Blake3Hasher::hash_leaf(&trie::LeafData {
