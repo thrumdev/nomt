@@ -180,6 +180,7 @@ fn search(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
 
 #[cfg(feature = "benchmarks")]
 pub mod benches {
+
     use crate::beatree::{
         benches::get_keys,
         leaf::node::{LeafBuilder, LEAF_NODE_BODY_SIZE},
@@ -216,6 +217,44 @@ pub mod benches {
                 BatchSize::SmallInput,
             )
         });
+
+        group.finish();
+    }
+
+    pub fn leaf_builder_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("leaf_builder");
+
+        // benchmark the leaf builder creating an almost full leaf node
+        // given different value sizes
+
+        for value_size in [4, 8, 16, 32, 64, 128] {
+            // leaf_body_size = b = n * 34 + value_size_sum
+            //                  b = n * 34 + (n * value_size)
+            //                  n = b / (34 + value_size)
+
+            let n = (LEAF_NODE_BODY_SIZE as f64 / (34 + value_size) as f64).floor() as usize;
+            let mut keys = get_keys(0, n);
+            keys.sort();
+
+            group.bench_function(BenchmarkId::new("value_len_bytes", value_size), |b| {
+                b.iter_batched(
+                    || {
+                        (
+                            keys.clone(),
+                            std::iter::repeat(12).take(value_size).collect::<Vec<u8>>(),
+                        )
+                    },
+                    |(keys, value)| {
+                        let mut leaf_builder = LeafBuilder::new(n, n * value_size);
+                        for k in keys.into_iter() {
+                            leaf_builder.push_cell(k, &value[..], false);
+                        }
+                        leaf_builder.finish();
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            });
+        }
 
         group.finish();
     }
