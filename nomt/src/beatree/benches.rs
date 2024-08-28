@@ -1,7 +1,10 @@
 #![cfg(feature = "benchmarks")]
 
 use crate::beatree::{
-    ops::update::{branch::benches::*, leaf::benches::*},
+    ops::{
+        benches::*,
+        update::{branch::benches::*, leaf::benches::*},
+    },
     Key,
 };
 
@@ -9,6 +12,7 @@ pub fn beatree_benchmark(c: &mut criterion::Criterion) {
     separate_benchmark(c);
     separator_len_benchmark(c);
     prefix_len_benchmark(c);
+    search_branch_benchmark(c);
 }
 
 // returns two keys a and b where b > a and b shares the first n bits with a
