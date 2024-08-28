@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-/// Options when opening a [`Nomt`] instance.
+/// Options when opening a [`crate::Nomt`] instance.
 pub struct Options {
     /// The path to the directory where the trie is stored.
     pub(crate) path: PathBuf,

@@ -17,9 +17,7 @@
 //! the root page has ID `0x00..00`. The child index ranges from 0 to 63 and therefore can be
 //! represented as a 6 bit string. This module exposes functions for manipulating page IDs.
 //!
-//! The [`Page`] structure wraps a borrowed slice of 32-byte data and treats it as a page.
-//! A [`PageSet`] is a simple index of pages which are loaded in memory. It can be used to build a
-//! [`PageSetCursor`] for traversing the nodes stored within pages.
+//! The [`RawPage`] structure wraps a borrowed slice of 32-byte data and treats it as a page.
 
 /// Depth of the rootless sub-binary tree stored in a page
 pub const DEPTH: usize = 6;
