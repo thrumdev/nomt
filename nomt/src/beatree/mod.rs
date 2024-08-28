@@ -25,7 +25,10 @@ mod bbn;
 pub(crate) mod branch;
 mod index;
 mod leaf;
-mod ops;
+pub(crate) mod ops;
+
+#[cfg(feature = "benchmarks")]
+pub mod benches;
 
 pub type Key = [u8; 32];
 
