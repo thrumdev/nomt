@@ -19,6 +19,7 @@ pub fn beatree_benchmark(c: &mut criterion::Criterion) {
     leaf_search_benchmark(c);
     reconstruct_key_benchmark(c);
     branch_builder_benchmark(c);
+    leaf_builder_benchmark(c);
 }
 
 // returns two keys a and b where b > a and b shares the first n bits with a
