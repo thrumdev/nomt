@@ -61,7 +61,7 @@ impl IoKind {
         }
     }
 
-    pub fn get_result(&self, res: i32) -> IoKindResult {
+    pub fn get_result(&self, res: isize) -> IoKindResult {
         match self {
             // pread returns 0 if the file has been read till the end of file
             //
@@ -71,7 +71,7 @@ impl IoKind {
             // when all previous writes have succeeded.
             IoKind::Read(_, _, _) if res == 0 => IoKindResult::Ok,
             // pread and pwrite return the number of bytes read or written
-            _ if res == PAGE_SIZE as i32 => IoKindResult::Ok,
+            _ if res == PAGE_SIZE as isize => IoKindResult::Ok,
             _ if res == -1 => IoKindResult::Err,
             _ => IoKindResult::Retry,
         }
