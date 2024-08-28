@@ -230,3 +230,61 @@ impl BranchNodeBuilder {
         self.branch
     }
 }
+
+#[cfg(feature = "benchmarks")]
+pub mod benches {
+    use crate::{
+        beatree::{
+            benches::get_keys,
+            branch::{BranchNodeBuilder, BranchNodePool},
+        },
+        io::PAGE_SIZE,
+    };
+    use criterion::{BenchmarkId, Criterion};
+
+    pub fn branch_builder_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("branch_builder");
+
+        // benchmark the branch builder creating an almost full branch node
+        // given different prefix sizes
+
+        let branch_node_pool = BranchNodePool::new();
+
+        for prefix_len_bytes in [1, 4, 8, 12, 16] {
+            // body_size = (prefix_len_bits + (separator_len_bits * n) + 7)/8 + 4 * n
+            // n = (8 * body_size - prefix_len_bits) / (separator_len_bits + 8*4)
+            let body_size_target = PAGE_SIZE - 8;
+            let prefix_len_bits = prefix_len_bytes * 8;
+            let separator_len_bits = (32 - prefix_len_bytes) * 8;
+            let n = (8 * body_size_target - prefix_len_bits) / (separator_len_bits + 8 * 4);
+
+            let mut separators = get_keys(prefix_len_bytes, n);
+            separators.sort();
+
+            group.bench_function(
+                BenchmarkId::new("prefix_len_bytes", prefix_len_bytes),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let branch_id = branch_node_pool.allocate();
+                            branch_node_pool.checkout(branch_id).unwrap()
+                        },
+                        |branch_node| {
+                            let mut branch_node_builder =
+                                BranchNodeBuilder::new(branch_node, n, prefix_len_bits, 256);
+
+                            for (index, separator) in separators.iter().enumerate() {
+                                branch_node_builder.push(separator.clone(), index as u32);
+                            }
+
+                            branch_node_builder.finish();
+                        },
+                        criterion::BatchSize::SmallInput,
+                    )
+                },
+            );
+        }
+
+        group.finish();
+    }
+}
