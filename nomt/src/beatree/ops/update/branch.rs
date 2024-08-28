@@ -488,3 +488,27 @@ impl BranchBulkSplitter {
         self.total_count += count;
     }
 }
+
+#[cfg(feature = "benchmarks")]
+pub mod benches {
+    use criterion::{BenchmarkId, Criterion};
+
+    pub fn separator_len_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("separator_len");
+
+        // n_bytes represents the amount of bytes set to one
+        // from the beginning of the key
+        for n_bytes in [16, 20, 24, 28, 31].into_iter().rev() {
+            let mut separator = [0; 32];
+            for byte in separator.iter_mut().take(n_bytes) {
+                *byte = 255;
+            }
+
+            group.bench_function(BenchmarkId::new("zero_bytes", 32 - n_bytes), |b| {
+                b.iter(|| super::separator_len(&separator));
+            });
+        }
+
+        group.finish();
+    }
+}
