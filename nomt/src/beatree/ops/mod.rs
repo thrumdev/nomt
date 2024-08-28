@@ -91,3 +91,80 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
     let node_pointer = branch.node_pointer(high - 1);
     Some((high - 1, node_pointer.into()))
 }
+
+#[cfg(feature = "benchmarks")]
+pub mod benches {
+    use crate::{
+        beatree::{
+            branch::{node::BranchNodeBuilder, BranchNodePool},
+            Key,
+        },
+        io::PAGE_SIZE,
+    };
+    use criterion::{BenchmarkId, Criterion};
+    use rand::{Rng, RngCore};
+
+    // Get a vector containing `n` random keys that share the first `shared_bytes`
+    fn get_keys(shared_bytes: usize, n: usize) -> Vec<Key> {
+        let mut rand = rand::thread_rng();
+        let mut prefix = [0; 32];
+        rand.fill_bytes(&mut prefix[0..shared_bytes]);
+
+        let mut keys = vec![];
+        for _ in 0..n {
+            let mut key = prefix.clone();
+            rand.fill_bytes(&mut key[shared_bytes..]);
+            keys.push(key);
+        }
+
+        keys
+    }
+
+    pub fn search_branch_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("search_branch");
+        let mut rand = rand::thread_rng();
+
+        let branch_node_pool = BranchNodePool::new();
+
+        for prefix_len_bytes in [1, 4, 8, 12, 16] {
+            // fill the branch node with as many separators as possible
+            //
+            // body_size = (prefix_len_bits + (separator_len_bits * n) + 7)/8 + 4 * n
+            // n = (8 * body_size - prefix_len_bits) / (separator_len_bits + 8*4)
+            let body_size_target = PAGE_SIZE - 8;
+            let prefix_len_bits = prefix_len_bytes * 8;
+            let separator_len_bits = (32 - prefix_len_bytes) * 8;
+            let n = (8 * body_size_target - prefix_len_bits) / (separator_len_bits + 8 * 4);
+
+            let mut separators = get_keys(prefix_len_bytes, n);
+            separators.sort();
+
+            let branch_id = branch_node_pool.allocate();
+            let branch_node = branch_node_pool.checkout(branch_id).unwrap();
+            let mut branch_node_builder =
+                BranchNodeBuilder::new(branch_node, n, prefix_len_bits, 256);
+
+            for (index, separator) in separators.iter().enumerate() {
+                branch_node_builder.push(separator.clone(), index as u32);
+            }
+
+            let branch = branch_node_builder.finish();
+
+            group.bench_function(
+                BenchmarkId::new("prefix_len_bytes", prefix_len_bytes),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let index = rand.gen_range(0..separators.len());
+                            separators[index].clone()
+                        },
+                        |separator| super::search_branch(&branch, separator),
+                        criterion::BatchSize::SmallInput,
+                    )
+                },
+            );
+        }
+
+        group.finish();
+    }
+}
