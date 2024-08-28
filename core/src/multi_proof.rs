@@ -7,7 +7,7 @@ use crate::{
     trie::Node,
 };
 
-#[cfg(not(features = "std"))]
+#[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
 /// This struct includes the terminal node and its depth
