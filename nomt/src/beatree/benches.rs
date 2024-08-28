@@ -1,6 +1,7 @@
 #![cfg(feature = "benchmarks")]
 
 use crate::beatree::{
+    branch::node::benches::*,
     leaf::node::benches::*,
     ops::{
         benches::*,
@@ -17,6 +18,7 @@ pub fn beatree_benchmark(c: &mut criterion::Criterion) {
     search_branch_benchmark(c);
     leaf_search_benchmark(c);
     reconstruct_key_benchmark(c);
+    branch_builder_benchmark(c);
 }
 
 // returns two keys a and b where b > a and b shares the first n bits with a
