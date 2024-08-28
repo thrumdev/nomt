@@ -326,3 +326,29 @@ fn preload_leaves(
 
     Ok(leaf_pages)
 }
+
+#[cfg(feature = "benchmarks")]
+pub mod benches {
+    use bitvec::{prelude::Msb0, view::BitView};
+    use criterion::{BenchmarkId, Criterion};
+    use rand::RngCore;
+
+    pub fn reconstruct_key_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("reconstruct_key");
+
+        for prefix_bytes in [0, 4, 8, 12, 16, 20] {
+            let mut rand = rand::thread_rng();
+            let mut key = [0; 32];
+            rand.fill_bytes(&mut key);
+
+            let prefix = &key.view_bits::<Msb0>()[0..prefix_bytes * 8];
+            let separator = &key.view_bits::<Msb0>()[prefix_bytes * 8..];
+
+            group.bench_function(BenchmarkId::new("prefix_len_bytes", prefix_bytes), |b| {
+                b.iter(|| super::reconstruct_key(prefix, separator))
+            });
+        }
+
+        group.finish();
+    }
+}
