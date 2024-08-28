@@ -20,7 +20,7 @@ use super::BranchId;
 use branch::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
 use leaf::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater};
 
-mod branch;
+pub(crate) mod branch;
 pub(crate) mod leaf;
 
 // All nodes less than this body size will be merged with a neighboring node.
