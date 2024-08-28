@@ -85,7 +85,7 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
                 let io_uring_res = completion_event.result();
                 let syscall_result = if io_uring_res >= 0 { io_uring_res } else { -1 };
 
-                let result = match command.kind.get_result(syscall_result) {
+                let result = match command.kind.get_result(syscall_result as isize) {
                     IoKindResult::Ok => Ok(()),
                     IoKindResult::Err => Err(std::io::Error::from_raw_os_error(io_uring_res.abs())),
                     IoKindResult::Retry => {

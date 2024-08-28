@@ -1,6 +1,5 @@
+use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender};
-
-use super::{CompleteIo, IoCommand, IoKind, IoPacket, PAGE_SIZE};
 
 // max number of inflight requests is bounded by the threadpool.
 const MAX_IN_FLIGHT: usize = 64;
