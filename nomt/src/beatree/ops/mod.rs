@@ -96,29 +96,13 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
 pub mod benches {
     use crate::{
         beatree::{
+            benches::get_keys,
             branch::{node::BranchNodeBuilder, BranchNodePool},
-            Key,
         },
         io::PAGE_SIZE,
     };
     use criterion::{BenchmarkId, Criterion};
-    use rand::{Rng, RngCore};
-
-    // Get a vector containing `n` random keys that share the first `shared_bytes`
-    fn get_keys(shared_bytes: usize, n: usize) -> Vec<Key> {
-        let mut rand = rand::thread_rng();
-        let mut prefix = [0; 32];
-        rand.fill_bytes(&mut prefix[0..shared_bytes]);
-
-        let mut keys = vec![];
-        for _ in 0..n {
-            let mut key = prefix.clone();
-            rand.fill_bytes(&mut key[shared_bytes..]);
-            keys.push(key);
-        }
-
-        keys
-    }
+    use rand::Rng;
 
     pub fn search_branch_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("search_branch");

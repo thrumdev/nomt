@@ -491,7 +491,7 @@ impl BranchBulkSplitter {
 
 #[cfg(feature = "benchmarks")]
 pub mod benches {
-    use crate::beatree::benches::get_keys;
+    use crate::beatree::benches::get_key_pair;
     use criterion::{BenchmarkId, Criterion};
 
     pub fn separator_len_benchmark(c: &mut Criterion) {
@@ -517,7 +517,7 @@ pub mod benches {
         let mut group = c.benchmark_group("prefix_len");
 
         for prefix_len_bytes in [0, 4, 8, 12, 16] {
-            let (key1, key2) = get_keys(prefix_len_bytes);
+            let (key1, key2) = get_key_pair(prefix_len_bytes);
             group.bench_function(BenchmarkId::new("shared_bytes", prefix_len_bytes), |b| {
                 b.iter(|| super::prefix_len(&key1, &key2));
             });
