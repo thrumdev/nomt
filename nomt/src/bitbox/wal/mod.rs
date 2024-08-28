@@ -1,7 +1,7 @@
 use anyhow::bail;
 
 use crate::io::PAGE_SIZE;
-use std::sync::Arc;
+use std::{fs::File, io::Seek, sync::Arc};
 
 struct Mmap {
     ptr: *mut u8,
@@ -35,6 +35,7 @@ impl Drop for Mmap {
     }
 }
 
+const WAL_ENTRY_TAG_END: u8 = 0;
 const WAL_ENTRY_TAG_CLEAR: u8 = 1;
 const WAL_ENTRY_TAG_UPDATE: u8 = 2;
 
@@ -121,6 +122,8 @@ impl WalBlobBuilder {
     ///
     /// The pointer is aligned to the page size.
     pub fn finalize(&mut self) -> (*mut u8, usize) {
+        self.write_byte(WAL_ENTRY_TAG_END);
+
         let ptr = self.mmap.ptr;
         // round up to the nearest page size.
         let len = (self.cur + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
@@ -153,7 +156,7 @@ impl WalBlobBuilder {
 
 unsafe impl Send for WalBlobBuilder {}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum WalEntry {
     Update {
         /// The unique identifier of the page being updated.
@@ -172,54 +175,68 @@ pub enum WalEntry {
     },
 }
 
-pub struct WalBlobReader<'a> {
-    wal_fd: &'a std::fs::File,
+pub struct WalBlobReader {
+    wal: Vec<u8>,
+    offset: usize,
 }
-impl<'a> WalBlobReader<'a> {
+impl WalBlobReader {
     /// Creates a new WAL blob reader.
     ///
     /// The `wal_fd` is expected to be positioned at the start of the WAL file. The file must be
     /// a multiple of the page size.
-    pub(crate) fn new(wal_fd: &'a std::fs::File) -> anyhow::Result<Self> {
+    pub(crate) fn new(mut wal_fd: &File) -> anyhow::Result<Self> {
+        use crate::io::Page;
+        use std::io::Read;
+
         let stat = wal_fd.metadata()?;
-        if stat.len() % PAGE_SIZE as u64 != 0 {
+        let file_size = stat.len() as usize;
+        if file_size % PAGE_SIZE != 0 {
             anyhow::bail!("WAL file size is not a multiple of the page size");
         }
-        Ok(Self { wal_fd })
+
+        wal_fd.seek(std::io::SeekFrom::Start(0))?;
+
+        // Read the entire WAL file into memory. We do it page-by-page because WAL fd is opened
+        // with O_DIRECT flag, and that means we need to provide aligned buffers.
+        let mut wal = Vec::with_capacity(file_size);
+        let mut buffer = Box::new(Page::zeroed());
+        loop {
+            match wal_fd.read_exact(&mut buffer[..]) {
+                Ok(_) => wal.extend_from_slice(&buffer[..]),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(Self { wal, offset: 0 })
     }
 
     /// Reads the next entry from the WAL file.
     ///
     /// Returns `None` if the end of the file is reached.
     pub fn read_entry(&mut self) -> anyhow::Result<Option<WalEntry>> {
-        use crate::io::Page;
-        use std::io::Read;
-
-        let mut buffer = Box::new(Page::zeroed());
-        self.wal_fd.read_exact(&mut buffer[..])?;
-
-        let entry_tag = buffer[0];
+        let entry_tag = self.read_byte()?;
         match entry_tag {
+            WAL_ENTRY_TAG_END => Ok(None),
             WAL_ENTRY_TAG_CLEAR => {
-                let bucket = u64::from_le_bytes(buffer[1..9].try_into().unwrap());
+                let bucket = self.read_u64()?;
                 Ok(Some(WalEntry::Clear { bucket }))
             }
             WAL_ENTRY_TAG_UPDATE => {
-                let page_id: [u8; 32] = buffer[1..33].try_into().unwrap();
-                let page_diff: [u8; 16] = buffer[33..49].try_into().unwrap();
+                let page_id: [u8; 32] = self.read_buf()?;
+                let page_diff: [u8; 16] = self.read_buf()?;
 
                 // Calculate the number of changed nodes based on the page_diff
                 let changed_count =
                     page_diff.iter().map(|&byte| byte.count_ones()).sum::<u32>() as usize;
 
                 let mut changed_nodes = Vec::with_capacity(changed_count);
-                let mut offset = 49;
                 for _ in 0..changed_count {
-                    changed_nodes.push(buffer[offset..offset + 32].try_into().unwrap());
-                    offset += 32;
+                    let node = self.read_buf::<32>()?;
+                    changed_nodes.push(node);
                 }
 
-                let bucket = u64::from_le_bytes(buffer[offset..offset + 8].try_into().unwrap());
+                let bucket = self.read_u64()?;
 
                 Ok(Some(WalEntry::Update {
                     page_id,
@@ -230,5 +247,114 @@ impl<'a> WalBlobReader<'a> {
             }
             _ => bail!("unknown WAL entry tag: {entry_tag}"),
         }
+    }
+
+    /// Reads a single byte from the WAL file.
+    fn read_byte(&mut self) -> anyhow::Result<u8> {
+        if self.offset >= self.wal.len() {
+            bail!("Unexpected end of WAL file");
+        }
+        let byte = self.wal[self.offset];
+        self.offset += 1;
+        Ok(byte)
+    }
+
+    /// Reads a [u8; N] array from the WAL file.
+    fn read_buf<const N: usize>(&mut self) -> anyhow::Result<[u8; N]> {
+        if self.offset + N > self.wal.len() {
+            bail!("Unexpected end of WAL file");
+        }
+        let array = self.wal[self.offset..self.offset + N]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to read [u8; {N}] from WAL file"))?;
+        self.offset += N;
+        Ok(array)
+    }
+
+    /// Reads a u64 from the WAL file in little-endian format.
+    fn read_u64(&mut self) -> anyhow::Result<u64> {
+        let buf = self.read_buf::<8>()?;
+        Ok(u64::from_le_bytes(buf))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::OpenOptions, io::Write as _, os::unix::fs::OpenOptionsExt as _};
+
+    use super::*;
+
+    #[test]
+    fn test_write_read() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let wal_filename = tempdir.path().join("wal");
+        std::fs::create_dir_all(tempdir.path()).unwrap();
+        let mut wal_fd = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(target_os = "linux")]
+            options.custom_flags(libc::O_DIRECT);
+            options.open(&wal_filename).unwrap()
+        };
+
+        let mut builder = WalBlobBuilder::new();
+        builder.write_clear(0);
+        builder.write_update([0; 32], [0; 16], vec![].into_iter(), 0);
+        builder.write_clear(1);
+        builder.write_update(
+            [1; 32],
+            hex_literal::hex!("01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"),
+            vec![[1; 32]].into_iter(),
+            1,
+        );
+        builder.write_update(
+            [2; 32],
+            [0xff; 16],
+            (0..128).map(|x| [x; 32]),
+            2,
+        );
+        let (ptr, len) = builder.finalize();
+        wal_fd
+            .write_all(unsafe { std::slice::from_raw_parts(ptr, len) })
+            .unwrap();
+        wal_fd.sync_data().unwrap();
+
+        let mut reader = WalBlobReader::new(&wal_fd).unwrap();
+        assert_eq!(
+            reader.read_entry().unwrap(),
+            Some(WalEntry::Clear { bucket: 0 })
+        );
+        assert_eq!(
+            reader.read_entry().unwrap(),
+            Some(WalEntry::Update {
+                page_id: [0; 32],
+                page_diff: [0; 16],
+                changed_nodes: vec![],
+                bucket: 0,
+            })
+        );
+        assert_eq!(
+            reader.read_entry().unwrap(),
+            Some(WalEntry::Clear { bucket: 1 })
+        );
+        assert_eq!(
+            reader.read_entry().unwrap(),
+            Some(WalEntry::Update {
+                page_id: [1; 32],
+                page_diff: hex_literal::hex!("01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"),
+                changed_nodes: vec![[1; 32]],
+                bucket: 1,
+            })
+        );
+        assert_eq!(
+            reader.read_entry().unwrap(),
+            Some(WalEntry::Update {
+                page_id: [2; 32],
+                page_diff: [0xff; 16],
+                changed_nodes: (0..128).map(|x| [x; 32]).collect(),
+                bucket: 2,
+            })
+        );
+        assert_eq!(reader.read_entry().unwrap(), None);
     }
 }

@@ -38,6 +38,7 @@ loom = { version = "0.7", features = ["checkpoint"] }
 [dev-dependencies]
 rand_pcg = "0.3.1"
 hex-literal = "0.4"
+tempfile = "3.8.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
