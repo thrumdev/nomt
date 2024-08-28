@@ -177,3 +177,46 @@ fn encode_cell_pointer(cell: &mut [u8], key: [u8; 32], offset: usize, overflow: 
 fn search(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
     cell_pointers.binary_search_by(|cell| cell[0..32].cmp(key))
 }
+
+#[cfg(feature = "benchmarks")]
+pub mod benches {
+    use crate::beatree::{
+        benches::get_keys,
+        leaf::node::{LeafBuilder, LEAF_NODE_BODY_SIZE},
+    };
+    use criterion::{BatchSize, BenchmarkId, Criterion};
+    use rand::Rng;
+
+    pub fn leaf_search_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("search_leaf");
+        let mut rand = rand::thread_rng();
+
+        // we fill the leaf with as much as possible 4B values
+        // leaf_body_size = b = n * 34 + value_size_sum
+        //                    = n * 34 + (n * 4)
+        //                  n = b / 38
+
+        let n = LEAF_NODE_BODY_SIZE / 38;
+        let mut leaf_builder = LeafBuilder::new(n, n * 4);
+
+        let mut keys = get_keys(0, n);
+        keys.sort();
+        for (index, k) in keys.iter().enumerate() {
+            leaf_builder.push_cell(k.clone(), &(index as u32).to_le_bytes()[..], false);
+        }
+        let leaf = leaf_builder.finish();
+
+        group.bench_function(BenchmarkId::new("full_leaf", format!("{}-keys", n)), |b| {
+            b.iter_batched(
+                || {
+                    let index = rand.gen_range(0..keys.len());
+                    keys[index].clone()
+                },
+                |key| leaf.get(&key),
+                BatchSize::SmallInput,
+            )
+        });
+
+        group.finish();
+    }
+}

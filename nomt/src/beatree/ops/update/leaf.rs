@@ -470,14 +470,14 @@ fn separate(a: &Key, b: &Key) -> Key {
 
 #[cfg(feature = "benchmarks")]
 pub mod benches {
-    use crate::beatree::benches::get_keys;
+    use crate::beatree::benches::get_key_pair;
     use criterion::{BenchmarkId, Criterion};
 
     pub fn separate_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("separate");
 
         for shared_bytes in [0, 4, 8, 12, 16] {
-            let (key1, key2) = get_keys(shared_bytes);
+            let (key1, key2) = get_key_pair(shared_bytes);
             group.bench_function(BenchmarkId::new("shared_bytes", shared_bytes), |b| {
                 b.iter(|| super::separate(&key1, &key2));
             });
