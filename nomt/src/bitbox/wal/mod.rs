@@ -1,6 +1,6 @@
 use anyhow::bail;
 
-use crate::io::PAGE_SIZE;
+use crate::{io::PAGE_SIZE, page_diff::PageDiff};
 use std::{fs::File, io::Seek, sync::Arc};
 
 struct Mmap {
@@ -72,7 +72,7 @@ impl WalBlobBuilder {
     pub fn write_update(
         &mut self,
         page_id: [u8; 32],
-        page_diff: [u8; 16],
+        page_diff: &PageDiff,
         changed: impl Iterator<Item = [u8; 32]>,
         bucket_index: u64,
     ) {
@@ -80,7 +80,7 @@ impl WalBlobBuilder {
             // SAFETY: Those do not overlap with the mmap.
             self.write_byte(WAL_ENTRY_TAG_UPDATE);
             self.write(&page_id);
-            self.write(&page_diff);
+            self.write(&page_diff.as_bytes());
             for changed in changed {
                 self.write(&changed);
             }
@@ -162,9 +162,10 @@ pub enum WalEntry {
         /// The unique identifier of the page being updated.
         page_id: [u8; 32],
         /// A bitmap where each bit indicates whether the node at the corresponding index was
-        /// changed by this entry.
-        page_diff: [u8; 16],
-        /// The length of this array is the same as the count of ones in `page_diff`.
+        /// changed by this update.
+        page_diff: PageDiff,
+        /// Nodes that were changed by this update. The length of this array must be consistent with
+        /// the number of ones in `page_diff`.
         changed_nodes: Vec<[u8; 32]>,
         /// The bucket index which is being updated.
         bucket: u64,
@@ -225,11 +226,10 @@ impl WalBlobReader {
             WAL_ENTRY_TAG_UPDATE => {
                 let page_id: [u8; 32] = self.read_buf()?;
                 let page_diff: [u8; 16] = self.read_buf()?;
+                let page_diff = PageDiff::from_bytes(page_diff)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid page diff"))?;
 
-                // Calculate the number of changed nodes based on the page_diff
-                let changed_count =
-                    page_diff.iter().map(|&byte| byte.count_ones()).sum::<u32>() as usize;
-
+                let changed_count = page_diff.count();
                 let mut changed_nodes = Vec::with_capacity(changed_count);
                 for _ in 0..changed_count {
                     let node = self.read_buf::<32>()?;
@@ -299,18 +299,35 @@ mod tests {
 
         let mut builder = WalBlobBuilder::new();
         builder.write_clear(0);
-        builder.write_update([0; 32], [0; 16], vec![].into_iter(), 0);
+        builder.write_update(
+            [0; 32],
+            &PageDiff::from_bytes(hex_literal::hex!(
+                "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+            ))
+            .unwrap(),
+            vec![].into_iter(),
+            0,
+        );
         builder.write_clear(1);
         builder.write_update(
             [1; 32],
-            hex_literal::hex!("01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"),
+            &PageDiff::from_bytes(hex_literal::hex!(
+                "01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+            ))
+            .unwrap(),
             vec![[1; 32]].into_iter(),
             1,
         );
         builder.write_update(
             [2; 32],
-            [0xff; 16],
-            (0..128).map(|x| [x; 32]),
+            &{
+                let mut diff = PageDiff::default();
+                for i in 0..126 {
+                    diff.set_changed(i);
+                }
+                diff
+            },
+            (0..126).map(|x| [x; 32]),
             2,
         );
         let (ptr, len) = builder.finalize();
@@ -328,7 +345,7 @@ mod tests {
             reader.read_entry().unwrap(),
             Some(WalEntry::Update {
                 page_id: [0; 32],
-                page_diff: [0; 16],
+                page_diff: PageDiff::default(),
                 changed_nodes: vec![],
                 bucket: 0,
             })
@@ -341,7 +358,11 @@ mod tests {
             reader.read_entry().unwrap(),
             Some(WalEntry::Update {
                 page_id: [1; 32],
-                page_diff: hex_literal::hex!("01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"),
+                page_diff: {
+                    let mut diff = PageDiff::default();
+                    diff.set_changed(0);
+                    diff
+                },
                 changed_nodes: vec![[1; 32]],
                 bucket: 1,
             })
@@ -350,8 +371,14 @@ mod tests {
             reader.read_entry().unwrap(),
             Some(WalEntry::Update {
                 page_id: [2; 32],
-                page_diff: [0xff; 16],
-                changed_nodes: (0..128).map(|x| [x; 32]).collect(),
+                page_diff: {
+                    let mut diff = PageDiff::default();
+                    for i in 0..126 {
+                        diff.set_changed(i);
+                    }
+                    diff
+                },
+                changed_nodes: (0..126).map(|x| [x; 32]).collect(),
                 bucket: 2,
             })
         );

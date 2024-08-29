@@ -3,7 +3,7 @@
 use crate::{
     beatree, bitbox,
     io::{self, IoPool, Page},
-    page_cache::PageDiff,
+    page_diff::PageDiff,
 };
 use meta::Meta;
 use nomt_core::{page_id::PageId, trie::KeyPath};

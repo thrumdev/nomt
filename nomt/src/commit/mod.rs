@@ -13,14 +13,14 @@ use nomt_core::{
 
 use std::sync::{Arc, Barrier};
 
-use threadpool::ThreadPool;
-
 use crate::{
-    page_cache::{PageCache, PageDiff, ShardIndex},
+    page_cache::{PageCache, ShardIndex},
+    page_diff::PageDiff,
     rw_pass_cell::WritePassEnvelope,
     store::Store,
     Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
+use threadpool::ThreadPool;
 
 mod worker;
 
