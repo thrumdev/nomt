@@ -156,7 +156,9 @@ fn warm_up_phase(
             continue;
         }
         seeker.submit_all(&read_pass)?;
-        seeker.recv_page(&read_pass)?;
+        if seeker.has_live_requests() {
+            seeker.recv_page(&read_pass)?;
+        }
     }
 
     Ok(warm_ups)
@@ -251,9 +253,9 @@ fn drive_page_fetch(
             Some(Completion::SinglePage) => return Ok(()),
             Some(_) => continue,
             None => {
-                let blocked = seeker.submit_all(read_pass)?;
-                if !blocked {
-                    seeker.recv_page(read_pass)?;
+                seeker.submit_all(read_pass)?;
+                if seeker.has_live_requests() {
+                    seeker.recv_page(&read_pass)?;
                 }
             }
         }
@@ -523,7 +525,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
             }
 
             let blocked = seeker.submit_all(self.write_pass.downgrade())?;
-            if !seeker.has_room() {
+            if !seeker.has_room() && seeker.has_live_requests() {
                 // no way to push work until at least one page fetch has concluded.
                 seeker.recv_page(self.write_pass.downgrade())?;
                 continue;

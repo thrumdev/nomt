@@ -211,6 +211,10 @@ impl Seeker {
         self.requests.front().map(|request| &request.key)
     }
 
+    pub fn has_live_requests(&self) -> bool {
+        self.idle_page_loads.len() < self.page_load_slab.len()
+    }
+
     /// Try to submit as many requests as possible. Returns `true` if blocked.
     pub fn submit_all(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<bool> {
         let blocked = self.submit_idle_page_loads(read_pass)?
