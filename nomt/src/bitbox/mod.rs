@@ -1,4 +1,3 @@
-use bitvec::{order::Lsb0, view::BitView};
 use crossbeam::channel::{TryRecvError, TrySendError};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, RwLock};
@@ -11,7 +10,7 @@ use std::{
 
 use crate::{
     io::{IoCommand, IoHandle, IoKind, Page, PAGE_SIZE},
-    page_cache::PageDiff,
+    page_diff::PageDiff,
 };
 
 use self::{ht_file::HTOffsets, meta_map::MetaMap};
@@ -100,8 +99,8 @@ impl DB {
 
                     wal_blob_builder.write_update(
                         page_id.encode(),
-                        page_diff.get_raw(),
-                        get_changed(&page, &page_diff),
+                        &page_diff,
+                        page_diff.pack_changed_nodes(&page),
                         bucket,
                     );
 
@@ -187,11 +186,14 @@ fn recover(
                 ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
                 ht_fd.read_exact(&mut page)?;
 
-                for (i, node) in page_diff.view_bits::<Lsb0>().iter_ones().zip(changed_nodes) {
-                    let start = i * 32;
-                    let end = start + 32;
-                    page[start..end].copy_from_slice(&node[..]);
+                if page_diff.count() != changed_nodes.len() {
+                    anyhow::bail!(
+                        "mismatched number of changed nodes: {} != {}",
+                        page_diff.count(),
+                        changed_nodes.len()
+                    );
                 }
+                page_diff.unpack_changed_nodes(&changed_nodes, &mut page);
 
                 ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
                 ht_fd.write_all(&page)?;
@@ -477,14 +479,6 @@ impl BucketAllocator {
     pub fn free(&mut self, bucket_index: BucketIndex) {
         self.changed_buckets.insert(bucket_index.0, false);
     }
-}
-
-fn get_changed<'a>(page: &'a Page, page_diff: &PageDiff) -> impl Iterator<Item = [u8; 32]> + 'a {
-    page_diff.get_changed().into_iter().map(|changed| {
-        let start = changed * 32;
-        let end = start + 32;
-        page[start..end].try_into().unwrap()
-    })
 }
 
 fn hash_page_id(page_id: &PageId, seed: &[u8; 16]) -> u64 {

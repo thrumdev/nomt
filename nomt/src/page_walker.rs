@@ -51,7 +51,8 @@ use nomt_core::{
 };
 
 use crate::{
-    page_cache::{Page, PageCache, PageDiff, ShardIndex},
+    page_cache::{Page, PageCache, ShardIndex},
+    page_diff::PageDiff,
     rw_pass_cell::{ReadPass, RegionContains, WritePass},
 };
 

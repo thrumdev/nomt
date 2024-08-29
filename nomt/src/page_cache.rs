@@ -2,12 +2,12 @@ use crate::{
     bitbox::BucketIndex,
     io,
     metrics::{Metric, Metrics},
+    page_diff::PageDiff,
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, Region, RegionContains, RwPassCell, RwPassDomain, WritePass},
     store::Transaction,
     Options,
 };
-use bitvec::prelude::*;
 use fxhash::FxBuildHasher;
 use lru::LruCache;
 use nomt_core::{
@@ -122,32 +122,6 @@ pub fn page_is_empty(page: &[u8]) -> bool {
     // 2. if both are empty, then the whole page is empty. this is because internal nodes
     //    with both children as terminals are not allowed to exist.
     &page[..64] == [0u8; 64].as_slice()
-}
-
-/// Tracks which nodes have changed within a page.
-#[derive(Debug, Default, Clone)]
-pub struct PageDiff {
-    /// A bitfield indicating the number of updated slots
-    updated_slots: BitArray<[u8; 16], Lsb0>,
-}
-
-impl PageDiff {
-    /// Note that some 32-byte slot in the page data has changed.
-    /// The acceptable range is 0..NODES_PER_PAGE
-    pub fn set_changed(&mut self, slot_index: usize) {
-        assert!(slot_index < NODES_PER_PAGE);
-        self.updated_slots.set(slot_index, true);
-    }
-
-    /// Get a vector containing the indexes of all changed nodes
-    pub fn get_changed(&self) -> Vec<usize> {
-        self.updated_slots.iter_ones().collect()
-    }
-
-    /// Get raw bytes representing the PageDiff
-    pub fn get_raw(&self) -> [u8; 16] {
-        self.updated_slots.data
-    }
 }
 
 /// A handle to the page.
