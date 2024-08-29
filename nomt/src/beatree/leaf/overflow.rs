@@ -104,27 +104,54 @@ pub fn encode_cell(value_size: usize, pages: &[PageNumber]) -> Vec<u8> {
 }
 
 fn total_needed_pages(value_size: usize) -> usize {
-    let mut encoded_size = value_size;
-    let mut total_pages = needed_pages(encoded_size);
-    let mut last_pages_in_pages = 0;
-
     // the encoded size is equal to the size of the value plus the number of node pointers that
     // will appear in pages.
-    // TODO: there's probably a closed form for this.
-    loop {
-        // account for the fact that some of the pages are going to be in the cell and not
-        // in pages, therefore they don't increase the payload size.
-        let pages_in_pages = total_pages.saturating_sub(MAX_OVERFLOW_CELL_NODE_POINTERS);
-        encoded_size += (pages_in_pages - last_pages_in_pages) * 4;
-        last_pages_in_pages = pages_in_pages;
-        let new_total = needed_pages(encoded_size);
-        if new_total == total_pages {
-            break;
-        }
-        total_pages = new_total;
+    let needed_pages_raw_value = needed_pages(value_size);
+
+    if needed_pages_raw_value <= MAX_OVERFLOW_CELL_NODE_POINTERS {
+        // less than MAX_OVERFLOW_CELL_NODE_POINTERS,
+        // space available in the leaf is enough
+        return needed_pages_raw_value;
     }
 
-    total_pages
+    // not all needed_pages_raw_values are used to store values.
+    // Therefore, there will be unused space in one of the pages
+    // to store other page numbers
+    let bytes_left = (needed_pages_raw_value * BODY_SIZE) - value_size;
+    let available_page_numbers = bytes_left / 4;
+
+    if needed_pages_raw_value <= MAX_OVERFLOW_CELL_NODE_POINTERS + available_page_numbers {
+        // there are enough available bytes to store all the remaining page numbers
+        return needed_pages_raw_value;
+    }
+
+    // additional pages are required
+    //
+    // given:
+    // value_size = vs
+    // MAX_OVERFLOW_CELL_NODE_POINTERS = M
+    // needed_pages_raw_value = np
+    // body_size = bs
+    // required_additional_pages = rp
+    //
+    // total bytes available:
+    // tot_bytes = (np + rp) * bs
+    //
+    // only a portion of the total available bytes will be used:
+    // used_bytes = vs - ((np - M)) * 4 - (rp * 4)
+    //
+    // we want tot_bytes - used_bytes to be positive and as little as possible,
+    // the only variable is rp, thus we can make everything dependent on rp:
+    //
+    // rp = ceil(n / (bs - 4))
+    // where n = (vs + (np - M) * 4 - (np * bs))
+
+    let n = value_size + (needed_pages_raw_value - MAX_OVERFLOW_CELL_NODE_POINTERS) * 4
+        - (needed_pages_raw_value * BODY_SIZE);
+
+    let required_additional_pages = (n + BODY_SIZE - 3) / (BODY_SIZE - 4);
+
+    needed_pages_raw_value + required_additional_pages
 }
 
 fn needed_pages(size: usize) -> usize {
@@ -225,6 +252,17 @@ mod tests {
         assert_eq!(
             total_needed_pages(size),
             MAX_OVERFLOW_CELL_NODE_POINTERS + 2
+        );
+    }
+
+    #[test]
+    fn total_needed_pages_additional_pages_adds_more() {
+        let size = (BODY_SIZE * MAX_OVERFLOW_CELL_NODE_POINTERS) + (BODY_SIZE * MAX_PNS);
+        assert_eq!(
+            total_needed_pages(size),
+            // one page is used to save MAX_PNS page numbers,
+            // and another page is used to save the page number of the previous one
+            MAX_OVERFLOW_CELL_NODE_POINTERS + MAX_PNS + 1 + 1
         );
     }
 
