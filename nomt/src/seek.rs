@@ -207,6 +207,10 @@ impl Seeker {
         self.page_loads.len() < MAX_INFLIGHT
     }
 
+    pub fn first_key(&self) -> Option<&KeyPath> {
+        self.requests.front().map(|request| &request.key)
+    }
+
     /// Try to submit as many requests as possible. Returns `true` if blocked.
     pub fn submit_all(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<bool> {
         let blocked = self.submit_idle_page_loads(read_pass)?

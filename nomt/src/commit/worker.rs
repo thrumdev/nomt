@@ -20,7 +20,10 @@ use nomt_core::{
     trie::{KeyPath, Node, NodeHasher, ValueHash},
 };
 
-use std::sync::{Arc, Barrier};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Barrier},
+};
 
 use super::{
     CommitCommand, CommitShared, KeyReadWrite, RootPagePending, ToWorker, WarmUpCommand,
@@ -63,10 +66,11 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
 
     let page_loader = store.page_loader();
     let page_io_receiver = page_loader.io_handle().receiver().clone();
-    let seeker = Seeker::new(root, page_cache.clone(), page_loader, false);
+    let seeker = Seeker::new(root, page_cache.clone(), page_loader, true);
 
-    if let Err(_) = warm_up_phase(&comms, read_pass, page_io_receiver, seeker) {
-        return;
+    let warm_ups = match warm_up_phase(&comms, read_pass, page_io_receiver, seeker) {
+        Ok(warm_ups) => warm_ups,
+        Err(_) => return,
     };
 
     match comms.commit_rx.recv() {
@@ -81,7 +85,7 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
                 command.shared.witness,
             );
 
-            let output = match commit::<H>(root, page_cache, seeker, command) {
+            let output = match commit::<H>(root, page_cache, seeker, command, warm_ups) {
                 Err(_) => return,
                 Ok(o) => o,
             };
@@ -95,7 +99,7 @@ fn warm_up_phase(
     read_pass: ReadPass<ShardIndex>,
     page_io_receiver: Receiver<crate::io::CompleteIo>,
     mut seeker: Seeker,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HashMap<KeyPath, Seek>> {
     let mut select_all = Select::new();
     let warmup_idx = select_all.recv(&comms.warmup_rx);
     let commit_idx = select_all.recv(&comms.commit_rx);
@@ -105,8 +109,11 @@ fn warm_up_phase(
     let commit_no_work_idx = select_no_work.recv(&comms.commit_rx);
     let page_no_work_idx = select_no_work.recv(&page_io_receiver);
 
+    let mut warm_ups = HashMap::new();
+
     loop {
-        if let Some(_) = seeker.take_completion() {
+        if let Some(Completion::Seek(result)) = seeker.take_completion() {
+            warm_ups.insert(result.key, result);
             continue;
         }
 
@@ -144,14 +151,15 @@ fn warm_up_phase(
     }
 
     while !seeker.is_empty() {
-        if let Some(_) = seeker.take_completion() {
+        if let Some(Completion::Seek(result)) = seeker.take_completion() {
+            warm_ups.insert(result.key, result);
             continue;
         }
         seeker.submit_all(&read_pass)?;
         seeker.recv_page(&read_pass)?;
     }
 
-    Ok(())
+    Ok(warm_ups)
 }
 
 fn commit<H: NodeHasher>(
@@ -159,6 +167,7 @@ fn commit<H: NodeHasher>(
     page_cache: PageCache,
     mut seeker: Seeker,
     command: CommitCommand,
+    warm_ups: HashMap<KeyPath, Seek>,
 ) -> anyhow::Result<WorkerOutput> {
     let CommitCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
@@ -168,7 +177,7 @@ fn commit<H: NodeHasher>(
     let committer = RangeCommitter::<H>::new(root, shared.clone(), write_pass, &page_cache);
 
     // one lucky thread gets the master write pass.
-    let mut write_pass = match committer.commit(&mut seeker, &mut output)? {
+    let mut write_pass = match committer.commit(&mut seeker, &mut output, warm_ups)? {
         None => return Ok(output),
         Some(write_pass) => write_pass,
     };
@@ -464,15 +473,31 @@ impl<H: NodeHasher> RangeCommitter<H> {
         mut self,
         seeker: &mut Seeker,
         output: &mut WorkerOutput,
+        mut warm_ups: HashMap<KeyPath, Seek>,
     ) -> anyhow::Result<Option<WritePass<ShardIndex>>> {
         let mut start_index = self.range_start;
         let mut pushes = 0;
         let mut skips = 0;
 
+        let mut warmed_up: VecDeque<Seek> = VecDeque::new();
+
         // 1. drive until work is done.
         while start_index < self.range_end || !seeker.is_empty() {
+            let completion = if self.saved_advance.is_none() && warmed_up.front()
+                .map_or(false, |res| match seeker.first_key() {
+                    None => true,
+                    Some(k) => &res.key < k,
+                })
+            {
+                // take a "completion" from our warm-ups instead.
+                // UNWRAP: checked front exists above.
+                Some(Completion::Seek(warmed_up.pop_front().unwrap()))
+            } else {
+                seeker.take_completion()
+            };
+
             // handle a single completion (only when blocked / at max capacity)
-            match seeker.take_completion() {
+            match completion {
                 None => {}
                 Some(Completion::Seek(seek_result)) => {
                     // skip completions until we're past the end of the last batch.
@@ -512,10 +537,18 @@ impl<H: NodeHasher> RangeCommitter<H> {
             while seeker.has_room() && start_index + pushes < self.range_end {
                 let next_push = start_index + pushes;
                 pushes += 1;
-                seeker.push(self.shared.read_write[next_push].0);
-                let blocked = seeker.submit_all(self.write_pass.downgrade())?;
-                if blocked {
-                    break;
+
+                if let Some(result) = warm_ups.remove(&self.shared.read_write[next_push].0) {
+                    warmed_up.push_back(result);
+                    if warmed_up.len() >= 512 {
+                        break;
+                    }
+                } else {
+                    seeker.push(self.shared.read_write[next_push].0);
+                    let blocked = seeker.submit_all(self.write_pass.downgrade())?;
+                    if blocked {
+                        break;
+                    }
                 }
             }
 
