@@ -189,14 +189,31 @@ impl BranchNodeBuilder {
     pub fn new(
         mut branch: BranchNode,
         n: usize,
-        prefix_len: usize,
+        mut prefix_len: usize,
         total_separator_len: usize,
     ) -> Self {
-        let separator_len = total_separator_len - prefix_len;
+        assert!(total_separator_len <= 256);
 
-        branch.set_n(n as u16);
-        branch.set_prefix_len(prefix_len as u8);
-        branch.set_separator_len(separator_len as u8);
+        let separator_len = match prefix_len {
+            0 if total_separator_len == 256 => {
+                panic!("total_separator_len is 256 with 0 separator len")
+            }
+            // this does not make sense
+            256 if total_separator_len != 0 => unreachable!(),
+            // in this case spill 1 bit to separator_len
+            256 => {
+                prefix_len = 255;
+                1
+            }
+            // standard case
+            prefix_len => total_separator_len - prefix_len,
+        };
+
+        //let separator_len = total_separator_len - prefix_len;
+
+        branch.set_n(dbg!(n) as u16);
+        branch.set_prefix_len(dbg!(prefix_len as u8));
+        branch.set_separator_len(dbg!(dbg!(separator_len) as u8));
 
         BranchNodeBuilder {
             branch,
@@ -211,11 +228,11 @@ impl BranchNodeBuilder {
 
         let varbits = self.branch.varbits_mut();
         if self.index == 0 {
-            let prefix = &key.view_bits::<Msb0>()[..self.prefix_len];
+            let prefix = dbg!(&key.view_bits::<Msb0>()[..self.prefix_len]);
             varbits[..self.prefix_len].copy_from_bitslice(prefix);
         }
 
-        let separator = &key.view_bits::<Msb0>()[self.prefix_len..][..self.separator_len];
+        let separator = dbg!(&key.view_bits::<Msb0>()[self.prefix_len..][..self.separator_len]);
 
         let cell_start = self.prefix_len + self.index * self.separator_len;
         let cell_end = cell_start + self.separator_len;
@@ -228,5 +245,31 @@ impl BranchNodeBuilder {
 
     pub fn finish(self) -> BranchNode {
         self.branch
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::beatree::branch::{BranchNodeBuilder, BranchNodePool};
+
+    #[test]
+    pub fn test_branch_builder() {
+        let bnp = BranchNodePool::new();
+        let id = bnp.allocate();
+        let branch_node = bnp.checkout(id).unwrap();
+
+        let prefix_len = 0;
+        let separtor_len = 256;
+        let n = 2;
+        let mut branch_builder = BranchNodeBuilder::new(branch_node, n, prefix_len, separtor_len);
+
+        let key1 = [255; 32];
+        let mut key2 = [255; 32];
+        key2[0] = 0;
+
+        branch_builder.push(key1, 1);
+        branch_builder.push(key2, 2);
+
+        let _ = branch_builder.finish();
     }
 }

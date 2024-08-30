@@ -11,7 +11,7 @@ use bitvec::prelude::*;
 pub struct TriePosition {
     // The bits after depth are irrelevant.
     path: [u8; 32],
-    depth: u8,
+    depth: Option<u8>,
     node_index: usize,
 }
 
@@ -28,8 +28,15 @@ impl TriePosition {
     pub fn new() -> Self {
         TriePosition {
             path: [0; 32],
-            depth: 0,
+            depth: Some(0),
             node_index: 0,
+        }
+    }
+
+    pub fn get_depth(&self) -> usize {
+        match self.depth {
+            Some(d) => d as usize,
+            None => 256,
         }
     }
 
@@ -41,7 +48,7 @@ impl TriePosition {
         let page_path = last_page_path(&path, depth);
         TriePosition {
             path,
-            depth,
+            depth: Some(depth),
             node_index: node_index(&page_path),
         }
     }
@@ -74,32 +81,37 @@ impl TriePosition {
         let path = bitvec.as_raw_slice().try_into().unwrap();
         Self {
             path,
-            depth,
+            depth: Some(depth),
             node_index,
         }
     }
 
     /// Whether the position is at the root.
     pub fn is_root(&self) -> bool {
-        self.depth == 0
+        self.get_depth() == 0
     }
 
     /// Get the current `depth` of the position.
     pub fn depth(&self) -> u8 {
-        self.depth
+        self.get_depth() as u8
     }
 
     /// Get the path to the current position.
     pub fn path(&self) -> &BitSlice<u8, Msb0> {
-        &self.path.view_bits::<Msb0>()[..self.depth as usize]
+        &self.path.view_bits::<Msb0>()[..self.depth.unwrap() as usize]
     }
 
     /// Move the position down by 1, towards either the left or right child.
     ///
     /// Panics on depth out of range.
     pub fn down(&mut self, bit: bool) {
-        assert_ne!(self.depth, 255, "can't descend past 255 bits");
-        if self.depth as usize % DEPTH == 0 {
+        let depth = self.get_depth();
+
+        //assert_ne!(self.depth, 255, "can't descend past 255 bits");
+        assert_ne!(depth, 256, "can't descend past 255 bits");
+        //assert_ne!(depth, 255, "can't descend past 255 bits");
+
+        if depth as usize % DEPTH == 0 {
             self.node_index = bit as usize;
         } else {
             let children = self.child_node_indices();
@@ -109,18 +121,22 @@ impl TriePosition {
                 children.left()
             };
         }
-        self.path
-            .view_bits_mut::<Msb0>()
-            .set(self.depth as usize, bit);
-        self.depth += 1;
+        self.path.view_bits_mut::<Msb0>().set(depth as usize, bit);
+
+        if depth == 255 {
+            self.depth = None;
+        } else {
+            *self.depth.as_mut().unwrap() += 1;
+        }
     }
 
     /// Move the position up by `d` bits.
     ///
     /// Panics if `d` is greater than the current depth.
     pub fn up(&mut self, d: u8) {
-        let prev_depth = self.depth;
-        let Some(new_depth) = self.depth.checked_sub(d) else {
+        assert!(d != 0);
+        let prev_depth = self.get_depth();
+        let Some(new_depth) = self.get_depth().checked_sub(d as usize) else {
             panic!("can't move up by {} bits from depth {}", d, prev_depth)
         };
         if new_depth == 0 {
@@ -128,15 +144,16 @@ impl TriePosition {
             return;
         }
 
-        self.depth = new_depth;
+        self.depth = Some(new_depth as u8);
         let prev_page_depth = (prev_depth as usize + DEPTH - 1) / DEPTH;
-        let new_page_depth = (self.depth as usize + DEPTH - 1) / DEPTH;
+        let new_page_depth = (self.depth.unwrap() as usize + DEPTH - 1) / DEPTH;
         if prev_page_depth == new_page_depth {
             for _ in 0..d {
                 self.node_index = parent_node_index(self.node_index);
             }
         } else {
-            let path = last_page_path(&self.path, self.depth);
+            // TODO: here there should be a check that this is not a 256 depth
+            let path = last_page_path(&self.path, self.get_depth() as u8);
             self.node_index = node_index(path);
         }
     }
@@ -145,9 +162,11 @@ impl TriePosition {
     ///
     /// Panic if at the root.
     pub fn sibling(&mut self) {
-        assert_ne!(self.depth, 0, "can't move to sibling of root node");
+        assert_ne!(self.depth, Some(0), "can't move to sibling of root node");
+        //assert_ne!(self.depth, None, "can't move to sibling of root node");
+
+        let i = self.get_depth() - 1;
         let bits = self.path.view_bits_mut::<Msb0>();
-        let i = self.depth as usize - 1;
         bits.set(i, !bits[i]);
         self.node_index = sibling_index(self.node_index);
     }
@@ -156,8 +175,8 @@ impl TriePosition {
     ///
     /// Panics if at the root.
     pub fn peek_last_bit(&self) -> bool {
-        assert_ne!(self.depth, 0, "can't peek at root node");
-        let this_bit_idx = self.depth as usize - 1;
+        assert_ne!(self.depth, Some(0), "can't peek at root node");
+        let this_bit_idx = self.get_depth() as usize - 1;
         // unwrap: depth != 0 above
         let bit = *self.path.view_bits::<Msb0>().get(this_bit_idx).unwrap();
         bit
@@ -171,7 +190,7 @@ impl TriePosition {
 
         let mut page_id = ROOT_PAGE_ID;
         for (i, chunk) in self.path().chunks_exact(DEPTH).enumerate() {
-            if (i + 1) * DEPTH == self.depth as usize {
+            if (i + 1) * DEPTH == self.get_depth() {
                 return Some(page_id);
             }
 
@@ -229,10 +248,10 @@ impl TriePosition {
     /// Note that every page has traversed at least 1 bit, therefore the return value would be
     /// between 1 and `DEPTH`, with the exception of the root node, which has traversed 0 bits.
     pub fn depth_in_page(&self) -> usize {
-        if self.depth == 0 {
+        if self.get_depth() == 0 {
             0
         } else {
-            self.depth as usize - ((self.depth as usize - 1) / DEPTH) * DEPTH
+            self.get_depth() as usize - ((self.get_depth() as usize - 1) / DEPTH) * DEPTH
         }
     }
 
@@ -248,7 +267,7 @@ impl TriePosition {
     /// a given key-path.
     pub fn subtrie_contains(&self, path: &crate::trie::KeyPath) -> bool {
         path.view_bits::<Msb0>()
-            .starts_with(&self.path.view_bits::<Msb0>()[..self.depth as usize])
+            .starts_with(&self.path.view_bits::<Msb0>()[..self.depth.unwrap() as usize])
     }
 }
 
@@ -299,7 +318,7 @@ fn parent_node_index(node_index: usize) -> usize {
 
 impl fmt::Debug for TriePosition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.depth == 0 {
+        if self.depth.unwrap() == 0 {
             write!(f, "TriePosition(root)")
         } else {
             write!(f, "TriePosition({})", self.path(),)
@@ -345,7 +364,7 @@ mod tests {
             1010101010101010101010101010101010101010101010101010101010101010\
             101010101010101010101010101010101010101010101010101010101010101",
         );
-        assert_eq!(p.depth as usize, 255);
+        assert_eq!(p.depth.unwrap() as usize, 255);
         p.down(false);
     }
 }

@@ -153,7 +153,7 @@ impl LeafUpdater {
             let separator = self.separator();
 
             let pn = leaf_writer.write(node);
-            branch_updater.ingest(separator, pn);
+            branch_updater.ingest(dbg!(separator), pn);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -278,7 +278,7 @@ impl LeafUpdater {
 
             // write the node and provide it to the branch above.
             let pn = leaf_writer.write(new_node);
-            branch_updater.ingest(separator, pn);
+            branch_updater.ingest(dbg!(separator), pn);
 
             start += item_count;
         }
@@ -328,13 +328,13 @@ impl LeafUpdater {
         let right_key = self.op_key(&self.ops[split_point]);
 
         let left_separator = self.separator();
-        let right_separator = separate(&left_key, &right_key);
+        let right_separator = dbg!(separate(dbg!(&left_key), dbg!(&right_key)));
 
         let left_leaf = self.build_leaf(left_ops);
 
         let left_pn = leaf_writer.write(left_leaf);
 
-        branch_updater.ingest(left_separator, left_pn);
+        branch_updater.ingest(dbg!(left_separator), left_pn);
 
         let mut right_gauge = LeafGauge::default();
         for op in &self.ops[split_point..] {
@@ -349,7 +349,7 @@ impl LeafUpdater {
         if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
             let right_pn = leaf_writer.write(right_leaf);
-            branch_updater.ingest(right_separator, right_pn);
+            branch_updater.ingest(dbg!(right_separator), right_pn);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -464,7 +464,8 @@ fn separate(a: &Key, b: &Key) -> Key {
         + 1;
 
     let mut separator = [0u8; 32];
-    separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
+    separator.view_bits_mut::<Msb0>()[..dbg!(len)]
+        .copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
     separator
 }
 

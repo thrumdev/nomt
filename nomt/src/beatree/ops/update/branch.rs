@@ -92,7 +92,7 @@ impl BranchUpdater {
     /// then digest, reset the base, and attempt again.
     pub fn ingest(&mut self, key: Key, pn: PageNumber) {
         self.keep_up_to(Some(&key));
-        self.ops.push(BranchOp::Insert(key, pn));
+        self.ops.push(BranchOp::Insert(dbg!(key), pn));
         self.bulk_split_step(self.ops.len() - 1);
     }
 
@@ -134,7 +134,9 @@ impl BranchUpdater {
                 "normal split can only occur when not bulk splitting"
             );
             (old_branch_id, self.split(bbn_index, bnp, bbn_writer))
-        } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
+        } else if dbg!(self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD)
+            || dbg!(self.cutoff.is_none())
+        {
             let (branch_id, node) =
                 self.build_branch(&self.ops[last_ops_start..], &self.gauge, bnp);
             let separator = self.op_key(&self.ops[last_ops_start]);
