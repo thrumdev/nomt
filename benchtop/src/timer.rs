@@ -29,7 +29,7 @@ impl Timer {
             }
         }
 
-        let h = self.spans.entry(span_name).or_insert(Rc::new(RefCell::new(
+        let h = self.spans.entry(span_name).or_insert_with(|| Rc::new(RefCell::new(
             hdrhistogram::Histogram::<u64>::new(3).unwrap(),
         )));
 
