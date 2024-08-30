@@ -12,7 +12,7 @@
 //! Updates are performed while the next fetch is pending, unless all fetches in
 //! the range have completed.
 
-use crossbeam::channel::{Receiver, Select, Sender};
+use crossbeam::channel::{Receiver, Select, Sender, TryRecvError};
 
 use nomt_core::{
     page_id::{PageId, ROOT_PAGE_ID},
@@ -122,12 +122,14 @@ fn warm_up_phase(
             // block on interrupt or next page ready.
             let index = select_no_work.ready();
             if index == commit_no_work_idx {
-                match comms.commit_rx.recv()? {
-                    ToWorker::Prepare => break,
-                    ToWorker::Commit(_) => unreachable!(),
+                match comms.commit_rx.try_recv() {
+                    Err(TryRecvError::Empty) => continue,
+                    Err(e) => anyhow::bail!(e),
+                    Ok(ToWorker::Prepare) => break,
+                    Ok(ToWorker::Commit(_)) => unreachable!(),
                 }
             } else if index == page_no_work_idx {
-                seeker.recv_page(&read_pass)?;
+                seeker.try_recv_page(&read_pass)?;
             } else {
                 unreachable!()
             }
@@ -135,15 +137,22 @@ fn warm_up_phase(
             // not blocked and has room. select on everything, pushing new work as available.
             let index = select_all.ready();
             if index == commit_idx {
-                match comms.commit_rx.recv()? {
-                    ToWorker::Prepare => break,
-                    ToWorker::Commit(_) => unreachable!(),
+                match comms.commit_rx.try_recv() {
+                    Err(TryRecvError::Empty) => continue,
+                    Err(e) => anyhow::bail!(e),
+                    Ok(ToWorker::Prepare) => break,
+                    Ok(ToWorker::Commit(_)) => unreachable!(),
                 }
             } else if index == warmup_idx {
-                let warm_up_command = comms.warmup_rx.recv()?;
+                let warm_up_command = match comms.warmup_rx.try_recv() {
+                    Ok(command) => command,
+                    Err(TryRecvError::Empty) => continue,
+                    Err(e) => anyhow::bail!(e),
+                };
+
                 seeker.push(warm_up_command.key_path);
             } else if index == page_idx {
-                seeker.recv_page(&read_pass)?;
+                seeker.try_recv_page(&read_pass)?;
             } else {
                 unreachable!()
             }
