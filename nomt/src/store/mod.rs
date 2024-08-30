@@ -98,6 +98,16 @@ impl Store {
             options.custom_flags(libc::O_DIRECT);
             options.open(&o.path.join("wal"))?
         };
+
+        #[cfg(target_os = "macos")]
+        unsafe {
+            libc::fcntl(meta_fd.as_raw_fd(), libc::F_NOCACHE, 1);
+            libc::fcntl(ln_fd.as_raw_fd(), libc::F_NOCACHE, 1);
+            libc::fcntl(bbn_fd.as_raw_fd(), libc::F_NOCACHE, 1);
+            libc::fcntl(ht_fd.as_raw_fd(), libc::F_NOCACHE, 1);
+            libc::fcntl(wal_fd.as_raw_fd(), libc::F_NOCACHE, 1);
+        }
+
         let meta = meta::Meta::read(&meta_fd)?;
         let values = beatree::Tree::open(
             &io_pool,
