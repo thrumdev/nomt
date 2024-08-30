@@ -68,7 +68,7 @@ impl Options {
     }
 
     /// Set the seed for the hash function used by the bitbox store.
-    /// 
+    ///
     /// Useful for reproducibility.
     pub fn bitbox_seed(&mut self, bitbox_seed: [u8; 16]) {
         self.bitbox_seed = bitbox_seed;
@@ -76,7 +76,7 @@ impl Options {
 
     /// Set to `true` to panic on sync after writing the WAL file and updating the manifest, but
     /// before the data has been written to the HT file.
-    /// 
+    ///
     /// Useful to test WAL recovery.
     pub fn panic_on_sync(&mut self, panic_on_sync: bool) {
         self.panic_on_sync = panic_on_sync;

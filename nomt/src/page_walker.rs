@@ -351,7 +351,10 @@ impl<H: NodeHasher> PageWalker<H> {
                 let child_page_id = parent_page_id.child_page_id(child_page_index).unwrap();
 
                 let (page, diff) = if fresh {
-                    (self.page_cache.insert(child_page_id.clone(), None), PageDiff::default())
+                    (
+                        self.page_cache.insert(child_page_id.clone(), None),
+                        PageDiff::default(),
+                    )
                 } else {
                     // UNWRAP: all non-fresh pages should be in the cache.
                     let diff = if self.diffs.last().map_or(false, |d| d.0 == child_page_id) {
@@ -561,14 +564,19 @@ impl<H: NodeHasher> PageWalker<H> {
         &self,
         read_pass: &ReadPass<impl RegionContains<ShardIndex>>,
     ) -> Result<trie::LeafData, NeedsPage> {
-        let cur_page = self.stack.last()
+        let cur_page = self
+            .stack
+            .last()
             .map(|stack_item| (&stack_item.page_id, &stack_item.page))
             .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
 
-        let (page, _, children) =
-            crate::page_cache::locate_leaf_data::<NeedsPage>(&self.position, cur_page, |page_id| {
+        let (page, _, children) = crate::page_cache::locate_leaf_data::<NeedsPage>(
+            &self.position,
+            cur_page,
+            |page_id| {
                 get_page(&self.page_cache, page_id.clone()).ok_or_else(move || NeedsPage(page_id))
-            })?;
+            },
+        )?;
 
         Ok(trie::LeafData {
             key_path: page.node(&read_pass, children.left()),
@@ -584,7 +592,9 @@ impl<H: NodeHasher> PageWalker<H> {
         hint_fresh: bool,
     ) {
         let (page_id, children) = {
-            let cur_page = self.stack.last()
+            let cur_page = self
+                .stack
+                .last()
                 .map(|stack_item| (&stack_item.page_id, &stack_item.page))
                 .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
 

@@ -485,12 +485,13 @@ impl<H: NodeHasher> RangeCommitter<H> {
 
         // 1. drive until work is done.
         while start_index < self.range_end || !seeker.is_empty() {
-            let completion = if self.saved_advance.is_none() && warmed_up.front()
-                .map_or(false, |res| match seeker.first_key() {
-                    None => true,
-                    Some(k) => &res.key < k,
-                })
-            {
+            let completion = if self.saved_advance.is_none()
+                && warmed_up
+                    .front()
+                    .map_or(false, |res| match seeker.first_key() {
+                        None => true,
+                        Some(k) => &res.key < k,
+                    }) {
                 // take a "completion" from our warm-ups instead.
                 // UNWRAP: checked front exists above.
                 Some(Completion::Seek(warmed_up.pop_front().unwrap()))
