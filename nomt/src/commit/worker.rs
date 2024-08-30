@@ -376,11 +376,11 @@ impl<H: NodeHasher> RangeCommitter<H> {
                         terminal: match seek_result.terminal.clone() {
                             Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
                             None => PathProofTerminal::Terminator(
-                                seek_result.position.path().to_bitvec(),
+                                seek_result.position.clone(),
                             ),
                         },
                     },
-                    path: seek_result.position.path().to_bitvec(),
+                    path: seek_result.position,
                 };
                 witnessed_paths.push((path, seek_result.terminal, batch_size));
             }
@@ -451,11 +451,11 @@ impl<H: NodeHasher> RangeCommitter<H> {
                     terminal: match seek_result.terminal.clone() {
                         Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
                         None => {
-                            PathProofTerminal::Terminator(seek_result.position.path().to_bitvec())
+                            PathProofTerminal::Terminator(seek_result.position.clone())
                         }
                     },
                 },
-                path: seek_result.position.path().to_bitvec(),
+                path: seek_result.position,
             };
             witnessed_paths.push((path, seek_result.terminal, batch_size));
         }

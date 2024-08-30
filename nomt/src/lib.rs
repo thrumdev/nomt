@@ -15,6 +15,7 @@ use nomt_core::{
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
     trie::{InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
+    trie_pos::TriePosition,
 };
 use page_cache::PageCache;
 use parking_lot::Mutex;
@@ -79,7 +80,7 @@ pub struct WitnessedPath {
     /// Proof of a query path along the trie.
     pub inner: PathProof,
     /// The query path itself.
-    pub path: BitVec<u8, Msb0>,
+    pub path: TriePosition,
 }
 
 /// A witness of a read value.

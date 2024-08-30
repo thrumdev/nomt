@@ -3,6 +3,7 @@
 use crate::trie::{
     self, InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, NodeKind, TERMINATOR,
 };
+use crate::trie_pos::TriePosition;
 
 use bitvec::prelude::*;
 
@@ -14,7 +15,7 @@ use alloc::vec::Vec;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathProofTerminal {
     Leaf(LeafData),
-    Terminator(BitVec<u8, Msb0>),
+    Terminator(TriePosition),
 }
 
 impl PathProofTerminal {
@@ -22,7 +23,7 @@ impl PathProofTerminal {
     pub fn path(&self) -> &BitSlice<u8, Msb0> {
         match self {
             Self::Leaf(leaf_data) => &leaf_data.key_path.view_bits(),
-            Self::Terminator(key_path) => key_path,
+            Self::Terminator(key_path) => key_path.path(),
         }
     }
 
