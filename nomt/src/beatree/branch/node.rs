@@ -116,7 +116,15 @@ impl Drop for BranchNode {
     fn drop(&mut self) {
         // Remove the node from the checked out list.
         let mut inner = self.pool.lock().unwrap();
-        inner.checked_out.retain(|id| *id != self.id);
+
+        match inner.checked_out.remove(&self.id) {
+            // notify the waiter of the availability of the node
+            Some(Some(waiter_tx)) => waiter_tx.send(()).unwrap(),
+            None => {
+                panic!("BranchNode dropped but never checked in");
+            }
+            Some(None) => {}
+        }
     }
 }
 

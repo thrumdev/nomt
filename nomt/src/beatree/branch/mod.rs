@@ -11,12 +11,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crossbeam_channel::Sender;
 pub use node::{body_size, BranchNode, BranchNodeBuilder, BranchNodeView, BRANCH_NODE_BODY_SIZE};
+use std::collections::HashMap;
 
 pub mod node;
 
 /// The ID of a branch node in the node pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BranchId(u32);
 
 impl From<u32> for BranchId {
@@ -42,8 +44,10 @@ struct BranchNodePoolInner {
     /// The list of the branch nodes that are ready to be reused.
     freelist: Vec<BranchId>,
 
-    /// The list of the branch nodes that are currently checked out.
-    checked_out: Vec<BranchId>,
+    /// The branch nodes currently checked out,
+    /// along with an optional waiter awaiting notification
+    /// as soon as the branch node becomes again available
+    checked_out: HashMap<BranchId, Option<Sender<()>>>,
 }
 
 impl Drop for BranchNodePoolInner {
@@ -87,7 +91,7 @@ impl BranchNodePool {
                 pool_base_ptr,
                 bump: 0,
                 freelist: Vec::new(),
-                checked_out: Vec::new(),
+                checked_out: HashMap::new(),
             })),
         }
     }
@@ -111,21 +115,30 @@ impl BranchNodePool {
 
     /// Returns the branch node with the given ID, if it exists.
     ///
-    /// Note that this function expects the node to be allocated. If the node is not allocated,
-    /// the behavior is unspecified.
+    /// Note that this function expects the node to be allocated.
+    /// If the node is not allocated, the behavior is unspecified.
     ///
-    /// # Panics
-    ///
-    /// Panics if the node is already checked out.
+    /// Block if the node is already checked out and await until it is available.
     pub fn checkout(&self, id: BranchId) -> Option<BranchNode> {
         let mut inner = self.inner.lock().unwrap();
+
         if id.0 >= inner.bump {
             return None;
         }
-        if inner.checked_out.contains(&id) {
-            panic!();
+
+        if let Some(tx) = inner.checked_out.get_mut(&id) {
+            let (waiter_tx, waiter_rx) = crossbeam_channel::bounded(1);
+            // Register as a waiter for the node
+            *tx = Some(waiter_tx);
+            // Release the lock
+            drop(inner);
+            // Wait until the branch node is dropped and becomes available
+            let _ = waiter_rx.recv().expect("BranchNode waiter channel failed");
+            inner = self.inner.lock().unwrap();
         }
-        inner.checked_out.push(id);
+
+        inner.checked_out.insert(id, None);
+
         unsafe {
             let offset = id.0 as usize * BRANCH_NODE_SIZE;
             let ptr = inner.pool_base_ptr.offset(offset as isize);
