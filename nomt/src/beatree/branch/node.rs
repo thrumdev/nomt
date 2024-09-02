@@ -11,8 +11,8 @@ use crate::beatree::Key;
 //                        // if this is a BBN, 0 otherwise.
 //
 // n: u16                 // item count
-// prefix_len: u8         // bits
-// separator_len: u8      // bits
+// prefix_len: u16         // bits
+// separator_len: u16      // bits
 //
 // # Then the varbits follow. To avoid two padding bytes, the varbits are stored in a single bitvec.
 //
@@ -25,7 +25,8 @@ use crate::beatree::Key;
 // node_pointers: LNPN or BNID[n]
 // ```
 
-pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - (4 + 2 + 1 + 1);
+const BRANCH_NODE_HEADER_SIZE: usize = 4 + 2 + 2 + 2;
+pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_SIZE;
 
 /// A branch node, regardless of its level.
 pub struct BranchNode {
@@ -67,22 +68,22 @@ impl BranchNode {
         slice[4..6].copy_from_slice(&n.to_le_bytes());
     }
 
-    pub fn prefix_len(&self) -> u8 {
+    pub fn prefix_len(&self) -> u16 {
         self.view().prefix_len()
     }
 
-    pub fn set_prefix_len(&mut self, len: u8) {
+    pub fn set_prefix_len(&mut self, len: u16) {
         let slice = self.as_mut_slice();
-        slice[6] = len;
+        slice[6..8].copy_from_slice(&len.to_le_bytes());
     }
 
-    pub fn separator_len(&self) -> u8 {
+    pub fn separator_len(&self) -> u16 {
         self.view().separator_len()
     }
 
-    pub fn set_separator_len(&mut self, len: u8) {
+    pub fn set_separator_len(&mut self, len: u16) {
         let slice = self.as_mut_slice();
-        slice[7] = len;
+        slice[8..10].copy_from_slice(&len.to_le_bytes());
     }
 
     fn varbits_mut(&mut self) -> &mut BitSlice<u8, Msb0> {
@@ -90,8 +91,8 @@ impl BranchNode {
             self.prefix_len() as _,
             self.separator_len() as _,
             self.n() as _,
-        ) + 8;
-        self.as_mut_slice()[8..body_end].view_bits_mut()
+        ) + BRANCH_NODE_HEADER_SIZE;
+        self.as_mut_slice()[BRANCH_NODE_HEADER_SIZE..body_end].view_bits_mut()
     }
 
     pub fn prefix(&self) -> &BitSlice<u8, Msb0> {
@@ -138,12 +139,12 @@ impl<'a> BranchNodeView<'a> {
         u16::from_le_bytes(self.inner[4..6].try_into().unwrap())
     }
 
-    pub fn prefix_len(&self) -> u8 {
-        self.inner[6]
+    pub fn prefix_len(&self) -> u16 {
+        u16::from_le_bytes(self.inner[6..8].try_into().unwrap())
     }
 
-    pub fn separator_len(&self) -> u8 {
-        self.inner[7]
+    pub fn separator_len(&self) -> u16 {
+        u16::from_le_bytes(self.inner[8..10].try_into().unwrap())
     }
 
     fn varbits(&self) -> &'a BitSlice<u8, Msb0> {
@@ -151,8 +152,8 @@ impl<'a> BranchNodeView<'a> {
             self.prefix_len() as _,
             self.separator_len() as _,
             self.n() as _,
-        ) + 8;
-        self.inner[8..body_end].view_bits()
+        ) + BRANCH_NODE_HEADER_SIZE;
+        self.inner[BRANCH_NODE_HEADER_SIZE..body_end].view_bits()
     }
 
     pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
@@ -195,8 +196,8 @@ impl BranchNodeBuilder {
         let separator_len = total_separator_len - prefix_len;
 
         branch.set_n(n as u16);
-        branch.set_prefix_len(prefix_len as u8);
-        branch.set_separator_len(separator_len as u8);
+        branch.set_prefix_len(prefix_len as u16);
+        branch.set_separator_len(separator_len as u16);
 
         BranchNodeBuilder {
             branch,
