@@ -16,41 +16,20 @@ struct PendingIo {
 
 pub fn start_io_worker(io_workers: usize) -> Sender<IoPacket> {
     // main bound is from the pending slab.
-    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * 2);
+    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * io_workers);
 
-    let _ = std::thread::Builder::new()
-        .name("io_ingress".to_string())
-        .spawn(move || run_ingress(command_rx, io_workers))
-        .unwrap();
+    start_workers(command_rx, io_workers);
 
     command_tx
 }
 
-fn run_ingress(command_rx: Receiver<IoPacket>, io_workers: usize) {
-    if io_workers == 1 {
-        run_worker(command_rx);
-        return;
-    }
-
-    let mut worker_command_txs = Vec::with_capacity(io_workers);
+fn start_workers(command_rx: Receiver<IoPacket>, io_workers: usize) {
     for i in 0..io_workers {
-        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let command_rx = command_rx.clone();
         let _ = std::thread::Builder::new()
             .name(format!("io_worker-{i}"))
             .spawn(move || run_worker(command_rx))
             .unwrap();
-        worker_command_txs.push(command_tx);
-    }
-
-    let mut next_worker_ix = 0;
-    loop {
-        match command_rx.recv() {
-            Ok(command) => {
-                let _ = worker_command_txs[next_worker_ix].send(command);
-                next_worker_ix = (next_worker_ix + 1) % io_workers;
-            }
-            Err(_) => return,
-        }
     }
 }
 
