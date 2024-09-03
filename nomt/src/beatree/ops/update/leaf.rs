@@ -1,22 +1,16 @@
 use bitvec::prelude::*;
 use std::cmp::Ordering;
 
-use crate::{beatree::{
-    allocator::PageNumber,
-    leaf::{
-        node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},
-        store::LeafStoreWriter,
-    },
+use crate::beatree::{
+    leaf::node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},
     Key,
-}, io::PagePool};
-
-use super::{
-    branch::BranchUpdater, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD,
 };
+use crate::io::PagePool;
+
+use super::{LeafChanges, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD};
 
 pub struct BaseLeaf {
     pub node: LeafNode,
-    pub id: PageNumber,
     pub iter_pos: usize,
     pub separator: Key,
 }
@@ -118,26 +112,14 @@ impl LeafUpdater {
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
     // separator_override is set.
     // If `Finished` is returned, `ops` is guaranteed empty and separator_override is empty.
-    pub fn digest(
-        &mut self,
-        branch_updater: &mut BranchUpdater,
-        leaf_writer: &mut LeafStoreWriter,
-    ) -> DigestResult {
-        if let Some(ref base) = self.base {
-            branch_updater.possibly_delete(base.separator);
-        }
-
+    pub(super) fn digest(&mut self, leaf_changes: &mut LeafChanges) -> DigestResult {
         // no cells are going to be deleted from this point onwards - this keeps everything.
         self.keep_up_to(None, |_| {});
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_leaves(branch_updater, leaf_writer);
-
-        if let Some(ref base) = self.base {
-            leaf_writer.release(base.id);
-        }
+        let last_ops_start = self.build_bulk_splitter_leaves(leaf_changes);
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
@@ -149,13 +131,12 @@ impl LeafUpdater {
                 last_ops_start, 0,
                 "normal split can only occur when not bulk splitting"
             );
-            self.split(branch_updater, leaf_writer)
+            self.split(leaf_changes)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_leaf(&self.ops[last_ops_start..]);
             let separator = self.separator();
 
-            let pn = leaf_writer.write(node);
-            branch_updater.ingest(separator, pn);
+            leaf_changes.insert(separator, node);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -249,11 +230,7 @@ impl LeafUpdater {
         }
     }
 
-    fn build_bulk_splitter_leaves(
-        &mut self,
-        branch_updater: &mut BranchUpdater,
-        leaf_writer: &mut LeafStoreWriter,
-    ) -> usize {
+    fn build_bulk_splitter_leaves(&mut self, leaf_changes: &mut LeafChanges) -> usize {
         let Some(splitter) = self.bulk_split.take() else {
             return 0;
         };
@@ -278,10 +255,7 @@ impl LeafUpdater {
                 self.separator_override = Some(separate(&last, &next));
             }
 
-            // write the node and provide it to the branch above.
-            let pn = leaf_writer.write(new_node);
-            branch_updater.ingest(separator, pn);
-
+            leaf_changes.insert(separator, new_node);
             start += item_count;
         }
 
@@ -295,11 +269,7 @@ impl LeafUpdater {
             .unwrap_or([0u8; 32])
     }
 
-    fn split(
-        &mut self,
-        branch_updater: &mut BranchUpdater,
-        leaf_writer: &mut LeafStoreWriter,
-    ) -> DigestResult {
+    fn split(&mut self, leaf_changes: &mut LeafChanges) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -333,10 +303,7 @@ impl LeafUpdater {
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);
-
-        let left_pn = leaf_writer.write(left_leaf);
-
-        branch_updater.ingest(left_separator, left_pn);
+        leaf_changes.insert(left_separator, left_leaf);
 
         let mut right_gauge = LeafGauge::default();
         for op in &self.ops[split_point..] {
@@ -350,8 +317,7 @@ impl LeafUpdater {
 
         if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
-            let right_pn = leaf_writer.write(right_leaf);
-            branch_updater.ingest(right_separator, right_pn);
+            leaf_changes.insert(right_separator, right_leaf);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();

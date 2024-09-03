@@ -18,16 +18,11 @@ impl Index {
     ///
     /// This is either a branch whose separator is exactly equal to this key or the branch with the
     /// highest separator less than the key.
-    pub fn lookup(&self, key: Key) -> Option<BranchId> {
+    pub fn lookup(&self, key: Key) -> Option<(Key, BranchId)> {
         self.first_key_map
             .range(RangeToInclusive { end: key })
             .next_back()
-            .map(|(_sep, b)| b.clone())
-    }
-
-    /// Get the first branch in the index by key.
-    pub fn first(&self) -> Option<(Key, BranchId)> {
-        self.first_key_map.iter().next().map(|(k, b)| (*k, *b))
+            .map(|(sep, b)| (sep.clone(), b.clone()))
     }
 
     /// Get the first branch with separator greater than the given key.
