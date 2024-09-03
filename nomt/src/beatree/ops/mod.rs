@@ -28,7 +28,7 @@ pub fn lookup(
 ) -> Result<Option<Vec<u8>>> {
     let branch_id = match bbn_index.lookup(key) {
         None => return Ok(None),
-        Some(branch_id) => branch_id,
+        Some((_, branch_id)) => branch_id,
     };
 
     let branch = branch_node_pool

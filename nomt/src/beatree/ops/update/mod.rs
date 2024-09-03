@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::beatree::{
     allocator::PageNumber,
     bbn,
-    branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},
+    branch::{node::BranchNode, BranchNodePool, BRANCH_NODE_BODY_SIZE},
     index::Index,
     leaf::{
         node::{LeafNode, LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
@@ -50,229 +50,342 @@ pub fn update(
     leaf_writer: &mut LeafStoreWriter,
     bbn_writer: &mut bbn::BbnStoreWriter,
 ) -> Result<Vec<BranchId>> {
-    let leaf_pages = preload_leaves(leaf_reader, &bbn_index, &bnp, changeset.keys().cloned())?;
+    let leaf_cache = preload_leaves(leaf_reader, &bbn_index, &bnp, changeset.keys().cloned())?;
 
-    let mut ctx = Ctx {
-        bbn_index,
-        bbn_writer,
-        bnp,
-        leaf_reader,
-        leaf_writer,
-    };
+    let changeset = changeset
+        .iter()
+        .map(|(k, v)| match v {
+            Some(v) if v.len() <= MAX_LEAF_VALUE_SIZE => (*k, Some((v.clone(), false))),
+            Some(large_value) => {
+                let pages = overflow::chunk(&large_value, leaf_writer);
+                let cell = overflow::encode_cell(large_value.len(), &pages);
+                (*k, Some((cell, true)))
+            }
+            None => (*k, None),
+        })
+        .collect::<_>();
 
-    let mut updater = Updater::new(&ctx, leaf_pages);
-    for (key, value_change) in changeset {
-        updater.ingest(*key, value_change.clone(), &mut ctx);
+    let leaf_changes = leaf_stage(&bbn_index, &bnp, leaf_cache, leaf_reader, changeset);
+
+    let branch_changeset = leaf_changes
+        .inner
+        .into_iter()
+        .map(|(key, leaf_entry)| {
+            let leaf_pn = leaf_entry.inserted.map(|leaf| leaf_writer.write(leaf));
+            if let Some(prev_pn) = leaf_entry.deleted {
+                leaf_writer.release(prev_pn);
+            }
+
+            (key, leaf_pn)
+        })
+        .collect::<Vec<_>>();
+
+    for overflow_deleted in leaf_changes.overflow_deleted {
+        overflow::delete(&overflow_deleted, leaf_reader, leaf_writer);
     }
 
-    updater.complete(&mut ctx);
+    let branch_changes = branch_stage(&bbn_index, &bnp, branch_changeset);
 
-    Ok(updater.obsolete_branches)
-}
+    let mut removed_branches = Vec::new();
+    for (key, changed_branch) in branch_changes.inner {
+        match changed_branch.inserted {
+            Some((branch_id, node)) => {
+                bbn_index.insert(key, branch_id);
+                bbn_writer.allocate(node);
+            }
+            None => {
+                bbn_index.remove(&key);
+            }
+        }
 
-struct Ctx<'a> {
-    bbn_index: &'a mut Index,
-    bbn_writer: &'a mut bbn::BbnStoreWriter,
-    bnp: &'a mut BranchNodePool,
-    leaf_reader: &'a LeafStoreReader,
-    leaf_writer: &'a mut LeafStoreWriter,
-}
-
-struct Updater {
-    branch_updater: BranchUpdater,
-    leaf_updater: LeafUpdater,
-    obsolete_branches: Vec<BranchId>,
-    leaf_pages: HashMap<PageNumber, LeafNode>,
-}
-
-impl Updater {
-    fn new(ctx: &Ctx, mut leaf_pages: HashMap<PageNumber, LeafNode>) -> Self {
-        let first = ctx.bbn_index.first();
-
-        // UNWRAP: all nodes in index must exist.
-        let first_branch = first.as_ref().map(|(_, id)| ctx.bnp.checkout(*id).unwrap());
-        let first_branch_cutoff = first
-            .as_ref()
-            .and_then(|(k, _)| ctx.bbn_index.next_after(*k))
-            .map(|(k, _)| k);
-
-        // first leaf cutoff is the separator of the second leaf _or_ the separator of the next
-        // branch if there is only 1 leaf, or nothing.
-        let first_leaf_cutoff = first_branch
-            .as_ref()
-            .and_then(|node| {
-                if node.n() > 1 {
-                    Some(reconstruct_key(node.prefix(), node.separator(1)))
-                } else {
-                    None
-                }
-            })
-            .or(first_branch_cutoff);
-
-        let first_leaf = first_branch
-            .as_ref()
-            .map(|node| {
-                (
-                    PageNumber::from(node.node_pointer(0)),
-                    reconstruct_key(node.prefix(), node.separator(0)),
-                )
-            })
-            .map(|(id, separator)| BaseLeaf {
-                id,
-                node: leaf_pages.remove(&id).unwrap_or_else(|| LeafNode {
-                    inner: ctx.leaf_reader.query(id),
-                }),
-                iter_pos: 0,
-                separator,
-            });
-
-        // start with the first branch, cut-off second branch key.
-        let branch_updater = BranchUpdater::new(
-            first_branch.map(|node| BaseBranch {
-                // UNWRAP: node can only exist if ID does.
-                id: first.as_ref().unwrap().1,
-                node,
-                iter_pos: 0,
-            }),
-            first_branch_cutoff,
-        );
-
-        // start with first leaf in first branch, cut-off second leaf key.
-        let leaf_updater = LeafUpdater::new(first_leaf, first_leaf_cutoff);
-
-        Updater {
-            branch_updater,
-            leaf_updater,
-            obsolete_branches: Vec::new(),
-            leaf_pages,
+        if let Some((deleted_branch_id, deleted_pn)) = changed_branch.deleted {
+            removed_branches.push(deleted_branch_id);
+            bbn_writer.release(deleted_pn);
         }
     }
 
-    fn ingest(&mut self, key: Key, value_change: Option<Vec<u8>>, ctx: &mut Ctx) {
-        self.digest_until(Some(key), ctx);
-
-        let (value_change, overflow) = if let Some(ref large_value) = value_change
-            .as_ref()
-            .filter(|v| v.len() > MAX_LEAF_VALUE_SIZE)
-        {
-            let pages = overflow::chunk(large_value, &mut ctx.leaf_writer);
-            (Some(overflow::encode_cell(large_value.len(), &pages)), true)
-        } else {
-            (value_change, false)
-        };
-
-        let delete_overflow = |overflow_cell: &[u8]| {
-            overflow::delete(overflow_cell, &ctx.leaf_reader, &mut ctx.leaf_writer)
-        };
-        self.leaf_updater
-            .ingest(key, value_change, overflow, delete_overflow);
+    for branch_id in branch_changes.fresh_released {
+        bnp.release(branch_id);
     }
 
-    fn complete(&mut self, ctx: &mut Ctx) {
-        self.digest_until(None, ctx);
-    }
+    Ok(removed_branches)
+}
 
-    fn digest_until(&mut self, until: Option<Key>, ctx: &mut Ctx) {
-        while until.map_or(true, |k| !self.leaf_updater.is_in_scope(&k)) {
-            match self
-                .leaf_updater
-                .digest(&mut self.branch_updater, &mut ctx.leaf_writer)
-            {
-                LeafDigestResult::Finished => {
-                    self.digest_branches_until(until, ctx);
-                    let Some(until) = until else { break };
+struct ChangedLeafEntry {
+    deleted: Option<PageNumber>,
+    inserted: Option<LeafNode>,
+}
 
-                    // UNWRAP: branch updater base must be `Some` as an empty DB would never
-                    // pass the loop condition if `until` is `Some`.
-                    //
-                    // UNWRAP: branch updater base must contain `until` as a postcondition of
-                    // digest_branches_until.
-                    self.reset_leaf_base(until, ctx).unwrap();
-                }
-                LeafDigestResult::NeedsMerge(key) => {
-                    self.digest_branches_until(Some(key), ctx);
+#[derive(Default)]
+struct LeafChanges {
+    inner: BTreeMap<Key, ChangedLeafEntry>,
+    overflow_deleted: Vec<Vec<u8>>,
+}
 
-                    // UNWRAP: branch updater base must be `Some` as an empty DB would never
-                    // pass the loop condition _and_ the merge key is always a known leaf.
-                    //
-                    // UNWRAP: branch updater base must contain `key` as a postcondition of
-                    // digest_branches_until.
-                    self.reset_leaf_base(key, ctx).unwrap();
-                }
-            }
-        }
-    }
-
-    // post condition: if `until` is `Some`, `branch_updater`'s base is always set to the branch
-    // containing the `until` key.
-    fn digest_branches_until(&mut self, until: Option<Key>, ctx: &mut Ctx) {
-        while until.map_or(true, |k| !self.branch_updater.is_in_scope(&k)) {
-            let (old_branch, digest_result) =
-                self.branch_updater
-                    .digest(&mut ctx.bbn_index, &mut ctx.bnp, &mut ctx.bbn_writer);
-
-            self.obsolete_branches.extend(old_branch);
-
-            match digest_result {
-                BranchDigestResult::Finished => {
-                    let Some(until) = until else { break };
-                    self.reset_branch_base(until, &*ctx);
-                }
-                BranchDigestResult::NeedsMerge(key) => {
-                    self.reset_branch_base(key, &*ctx);
-                }
-            }
-        }
-    }
-
-    // panics if branch updater base is not a branch containing the target.
-    fn reset_leaf_base(&mut self, target: Key, ctx: &Ctx) -> Result<(), ()> {
-        let branch = self.branch_updater.base().ok_or(())?;
-        let (i, leaf_pn) = super::search_branch(&branch.node, target).ok_or(())?;
-        let leaf = self
-            .leaf_pages
-            .remove(&leaf_pn)
-            .unwrap_or_else(|| LeafNode {
-                inner: ctx.leaf_reader.query(leaf_pn),
-            });
-
-        let separator = reconstruct_key(branch.node.prefix(), branch.node.separator(i));
-
-        let cutoff = if branch.node.n() as usize > i + 1 {
-            Some(reconstruct_key(
-                branch.node.prefix(),
-                branch.node.separator(i + 1),
-            ))
-        } else {
-            self.branch_updater.cutoff()
-        };
-
-        let base_leaf = BaseLeaf {
-            node: leaf,
-            id: leaf_pn,
-            iter_pos: 0,
-            separator,
-        };
-
-        self.leaf_updater.reset_base(Some(base_leaf), cutoff);
-        Ok(())
-    }
-
-    fn reset_branch_base(&mut self, target: Key, ctx: &Ctx) {
-        let target_branch = ctx.bbn_index.lookup(target);
-        let cutoff = ctx.bbn_index.next_after(target).map(|(k, _)| k);
-        let base = target_branch.map(|id| {
-            // UNWRAP: all nodes in index must exist.
-            let node = ctx.bnp.checkout(id).unwrap();
-            BaseBranch {
-                id: id,
-                node,
-                iter_pos: 0,
-            }
+impl LeafChanges {
+    fn delete(&mut self, key: Key, pn: PageNumber) {
+        let entry = self.inner.entry(key).or_insert_with(|| ChangedLeafEntry {
+            deleted: None,
+            inserted: None,
         });
 
-        self.branch_updater.reset_base(base, cutoff);
+        // we can only delete a leaf once.
+        assert!(entry.deleted.is_none());
+
+        entry.deleted = Some(pn);
     }
+
+    fn insert(&mut self, key: Key, node: LeafNode) {
+        let entry = self.inner.entry(key).or_insert_with(|| ChangedLeafEntry {
+            deleted: None,
+            inserted: None,
+        });
+
+        if let Some(_prev) = entry.inserted.replace(node) {
+            // TODO: this is where we'd clean up.
+        }
+    }
+
+    fn delete_overflow(&mut self, overflow_cell: &[u8]) {
+        self.overflow_deleted.push(overflow_cell.to_vec());
+    }
+}
+
+fn reset_leaf_base(
+    bbn_index: &Index,
+    bnp: &BranchNodePool,
+    leaf_cache: &mut HashMap<PageNumber, LeafNode>,
+    leaf_reader: &LeafStoreReader,
+    leaf_changes: &mut LeafChanges,
+    leaf_updater: &mut LeafUpdater,
+    key: Key,
+) {
+    let Some((_, branch_id)) = bbn_index.lookup(key) else {
+        return;
+    };
+
+    // UNWRAP: branches in index always exist.
+    let branch = bnp.checkout(branch_id).unwrap();
+    let Some((i, leaf_pn)) = super::search_branch(&branch, key) else {
+        return;
+    };
+    let separator = reconstruct_key(branch.prefix(), branch.separator(i));
+
+    // we intend to work on this leaf, therefore, we delete it. any new leaves produced by the
+    // updater will replace it.
+    leaf_changes.delete(separator, leaf_pn);
+
+    let cutoff = if i + 1 < branch.n() as usize {
+        Some(reconstruct_key(branch.prefix(), branch.separator(i + 1)))
+    } else {
+        bbn_index.next_after(key).map(|(cutoff, _)| cutoff)
+    };
+
+    let base = BaseLeaf {
+        node: leaf_cache.remove(&leaf_pn).unwrap_or_else(|| LeafNode {
+            inner: leaf_reader.query(leaf_pn),
+        }),
+        iter_pos: 0,
+        separator,
+    };
+
+    leaf_updater.reset_base(Some(base), cutoff);
+}
+
+fn leaf_stage(
+    bbn_index: &Index,
+    bnp: &BranchNodePool,
+    mut leaf_cache: HashMap<PageNumber, LeafNode>,
+    leaf_reader: &LeafStoreReader,
+    changeset: Vec<(Key, Option<(Vec<u8>, bool)>)>,
+) -> LeafChanges {
+    if changeset.is_empty() {
+        return LeafChanges::default();
+    }
+    let mut leaf_changes = LeafChanges::default();
+
+    let mut leaf_updater = LeafUpdater::new(None, None);
+
+    // point leaf updater at first leaf.
+    reset_leaf_base(
+        bbn_index,
+        &bnp,
+        &mut leaf_cache,
+        &leaf_reader,
+        &mut leaf_changes,
+        &mut leaf_updater,
+        // UNWRAP: size checked
+        changeset.first().unwrap().0,
+    );
+
+    for (key, op) in changeset {
+        // ensure key is in scope for leaf updater. if not, digest it. merge rightwards until
+        //    done _or_ key is in scope.
+        while !leaf_updater.is_in_scope(&key) {
+            let k = if let LeafDigestResult::NeedsMerge(cutoff) =
+                leaf_updater.digest(&mut leaf_changes)
+            {
+                cutoff
+            } else {
+                key
+            };
+
+            reset_leaf_base(
+                bbn_index,
+                &bnp,
+                &mut leaf_cache,
+                &leaf_reader,
+                &mut leaf_changes,
+                &mut leaf_updater,
+                k,
+            );
+        }
+
+        let (value_change, overflow) = match op {
+            None => (None, false),
+            Some((v, overflow)) => (Some(v), overflow),
+        };
+
+        let delete_overflow = |overflow_cell: &[u8]| leaf_changes.delete_overflow(overflow_cell);
+        leaf_updater.ingest(key, value_change, overflow, delete_overflow);
+    }
+
+    loop {
+        if let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut leaf_changes) {
+            reset_leaf_base(
+                bbn_index,
+                &bnp,
+                &mut leaf_cache,
+                &leaf_reader,
+                &mut leaf_changes,
+                &mut leaf_updater,
+                cutoff,
+            );
+            continue;
+        }
+        break;
+    }
+
+    leaf_changes
+}
+
+struct ChangedBranchEntry {
+    deleted: Option<(BranchId, PageNumber)>,
+    inserted: Option<(BranchId, BranchNode)>,
+}
+
+#[derive(Default)]
+struct BranchChanges {
+    inner: BTreeMap<Key, ChangedBranchEntry>,
+    fresh_released: Vec<BranchId>,
+}
+
+impl BranchChanges {
+    fn delete(&mut self, key: Key, branch_id: BranchId, pn: PageNumber) {
+        let entry = self.inner.entry(key).or_insert_with(|| ChangedBranchEntry {
+            deleted: None,
+            inserted: None,
+        });
+
+        // we can only delete a branch once.
+        assert!(entry.deleted.is_none());
+
+        entry.deleted = Some((branch_id, pn));
+    }
+
+    fn insert(&mut self, key: Key, branch_id: BranchId, node: BranchNode) {
+        let entry = self.inner.entry(key).or_insert_with(|| ChangedBranchEntry {
+            deleted: None,
+            inserted: None,
+        });
+
+        if let Some((prev_id, _)) = entry.inserted.replace((branch_id, node)) {
+            self.fresh_released.push(prev_id);
+        }
+    }
+}
+
+fn reset_branch_base(
+    bbn_index: &Index,
+    bnp: &BranchNodePool,
+    branch_changes: &mut BranchChanges,
+    branch_updater: &mut BranchUpdater,
+    key: Key,
+) {
+    let Some((separator, branch_id)) = bbn_index.lookup(key) else {
+        return;
+    };
+
+    // UNWRAP: all indexed branches exist.
+    let branch = bnp.checkout(branch_id).unwrap();
+    let cutoff = bbn_index.next_after(key).map(|(cutoff, _)| cutoff);
+
+    branch_changes.delete(separator, branch_id, branch.bbn_pn().into());
+
+    let base = BaseBranch {
+        node: branch,
+        iter_pos: 0,
+    };
+    branch_updater.reset_base(Some(base), cutoff);
+}
+
+fn branch_stage(
+    bbn_index: &Index,
+    bnp: &BranchNodePool,
+    changeset: Vec<(Key, Option<PageNumber>)>,
+) -> BranchChanges {
+    if changeset.is_empty() {
+        return BranchChanges::default();
+    }
+    let mut branch_changes = BranchChanges::default();
+
+    let mut branch_updater = BranchUpdater::new(None, None);
+
+    // point branch updater at first branch.
+    reset_branch_base(
+        bbn_index,
+        &bnp,
+        &mut branch_changes,
+        &mut branch_updater,
+        // UNWRAP: size checked
+        changeset.first().unwrap().0,
+    );
+
+    for (key, op) in changeset {
+        // ensure key is in scope for branch updater. if not, digest it. merge rightwards until
+        //    done _or_ key is in scope.
+        while !branch_updater.is_in_scope(&key) {
+            let k = if let BranchDigestResult::NeedsMerge(cutoff) =
+                branch_updater.digest(&bnp, &mut branch_changes)
+            {
+                cutoff
+            } else {
+                key
+            };
+
+            reset_branch_base(bbn_index, &bnp, &mut branch_changes, &mut branch_updater, k);
+        }
+
+        branch_updater.ingest(key, op);
+    }
+
+    loop {
+        if let BranchDigestResult::NeedsMerge(cutoff) =
+            branch_updater.digest(&bnp, &mut branch_changes)
+        {
+            reset_branch_base(
+                bbn_index,
+                &bnp,
+                &mut branch_changes,
+                &mut branch_updater,
+                cutoff,
+            );
+            continue;
+        }
+        break;
+    }
+
+    branch_changes
 }
 
 pub fn reconstruct_key(prefix: &BitSlice<u8, Msb0>, separator: &BitSlice<u8, Msb0>) -> Key {
@@ -293,7 +406,7 @@ fn preload_leaves(
 
     let mut submissions = 0;
     for key in keys {
-        let Some(branch_id) = bbn_index.lookup(key) else {
+        let Some((_, branch_id)) = bbn_index.lookup(key) else {
             continue;
         };
         // UNWRAP: all branches in index exist.
