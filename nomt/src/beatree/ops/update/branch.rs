@@ -4,22 +4,19 @@ use std::cmp::Ordering;
 
 use crate::beatree::{
     allocator::PageNumber,
-    bbn::BbnStoreWriter,
     branch::{
         self as branch_node, BranchNode, BranchNodeBuilder, BranchNodePool, BRANCH_NODE_BODY_SIZE,
     },
-    index::Index,
     Key,
 };
 
 use super::{
-    get_key, BranchId, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
-    BRANCH_MERGE_THRESHOLD,
+    get_key, BranchChanges, BranchId, BRANCH_BULK_SPLIT_TARGET,
+    BRANCH_BULK_SPLIT_THRESHOLD, BRANCH_MERGE_THRESHOLD,
 };
 
 pub struct BaseBranch {
     pub node: BranchNode,
-    pub id: BranchId,
     pub iter_pos: usize,
 }
 
@@ -38,10 +35,6 @@ impl BaseBranch {
 
     fn key_value(&self, i: usize) -> (Key, PageNumber) {
         (self.key(i), self.node.node_pointer(i).into())
-    }
-
-    pub fn separator(&self) -> Key {
-        self.key(0)
     }
 
     fn advance_iter(&mut self) {
@@ -65,9 +58,6 @@ pub struct BranchUpdater {
     // the cutoff key, which determines if an operation is in-scope.
     // does not exist for the last branch in the database.
     cutoff: Option<Key>,
-    // separator keys which are to be possibly deleted and will be at the point that another
-    // separator greater than it is ingested.
-    possibly_deleted: Vec<Key>,
     ops: Vec<BranchOp>,
     // gauges total size of branch after ops applied.
     // if bulk split is undergoing, this just stores the total size of the last branch,
@@ -81,77 +71,56 @@ impl BranchUpdater {
         BranchUpdater {
             base,
             cutoff,
-            possibly_deleted: Vec::new(),
             ops: Vec::new(),
             gauge: BranchGauge::new(),
             bulk_split: None,
         }
     }
 
-    /// Ingest a key and page number into the branch updater. If this returns `NeedsBranch`,
-    /// then digest, reset the base, and attempt again.
-    pub fn ingest(&mut self, key: Key, pn: PageNumber) {
+    /// Ingest a key and page number into the branch updater.
+    pub fn ingest(&mut self, key: Key, pn: Option<PageNumber>) {
         self.keep_up_to(Some(&key));
-        self.ops.push(BranchOp::Insert(key, pn));
-        self.bulk_split_step(self.ops.len() - 1);
-    }
-
-    pub fn base(&self) -> Option<&BaseBranch> {
-        self.base.as_ref()
-    }
-
-    pub fn cutoff(&self) -> Option<Key> {
-        self.cutoff
-    }
-
-    pub fn digest(
-        &mut self,
-        bbn_index: &mut Index,
-        bnp: &mut BranchNodePool,
-        bbn_writer: &mut BbnStoreWriter,
-    ) -> (Option<BranchId>, DigestResult) {
-        if let Some(ref base) = self.base {
-            bbn_index.remove(&base.separator());
-            bbn_writer.release(base.node.bbn_pn().into());
+        if let Some(pn) = pn {
+            self.ops.push(BranchOp::Insert(key, pn));
+            self.bulk_split_step(self.ops.len() - 1);
         }
+    }
 
-        let old_branch_id = self.base.as_ref().map(|b| b.id);
-
+    pub(super) fn digest(
+        &mut self,
+        bnp: &BranchNodePool,
+        branch_changes: &mut BranchChanges,
+    ) -> DigestResult {
         self.keep_up_to(None);
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_branches(bbn_index, bnp, bbn_writer);
+        let last_ops_start = self.build_bulk_splitter_branches(bnp, branch_changes);
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
 
-            (old_branch_id, DigestResult::Finished)
+            DigestResult::Finished
         } else if self.gauge.body_size() > BRANCH_NODE_BODY_SIZE {
             assert_eq!(
                 last_ops_start, 0,
                 "normal split can only occur when not bulk splitting"
             );
-            (old_branch_id, self.split(bbn_index, bnp, bbn_writer))
+            self.split(bnp, branch_changes)
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let (branch_id, node) =
                 self.build_branch(&self.ops[last_ops_start..], &self.gauge, bnp);
             let separator = self.op_key(&self.ops[last_ops_start]);
-
-            bbn_index.insert(separator, branch_id);
-            bbn_writer.allocate(node);
+            branch_changes.insert(separator, branch_id, node);
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
-            (old_branch_id, DigestResult::Finished)
+            DigestResult::Finished
         } else {
             self.prepare_merge_ops(last_ops_start);
 
-            (
-                old_branch_id,
-                DigestResult::NeedsMerge(self.cutoff.unwrap()),
-            )
+            DigestResult::NeedsMerge(self.cutoff.unwrap())
         }
     }
 
@@ -159,14 +128,9 @@ impl BranchUpdater {
         self.cutoff.map_or(true, |k| *key < k)
     }
 
-    pub fn possibly_delete(&mut self, key: Key) {
-        self.possibly_deleted.push(key);
-    }
-
     pub fn reset_base(&mut self, base: Option<BaseBranch>, cutoff: Option<Key>) {
         self.base = base;
         self.cutoff = cutoff;
-        self.possibly_deleted.clear();
     }
 
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
@@ -182,11 +146,7 @@ impl BranchUpdater {
                 break;
             }
 
-            if self.possibly_deleted.first() == Some(&next_key) {
-                // never keep items from `possibly_deleted`.
-                self.possibly_deleted.remove(0);
-                base_node.advance_iter();
-            } else if order == Ordering::Greater {
+            if order == Ordering::Greater {
                 let separator_len = separator_len(&next_key);
                 self.ops
                     .push(BranchOp::Keep(base_node.iter_pos, separator_len));
@@ -251,9 +211,8 @@ impl BranchUpdater {
 
     fn build_bulk_splitter_branches(
         &mut self,
-        bbn_index: &mut Index,
-        bnp: &mut BranchNodePool,
-        bbn_writer: &mut BbnStoreWriter,
+        bnp: &BranchNodePool,
+        branch_changes: &mut BranchChanges,
     ) -> usize {
         let Some(splitter) = self.bulk_split.take() else {
             return 0;
@@ -265,9 +224,7 @@ impl BranchUpdater {
             let separator = self.op_key(&self.ops[start]);
             let (new_branch_id, new_node) = self.build_branch(branch_ops, &gauge, bnp);
 
-            // write the node and provide it to the branch above.
-            bbn_index.insert(separator, new_branch_id);
-            bbn_writer.allocate(new_node);
+            branch_changes.insert(separator, new_branch_id, new_node);
 
             start += item_count;
         }
@@ -275,12 +232,7 @@ impl BranchUpdater {
         start
     }
 
-    fn split(
-        &mut self,
-        bbn_index: &mut Index,
-        bnp: &mut BranchNodePool,
-        bbn_writer: &mut BbnStoreWriter,
-    ) -> DigestResult {
+    fn split(&mut self, bnp: &BranchNodePool, branch_changes: &mut BranchChanges) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -316,8 +268,7 @@ impl BranchUpdater {
 
         let (left_branch_id, left_node) = self.build_branch(left_ops, &left_gauge, bnp);
 
-        bbn_index.insert(left_separator, left_branch_id);
-        bbn_writer.allocate(left_node);
+        branch_changes.insert(left_separator, left_branch_id, left_node);
 
         let mut right_gauge = BranchGauge::new();
         for op in &self.ops[split_point..] {
@@ -336,8 +287,7 @@ impl BranchUpdater {
         if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let (right_branch_id, right_node) = self.build_branch(right_ops, &right_gauge, bnp);
 
-            bbn_index.insert(right_separator, right_branch_id);
-            bbn_writer.allocate(right_node);
+            branch_changes.insert(right_separator, right_branch_id, right_node);
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
@@ -359,7 +309,7 @@ impl BranchUpdater {
         &self,
         ops: &[BranchOp],
         gauge: &BranchGauge,
-        bnp: &mut BranchNodePool,
+        bnp: &BranchNodePool,
     ) -> (BranchId, BranchNode) {
         let branch_id = bnp.allocate();
 

@@ -9,7 +9,10 @@
 /// pointers: [PageNumber; n_pointers]
 /// bytes: [u8; n_bytes]
 /// ```
-use crate::{beatree::PageNumber, io::{page_pool::FatPage, PAGE_SIZE}};
+use crate::{
+    beatree::PageNumber,
+    io::{page_pool::FatPage, PAGE_SIZE},
+};
 
 use super::{
     node::MAX_OVERFLOW_CELL_NODE_POINTERS,
