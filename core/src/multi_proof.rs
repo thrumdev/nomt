@@ -254,7 +254,9 @@ mod tests {
         let sibling1 = [1; 32];
         let sibling2 = [2; 32];
         let path_proof = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path, 256,
+            )),
             siblings: vec![sibling1, sibling2],
         };
 
@@ -287,11 +289,15 @@ mod tests {
         let sibling_x = [b'x'; 32];
 
         let path_proof_1 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_1, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_1, 256,
+            )),
             siblings: vec![sibling1, sibling2, sibling_x, sibling3, sibling4],
         };
         let path_proof_2 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_2, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_2, 256,
+            )),
             siblings: vec![sibling1, sibling2, sibling_x, sibling5, sibling6],
         };
 
@@ -332,11 +338,15 @@ mod tests {
         siblings_2.push([b'1'; 32]);
 
         let path_proof_1 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_1, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_1, 256,
+            )),
             siblings: siblings_1.clone(),
         };
         let path_proof_2 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_2, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_2, 256,
+            )),
             siblings: siblings_2,
         };
 
@@ -402,36 +412,48 @@ mod tests {
         let sibling19 = [19; 32];
 
         let path_proof_1 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_1, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_1, 256,
+            )),
             siblings: vec![sibling1, sibling2],
         };
 
         let path_proof_2 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_2, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_2, 256,
+            )),
             siblings: vec![sibling1, sibling3, sibling4, sibling5, sibling6, sibling7],
         };
 
         let path_proof_3 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_3, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_3, 256,
+            )),
             siblings: vec![sibling1, sibling3, sibling4, sibling5, sibling8, sibling9],
         };
 
         let path_proof_4 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_4, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_4, 256,
+            )),
             siblings: vec![
                 sibling10, sibling11, sibling12, sibling13, sibling14, sibling15,
             ],
         };
 
         let path_proof_5 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_5, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_5, 256,
+            )),
             siblings: vec![
                 sibling10, sibling11, sibling12, sibling16, sibling17, sibling18,
             ],
         };
 
         let path_proof_6 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_6, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_6, 256,
+            )),
             siblings: vec![sibling10, sibling11, sibling12, sibling16, sibling19],
         };
 
@@ -534,24 +556,32 @@ mod tests {
         let sibling24 = [24; 32];
 
         let path_proof_0 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_0, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_0, 256,
+            )),
             siblings: vec![sibling1, sibling2, sibling3, sibling4, sibling5],
         };
 
         let path_proof_1 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_1, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_1, 256,
+            )),
             siblings: vec![sibling1, sibling2, sibling3, sibling6, sibling7],
         };
 
         let path_proof_2 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_2, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_2, 256,
+            )),
             siblings: vec![
                 sibling8, sibling9, sibling10, sibling11, sibling12, sibling13, sibling14,
                 sibling15,
             ],
         };
         let path_proof_3 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_3, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_3, 256,
+            )),
             siblings: vec![
                 sibling8, sibling9, sibling10, sibling11, sibling12, sibling13, sibling16,
                 sibling17,
@@ -559,7 +589,9 @@ mod tests {
         };
 
         let path_proof_4 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_4, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_4, 256,
+            )),
             siblings: vec![
                 sibling8, sibling9, sibling10, sibling18, sibling19, sibling20, sibling21,
                 sibling22,
@@ -567,7 +599,9 @@ mod tests {
         };
 
         let path_proof_5 = PathProof {
-            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(key_path_5, 256)),
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                key_path_5, 256,
+            )),
             siblings: vec![
                 sibling8, sibling9, sibling10, sibling18, sibling19, sibling20, sibling23,
                 sibling24,

@@ -384,9 +384,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
                         siblings: seek_result.siblings,
                         terminal: match seek_result.terminal.clone() {
                             Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
-                            None => PathProofTerminal::Terminator(
-                                seek_result.position.clone(),
-                            ),
+                            None => PathProofTerminal::Terminator(seek_result.position.clone()),
                         },
                     },
                     path: seek_result.position,
@@ -459,9 +457,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
                     siblings,
                     terminal: match seek_result.terminal.clone() {
                         Some(leaf_data) => PathProofTerminal::Leaf(leaf_data),
-                        None => {
-                            PathProofTerminal::Terminator(seek_result.position.clone())
-                        }
+                        None => PathProofTerminal::Terminator(seek_result.position.clone()),
                     },
                 },
                 path: seek_result.position,
