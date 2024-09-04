@@ -87,12 +87,12 @@ impl Tree {
         let (leaf_store_rd_shared, leaf_store_rd_sync, leaf_store_wr) = {
             let ln_file = ln_file.try_clone().unwrap();
 
-            leaf::store::create(ln_file, ln_freelist_pn, ln_bump, &io_pool)
+            leaf::store::open(ln_file, ln_freelist_pn, ln_bump, &io_pool)
         };
 
         let (bbn_store_wr, bbn_freelist_tracked) = {
             let bbn_fd = bbn_file.try_clone().unwrap();
-            bbn::create(bbn_fd, bbn_freelist_pn, bbn_bump, &io_pool)
+            bbn::open(bbn_fd, bbn_freelist_pn, bbn_bump, &io_pool)
         };
         let mut bnp = branch::BranchNodePool::new();
         let index = ops::reconstruct(

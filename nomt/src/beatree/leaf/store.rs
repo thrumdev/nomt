@@ -20,8 +20,8 @@ pub struct LeafStoreWriter {
     pending: Vec<(PageNumber, Box<Page>)>,
 }
 
-/// creates a pair of LeafStoreReader and LeafStoreWriter over a possibly already existing File.
-pub fn create(
+/// creates a pair of LeafStoreReader and LeafStoreWriter over an already existing File.
+pub fn open(
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
@@ -37,7 +37,7 @@ pub fn create(
         io_pool.make_handle(),
     );
 
-    let allocator_writer = AllocatorWriter::new(fd, free_list_head, bump, io_pool.make_handle());
+    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump, io_pool.make_handle());
 
     (
         LeafStoreReader {
