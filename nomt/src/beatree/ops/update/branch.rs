@@ -6,7 +6,8 @@ use crate::beatree::{
     allocator::PageNumber,
     bbn::BbnStoreWriter,
     branch::{
-        self as branch_node, BranchNode, BranchNodeBuilder, BranchNodePool, BRANCH_NODE_BODY_SIZE,
+        self as branch_node, node::BRANCH_NODE_EMPTY_BODY, BranchNode, BranchNodeBuilder,
+        BranchNodePool, BRANCH_NODE_BODY_SIZE,
     },
     index::Index,
     Key,
@@ -124,7 +125,7 @@ impl BranchUpdater {
         // in practice; bulk splits are rare.
         let last_ops_start = self.build_bulk_splitter_branches(bbn_index, bnp, bbn_writer);
 
-        if self.gauge.body_size() == 0 {
+        if self.gauge.body_size() == BRANCH_NODE_EMPTY_BODY {
             self.ops.clear();
 
             (old_branch_id, DigestResult::Finished)
@@ -365,15 +366,14 @@ impl BranchUpdater {
 
         // UNWRAP: freshly allocated branch can always be checked out.
         let branch = bnp.checkout(branch_id).unwrap();
-        let mut builder =
-            BranchNodeBuilder::new(branch, gauge.n, gauge.prefix_len, gauge.separator_len);
+        let mut builder = BranchNodeBuilder::new(branch, gauge.n, gauge.prefix_len);
 
         for op in ops {
             match op {
-                BranchOp::Insert(k, pn) => builder.push(*k, pn.0),
-                BranchOp::Keep(i, _) => {
+                BranchOp::Insert(k, pn) => builder.push(*k, separator_len(k), pn.0),
+                BranchOp::Keep(i, s) => {
                     let (k, pn) = self.base.as_ref().unwrap().key_value(*i);
-                    builder.push(k, pn.0);
+                    builder.push(k, *s, pn.0);
                 }
             }
         }
@@ -406,8 +406,7 @@ impl BranchUpdater {
 struct BranchGauge {
     first_separator: Option<Key>,
     prefix_len: usize,
-    // total separator len, not counting prefix.
-    separator_len: usize,
+    separators_len: Vec<usize>,
     n: usize,
 }
 
@@ -416,7 +415,7 @@ impl BranchGauge {
         BranchGauge {
             first_separator: None,
             prefix_len: 0,
-            separator_len: 0,
+            separators_len: vec![],
             n: 0,
         }
     }
@@ -424,38 +423,48 @@ impl BranchGauge {
     fn ingest(&mut self, key: Key, len: usize) {
         let Some(ref first) = self.first_separator else {
             self.first_separator = Some(key);
-            self.separator_len = len;
-            self.prefix_len = self.separator_len;
+            self.prefix_len = len;
 
             self.n = 1;
             return;
         };
 
-        self.separator_len = std::cmp::max(len, self.separator_len);
-        self.prefix_len = std::cmp::min(self.separator_len, prefix_len(first, &key));
+        if self.separators_len.is_empty() {
+            // when a second value is ingested we need to count for the
+            // separator len of the first inserted separator, which was
+            // saved into the prefix_len
+            self.separators_len.push(self.prefix_len);
+        }
+
+        self.separators_len.push(len);
+
+        self.prefix_len = prefix_len(first, &key);
         self.n += 1;
+    }
+
+    fn tot_separators_len(&self) -> usize {
+        self.separators_len
+            .iter()
+            .map(|s| s.saturating_sub(self.prefix_len))
+            .sum()
     }
 
     fn body_size_after(&mut self, key: Key, len: usize) -> usize {
         let p;
-        let s;
+        let t;
         if let Some(ref first) = self.first_separator {
-            s = std::cmp::max(len, self.separator_len);
-            p = std::cmp::min(s, prefix_len(first, &key));
+            t = self.tot_separators_len() + len.saturating_sub(self.prefix_len);
+            p = prefix_len(first, &key);
         } else {
-            s = len;
+            t = 0;
             p = len;
         }
 
-        branch_node::body_size(p, s - p, self.n + 1)
+        branch_node::body_size(p, t, self.n + 1)
     }
 
     fn body_size(&self) -> usize {
-        branch_node::body_size(
-            self.prefix_len,
-            self.separator_len - self.prefix_len,
-            self.n,
-        )
+        branch_node::body_size(self.prefix_len, self.tot_separators_len(), self.n)
     }
 }
 
