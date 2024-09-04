@@ -230,6 +230,7 @@ impl Store {
             beatree_writeout_data.bbn_freelist_pages,
             beatree_writeout_data.bbn_extend_file_sz,
             beatree_writeout_data.ln,
+            beatree_writeout_data.ln_free_list_pages,
             beatree_writeout_data.ln_extend_file_sz,
             bitbox_writeout_data.ht_pages,
             new_meta,
