@@ -15,15 +15,15 @@ pub struct BbnStoreWriter {
     pending: Vec<BranchNode>,
 }
 
-/// Initializes a BbnStoreWriter over a possibly already existing File and returns all pages tracked
+/// Initializes a BbnStoreWriter over an already existing File and returns all pages tracked
 /// by the freelist (free + used by the list itself) to inform reconstruction.
-pub fn create(
+pub fn open(
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
     io_pool: &IoPool,
 ) -> (BbnStoreWriter, BTreeSet<PageNumber>) {
-    let allocator_writer = AllocatorWriter::new(fd, free_list_head, bump, io_pool.make_handle());
+    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump, io_pool.make_handle());
     let freelist = allocator_writer.free_list().all_tracked_pages();
 
     (

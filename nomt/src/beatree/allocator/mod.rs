@@ -100,8 +100,8 @@ impl AllocatorReader {
 }
 
 impl AllocatorWriter {
-    /// creates an AllocatorWriter over a possibly already existing File.
-    pub fn new(
+    /// creates an AllocatorWriter over an already existing File.
+    pub fn open(
         fd: File,
         free_list_head: Option<PageNumber>,
         bump: PageNumber,
