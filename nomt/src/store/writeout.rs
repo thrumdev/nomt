@@ -23,6 +23,7 @@ pub fn run(
     bbn_free_list_pages: Vec<(PageNumber, Box<Page>)>,
     bbn_extend_file_sz: Option<u64>,
     ln: Vec<(PageNumber, Box<Page>)>,
+    ln_free_list_pages: Vec<(PageNumber, Box<Page>)>,
     ln_extend_file_sz: Option<u64>,
     ht: Vec<(u64, Box<Page>)>,
     new_meta: Meta,
@@ -44,6 +45,7 @@ pub fn run(
                 ln_extend_file_sz,
                 ln_remaining: ln.len(),
                 ln,
+                free_list_pages: ln_free_list_pages,
             },
             ht_write_out: HtWriteOut {
                 ht_fd,
@@ -443,6 +445,7 @@ struct LnWriteOut {
     ln_fd: RawFd,
     ln_extend_file_sz: Option<u64>,
     ln: Vec<(PageNumber, Box<Page>)>,
+    free_list_pages: Vec<(PageNumber, Box<Page>)>,
     ln_remaining: usize,
 }
 
@@ -465,6 +468,9 @@ impl LnWriteOut {
 
     fn send_writes(&mut self, io: &mut IoDmux) {
         for (ln_pn, ln_page) in self.ln.drain(..) {
+            io.send_ln(IoKind::Write(self.ln_fd, ln_pn.0 as u64, ln_page));
+        }
+        for (ln_pn, ln_page) in self.free_list_pages.drain(..) {
             io.send_ln(IoKind::Write(self.ln_fd, ln_pn.0 as u64, ln_page));
         }
     }

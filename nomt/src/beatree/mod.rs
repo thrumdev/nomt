@@ -214,14 +214,15 @@ impl Tree {
             .unwrap()
         };
 
-        let (ln, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
+        let (ln, ln_free_list_pages, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
             let LeafStoreCommitOutput {
-                pages,
+                pending,
+                free_list_pages,
                 extend_file_sz,
                 freelist_head,
                 bump,
             } = sync.leaf_store_wr.commit();
-            (pages, freelist_head.0, bump.0, extend_file_sz)
+            (pending, free_list_pages, freelist_head.0, bump.0, extend_file_sz)
         };
 
         let (bbn, bbn_freelist_pages, bbn_freelist_pn, bbn_bump, bbn_extend_file_sz) = {
@@ -246,6 +247,7 @@ impl Tree {
             bbn_freelist_pages,
             bbn_extend_file_sz,
             ln,
+            ln_free_list_pages,
             ln_extend_file_sz,
             ln_freelist_pn,
             ln_bump,
@@ -272,6 +274,7 @@ pub struct WriteoutData {
     pub bbn_freelist_pages: Vec<(PageNumber, Box<Page>)>,
     pub bbn_extend_file_sz: Option<u64>,
     pub ln: Vec<(PageNumber, Box<Page>)>,
+    pub ln_free_list_pages: Vec<(PageNumber, Box<Page>)>,
     pub ln_extend_file_sz: Option<u64>,
     pub ln_freelist_pn: u32,
     pub ln_bump: u32,

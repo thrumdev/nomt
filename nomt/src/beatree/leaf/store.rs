@@ -106,7 +106,8 @@ impl LeafStoreWriter {
         } = self.allocator_writer.commit();
 
         LeafStoreCommitOutput {
-            pages: pending.into_iter().chain(free_list_pages).collect(),
+            pending,
+            free_list_pages,
             bump,
             extend_file_sz,
             freelist_head,
@@ -115,7 +116,8 @@ impl LeafStoreWriter {
 }
 
 pub struct LeafStoreCommitOutput {
-    pub pages: Vec<(PageNumber, Box<Page>)>,
+    pub pending: Vec<(PageNumber, Box<Page>)>,
+    pub free_list_pages: Vec<(PageNumber, Box<Page>)>,
     pub bump: PageNumber,
     pub extend_file_sz: Option<u64>,
     pub freelist_head: PageNumber,
