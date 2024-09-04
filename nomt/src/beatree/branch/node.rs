@@ -156,12 +156,17 @@ impl<'a> BranchNodeView<'a> {
 
     pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
         let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let end_separators = (start_separators * 8
+            + self.prefix_len() as usize
+            + self.cell(self.n() as usize - 1)
+            + 7)
+            / 8;
 
         let mut bit_offset_start = self.prefix_len() as usize;
         bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
         let bit_offset_end = self.prefix_len() as usize + self.cell(i);
 
-        &self.inner[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
+        &self.inner[start_separators..end_separators].view_bits()[bit_offset_start..bit_offset_end]
     }
 
     pub fn node_pointer(&self, i: usize) -> u32 {
