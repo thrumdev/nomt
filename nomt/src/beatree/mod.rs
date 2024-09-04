@@ -92,7 +92,7 @@ impl Tree {
 
         let (bbn_store_wr, bbn_freelist_tracked) = {
             let bbn_fd = bbn_file.try_clone().unwrap();
-            bbn::open(bbn_fd, bbn_freelist_pn, bbn_bump, &io_pool)
+            bbn::open(bbn_fd, bbn_freelist_pn, bbn_bump)
         };
         let mut bnp = branch::BranchNodePool::new();
         let index = ops::reconstruct(

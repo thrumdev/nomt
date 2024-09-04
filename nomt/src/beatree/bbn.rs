@@ -1,4 +1,4 @@
-use crate::io::{IoPool, Page};
+use crate::io::Page;
 
 use std::{collections::BTreeSet, fs::File};
 
@@ -21,9 +21,9 @@ pub fn open(
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
-    io_pool: &IoPool,
+    
 ) -> (BbnStoreWriter, BTreeSet<PageNumber>) {
-    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump, io_pool.make_handle());
+    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump);
     let freelist = allocator_writer.free_list().all_tracked_pages();
 
     (

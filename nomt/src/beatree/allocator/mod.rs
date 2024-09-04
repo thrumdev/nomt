@@ -1,7 +1,4 @@
-use crate::{
-    io::{IoCommand, IoHandle, IoKind},
-    io::{Page, PAGE_SIZE},
-};
+use crate::io::{self, IoCommand, IoHandle, IoKind, Page, PAGE_SIZE};
 
 use std::{
     fs::File,
@@ -64,23 +61,7 @@ impl AllocatorReader {
 
     /// Returns the page with the specified page number. Blocks the current thread.
     pub fn query(&self, pn: PageNumber) -> Box<Page> {
-        let mut page = Box::new(Page::zeroed());
-        loop {
-            let res = unsafe {
-                libc::pread(
-                    self.store_file.as_raw_fd(),
-                    page.as_mut_ptr() as *mut libc::c_void,
-                    PAGE_SIZE as libc::size_t,
-                    (pn.0 as usize * PAGE_SIZE) as libc::off_t,
-                )
-            };
-            assert!(res != -1);
-            if res as usize == PAGE_SIZE {
-                break;
-            }
-        }
-
-        page
+        io::read_page(&self.store_file, pn.0 as u64).unwrap()
     }
 
     /// Get a reference to the I/O handle.
@@ -105,7 +86,7 @@ impl AllocatorWriter {
         fd: File,
         free_list_head: Option<PageNumber>,
         bump: PageNumber,
-        io_handle: IoHandle,
+        
     ) -> Self {
         let file_size = fd
             .metadata()
@@ -113,7 +94,7 @@ impl AllocatorWriter {
             .size() as usize;
 
         AllocatorWriter {
-            free_list: FreeList::read(&fd, &io_handle, free_list_head),
+            free_list: FreeList::read(&fd, free_list_head),
             bump,
             file_max_bump: PageNumber((file_size / PAGE_SIZE) as u32),
             released: vec![],

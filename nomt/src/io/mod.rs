@@ -3,6 +3,7 @@ std::compile_error!("NOMT only supports Unix-based OSs");
 
 use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError, TrySendError};
 use std::{
+    fs::File,
     ops::{Deref, DerefMut},
     os::fd::RawFd,
 };
@@ -178,4 +179,12 @@ impl IoHandle {
     pub fn receiver(&self) -> &Receiver<CompleteIo> {
         &self.completion_receiver
     }
+}
+
+/// Read a page from the file at the given page number.
+pub fn read_page(fd: &File, pn: u64) -> std::io::Result<Box<Page>> {
+    use std::os::unix::fs::FileExt as _;
+    let mut page = Box::new(Page::zeroed());
+    fd.read_exact_at(&mut page, pn * PAGE_SIZE as u64)?;
+    Ok(page)
 }

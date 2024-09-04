@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    io::{IoCommand, IoHandle, IoKind, Page, PAGE_SIZE},
+    io::{self, IoCommand, IoHandle, IoKind, Page, PAGE_SIZE},
     page_diff::PageDiff,
 };
 
@@ -143,7 +143,7 @@ fn recover(
     seed: [u8; 16],
 ) -> anyhow::Result<()> {
     use crate::bitbox::wal::WalBlobReader;
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom, Write};
 
     wal_fd.seek(SeekFrom::Start(0))?;
 
@@ -182,9 +182,7 @@ fn recover(
                 //   the page.
                 // - store the changed page.
                 let pn = ht_offsets.data_page_index(bucket);
-                let mut page = Page::zeroed();
-                ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
-                ht_fd.read_exact(&mut page)?;
+                let mut page = io::read_page(ht_fd, pn)?;
 
                 if page_diff.count() != changed_nodes.len() {
                     anyhow::bail!(
@@ -193,7 +191,7 @@ fn recover(
                         changed_nodes.len()
                     );
                 }
-                page_diff.unpack_changed_nodes(&changed_nodes, &mut page);
+                page_diff.unpack_changed_nodes(&changed_nodes, &mut *page);
 
                 ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
                 ht_fd.write_all(&page)?;

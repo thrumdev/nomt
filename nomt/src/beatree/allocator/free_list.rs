@@ -1,10 +1,8 @@
 use crate::{
     beatree::FREELIST_EMPTY,
-    io::{IoCommand, IoHandle, IoKind},
-    io::{Page, PAGE_SIZE},
+    io::{self, Page, PAGE_SIZE},
 };
-use crossbeam_channel::TrySendError;
-use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd};
+use std::{collections::BTreeSet, fs::File};
 
 use super::PageNumber;
 
@@ -26,11 +24,7 @@ pub struct FreeList {
 }
 
 impl FreeList {
-    pub fn read(
-        store_file: &File,
-        io_handle: &IoHandle,
-        free_list_head: Option<PageNumber>,
-    ) -> FreeList {
+    pub fn read(store_file: &File, free_list_head: Option<PageNumber>) -> FreeList {
         let Some(mut free_list_pn) = free_list_head else {
             return FreeList {
                 portions: vec![],
@@ -46,26 +40,7 @@ impl FreeList {
                 break;
             }
 
-            let page = Box::new(Page::zeroed());
-
-            let mut command = Some(IoCommand {
-                kind: IoKind::Read(store_file.as_raw_fd(), free_list_pn.0 as u64, page),
-                user_data: 0,
-            });
-
-            while let Some(c) = command.take() {
-                match io_handle.try_send(c) {
-                    Ok(()) => break,
-                    Err(TrySendError::Disconnected(_)) => panic!("I/O worker dropped"),
-                    Err(TrySendError::Full(c)) => {
-                        command = Some(c);
-                    }
-                }
-            }
-
-            let completion = io_handle.recv().expect("I/O store worker dropped");
-            assert!(completion.result.is_ok());
-            let page = completion.command.kind.unwrap_buf();
+            let page = io::read_page(store_file, free_list_pn.0 as u64).unwrap();
 
             let (prev, free_list) = decode_free_list_page(page);
             free_list_portions.push((free_list_pn, free_list));
