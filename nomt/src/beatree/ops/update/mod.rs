@@ -15,14 +15,13 @@ use crate::beatree::{
     },
     Key,
 };
-use crate::io::PagePool;
 
 use super::BranchId;
-use branch::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
-use leaf::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater};
 
-pub(crate) mod branch;
-pub(crate) mod leaf;
+mod branch_stage;
+mod branch_updater;
+mod leaf_stage;
+mod leaf_updater;
 
 // All nodes less than this body size will be merged with a neighboring node.
 const BRANCH_MERGE_THRESHOLD: usize = BRANCH_NODE_BODY_SIZE / 2;
@@ -66,17 +65,10 @@ pub fn update(
         })
         .collect::<_>();
 
-    let leaf_changes = leaf_stage(
-        &bbn_index,
-        &bnp,
-        leaf_cache,
-        leaf_reader,
-        leaf_writer.page_pool().clone(),
-        changeset,
-    );
+    let (leaf_changes, overflow_deleted) =
+        leaf_stage::run(&bbn_index, &bnp, leaf_cache, leaf_reader, leaf_writer.page_pool().clone(), changeset);
 
     let branch_changeset = leaf_changes
-        .inner
         .into_iter()
         .map(|(key, leaf_entry)| {
             let leaf_pn = leaf_entry.inserted.map(|leaf| leaf_writer.write(leaf));
@@ -88,14 +80,14 @@ pub fn update(
         })
         .collect::<Vec<_>>();
 
-    for overflow_deleted in leaf_changes.overflow_deleted {
-        overflow::delete(&overflow_deleted, leaf_reader, leaf_writer);
+    for overflow_cell in overflow_deleted {
+        overflow::delete(&overflow_cell, leaf_reader, leaf_writer);
     }
 
-    let branch_changes = branch_stage(&bbn_index, &bnp, branch_changeset);
+    let (branch_changes, fresh_released) = branch_stage::run(&bbn_index, &bnp, branch_changeset);
 
     let mut removed_branches = Vec::new();
-    for (key, changed_branch) in branch_changes.inner {
+    for (key, changed_branch) in branch_changes {
         match changed_branch.inserted {
             Some((branch_id, node)) => {
                 bbn_index.insert(key, branch_id);
@@ -112,289 +104,11 @@ pub fn update(
         }
     }
 
-    for branch_id in branch_changes.fresh_released {
+    for branch_id in fresh_released {
         bnp.release(branch_id);
     }
 
     Ok(removed_branches)
-}
-
-struct ChangedLeafEntry {
-    deleted: Option<PageNumber>,
-    inserted: Option<LeafNode>,
-}
-
-#[derive(Default)]
-struct LeafChanges {
-    inner: BTreeMap<Key, ChangedLeafEntry>,
-    overflow_deleted: Vec<Vec<u8>>,
-}
-
-impl LeafChanges {
-    fn delete(&mut self, key: Key, pn: PageNumber) {
-        let entry = self.inner.entry(key).or_insert_with(|| ChangedLeafEntry {
-            deleted: None,
-            inserted: None,
-        });
-
-        // we can only delete a leaf once.
-        assert!(entry.deleted.is_none());
-
-        entry.deleted = Some(pn);
-    }
-
-    fn insert(&mut self, key: Key, node: LeafNode) {
-        let entry = self.inner.entry(key).or_insert_with(|| ChangedLeafEntry {
-            deleted: None,
-            inserted: None,
-        });
-
-        if let Some(_prev) = entry.inserted.replace(node) {
-            // TODO: this is where we'd clean up.
-        }
-    }
-
-    fn delete_overflow(&mut self, overflow_cell: &[u8]) {
-        self.overflow_deleted.push(overflow_cell.to_vec());
-    }
-}
-
-fn reset_leaf_base(
-    bbn_index: &Index,
-    bnp: &BranchNodePool,
-    leaf_cache: &mut HashMap<PageNumber, LeafNode>,
-    leaf_reader: &LeafStoreReader,
-    leaf_changes: &mut LeafChanges,
-    leaf_updater: &mut LeafUpdater,
-    key: Key,
-) {
-    let Some((_, branch_id)) = bbn_index.lookup(key) else {
-        return;
-    };
-
-    // UNWRAP: branches in index always exist.
-    let branch = bnp.checkout(branch_id).unwrap();
-    let Some((i, leaf_pn)) = super::search_branch(&branch, key) else {
-        return;
-    };
-    let separator = get_key(&branch, i);
-
-    // we intend to work on this leaf, therefore, we delete it. any new leaves produced by the
-    // updater will replace it.
-    leaf_changes.delete(separator, leaf_pn);
-
-    let cutoff = if i + 1 < branch.n() as usize {
-        Some(get_key(&branch, i + 1))
-    } else {
-        bbn_index.next_after(key).map(|(cutoff, _)| cutoff)
-    };
-
-    let base = BaseLeaf {
-        node: leaf_cache.remove(&leaf_pn).unwrap_or_else(|| LeafNode {
-            inner: leaf_reader.query(leaf_pn),
-        }),
-        iter_pos: 0,
-        separator,
-    };
-
-    leaf_updater.reset_base(Some(base), cutoff);
-}
-
-fn leaf_stage(
-    bbn_index: &Index,
-    bnp: &BranchNodePool,
-    mut leaf_cache: HashMap<PageNumber, LeafNode>,
-    leaf_reader: &LeafStoreReader,
-    page_pool: PagePool,
-    changeset: Vec<(Key, Option<(Vec<u8>, bool)>)>,
-) -> LeafChanges {
-    if changeset.is_empty() {
-        return LeafChanges::default();
-    }
-    let mut leaf_changes = LeafChanges::default();
-
-    let mut leaf_updater = LeafUpdater::new(page_pool, None, None);
-
-    // point leaf updater at first leaf.
-    reset_leaf_base(
-        bbn_index,
-        &bnp,
-        &mut leaf_cache,
-        &leaf_reader,
-        &mut leaf_changes,
-        &mut leaf_updater,
-        // UNWRAP: size checked
-        changeset.first().unwrap().0,
-    );
-
-    for (key, op) in changeset {
-        // ensure key is in scope for leaf updater. if not, digest it. merge rightwards until
-        //    done _or_ key is in scope.
-        while !leaf_updater.is_in_scope(&key) {
-            let k = if let LeafDigestResult::NeedsMerge(cutoff) =
-                leaf_updater.digest(&mut leaf_changes)
-            {
-                cutoff
-            } else {
-                key
-            };
-
-            reset_leaf_base(
-                bbn_index,
-                &bnp,
-                &mut leaf_cache,
-                &leaf_reader,
-                &mut leaf_changes,
-                &mut leaf_updater,
-                k,
-            );
-        }
-
-        let (value_change, overflow) = match op {
-            None => (None, false),
-            Some((v, overflow)) => (Some(v), overflow),
-        };
-
-        let delete_overflow = |overflow_cell: &[u8]| leaf_changes.delete_overflow(overflow_cell);
-        leaf_updater.ingest(key, value_change, overflow, delete_overflow);
-    }
-
-    loop {
-        if let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut leaf_changes) {
-            reset_leaf_base(
-                bbn_index,
-                &bnp,
-                &mut leaf_cache,
-                &leaf_reader,
-                &mut leaf_changes,
-                &mut leaf_updater,
-                cutoff,
-            );
-            continue;
-        }
-        break;
-    }
-
-    leaf_changes
-}
-
-struct ChangedBranchEntry {
-    deleted: Option<(BranchId, PageNumber)>,
-    inserted: Option<(BranchId, BranchNode)>,
-}
-
-#[derive(Default)]
-struct BranchChanges {
-    inner: BTreeMap<Key, ChangedBranchEntry>,
-    fresh_released: Vec<BranchId>,
-}
-
-impl BranchChanges {
-    fn delete(&mut self, key: Key, branch_id: BranchId, pn: PageNumber) {
-        let entry = self.inner.entry(key).or_insert_with(|| ChangedBranchEntry {
-            deleted: None,
-            inserted: None,
-        });
-
-        // we can only delete a branch once.
-        assert!(entry.deleted.is_none());
-
-        entry.deleted = Some((branch_id, pn));
-    }
-
-    fn insert(&mut self, key: Key, branch_id: BranchId, node: BranchNode) {
-        let entry = self.inner.entry(key).or_insert_with(|| ChangedBranchEntry {
-            deleted: None,
-            inserted: None,
-        });
-
-        if let Some((prev_id, _)) = entry.inserted.replace((branch_id, node)) {
-            self.fresh_released.push(prev_id);
-        }
-    }
-}
-
-fn reset_branch_base(
-    bbn_index: &Index,
-    bnp: &BranchNodePool,
-    branch_changes: &mut BranchChanges,
-    branch_updater: &mut BranchUpdater,
-    key: Key,
-) {
-    let Some((separator, branch_id)) = bbn_index.lookup(key) else {
-        return;
-    };
-
-    // UNWRAP: all indexed branches exist.
-    let branch = bnp.checkout(branch_id).unwrap();
-    let cutoff = bbn_index.next_after(key).map(|(cutoff, _)| cutoff);
-
-    branch_changes.delete(separator, branch_id, branch.bbn_pn().into());
-
-    let base = BaseBranch {
-        node: branch,
-        iter_pos: 0,
-    };
-    branch_updater.reset_base(Some(base), cutoff);
-}
-
-fn branch_stage(
-    bbn_index: &Index,
-    bnp: &BranchNodePool,
-    changeset: Vec<(Key, Option<PageNumber>)>,
-) -> BranchChanges {
-    if changeset.is_empty() {
-        return BranchChanges::default();
-    }
-    let mut branch_changes = BranchChanges::default();
-
-    let mut branch_updater = BranchUpdater::new(None, None);
-
-    // point branch updater at first branch.
-    reset_branch_base(
-        bbn_index,
-        &bnp,
-        &mut branch_changes,
-        &mut branch_updater,
-        // UNWRAP: size checked
-        changeset.first().unwrap().0,
-    );
-
-    for (key, op) in changeset {
-        // ensure key is in scope for branch updater. if not, digest it. merge rightwards until
-        //    done _or_ key is in scope.
-        while !branch_updater.is_in_scope(&key) {
-            let k = if let BranchDigestResult::NeedsMerge(cutoff) =
-                branch_updater.digest(&bnp, &mut branch_changes)
-            {
-                cutoff
-            } else {
-                key
-            };
-
-            reset_branch_base(bbn_index, &bnp, &mut branch_changes, &mut branch_updater, k);
-        }
-
-        branch_updater.ingest(key, op);
-    }
-
-    loop {
-        if let BranchDigestResult::NeedsMerge(cutoff) =
-            branch_updater.digest(&bnp, &mut branch_changes)
-        {
-            reset_branch_base(
-                bbn_index,
-                &bnp,
-                &mut branch_changes,
-                &mut branch_updater,
-                cutoff,
-            );
-            continue;
-        }
-        break;
-    }
-
-    branch_changes
 }
 
 pub fn reconstruct_key(prefix: Option<&BitSlice<u8, Msb0>>, separator: &BitSlice<u8, Msb0>) -> Key {
@@ -466,11 +180,57 @@ fn preload_leaves(
     Ok(leaf_pages)
 }
 
+// separate two keys a and b where b > a
+pub fn separate(a: &Key, b: &Key) -> Key {
+    // if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
+    let len = a
+        .view_bits::<Msb0>()
+        .iter()
+        .zip(b.view_bits::<Msb0>().iter())
+        .take_while(|(a, b)| a == b)
+        .count()
+        + 1;
+
+    let mut separator = [0u8; 32];
+    separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
+    separator
+}
+
+pub fn prefix_len(key_a: &Key, key_b: &Key) -> usize {
+    key_a
+        .view_bits::<Msb0>()
+        .iter()
+        .zip(key_b.view_bits::<Msb0>().iter())
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+pub fn separator_len(key: &Key) -> usize {
+    if key == &[0u8; 32] {
+        return 1;
+    }
+    let key = &key.view_bits::<Msb0>();
+    key.len() - key.trailing_zeros()
+}
+
 #[cfg(feature = "benchmarks")]
 pub mod benches {
     use bitvec::{prelude::Msb0, view::BitView};
     use criterion::{BenchmarkId, Criterion};
     use rand::RngCore;
+
+    pub fn separate_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("separate");
+
+        for shared_bytes in [0, 4, 8, 12, 16] {
+            let (key1, key2) = get_key_pair(shared_bytes);
+            group.bench_function(BenchmarkId::new("shared_bytes", shared_bytes), |b| {
+                b.iter(|| super::separate(&key1, &key2));
+            });
+        }
+
+        group.finish();
+    }
 
     pub fn reconstruct_key_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("reconstruct_key");
@@ -485,6 +245,38 @@ pub mod benches {
 
             group.bench_function(BenchmarkId::new("prefix_len_bytes", prefix_bytes), |b| {
                 b.iter(|| super::reconstruct_key(Some(prefix), separator))
+            });
+        }
+
+        group.finish();
+    }
+
+    pub fn separator_len_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("separator_len");
+
+        // n_bytes represents the amount of bytes set to one
+        // from the beginning of the key
+        for n_bytes in [16, 20, 24, 28, 31].into_iter().rev() {
+            let mut separator = [0; 32];
+            for byte in separator.iter_mut().take(n_bytes) {
+                *byte = 255;
+            }
+
+            group.bench_function(BenchmarkId::new("zero_bytes", 32 - n_bytes), |b| {
+                b.iter(|| super::separator_len(&separator));
+            });
+        }
+
+        group.finish();
+    }
+
+    pub fn prefix_len_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("prefix_len");
+
+        for prefix_len_bytes in [0, 4, 8, 12, 16] {
+            let (key1, key2) = get_key_pair(prefix_len_bytes);
+            group.bench_function(BenchmarkId::new("shared_bytes", prefix_len_bytes), |b| {
+                b.iter(|| super::prefix_len(&key1, &key2));
             });
         }
 

@@ -3,10 +3,7 @@
 use crate::beatree::{
     branch::node::benches::*,
     leaf::node::benches::*,
-    ops::{
-        benches::*,
-        update::{benches::*, branch::benches::*, leaf::benches::*},
-    },
+    ops::{benches::*, update::benches::*},
     Key,
 };
 use rand::RngCore;
