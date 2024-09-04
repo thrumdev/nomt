@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::io::{IoPool, Page};
+use crate::io::{page_pool::FatPage, IoPool, PagePool};
 
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
 
@@ -38,6 +38,7 @@ pub struct Tree {
 }
 
 struct Shared {
+    page_pool: PagePool,
     bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
     branch_node_pool: branch::BranchNodePool,
@@ -66,6 +67,7 @@ impl Shared {
 
 impl Tree {
     pub fn open(
+        page_pool: PagePool,
         io_pool: &IoPool,
         ln_freelist_pn: u32,
         bbn_freelist_pn: u32,
@@ -87,12 +89,18 @@ impl Tree {
         let (leaf_store_rd_shared, leaf_store_rd_sync, leaf_store_wr) = {
             let ln_file = ln_file.try_clone().unwrap();
 
-            leaf::store::open(ln_file, ln_freelist_pn, ln_bump, &io_pool)
+            leaf::store::open(
+                page_pool.clone(),
+                ln_file,
+                ln_freelist_pn,
+                ln_bump,
+                &io_pool,
+            )
         };
 
         let (bbn_store_wr, bbn_freelist_tracked) = {
             let bbn_fd = bbn_file.try_clone().unwrap();
-            bbn::open(bbn_fd, bbn_freelist_pn, bbn_bump)
+            bbn::open(&page_pool, bbn_fd, bbn_freelist_pn, bbn_bump)
         };
         let mut bnp = branch::BranchNodePool::new();
         let index = ops::reconstruct(
@@ -103,6 +111,7 @@ impl Tree {
         )
         .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
         let shared = Shared {
+            page_pool: io_pool.page_pool().clone(),
             bbn_index: index,
             leaf_store_rd: leaf_store_rd_shared,
             branch_node_pool: bnp,
@@ -176,11 +185,13 @@ impl Tree {
         let staged_changeset;
         let mut bbn_index;
         let mut branch_node_pool;
+        let page_pool;
         {
             let mut shared = self.shared.lock().unwrap();
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
             branch_node_pool = shared.branch_node_pool.clone();
+            page_pool = shared.page_pool.clone();
         }
 
         let obsolete_branches = {
@@ -221,8 +232,14 @@ impl Tree {
                 extend_file_sz,
                 freelist_head,
                 bump,
-            } = sync.leaf_store_wr.commit();
-            (pending, free_list_pages, freelist_head.0, bump.0, extend_file_sz)
+            } = sync.leaf_store_wr.commit(&page_pool);
+            (
+                pending,
+                free_list_pages,
+                freelist_head.0,
+                bump.0,
+                extend_file_sz,
+            )
         };
 
         let (bbn, bbn_freelist_pages, bbn_freelist_pn, bbn_bump, bbn_extend_file_sz) = {
@@ -232,7 +249,7 @@ impl Tree {
                 extend_file_sz,
                 freelist_head,
                 bump,
-            } = sync.bbn_store_wr.commit();
+            } = sync.bbn_store_wr.commit(&page_pool);
             (
                 bbn,
                 free_list_pages,
@@ -271,10 +288,10 @@ impl Tree {
 
 pub struct WriteoutData {
     pub bbn: Vec<BranchNode>,
-    pub bbn_freelist_pages: Vec<(PageNumber, Box<Page>)>,
+    pub bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub bbn_extend_file_sz: Option<u64>,
-    pub ln: Vec<(PageNumber, Box<Page>)>,
-    pub ln_free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    pub ln: Vec<(PageNumber, FatPage)>,
+    pub ln_free_list_pages: Vec<(PageNumber, FatPage)>,
     pub ln_extend_file_sz: Option<u64>,
     pub ln_freelist_pn: u32,
     pub ln_bump: u32,

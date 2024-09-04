@@ -1,7 +1,7 @@
 use anyhow::bail;
 
 use crate::{
-    io::{self, PAGE_SIZE},
+    io::{self, PagePool, PAGE_SIZE},
     page_diff::PageDiff,
 };
 use std::{fs::File, io::Seek, sync::Arc};
@@ -188,7 +188,7 @@ impl WalBlobReader {
     ///
     /// The `wal_fd` is expected to be positioned at the start of the WAL file. The file must be
     /// a multiple of the page size.
-    pub(crate) fn new(mut wal_fd: &File) -> anyhow::Result<Self> {
+    pub(crate) fn new(page_pool: &PagePool, mut wal_fd: &File) -> anyhow::Result<Self> {
         let stat = wal_fd.metadata()?;
         let file_size = stat.len() as usize;
         if file_size % PAGE_SIZE != 0 {
@@ -202,7 +202,7 @@ impl WalBlobReader {
         let mut wal = Vec::with_capacity(file_size);
         let mut pn = 0;
         loop {
-            let page = match io::read_page(wal_fd, pn) {
+            let page = match io::read_page(page_pool, wal_fd, pn) {
                 Ok(page) => page,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e.into()),
@@ -338,7 +338,8 @@ mod tests {
             .unwrap();
         wal_fd.sync_data().unwrap();
 
-        let mut reader = WalBlobReader::new(&wal_fd).unwrap();
+        let page_pool = PagePool::new();
+        let mut reader = WalBlobReader::new(&page_pool, &wal_fd).unwrap();
         assert_eq!(
             reader.read_entry().unwrap(),
             Some(WalEntry::Clear { bucket: 0 })

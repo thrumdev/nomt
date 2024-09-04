@@ -14,6 +14,7 @@ use nomt_core::{
 use std::sync::{Arc, Barrier};
 
 use crate::{
+    io::PagePool,
     page_cache::{PageCache, ShardIndex},
     page_diff::PageDiff,
     rw_pass_cell::WritePassEnvelope,
@@ -90,6 +91,7 @@ impl CommitPool {
     pub fn begin<H: NodeHasher>(
         &self,
         page_cache: PageCache,
+        page_pool: PagePool,
         store: Store,
         root: Node,
     ) -> Committer {
@@ -101,6 +103,7 @@ impl CommitPool {
             .map(|_| {
                 let params = worker::Params {
                     page_cache: page_cache.clone(),
+                    page_pool: page_pool.clone(),
                     store: store.clone(),
                     root,
                     barrier: barrier.clone(),

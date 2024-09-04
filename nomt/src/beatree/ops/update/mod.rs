@@ -138,7 +138,11 @@ impl Updater {
         );
 
         // start with first leaf in first branch, cut-off second leaf key.
-        let leaf_updater = LeafUpdater::new(first_leaf, first_leaf_cutoff);
+        let leaf_updater = LeafUpdater::new(
+            ctx.leaf_writer.page_pool().clone(),
+            first_leaf,
+            first_leaf_cutoff,
+        );
 
         Updater {
             branch_updater,

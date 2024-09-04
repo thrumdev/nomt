@@ -4,7 +4,7 @@ use std::{
     os::fd::{FromRawFd, IntoRawFd, RawFd},
 };
 
-use crate::io::{CompleteIo, IoCommand, IoHandle, IoKind, Page, PAGE_SIZE};
+use crate::io::{page_pool::FatPage, CompleteIo, IoCommand, IoHandle, IoKind, PAGE_SIZE};
 
 use super::{
     beatree::{allocator::PageNumber, branch::BranchNode},
@@ -20,12 +20,12 @@ pub fn run(
     meta_fd: RawFd,
     wal_blob: (*mut u8, usize),
     bbn: Vec<BranchNode>,
-    bbn_free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    bbn_free_list_pages: Vec<(PageNumber, FatPage)>,
     bbn_extend_file_sz: Option<u64>,
-    ln: Vec<(PageNumber, Box<Page>)>,
-    ln_free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    ln: Vec<(PageNumber, FatPage)>,
+    ln_free_list_pages: Vec<(PageNumber, FatPage)>,
     ln_extend_file_sz: Option<u64>,
-    ht: Vec<(u64, Box<Page>)>,
+    ht: Vec<(u64, FatPage)>,
     new_meta: Meta,
     panic_on_sync: bool,
 ) {
@@ -385,7 +385,7 @@ struct BbnWriteOut {
     bbn_fd: RawFd,
     bbn_extend_file_sz: Option<u64>,
     bbn: Vec<BranchNode>,
-    free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    free_list_pages: Vec<(PageNumber, FatPage)>,
     // Initially, set to the len of `bbn`. Each completion will decrement this.
     remaining: usize,
 }
@@ -444,8 +444,8 @@ impl BbnWriteOut {
 struct LnWriteOut {
     ln_fd: RawFd,
     ln_extend_file_sz: Option<u64>,
-    ln: Vec<(PageNumber, Box<Page>)>,
-    free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    ln: Vec<(PageNumber, FatPage)>,
+    free_list_pages: Vec<(PageNumber, FatPage)>,
     ln_remaining: usize,
 }
 
@@ -493,7 +493,7 @@ impl LnWriteOut {
 
 struct HtWriteOut {
     ht_fd: RawFd,
-    ht: Vec<(u64, Box<Page>)>,
+    ht: Vec<(u64, FatPage)>,
     ht_remaining: usize,
 }
 
@@ -529,7 +529,7 @@ struct MetaSwap {
 impl MetaSwap {
     fn run(&mut self, io: &mut IoDmux) {
         // Oh god, there is a special place in hell for this. Will do for now though.
-        let mut page = Box::new(Page::zeroed());
+        let mut page = io.io_handle.page_pool().alloc_fat_page();
         self.new_meta.encode_to(&mut page.as_mut()[..40]);
 
         io.send_meta(IoKind::Write(self.meta_fd, 0, page));

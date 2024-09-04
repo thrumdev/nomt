@@ -2,11 +2,7 @@
 std::compile_error!("NOMT only supports Unix-based OSs");
 
 use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError, TrySendError};
-use std::{
-    fs::File,
-    ops::{Deref, DerefMut},
-    os::fd::RawFd,
-};
+use std::{fs::File, os::fd::RawFd};
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -16,35 +12,15 @@ mod platform;
 #[path = "unix.rs"]
 mod platform;
 
+pub mod page_pool;
+
 pub const PAGE_SIZE: usize = 4096;
 
-#[derive(Clone)]
-#[repr(align(4096))]
-pub struct Page(pub [u8; PAGE_SIZE]);
+pub use page_pool::{PagePool, FatPage};
 
-impl Deref for Page {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Page {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Page {
-    pub fn zeroed() -> Self {
-        Self([0; PAGE_SIZE])
-    }
-}
-
-#[derive(Clone)]
 pub enum IoKind {
-    Read(RawFd, u64, Box<Page>),
-    Write(RawFd, u64, Box<Page>),
+    Read(RawFd, u64, FatPage),
+    Write(RawFd, u64, FatPage),
     WriteRaw(RawFd, u64, *const u8, usize),
 }
 
@@ -55,7 +31,7 @@ pub enum IoKindResult {
 }
 
 impl IoKind {
-    pub fn unwrap_buf(self) -> Box<Page> {
+    pub fn unwrap_buf(self) -> FatPage {
         match self {
             IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
             IoKind::WriteRaw(_, _, _, _) => panic!("attempted to extract buf from write_raw"),
@@ -99,9 +75,9 @@ struct IoPacket {
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
-pub fn start_io_pool(io_workers: usize) -> IoPool {
-    let sender = platform::start_io_worker(io_workers);
-    IoPool { sender }
+pub fn start_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
+    let sender = platform::start_io_worker(io_workers, page_pool.clone());
+    IoPool { sender, page_pool }
 }
 
 /// A manager for the broader I/O pool. This can be used to create new I/O handles.
@@ -109,6 +85,7 @@ pub fn start_io_pool(io_workers: usize) -> IoPool {
 /// Dropping this does not close any outstanding I/O handles or shut down I/O workers.
 pub struct IoPool {
     sender: Sender<IoPacket>,
+    page_pool: PagePool,
 }
 
 impl IoPool {
@@ -116,10 +93,15 @@ impl IoPool {
     pub fn make_handle(&self) -> IoHandle {
         let (completion_sender, completion_receiver) = crossbeam_channel::unbounded();
         IoHandle {
+            page_pool: self.page_pool.clone(),
             sender: self.sender.clone(),
             completion_sender,
             completion_receiver,
         }
+    }
+
+    pub fn page_pool(&self) -> &PagePool {
+        &self.page_pool
     }
 }
 
@@ -134,6 +116,7 @@ impl IoPool {
 /// This is safe to use across multiple threads, but care must be taken by the user for correctness.
 #[derive(Clone)]
 pub struct IoHandle {
+    page_pool: PagePool,
     sender: Sender<IoPacket>,
     completion_sender: Sender<CompleteIo>,
     completion_receiver: Receiver<CompleteIo>,
@@ -179,12 +162,16 @@ impl IoHandle {
     pub fn receiver(&self) -> &Receiver<CompleteIo> {
         &self.completion_receiver
     }
+
+    pub fn page_pool(&self) -> &PagePool {
+        &self.page_pool
+    }
 }
 
 /// Read a page from the file at the given page number.
-pub fn read_page(fd: &File, pn: u64) -> std::io::Result<Box<Page>> {
+pub fn read_page(page_pool: &PagePool, fd: &File, pn: u64) -> std::io::Result<FatPage> {
     use std::os::unix::fs::FileExt as _;
-    let mut page = Box::new(Page::zeroed());
-    fd.read_exact_at(&mut page, pn * PAGE_SIZE as u64)?;
+    let mut page = page_pool.alloc_fat_page();
+    fd.read_exact_at(&mut page[..], pn * PAGE_SIZE as u64)?;
     Ok(page)
 }

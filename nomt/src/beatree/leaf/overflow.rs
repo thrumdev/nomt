@@ -9,10 +9,7 @@
 /// pointers: [PageNumber; n_pointers]
 /// bytes: [u8; n_bytes]
 /// ```
-use crate::{
-    beatree::PageNumber,
-    io::{Page, PAGE_SIZE},
-};
+use crate::{beatree::PageNumber, io::{page_pool::FatPage, PAGE_SIZE}};
 
 use super::{
     node::MAX_OVERFLOW_CELL_NODE_POINTERS,
@@ -46,7 +43,7 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         assert!(!value.is_empty());
 
         // allocate a page.
-        let mut page = Box::new(Page::zeroed());
+        let mut page = leaf_writer.page_pool().alloc_fat_page();
         let mut pns_written = 0;
 
         // write as many page numbers as possible.
@@ -206,7 +203,7 @@ pub fn delete(cell: &[u8], leaf_reader: &LeafStoreReader, leaf_writer: &mut Leaf
     }
 }
 
-fn read_page<'a>(page: &'a Page) -> (impl Iterator<Item = PageNumber> + 'a, &'a [u8]) {
+fn read_page<'a>(page: &'a FatPage) -> (impl Iterator<Item = PageNumber> + 'a, &'a [u8]) {
     let n_pages = u16::from_le_bytes(page[0..2].try_into().unwrap()) as usize;
     let n_bytes = u16::from_le_bytes(page[2..4].try_into().unwrap()) as usize;
 

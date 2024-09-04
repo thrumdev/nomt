@@ -1,4 +1,4 @@
-use crate::{io, page_cache::NODES_PER_PAGE};
+use crate::page_cache::NODES_PER_PAGE;
 use bitvec::prelude::*;
 
 /// A bitfield tracking which nodes have changed within a page.
@@ -33,7 +33,7 @@ impl PageDiff {
     /// Given the page data, collect the nodes that have changed according to this diff.
     pub fn pack_changed_nodes<'a, 'b: 'a>(
         &'b self,
-        page: &'a io::Page,
+        page: &'a [u8],
     ) -> impl Iterator<Item = [u8; 32]> + 'a {
         self.changed_nodes.iter_ones().map(|node_index| {
             let start = node_index * 32;
@@ -46,7 +46,7 @@ impl PageDiff {
     ///
     /// Panics if the number of changed nodes doesn't equal to the number of nodes
     /// this diff recorded.
-    pub fn unpack_changed_nodes(&self, nodes: &[[u8; 32]], page: &mut io::Page) {
+    pub fn unpack_changed_nodes(&self, nodes: &[[u8; 32]], page: &mut [u8]) {
         assert!(self.changed_nodes.count_ones() == nodes.len());
         for (node_index, node) in self.changed_nodes.iter_ones().zip(nodes) {
             let start = node_index * 32;

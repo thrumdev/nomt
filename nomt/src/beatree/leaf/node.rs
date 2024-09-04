@@ -29,7 +29,7 @@ use std::ops::Range;
 
 use crate::{
     beatree::Key,
-    io::{Page, PAGE_SIZE},
+    io::{page_pool::FatPage, PagePool, PAGE_SIZE},
 };
 
 /// The size of the leaf node body: everything excluding the mandatory header.
@@ -47,7 +47,7 @@ pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 23;
 const OVERFLOW_BIT: u16 = 1 << 15;
 
 pub struct LeafNode {
-    pub inner: Box<Page>,
+    pub inner: FatPage,
 }
 
 impl LeafNode {
@@ -114,9 +114,9 @@ pub struct LeafBuilder {
 }
 
 impl LeafBuilder {
-    pub fn new(n: usize, total_value_size: usize) -> Self {
+    pub fn new(page_pool: &PagePool, n: usize, total_value_size: usize) -> Self {
         let mut leaf = LeafNode {
-            inner: Box::new(Page::zeroed()),
+            inner: page_pool.alloc_fat_page(),
         };
         leaf.set_n(n as u16);
         LeafBuilder {

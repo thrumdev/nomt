@@ -1,4 +1,4 @@
-use crate::io::Page;
+use crate::io::{page_pool::FatPage, PagePool};
 
 use std::{collections::BTreeSet, fs::File};
 
@@ -18,12 +18,12 @@ pub struct BbnStoreWriter {
 /// Initializes a BbnStoreWriter over an already existing File and returns all pages tracked
 /// by the freelist (free + used by the list itself) to inform reconstruction.
 pub fn open(
+    page_pool: &PagePool,
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
-    
 ) -> (BbnStoreWriter, BTreeSet<PageNumber>) {
-    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump);
+    let allocator_writer = AllocatorWriter::open(page_pool, fd, free_list_head, bump);
     let freelist = allocator_writer.free_list().all_tracked_pages();
 
     (
@@ -51,7 +51,7 @@ impl BbnStoreWriter {
     //
     // The output will include not only the list of pages that need to be written but also
     // the new free_list head, the current bump page number, and the new file size if extending is needed
-    pub fn commit(&mut self) -> BbnStoreCommitOutput {
+    pub fn commit(&mut self, page_pool: &PagePool) -> BbnStoreCommitOutput {
         let pending = std::mem::take(&mut self.pending);
 
         let AllocatorCommitOutput {
@@ -59,7 +59,7 @@ impl BbnStoreWriter {
             bump,
             extend_file_sz,
             freelist_head,
-        } = self.allocator_writer.commit();
+        } = self.allocator_writer.commit(page_pool);
 
         BbnStoreCommitOutput {
             bbn: pending,
@@ -73,7 +73,7 @@ impl BbnStoreWriter {
 
 pub struct BbnStoreCommitOutput {
     pub bbn: Vec<BranchNode>,
-    pub free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    pub free_list_pages: Vec<(PageNumber, FatPage)>,
     pub bump: PageNumber,
     pub extend_file_sz: Option<u64>,
     pub freelist_head: PageNumber,

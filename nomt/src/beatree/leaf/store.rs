@@ -3,7 +3,7 @@ use crate::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },
-    io::{IoCommand, IoHandle, IoPool, Page},
+    io::{page_pool::FatPage, IoCommand, IoHandle, IoPool, PagePool},
 };
 
 use std::fs::File;
@@ -17,11 +17,13 @@ pub struct LeafStoreReader {
 /// to storage to reflect the LeafStore's state at that moment
 pub struct LeafStoreWriter {
     allocator_writer: AllocatorWriter,
-    pending: Vec<(PageNumber, Box<Page>)>,
+    pending: Vec<(PageNumber, FatPage)>,
+    page_pool: PagePool,
 }
 
 /// creates a pair of LeafStoreReader and LeafStoreWriter over an already existing File.
 pub fn open(
+    page_pool: PagePool,
     fd: File,
     free_list_head: Option<PageNumber>,
     bump: PageNumber,
@@ -37,7 +39,7 @@ pub fn open(
         io_pool.make_handle(),
     );
 
-    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump);
+    let allocator_writer = AllocatorWriter::open(&page_pool, fd, free_list_head, bump);
 
     (
         LeafStoreReader {
@@ -49,13 +51,14 @@ pub fn open(
         LeafStoreWriter {
             allocator_writer,
             pending: vec![],
+            page_pool,
         },
     )
 }
 
 impl LeafStoreReader {
     /// Returns the leaf page with the specified page number.
-    pub fn query(&self, pn: PageNumber) -> Box<Page> {
+    pub fn query(&self, pn: PageNumber) -> FatPage {
         self.allocator_reader.query(pn)
     }
 
@@ -83,8 +86,12 @@ impl LeafStoreWriter {
     }
 
     /// Write a page under a preallocated page number.
-    pub fn write_preallocated(&mut self, pn: PageNumber, page: Box<Page>) {
+    pub fn write_preallocated(&mut self, pn: PageNumber, page: FatPage) {
         self.pending.push((pn, page));
+    }
+
+    pub fn page_pool(&self) -> &PagePool {
+        &self.page_pool
     }
 
     pub fn release(&mut self, id: PageNumber) {
@@ -95,7 +102,7 @@ impl LeafStoreWriter {
     //
     // The output will include not only the list of pages that need to be written but also
     // the new free_list head, the current bump page number, and the new file size if extending is needed
-    pub fn commit(&mut self) -> LeafStoreCommitOutput {
+    pub fn commit(&mut self, page_pool: &PagePool) -> LeafStoreCommitOutput {
         let pending = std::mem::take(&mut self.pending);
 
         let AllocatorCommitOutput {
@@ -103,7 +110,7 @@ impl LeafStoreWriter {
             bump,
             extend_file_sz,
             freelist_head,
-        } = self.allocator_writer.commit();
+        } = self.allocator_writer.commit(page_pool);
 
         LeafStoreCommitOutput {
             pending,
@@ -116,8 +123,8 @@ impl LeafStoreWriter {
 }
 
 pub struct LeafStoreCommitOutput {
-    pub pending: Vec<(PageNumber, Box<Page>)>,
-    pub free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    pub pending: Vec<(PageNumber, FatPage)>,
+    pub free_list_pages: Vec<(PageNumber, FatPage)>,
     pub bump: PageNumber,
     pub extend_file_sz: Option<u64>,
     pub freelist_head: PageNumber,

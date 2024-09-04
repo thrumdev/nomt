@@ -2,7 +2,7 @@
 use anyhow::Result;
 use std::fs::File;
 
-use crate::io;
+use crate::io::{self, PagePool};
 
 /// This data structure describes the state of the btree.
 #[derive(Clone)]
@@ -62,8 +62,8 @@ impl Meta {
         }
     }
 
-    pub fn read(fd: &File) -> Result<Self> {
-        let page = io::read_page(fd, 0)?;
+    pub fn read(page_pool: &PagePool, fd: &File) -> Result<Self> {
+        let page = io::read_page(page_pool, fd, 0)?;
         let meta = Meta::decode(&page[..40]);
         Ok(meta)
     }

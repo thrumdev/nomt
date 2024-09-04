@@ -1,6 +1,6 @@
 use crate::{
     beatree::FREELIST_EMPTY,
-    io::{self, Page, PAGE_SIZE},
+    io::{self, page_pool::FatPage, PagePool, PAGE_SIZE},
 };
 use std::{collections::BTreeSet, fs::File};
 
@@ -24,7 +24,11 @@ pub struct FreeList {
 }
 
 impl FreeList {
-    pub fn read(store_file: &File, free_list_head: Option<PageNumber>) -> FreeList {
+    pub fn read(
+        page_pool: &PagePool,
+        store_file: &File,
+        free_list_head: Option<PageNumber>,
+    ) -> FreeList {
         let Some(mut free_list_pn) = free_list_head else {
             return FreeList {
                 portions: vec![],
@@ -40,7 +44,7 @@ impl FreeList {
                 break;
             }
 
-            let page = io::read_page(store_file, free_list_pn.0 as u64).unwrap();
+            let page = io::read_page(page_pool, store_file, free_list_pn.0 as u64).unwrap();
 
             let (prev, free_list) = decode_free_list_page(page);
             free_list_portions.push((free_list_pn, free_list));
@@ -126,9 +130,10 @@ impl FreeList {
     /// O(n) in the number of pops / pushes.
     pub fn commit(
         &mut self,
+        page_pool: &PagePool,
         mut to_push: Vec<PageNumber>,
         bump: &mut PageNumber,
-    ) -> Vec<(PageNumber, Box<Page>)> {
+    ) -> Vec<(PageNumber, FatPage)> {
         // No changes were made
         if !self.pop && to_push.is_empty() {
             return vec![];
@@ -139,13 +144,13 @@ impl FreeList {
 
         if self.pop && to_push.is_empty() {
             // note: empty vec when head is empty.
-            return self.encode_head().into_iter().collect();
+            return self.encode_head(page_pool).into_iter().collect();
         }
 
         self.pop = false;
 
         let new_pages = self.preallocate(&mut to_push, bump);
-        self.push_and_encode(&to_push, new_pages)
+        self.push_and_encode(page_pool, &to_push, new_pages)
     }
 
     // determines the exact number of pops and bumps which are needed in order to fulfill the
@@ -262,9 +267,10 @@ impl FreeList {
 
     fn push_and_encode(
         &mut self,
+        page_pool: &PagePool,
         to_push: &[PageNumber],
         new_pages: Vec<PageNumber>,
-    ) -> Vec<(PageNumber, Box<Page>)> {
+    ) -> Vec<(PageNumber, FatPage)> {
         let mut encoded = Vec::new();
         let mut new_pages = new_pages.into_iter().peekable();
         for (i, pn) in to_push.iter().cloned().enumerate() {
@@ -284,7 +290,7 @@ impl FreeList {
                 && i + 1 == to_push.len();
 
             if head_full || fragmentation {
-                encoded.extend(self.encode_head());
+                encoded.extend(self.encode_head(page_pool));
                 // UNWRAP: we've always allocated enough PNs for all appended PNs.
                 let new_head_pn = new_pages.next().unwrap();
                 self.portions.push((new_head_pn, Vec::new()));
@@ -295,7 +301,7 @@ impl FreeList {
 
         assert!(new_pages.next().is_none());
 
-        encoded.extend(self.encode_head());
+        encoded.extend(self.encode_head(page_pool));
         encoded
     }
 
@@ -306,7 +312,7 @@ impl FreeList {
         head.1.push(pn);
     }
 
-    fn encode_head(&self) -> Option<(PageNumber, Box<Page>)> {
+    fn encode_head(&self, page_pool: &PagePool) -> Option<(PageNumber, FatPage)> {
         if let Some((head_pn, head_pns)) = self.portions.last() {
             let prev_pn = self
                 .portions
@@ -314,7 +320,10 @@ impl FreeList {
                 .checked_sub(2)
                 .map_or(FREELIST_EMPTY, |i| self.portions[i].0);
 
-            Some((*head_pn, encode_free_list_page(prev_pn, &head_pns)))
+            Some((
+                *head_pn,
+                encode_free_list_page(page_pool, prev_pn, &head_pns),
+            ))
         } else {
             None
         }
@@ -327,7 +336,7 @@ impl FreeList {
 // + prev free page : u32
 // + item_count : u16
 // + free pages : [u32; item_count]
-fn decode_free_list_page(page: Box<Page>) -> (PageNumber, Vec<PageNumber>) {
+fn decode_free_list_page(page: FatPage) -> (PageNumber, Vec<PageNumber>) {
     let prev = {
         let mut buf = [0u8; 4];
         buf.copy_from_slice(&page[0..4]);
@@ -357,8 +366,8 @@ fn decode_free_list_page(page: Box<Page>) -> (PageNumber, Vec<PageNumber>) {
     (prev, free_list)
 }
 
-fn encode_free_list_page(prev: PageNumber, pns: &[PageNumber]) -> Box<Page> {
-    let mut page = Page::zeroed();
+fn encode_free_list_page(page_pool: &PagePool, prev: PageNumber, pns: &[PageNumber]) -> FatPage {
+    let mut page = page_pool.alloc_fat_page();
 
     page[0..4].copy_from_slice(&prev.0.to_le_bytes());
     page[4..6].copy_from_slice(&(pns.len() as u16).to_le_bytes());
@@ -368,7 +377,7 @@ fn encode_free_list_page(prev: PageNumber, pns: &[PageNumber]) -> Box<Page> {
         page[start..start + 4].copy_from_slice(&pn.0.to_le_bytes());
     }
 
-    Box::new(page)
+    page
 }
 
 #[cfg(test)]
@@ -386,7 +395,9 @@ mod tests {
         // expected order of events:
         //   1. first (2) is popped for the new head.
         //   2. This exhausts the head. We use (2) for a new head and push (1) to the end.
+        let page_pool = PagePool::new();
         let result = free_list.commit(
+            &page_pool,
             (3..).take(1).map(PageNumber).collect::<Vec<_>>(),
             &mut PageNumber(10000),
         );
@@ -415,7 +426,9 @@ mod tests {
         //      If we had pushed (3) to the end of the free-list instead, to_push would be MAX+1
         //      and we'd need to take a new page from bump or the previous head, dirtying it and
         //      allocating unnecessarily.
+        let page_pool = PagePool::new();
         let result = free_list.commit(
+            &page_pool,
             (4..)
                 .take(MAX_PNS_PER_PAGE - 1)
                 .map(PageNumber)
@@ -448,7 +461,9 @@ mod tests {
         //   3. This empties the head portion, leaving (3) dangling. to_push = MAX + 1
         //   4. We push (2) for the first new page and (3) for the next. (2) is completely full,
         //      and (3) has the last item.
+        let page_pool = PagePool::new();
         let result = free_list.commit(
+            &page_pool,
             (4..)
                 .take(MAX_PNS_PER_PAGE)
                 .map(PageNumber)
@@ -496,8 +511,9 @@ mod tests {
         //      to pop a new page for that but wouldn't be able to use it.
         //   7. The only solution is to pop the next page (69) and have the second-to-last page
         //      fragmented.
-
+        let page_pool = PagePool::new();
         let result = free_list.commit(
+            &page_pool,
             (20000..)
                 .take(MAX_PNS_PER_PAGE)
                 .map(PageNumber)
@@ -545,7 +561,8 @@ mod tests {
         //      head and the outdated (1) and (4) are pushed.
         //   3. A new page (3) is popped for the new items.
         //   4. The fragmented (5) is filled out and the rest of the items are pushed into (3)
-        let result = free_list.commit(vec![PageNumber(6)], &mut PageNumber(10000));
+        let page_pool = PagePool::new();
+        let result = free_list.commit(&page_pool, vec![PageNumber(6)], &mut PageNumber(10000));
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0, PageNumber(5));
@@ -568,7 +585,8 @@ mod tests {
             released_portions: Vec::new(),
         };
 
-        let result = free_list.commit(Vec::new(), &mut PageNumber(10000));
+        let page_pool = PagePool::new();
+        let result = free_list.commit(&page_pool, Vec::new(), &mut PageNumber(10000));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, PageNumber(1));
     }
