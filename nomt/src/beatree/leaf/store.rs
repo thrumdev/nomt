@@ -37,7 +37,7 @@ pub fn open(
         io_pool.make_handle(),
     );
 
-    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump, io_pool.make_handle());
+    let allocator_writer = AllocatorWriter::open(fd, free_list_head, bump);
 
     (
         LeafStoreReader {

@@ -2,10 +2,9 @@
 ///
 /// The file that stores the hash-table buckets and the meta map.
 use super::meta_map::MetaMap;
-use crate::io::{Page, PAGE_SIZE};
+use crate::io::{self, PAGE_SIZE};
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek},
     path::PathBuf,
 };
 
@@ -38,28 +37,15 @@ fn num_meta_byte_pages(num_pages: u32) -> u32 {
 }
 
 /// Opens the HT file, checks its length and reads the meta map.
-pub fn open(num_pages: u32, mut ht_fd: &File) -> anyhow::Result<(HTOffsets, MetaMap)> {
+pub fn open(num_pages: u32, ht_fd: &File) -> anyhow::Result<(HTOffsets, MetaMap)> {
     if ht_fd.metadata()?.len() != expected_file_len(num_pages) {
         anyhow::bail!("Store corrupted; unexpected file length");
     }
 
-    // Read the extra meta pages. Note that due to O_DIRECT we are only allowed to read into
-    // aligned buffers. You cannot really conjure a Vec from raw parts because the Vec doesn't
-    // store alignment but deducts it from T before deallocation and the allocator might not
-    // like that.
-    //
-    // We could try to be smart about this sure, but there is always a risk to outsmart yourself
-    // pooping your own pants on the way.
-    ht_fd.seek(std::io::SeekFrom::Start(0))?;
-    let num_meta_byte_pages = num_meta_byte_pages(num_pages) as usize;
-    let mut extra_meta_pages: Vec<Page> = Vec::with_capacity(num_meta_byte_pages);
-    for _ in 0..num_meta_byte_pages {
-        let mut buf = Page::zeroed();
-        ht_fd.read_exact(&mut buf)?;
-        extra_meta_pages.push(buf);
-    }
-    let mut meta_bytes = Vec::with_capacity(num_meta_byte_pages * PAGE_SIZE);
-    for extra_meta_page in extra_meta_pages {
+    let num_meta_byte_pages = num_meta_byte_pages(num_pages);
+    let mut meta_bytes = Vec::with_capacity(num_meta_byte_pages as usize * PAGE_SIZE);
+    for pn in 0..num_meta_byte_pages {
+        let extra_meta_page = io::read_page(ht_fd, pn as u64)?;
         meta_bytes.extend_from_slice(&*extra_meta_page);
     }
 

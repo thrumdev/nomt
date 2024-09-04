@@ -1,6 +1,9 @@
 use anyhow::bail;
 
-use crate::{io::PAGE_SIZE, page_diff::PageDiff};
+use crate::{
+    io::{self, PAGE_SIZE},
+    page_diff::PageDiff,
+};
 use std::{fs::File, io::Seek, sync::Arc};
 
 struct Mmap {
@@ -186,9 +189,6 @@ impl WalBlobReader {
     /// The `wal_fd` is expected to be positioned at the start of the WAL file. The file must be
     /// a multiple of the page size.
     pub(crate) fn new(mut wal_fd: &File) -> anyhow::Result<Self> {
-        use crate::io::Page;
-        use std::io::Read;
-
         let stat = wal_fd.metadata()?;
         let file_size = stat.len() as usize;
         if file_size % PAGE_SIZE != 0 {
@@ -200,13 +200,15 @@ impl WalBlobReader {
         // Read the entire WAL file into memory. We do it page-by-page because WAL fd is opened
         // with O_DIRECT flag, and that means we need to provide aligned buffers.
         let mut wal = Vec::with_capacity(file_size);
-        let mut buffer = Box::new(Page::zeroed());
+        let mut pn = 0;
         loop {
-            match wal_fd.read_exact(&mut buffer[..]) {
-                Ok(_) => wal.extend_from_slice(&buffer[..]),
+            let page = match io::read_page(wal_fd, pn) {
+                Ok(page) => page,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e.into()),
-            }
+            };
+            pn += 1;
+            wal.extend_from_slice(&*page);
         }
 
         Ok(Self { wal, offset: 0 })
