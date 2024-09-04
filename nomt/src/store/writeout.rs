@@ -528,12 +528,6 @@ impl MetaSwap {
 
         io.send_meta(IoKind::Write(self.meta_fd, 0, page));
 
-        unsafe {
-            let f = File::from_raw_fd(self.meta_fd);
-            f.sync_all().unwrap();
-            let _ = f.into_raw_fd();
-        }
-
         // Reap the completions.
         loop {
             if let Some(CompleteIo { command, result }) = io.recv_meta() {
@@ -543,6 +537,12 @@ impl MetaSwap {
                     _ => panic!("unexpected completion kind"),
                 }
             }
+        }
+
+        unsafe {
+            let f = File::from_raw_fd(self.meta_fd);
+            f.sync_all().unwrap();
+            let _ = f.into_raw_fd();
         }
     }
 }
