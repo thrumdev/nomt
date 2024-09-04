@@ -1,14 +1,14 @@
 use bitvec::prelude::*;
 use std::cmp::Ordering;
 
-use crate::beatree::{
+use crate::{beatree::{
     allocator::PageNumber,
     leaf::{
         node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},
         store::LeafStoreWriter,
     },
     Key,
-};
+}, io::PagePool};
 
 use super::{
     branch::BranchUpdater, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD,
@@ -73,10 +73,11 @@ pub struct LeafUpdater {
     // and the gauges for the previous leaves are stored in `bulk_split`.
     gauge: LeafGauge,
     bulk_split: Option<LeafBulkSplitter>,
+    page_pool: PagePool,
 }
 
 impl LeafUpdater {
-    pub fn new(base: Option<BaseLeaf>, cutoff: Option<Key>) -> Self {
+    pub fn new(page_pool: PagePool, base: Option<BaseLeaf>, cutoff: Option<Key>) -> Self {
         LeafUpdater {
             base,
             cutoff,
@@ -84,6 +85,7 @@ impl LeafUpdater {
             ops: Vec::new(),
             gauge: LeafGauge::default(),
             bulk_split: None,
+            page_pool,
         }
     }
 
@@ -408,7 +410,7 @@ impl LeafUpdater {
             })
             .sum();
 
-        let mut leaf_builder = LeafBuilder::new(ops.len(), total_value_size);
+        let mut leaf_builder = LeafBuilder::new(&self.page_pool, ops.len(), total_value_size);
         for op in ops {
             let (k, v, o) = self.op_cell(op);
 

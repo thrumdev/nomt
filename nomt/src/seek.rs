@@ -1,7 +1,7 @@
 //! Multiplexer for page requests.
 
 use crate::{
-    io,
+    io::page_pool::FatPage,
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::ReadPass,
     store::{BucketIndex, PageLoad, PageLoadAdvance, PageLoadCompletion, PageLoader},
@@ -415,9 +415,9 @@ impl Seeker {
 
         // UNWRAP: requests are submitted with slab indices that are populated and never cleared
         // until this point is reached.
-        let page_load = self.page_load_slab.get_mut(slab_index).unwrap();
+        let mut page_load = self.page_load_slab.get_mut(slab_index).unwrap();
 
-        match completion.apply_to(page_load) {
+        match completion.apply_to(&mut page_load) {
             Some(p) => self.remove_and_continue_seeks(read_pass, slab_index, Some(p)),
             None => {
                 self.idle_page_loads.push_back(slab_index);
@@ -430,7 +430,7 @@ impl Seeker {
         &mut self,
         read_pass: &ReadPass<ShardIndex>,
         slab_index: usize,
-        page_data: Option<(Box<io::Page>, BucketIndex)>,
+        page_data: Option<(FatPage, BucketIndex)>,
     ) {
         let page_load = self.page_load_slab.remove(slab_index);
         let page = self

@@ -2,7 +2,7 @@
 
 use crate::{
     beatree, bitbox,
-    io::{self, IoPool, Page},
+    io::{self, page_pool::FatPage, IoPool, PagePool},
     page_diff::PageDiff,
 };
 use meta::Meta;
@@ -37,6 +37,7 @@ struct Shared {
     panic_on_sync: bool,
     values: beatree::Tree,
     pages: bitbox::DB,
+    page_pool: PagePool,
     io_pool: IoPool,
     meta_fd: File,
     ln_fd: File,
@@ -55,12 +56,12 @@ struct Sync {
 
 impl Store {
     /// Open the store with the provided `Options`.
-    pub fn open(o: &crate::Options) -> anyhow::Result<Self> {
+    pub fn open(o: &crate::Options, page_pool: PagePool) -> anyhow::Result<Self> {
         if !o.path.exists() {
             create(o)?;
         }
 
-        let io_pool = io::start_io_pool(o.io_workers);
+        let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
 
         let meta_fd = {
             let mut options = OpenOptions::new();
@@ -108,8 +109,9 @@ impl Store {
             libc::fcntl(wal_fd.as_raw_fd(), libc::F_NOCACHE, 1);
         }
 
-        let meta = meta::Meta::read(&meta_fd)?;
+        let meta = meta::Meta::read(&page_pool, &meta_fd)?;
         let values = beatree::Tree::open(
+            page_pool.clone(),
             &io_pool,
             meta.ln_freelist_pn,
             meta.bbn_freelist_pn,
@@ -118,11 +120,18 @@ impl Store {
             &bbn_fd,
             &ln_fd,
         )?;
-        let pages = bitbox::DB::open(meta.bitbox_num_pages, meta.bitbox_seed, &ht_fd, &wal_fd)?;
+        let pages = bitbox::DB::open(
+            meta.bitbox_num_pages,
+            meta.bitbox_seed,
+            &page_pool,
+            &ht_fd,
+            &wal_fd,
+        )?;
         let io_handle = io_pool.make_handle();
         let wal_blob_builder = bitbox::WalBlobBuilder::new();
         Ok(Self {
             shared: Arc::new(Shared {
+                page_pool,
                 bitbox_num_pages: meta.bitbox_num_pages,
                 bitbox_seed: meta.bitbox_seed,
                 panic_on_sync: o.panic_on_sync,
@@ -149,7 +158,7 @@ impl Store {
     }
 
     /// Loads the given page, blocking the current thread.
-    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(Box<Page>, BucketIndex)>> {
+    pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(FatPage, BucketIndex)>> {
         let page_loader = self.page_loader();
         let mut page_load = page_loader.start_load(page_id);
         loop {
@@ -182,6 +191,7 @@ impl Store {
     /// Create a new transaction to be applied against this database.
     pub fn new_tx(&self) -> Transaction {
         Transaction {
+            page_pool: self.shared.page_pool.clone(),
             batch: Vec::new(),
             new_pages: vec![],
             bucket_allocator: self.shared.pages.bucket_allocator(),
@@ -201,10 +211,11 @@ impl Store {
 
         self.shared.values.commit(tx.batch);
 
-        let bitbox_writeout_data = self
-            .shared
-            .pages
-            .prepare_sync(tx.new_pages, &mut sync.wal_blob_builder)?;
+        let bitbox_writeout_data = self.shared.pages.prepare_sync(
+            &self.shared.page_pool,
+            tx.new_pages,
+            &mut sync.wal_blob_builder,
+        )?;
         let beatree_writeout_data = self.shared.values.prepare_sync();
 
         let new_meta = Meta {
@@ -248,9 +259,10 @@ impl Store {
 
 /// An atomic transaction to be applied against th estore with [`Store::commit`].
 pub struct Transaction {
+    page_pool: PagePool,
     batch: Vec<(KeyPath, Option<Vec<u8>>)>,
     bucket_allocator: bitbox::BucketAllocator,
-    new_pages: Vec<(PageId, BucketIndex, Option<(Box<Page>, PageDiff)>)>,
+    new_pages: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
 }
 
 impl Transaction {
@@ -264,16 +276,20 @@ impl Transaction {
         &mut self,
         page_id: PageId,
         bucket: Option<BucketIndex>,
-        page: &Page,
+        page: &FatPage,
         page_diff: PageDiff,
     ) -> BucketIndex {
         let bucket_index =
             bucket.unwrap_or_else(|| self.bucket_allocator.allocate(page_id.clone()));
-        self.new_pages.push((
-            page_id,
-            bucket_index,
-            Some((Box::new(page.clone()), page_diff)),
-        ));
+
+        // Perform a deep clone of the page. For that allocate a new page and copy the data over.
+        //
+        // TODO: get rid of this copy.
+        let mut new_page = self.page_pool.alloc_fat_page();
+        new_page.copy_from_slice(page);
+
+        self.new_pages
+            .push((page_id, bucket_index, Some((new_page, page_diff))));
         bucket_index
     }
     /// Delete a page from storage.

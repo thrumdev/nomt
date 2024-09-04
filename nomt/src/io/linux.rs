@@ -1,4 +1,4 @@
-use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PAGE_SIZE};
+use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PagePool, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
@@ -14,26 +14,27 @@ struct PendingIo {
     completion_sender: Sender<CompleteIo>,
 }
 
-pub fn start_io_worker(io_workers: usize) -> Sender<IoPacket> {
+pub fn start_io_worker(io_workers: usize, page_pool: PagePool) -> Sender<IoPacket> {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * io_workers);
 
-    start_workers(command_rx, io_workers);
+    start_workers(command_rx, io_workers, page_pool);
 
     command_tx
 }
 
-fn start_workers(command_rx: Receiver<IoPacket>, io_workers: usize) {
+fn start_workers(command_rx: Receiver<IoPacket>, io_workers: usize, page_pool: PagePool) {
     for i in 0..io_workers {
         let command_rx = command_rx.clone();
+        let page_pool = page_pool.clone();
         let _ = std::thread::Builder::new()
             .name(format!("io_worker-{i}"))
-            .spawn(move || run_worker(command_rx))
+            .spawn(move || run_worker(command_rx, page_pool))
             .unwrap();
     }
 }
 
-fn run_worker(command_rx: Receiver<IoPacket>) {
+fn run_worker(command_rx: Receiver<IoPacket>, page_pool: PagePool) {
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
@@ -110,8 +111,11 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
                 completion_sender: next_io.completion_sender,
             });
 
-            let entry = submission_entry(&mut pending.get_mut(pending_index).unwrap().command)
-                .user_data(pending_index as u64);
+            let entry = submission_entry(
+                &mut pending.get_mut(pending_index).unwrap().command,
+                &page_pool,
+            )
+            .user_data(pending_index as u64);
 
             // unwrap: known not full
             unsafe { submit_queue.push(&entry).unwrap() };
@@ -128,15 +132,15 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
     }
 }
 
-fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
+fn submission_entry(command: &mut IoCommand, page_pool: &PagePool) -> squeue::Entry {
     match command.kind {
-        IoKind::Read(fd, page_index, ref mut buf) => {
-            opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), PAGE_SIZE as u32)
+        IoKind::Read(fd, page_index, ref mut page) => {
+            opcode::Read::new(types::Fd(fd), page.as_mut_ptr(page_pool), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-        IoKind::Write(fd, page_index, ref buf) => {
-            opcode::Write::new(types::Fd(fd), buf.as_ptr(), PAGE_SIZE as u32)
+        IoKind::Write(fd, page_index, ref page) => {
+            opcode::Write::new(types::Fd(fd), page.as_ptr(page_pool), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }

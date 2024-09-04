@@ -3,6 +3,7 @@
 //! A Nearly-Optimal Merkle Trie Database.
 
 use bitvec::prelude::*;
+use io::PagePool;
 use metrics::{Metric, Metrics};
 use std::{
     mem,
@@ -167,6 +168,7 @@ pub struct Nomt {
     commit_pool: CommitPool,
     /// The handle to the page cache.
     page_cache: PageCache,
+    page_pool: PagePool,
     store: Store,
     shared: Arc<Mutex<Shared>>,
     /// The number of active sessions. Expected to be either 0 or 1.
@@ -187,13 +189,15 @@ impl Nomt {
 
         let metrics = Metrics::new(o.metrics);
 
-        let store = Store::open(&o)?;
+        let page_pool = PagePool::new();
+        let store = Store::open(&o, page_pool.clone())?;
         let root_page = store.load_page(ROOT_PAGE_ID)?;
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
         let root = compute_root_node::<Blake3Hasher>(&page_cache);
         Ok(Self {
             commit_pool: CommitPool::new(o.commit_concurrency),
             page_cache,
+            page_pool,
             store,
             shared: Arc::new(Mutex::new(Shared { root })),
             session_cnt: Arc::new(AtomicUsize::new(0)),
@@ -225,6 +229,7 @@ impl Nomt {
             store: self.store.clone(),
             committer: Some(self.commit_pool.begin::<Blake3Hasher>(
                 self.page_cache.clone(),
+                self.page_pool.clone(),
                 self.store.clone(),
                 self.root(),
             )),

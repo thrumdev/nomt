@@ -1,4 +1,4 @@
-use crate::io::{self, IoCommand, IoHandle, IoKind, Page, PAGE_SIZE};
+use crate::io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE};
 
 use std::{
     fs::File,
@@ -60,8 +60,8 @@ impl AllocatorReader {
     }
 
     /// Returns the page with the specified page number. Blocks the current thread.
-    pub fn query(&self, pn: PageNumber) -> Box<Page> {
-        io::read_page(&self.store_file, pn.0 as u64).unwrap()
+    pub fn query(&self, pn: PageNumber) -> FatPage {
+        io::read_page(self.io_handle.page_pool(), &self.store_file, pn.0 as u64).unwrap()
     }
 
     /// Get a reference to the I/O handle.
@@ -71,8 +71,7 @@ impl AllocatorReader {
 
     /// Create an I/O command for querying a page by number.
     pub fn io_command(&self, pn: PageNumber, user_data: u64) -> IoCommand {
-        let page = Box::new(Page::zeroed());
-
+        let page = self.io_handle.page_pool().alloc_fat_page();
         IoCommand {
             kind: IoKind::Read(self.store_file.as_raw_fd(), pn.0 as u64, page),
             user_data,
@@ -83,10 +82,10 @@ impl AllocatorReader {
 impl AllocatorWriter {
     /// creates an AllocatorWriter over an already existing File.
     pub fn open(
+        page_pool: &PagePool,
         fd: File,
         free_list_head: Option<PageNumber>,
         bump: PageNumber,
-        
     ) -> Self {
         let file_size = fd
             .metadata()
@@ -94,7 +93,7 @@ impl AllocatorWriter {
             .size() as usize;
 
         AllocatorWriter {
-            free_list: FreeList::read(&fd, free_list_head),
+            free_list: FreeList::read(page_pool, &fd, free_list_head),
             bump,
             file_max_bump: PageNumber((file_size / PAGE_SIZE) as u32),
             released: vec![],
@@ -126,10 +125,10 @@ impl AllocatorWriter {
     //
     // The output will include not only the list of pages that need to be written but also
     // the new free_list head, the current bump page number, and the new required file size
-    pub fn commit(&mut self) -> AllocatorCommitOutput {
+    pub fn commit(&mut self, page_pool: &PagePool) -> AllocatorCommitOutput {
         let released = std::mem::take(&mut self.released);
 
-        let free_list_pages = self.free_list.commit(released, &mut self.bump);
+        let free_list_pages = self.free_list.commit(page_pool, released, &mut self.bump);
 
         // The store is expected to grow in increments of 1 MiB blocks,
         // equivalent to chunks of 256 4KiB pages.
@@ -156,7 +155,7 @@ impl AllocatorWriter {
 }
 
 pub struct AllocatorCommitOutput {
-    pub free_list_pages: Vec<(PageNumber, Box<Page>)>,
+    pub free_list_pages: Vec<(PageNumber, FatPage)>,
     pub bump: PageNumber,
     pub extend_file_sz: Option<u64>,
     pub freelist_head: PageNumber,

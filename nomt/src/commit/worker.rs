@@ -31,6 +31,7 @@ use super::{
 };
 
 use crate::{
+    io::PagePool,
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
     page_walker::{NeedsPage, Output, PageWalker},
@@ -42,6 +43,7 @@ use crate::{
 
 pub(super) struct Params {
     pub page_cache: PageCache,
+    pub page_pool: PagePool,
     pub store: Store,
     pub root: Node,
     pub barrier: Arc<Barrier>,
@@ -56,6 +58,7 @@ pub(super) struct Comms {
 pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
     let Params {
         page_cache,
+        page_pool,
         store,
         root,
         barrier,
@@ -85,7 +88,7 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
                 command.shared.witness,
             );
 
-            let output = match commit::<H>(root, page_cache, seeker, command, warm_ups) {
+            let output = match commit::<H>(root, page_cache, page_pool, seeker, command, warm_ups) {
                 Err(_) => return,
                 Ok(o) => o,
             };
@@ -176,6 +179,7 @@ fn warm_up_phase(
 fn commit<H: NodeHasher>(
     root: Node,
     page_cache: PageCache,
+    page_pool: PagePool,
     mut seeker: Seeker,
     command: CommitCommand,
     warm_ups: HashMap<KeyPath, Seek>,
@@ -185,7 +189,8 @@ fn commit<H: NodeHasher>(
 
     let mut output = WorkerOutput::new(shared.witness);
 
-    let committer = RangeCommitter::<H>::new(root, shared.clone(), write_pass, &page_cache);
+    let committer =
+        RangeCommitter::<H>::new(root, shared.clone(), write_pass, &page_cache, &page_pool);
 
     // one lucky thread gets the master write pass.
     let mut write_pass = match committer.commit(&mut seeker, &mut output, warm_ups)? {
@@ -194,7 +199,8 @@ fn commit<H: NodeHasher>(
     };
 
     let pending_ops = shared.take_root_pending();
-    let mut root_page_committer = PageWalker::<H>::new(root, page_cache.clone(), None);
+    let mut root_page_committer =
+        PageWalker::<H>::new(root, page_cache.clone(), page_pool.clone(), None);
 
     for (trie_pos, pending_op) in pending_ops {
         match pending_op {
@@ -291,6 +297,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
         shared: Arc<CommitShared>,
         write_pass: WritePass<ShardIndex>,
         page_cache: &PageCache,
+        page_pool: &PagePool,
     ) -> Self {
         let region = match write_pass.region() {
             ShardIndex::Root => PageRegion::universe(),
@@ -313,7 +320,12 @@ impl<H: NodeHasher> RangeCommitter<H> {
             shared,
             write_pass,
             region,
-            page_walker: PageWalker::<H>::new(root, page_cache.clone(), Some(ROOT_PAGE_ID)),
+            page_walker: PageWalker::<H>::new(
+                root,
+                page_cache.clone(),
+                page_pool.clone(),
+                Some(ROOT_PAGE_ID),
+            ),
             range_start,
             range_end,
             saved_advance: None,

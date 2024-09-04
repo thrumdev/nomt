@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    io::{self, IoCommand, IoHandle, IoKind, Page, PAGE_SIZE},
+    io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
     page_diff::PageDiff,
 };
 
@@ -41,10 +41,11 @@ impl DB {
     pub fn open(
         num_pages: u32,
         seed: [u8; 16],
+        page_pool: &PagePool,
         ht_fd: &File,
         wal_fd: &File,
     ) -> anyhow::Result<Self> {
-        let (store, mut meta_map) = match ht_file::open(num_pages, ht_fd) {
+        let (store, mut meta_map) = match ht_file::open(num_pages, page_pool, ht_fd) {
             Ok(x) => x,
             Err(e) => {
                 anyhow::bail!("encountered error in opening store: {e:?}");
@@ -52,7 +53,7 @@ impl DB {
         };
 
         if wal_fd.metadata()?.len() > 0 {
-            recover(ht_fd, wal_fd, &store, &mut meta_map, seed)?;
+            recover(ht_fd, wal_fd, page_pool, &store, &mut meta_map, seed)?;
         }
 
         Ok(Self {
@@ -75,7 +76,8 @@ impl DB {
 
     pub fn prepare_sync(
         &self,
-        changes: Vec<(PageId, BucketIndex, Option<(Box<Page>, PageDiff)>)>,
+        page_pool: &PagePool,
+        changes: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
         wal_blob_builder: &mut WalBlobBuilder,
     ) -> anyhow::Result<WriteoutData> {
         let mut meta_map = self.shared.meta_map.write();
@@ -116,7 +118,7 @@ impl DB {
         }
 
         for changed_meta_page in changed_meta_pages {
-            let mut buf = Box::new(Page::zeroed());
+            let mut buf = page_pool.alloc_fat_page();
             buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
             let pn = self.shared.store.meta_bytes_index(changed_meta_page as u64);
             ht_pages.push((pn, buf));
@@ -138,6 +140,7 @@ impl DB {
 fn recover(
     mut ht_fd: &File,
     mut wal_fd: &File,
+    page_pool: &PagePool,
     ht_offsets: &HTOffsets,
     meta_map: &mut MetaMap,
     seed: [u8; 16],
@@ -150,7 +153,7 @@ fn recover(
     // The indicies of pages (in the metabits page space) that were changed and require updates.
     // Note those are not ht page numbers yet and still require additional conversion.
     let mut changed_meta_page_ixs = HashSet::new();
-    let mut wal_reader = WalBlobReader::new(wal_fd)?;
+    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
 
     while let Some(entry) = wal_reader.read_entry()? {
         match entry {
@@ -182,8 +185,8 @@ fn recover(
                 //   the page.
                 // - store the changed page.
                 let pn = ht_offsets.data_page_index(bucket);
-                let mut page = io::read_page(ht_fd, pn)?;
 
+                let mut page = io::read_page(page_pool, ht_fd, pn)?;
                 if page_diff.count() != changed_nodes.len() {
                     anyhow::bail!(
                         "mismatched number of changed nodes: {} != {}",
@@ -191,7 +194,7 @@ fn recover(
                         changed_nodes.len()
                     );
                 }
-                page_diff.unpack_changed_nodes(&changed_nodes, &mut *page);
+                page_diff.unpack_changed_nodes(&changed_nodes, &mut page);
 
                 ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
                 ht_fd.write_all(&page)?;
@@ -204,11 +207,18 @@ fn recover(
     //
     // We now write those pages out to the HT file.
     for changed_meta_page_ix in changed_meta_page_ixs {
-        let mut page = Page::zeroed();
-        page[..].copy_from_slice(meta_map.page_slice(changed_meta_page_ix));
-        let pn = ht_offsets.meta_bytes_index(changed_meta_page_ix as u64);
-        ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
-        ht_fd.write_all(&page)?;
+        unsafe {
+            let page = page_pool.alloc_zeroed();
+            // SAFETY: page is a fresh allocation from page pool and it's not aliased.
+            let page_data = page.as_mut_slice(page_pool);
+            page_data[..].copy_from_slice(meta_map.page_slice(changed_meta_page_ix));
+
+            let pn = ht_offsets.meta_bytes_index(changed_meta_page_ix as u64);
+            ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
+            ht_fd.write_all(&page_data)?;
+
+            page_pool.dealloc(page);
+        }
     }
 
     // Finally, we collapse the WAL file.
@@ -219,7 +229,7 @@ fn recover(
 
 pub struct WriteoutData {
     /// The pages to write out to the ht file.
-    pub ht_pages: Vec<(u64, Box<Page>)>,
+    pub ht_pages: Vec<(u64, FatPage)>,
 }
 
 /// A utility for loading pages from bitbox.
@@ -274,8 +284,9 @@ impl PageLoader {
 
         let data_page_index = self.shared.store.data_page_index(bucket.0);
 
+        let page = self.io_handle.page_pool().alloc_fat_page();
         let command = IoCommand {
-            kind: IoKind::Read(ht_fd, data_page_index, Box::new(Page::zeroed())),
+            kind: IoKind::Read(ht_fd, data_page_index, page),
             user_data,
         };
 
@@ -318,8 +329,9 @@ impl PageLoader {
 
         let data_page_index = self.shared.store.data_page_index(bucket.0);
 
+        let page = self.io_handle.page_pool().alloc_fat_page();
         let command = IoCommand {
-            kind: IoKind::Read(ht_fd, data_page_index, Box::new(Page::zeroed())),
+            kind: IoKind::Read(ht_fd, data_page_index, page),
             user_data,
         };
 
@@ -379,7 +391,7 @@ impl PageLoader {
 
 /// Represents the completion of a page load.
 pub struct PageLoadCompletion {
-    page: Box<Page>,
+    page: FatPage,
     user_data: u64,
 }
 
@@ -388,7 +400,7 @@ impl PageLoadCompletion {
         self.user_data
     }
 
-    pub fn apply_to(self, load: &mut PageLoad) -> Option<(Box<Page>, BucketIndex)> {
+    pub fn apply_to(self, load: &mut PageLoad) -> Option<(FatPage, BucketIndex)> {
         assert!(load.needs_completion());
         if self.page[PAGE_SIZE - 32..] == load.page_id.encode() {
             Some((self.page, BucketIndex(load.probe_sequence.bucket())))

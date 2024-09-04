@@ -2,7 +2,7 @@
 ///
 /// The file that stores the hash-table buckets and the meta map.
 use super::meta_map::MetaMap;
-use crate::io::{self, PAGE_SIZE};
+use crate::io::{self, PagePool, PAGE_SIZE};
 use std::{
     fs::{File, OpenOptions},
     path::PathBuf,
@@ -37,7 +37,11 @@ fn num_meta_byte_pages(num_pages: u32) -> u32 {
 }
 
 /// Opens the HT file, checks its length and reads the meta map.
-pub fn open(num_pages: u32, ht_fd: &File) -> anyhow::Result<(HTOffsets, MetaMap)> {
+pub fn open(
+    num_pages: u32,
+    page_pool: &PagePool,
+    ht_fd: &File,
+) -> anyhow::Result<(HTOffsets, MetaMap)> {
     if ht_fd.metadata()?.len() != expected_file_len(num_pages) {
         anyhow::bail!("Store corrupted; unexpected file length");
     }
@@ -45,7 +49,7 @@ pub fn open(num_pages: u32, ht_fd: &File) -> anyhow::Result<(HTOffsets, MetaMap)
     let num_meta_byte_pages = num_meta_byte_pages(num_pages);
     let mut meta_bytes = Vec::with_capacity(num_meta_byte_pages as usize * PAGE_SIZE);
     for pn in 0..num_meta_byte_pages {
-        let extra_meta_page = io::read_page(ht_fd, pn as u64)?;
+        let extra_meta_page = io::read_page(page_pool, ht_fd, pn as u64)?;
         meta_bytes.extend_from_slice(&*extra_meta_page);
     }
 
