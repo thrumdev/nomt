@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use bitvec::prelude::*;
+use update::reconstruct_key;
 
 use std::cmp::Ordering;
 
@@ -59,24 +60,13 @@ pub fn lookup(
 /// node pointer whose separator is less than or equal to the given key.
 fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     let prefix = branch.prefix();
-
-    match key.view_bits::<Msb0>()[..prefix.len()].cmp(prefix) {
-        Ordering::Equal => {}
-        Ordering::Less => return None,
-        Ordering::Greater => {
-            let i = branch.n() as usize - 1;
-            return Some((i, branch.node_pointer(i).into()));
-        }
-    }
-
-    let post_key = &key.view_bits::<Msb0>()[prefix.len()..];
-
     let mut low = 0;
     let mut high = branch.n() as usize;
 
     while low < high {
         let mid = low + (high - low) / 2;
-        if post_key < branch.separator(mid) {
+        let s = reconstruct_key(prefix, branch.separator(mid));
+        if key < s {
             high = mid;
         } else {
             low = mid + 1;
@@ -89,6 +79,120 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
     }
     let node_pointer = branch.node_pointer(high - 1);
     Some((high - 1, node_pointer.into()))
+}
+
+#[cfg(test)]
+pub mod tests {
+    use crate::beatree::branch::{BranchNodeBuilder, BranchNodePool};
+
+    use super::search_branch;
+
+    #[test]
+    fn branch_node_upper_separators() {
+        // I want to insert a couple of separators with at the end a couple of upper separtors
+        // to check if the binary search works
+
+        let branch_node_pool = BranchNodePool::new();
+
+        let branch_id = branch_node_pool.allocate();
+        let branch_node = branch_node_pool.checkout(branch_id).unwrap();
+
+        let prefix_len_bits = 32;
+        let mut branch_node_builder = BranchNodeBuilder::new(branch_node, 5, prefix_len_bits);
+
+        let separators = vec![
+            {
+                let mut s = [0; 32];
+                s[4] = 127;
+                s
+            },
+            {
+                let mut s = [0; 32];
+                s[4] = 128;
+                s
+            },
+            {
+                let mut s = [0; 32];
+                s[0] = 128;
+                s[1] = 1;
+                s
+            },
+            {
+                let mut s = [0; 32];
+                s[0] = 128;
+                s[1] = 3;
+                s
+            },
+            {
+                let mut s = [0; 32];
+                s[0] = 128;
+                s[1] = 5;
+                s
+            },
+        ];
+
+        branch_node_builder.push(separators[0].clone(), Some(prefix_len_bits + 1), 0);
+        branch_node_builder.push(separators[1].clone(), Some(prefix_len_bits + 1), 1);
+        branch_node_builder.push(separators[2].clone(), None, 2);
+        branch_node_builder.push(separators[3].clone(), None, 3);
+        branch_node_builder.push(separators[4].clone(), None, 4);
+
+        let branch_node = branch_node_builder.finish();
+
+        let key = {
+            let mut s = [0; 32];
+            s[0] = 128;
+            s[1] = 1;
+            s
+        };
+        let (i, _) = dbg!(search_branch(&branch_node, key).unwrap());
+        assert_eq!(i, 2);
+
+        let key = {
+            let mut s = [0; 32];
+            s[0] = 128;
+            s[1] = 2;
+            s
+        };
+        let (i, _) = dbg!(search_branch(&branch_node, key).unwrap());
+        assert_eq!(i, 2);
+
+        let key = {
+            let mut s = [0; 32];
+            s[0] = 128;
+            s[1] = 3;
+            s
+        };
+        let (i, _) = dbg!(search_branch(&branch_node, key).unwrap());
+        assert_eq!(i, 3);
+
+        let key = {
+            let mut s = [0; 32];
+            s[0] = 128;
+            s[1] = 4;
+            s
+        };
+        let (i, _) = dbg!(search_branch(&branch_node, key).unwrap());
+        assert_eq!(i, 3);
+
+        let key = {
+            let mut s = [0; 32];
+            s[0] = 128;
+            s[1] = 5;
+            s
+        };
+        let (i, _) = dbg!(search_branch(&branch_node, key).unwrap());
+        assert_eq!(i, 4);
+
+        let key = {
+            let mut s = [0; 32];
+            s[0] = 128;
+            s[1] = 6;
+            s
+        };
+        let (i, _) = dbg!(search_branch(&branch_node, key).unwrap());
+        assert_eq!(i, 4);
+    }
 }
 
 #[cfg(feature = "benchmarks")]

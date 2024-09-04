@@ -369,10 +369,10 @@ impl BranchUpdater {
 
         for op in ops {
             match op {
-                BranchOp::Insert(k, pn) => builder.push(*k, separator_len(k), pn.0),
+                BranchOp::Insert(k, pn) => builder.push(*k, Some(separator_len(k)), pn.0),
                 BranchOp::Keep(i, s) => {
                     let (k, pn) = self.base.as_ref().unwrap().key_value(*i);
-                    builder.push(k, *s, pn.0);
+                    builder.push(k, Some(*s), pn.0);
                 }
             }
         }

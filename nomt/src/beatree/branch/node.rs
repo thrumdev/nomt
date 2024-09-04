@@ -24,6 +24,13 @@ use crate::beatree::Key;
 //
 // node_pointers: LNPN or BNID[n]
 // ```
+//
+// There is also the possibility of specifying one or more separators
+// that do not share the prefix specified at the beginning of the node.
+// This is the case only if the separator length extracted by the cells is 256.
+//
+// For example, the i-th separator does not share the prefix and it is
+// entirely saved into the separators bitvec if `cells(i) - cells(i-1) = 256`.
 
 const BRANCH_NODE_HEADER_SIZE: usize = 4 + 2 + 2;
 pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_SIZE;
@@ -207,7 +214,7 @@ impl BranchNodeBuilder {
         }
     }
 
-    pub fn push(&mut self, key: Key, separator_len: usize, pn: u32) {
+    pub fn push(&mut self, key: Key, separator_len: Option<usize>, pn: u32) {
         assert!(self.index < self.branch.n() as usize);
 
         if self.index == 0 {
@@ -215,11 +222,18 @@ impl BranchNodeBuilder {
             self.branch.set_prefix(prefix);
         }
 
-        // There are cases, for example a separator made by all zeros, where the
-        // prefix_len could be bigger then the separator_len
-        let separator_len = separator_len.saturating_sub(self.prefix_len);
+        let (prefix_len, separator_len) = match separator_len {
+            Some(s) => (
+                self.prefix_len,
+                // There are cases, for example a separator made by all zeros, where the
+                // prefix_len could be bigger then the separator_len
+                s.saturating_sub(self.prefix_len),
+            ),
+            // allow to save a separator which does not share any prefix
+            None => (0, 256),
+        };
 
-        let separator = &key.view_bits::<Msb0>()[self.prefix_len..][..separator_len];
+        let separator = &key.view_bits::<Msb0>()[prefix_len..][..separator_len];
 
         self.separator_bit_offset += separator_len as u16;
         self.cells.extend(self.separator_bit_offset.to_le_bytes());
