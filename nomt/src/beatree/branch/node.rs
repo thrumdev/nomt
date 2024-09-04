@@ -12,9 +12,7 @@ use crate::beatree::Key;
 //
 // n: u16               // item count
 // prefix_len: u16      // bits
-// cells: u16[n + 1]    // offsets of separators, each cell contain the bitoffset
-//                      // at which the relative separator is stored. The last cell
-//                      // contains offset to the end of all separators
+// cells: u16[n]        // bit offsets of the end of separators within the separators bitvec
 //
 // # To avoid two padding bytes, prefix and separators are stored in a single bitvec.
 //
@@ -28,7 +26,6 @@ use crate::beatree::Key;
 // ```
 
 const BRANCH_NODE_HEADER_SIZE: usize = 4 + 2 + 2;
-pub const BRANCH_NODE_EMPTY_BODY: usize = 2;
 pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_SIZE;
 
 /// A branch node, regardless of its level.
@@ -85,7 +82,7 @@ impl BranchNode {
     }
 
     fn set_prefix(&mut self, prefix: &BitSlice<u8, Msb0>) {
-        let start = BRANCH_NODE_HEADER_SIZE + (self.n() as usize + 1) * 2;
+        let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let prefix_len = self.prefix_len() as usize;
         self.as_mut_slice()[start..].view_bits_mut()[..prefix_len].copy_from_bitslice(prefix);
     }
@@ -100,7 +97,7 @@ impl BranchNode {
         let slice = self.as_mut_slice();
 
         let cells_start = BRANCH_NODE_HEADER_SIZE;
-        let cells_end = cells_start + (n + 1) * 2;
+        let cells_end = cells_start + n * 2;
         slice[cells_start..cells_end].copy_from_slice(cells.as_slice());
 
         slice[cells_end..].view_bits_mut()[prefix_len..][..separators.len()]
@@ -153,12 +150,18 @@ impl<'a> BranchNodeView<'a> {
     }
 
     pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
-        let start = BRANCH_NODE_HEADER_SIZE + (self.n() as usize + 1) * 2;
+        let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         &self.inner[start..].view_bits()[..self.prefix_len() as usize]
     }
 
     pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
-        &self.inner.view_bits()[self.cell(i)..self.cell(i + 1)]
+        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+
+        let mut bit_offset_start = self.prefix_len() as usize;
+        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
+        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
+
+        &self.inner[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
     }
 
     pub fn node_pointer(&self, i: usize) -> u32 {
@@ -172,7 +175,7 @@ unsafe impl Send for BranchNode {}
 pub fn body_size(prefix_len: usize, tot_separators_len: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round
     // up to the next byte boundary. They are preceded by cells and followed by node pointers
-    (n + 1) * 2 + (prefix_len + tot_separators_len + 7) / 8 + (n * 4)
+    (n * 2) + (prefix_len + tot_separators_len + 7) / 8 + (n * 4)
 }
 
 pub struct BranchNodeBuilder {
@@ -194,7 +197,7 @@ impl BranchNodeBuilder {
             index: 0,
             prefix_len,
             cells: Vec::new(),
-            separator_bit_offset: ((BRANCH_NODE_HEADER_SIZE + (n + 1) * 2) * 8 + prefix_len) as u16,
+            separator_bit_offset: 0,
             separators: BitVec::new(),
         }
     }
@@ -213,8 +216,8 @@ impl BranchNodeBuilder {
 
         let separator = &key.view_bits::<Msb0>()[self.prefix_len..][..separator_len];
 
-        self.cells.extend(self.separator_bit_offset.to_le_bytes());
         self.separator_bit_offset += separator_len as u16;
+        self.cells.extend(self.separator_bit_offset.to_le_bytes());
 
         self.separators.extend_from_bitslice(separator);
 
@@ -224,7 +227,6 @@ impl BranchNodeBuilder {
     }
 
     pub fn finish(mut self) -> BranchNode {
-        self.cells.extend(self.separator_bit_offset.to_le_bytes());
         self.branch.set_separators(self.cells, self.separators);
         self.branch
     }

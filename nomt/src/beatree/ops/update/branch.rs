@@ -6,8 +6,7 @@ use crate::beatree::{
     allocator::PageNumber,
     bbn::BbnStoreWriter,
     branch::{
-        self as branch_node, node::BRANCH_NODE_EMPTY_BODY, BranchNode, BranchNodeBuilder,
-        BranchNodePool, BRANCH_NODE_BODY_SIZE,
+        self as branch_node, BranchNode, BranchNodeBuilder, BranchNodePool, BRANCH_NODE_BODY_SIZE,
     },
     index::Index,
     Key,
@@ -125,7 +124,7 @@ impl BranchUpdater {
         // in practice; bulk splits are rare.
         let last_ops_start = self.build_bulk_splitter_branches(bbn_index, bnp, bbn_writer);
 
-        if self.gauge.body_size() == BRANCH_NODE_EMPTY_BODY {
+        if self.gauge.body_size() == 0 {
             self.ops.clear();
 
             (old_branch_id, DigestResult::Finished)
