@@ -1,4 +1,3 @@
-use bitvec::prelude::*;
 use std::cmp::Ordering;
 
 use crate::beatree::{
@@ -7,7 +6,10 @@ use crate::beatree::{
 };
 use crate::io::PagePool;
 
-use super::{LeafChanges, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD};
+use super::{
+    leaf_stage::LeafChanges, separate, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
+    LEAF_MERGE_THRESHOLD,
+};
 
 pub struct BaseLeaf {
     pub node: LeafNode,
@@ -112,7 +114,7 @@ impl LeafUpdater {
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
     // separator_override is set.
     // If `Finished` is returned, `ops` is guaranteed empty and separator_override is empty.
-    pub(super) fn digest(&mut self, leaf_changes: &mut LeafChanges) -> DigestResult {
+    pub fn digest(&mut self, leaf_changes: &mut LeafChanges) -> DigestResult {
         // no cells are going to be deleted from this point onwards - this keeps everything.
         self.keep_up_to(None, |_| {});
 
@@ -417,40 +419,5 @@ impl LeafGauge {
 
     fn body_size(&self) -> usize {
         leaf_node::body_size(self.n, self.value_size_sum)
-    }
-}
-
-// separate two keys a and b where b > a
-fn separate(a: &Key, b: &Key) -> Key {
-    // if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
-    let len = a
-        .view_bits::<Msb0>()
-        .iter()
-        .zip(b.view_bits::<Msb0>().iter())
-        .take_while(|(a, b)| a == b)
-        .count()
-        + 1;
-
-    let mut separator = [0u8; 32];
-    separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
-    separator
-}
-
-#[cfg(feature = "benchmarks")]
-pub mod benches {
-    use crate::beatree::benches::get_key_pair;
-    use criterion::{BenchmarkId, Criterion};
-
-    pub fn separate_benchmark(c: &mut Criterion) {
-        let mut group = c.benchmark_group("separate");
-
-        for shared_bytes in [0, 4, 8, 12, 16] {
-            let (key1, key2) = get_key_pair(shared_bytes);
-            group.bench_function(BenchmarkId::new("shared_bytes", shared_bytes), |b| {
-                b.iter(|| super::separate(&key1, &key2));
-            });
-        }
-
-        group.finish();
     }
 }
