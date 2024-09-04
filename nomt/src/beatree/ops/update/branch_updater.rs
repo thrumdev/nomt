@@ -1,5 +1,3 @@
-use bitvec::prelude::*;
-
 use std::cmp::Ordering;
 
 use crate::beatree::{
@@ -11,8 +9,8 @@ use crate::beatree::{
 };
 
 use super::{
-    reconstruct_key, BranchChanges, BranchId, BRANCH_BULK_SPLIT_TARGET,
-    BRANCH_BULK_SPLIT_THRESHOLD, BRANCH_MERGE_THRESHOLD,
+    branch_stage::BranchChanges, prefix_len, reconstruct_key, separator_len, BranchId,
+    BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD, BRANCH_MERGE_THRESHOLD,
 };
 
 pub struct BaseBranch {
@@ -86,7 +84,7 @@ impl BranchUpdater {
         }
     }
 
-    pub(super) fn digest(
+    pub fn digest(
         &mut self,
         bnp: &BranchNodePool,
         branch_changes: &mut BranchChanges,
@@ -409,23 +407,6 @@ impl BranchGauge {
     }
 }
 
-fn prefix_len(key_a: &Key, key_b: &Key) -> usize {
-    key_a
-        .view_bits::<Msb0>()
-        .iter()
-        .zip(key_b.view_bits::<Msb0>().iter())
-        .take_while(|(a, b)| a == b)
-        .count()
-}
-
-fn separator_len(key: &Key) -> usize {
-    if key == &[0u8; 32] {
-        return 1;
-    }
-    let key = &key.view_bits::<Msb0>();
-    key.len() - key.trailing_zeros()
-}
-
 #[derive(Default)]
 struct BranchBulkSplitter {
     items: Vec<(usize, BranchGauge)>,
@@ -436,43 +417,5 @@ impl BranchBulkSplitter {
     fn push(&mut self, count: usize, gauge: BranchGauge) {
         self.items.push((count, gauge));
         self.total_count += count;
-    }
-}
-
-#[cfg(feature = "benchmarks")]
-pub mod benches {
-    use crate::beatree::benches::get_key_pair;
-    use criterion::{BenchmarkId, Criterion};
-
-    pub fn separator_len_benchmark(c: &mut Criterion) {
-        let mut group = c.benchmark_group("separator_len");
-
-        // n_bytes represents the amount of bytes set to one
-        // from the beginning of the key
-        for n_bytes in [16, 20, 24, 28, 31].into_iter().rev() {
-            let mut separator = [0; 32];
-            for byte in separator.iter_mut().take(n_bytes) {
-                *byte = 255;
-            }
-
-            group.bench_function(BenchmarkId::new("zero_bytes", 32 - n_bytes), |b| {
-                b.iter(|| super::separator_len(&separator));
-            });
-        }
-
-        group.finish();
-    }
-
-    pub fn prefix_len_benchmark(c: &mut Criterion) {
-        let mut group = c.benchmark_group("prefix_len");
-
-        for prefix_len_bytes in [0, 4, 8, 12, 16] {
-            let (key1, key2) = get_key_pair(prefix_len_bytes);
-            group.bench_function(BenchmarkId::new("shared_bytes", prefix_len_bytes), |b| {
-                b.iter(|| super::prefix_len(&key1, &key2));
-            });
-        }
-
-        group.finish();
     }
 }
