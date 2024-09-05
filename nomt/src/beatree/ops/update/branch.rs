@@ -365,15 +365,14 @@ impl BranchUpdater {
 
         // UNWRAP: freshly allocated branch can always be checked out.
         let branch = bnp.checkout(branch_id).unwrap();
-        let mut builder =
-            BranchNodeBuilder::new(branch, gauge.n, gauge.prefix_len, gauge.separator_len);
+        let mut builder = BranchNodeBuilder::new(branch, gauge.n, gauge.prefix_len);
 
         for op in ops {
             match op {
-                BranchOp::Insert(k, pn) => builder.push(*k, pn.0),
-                BranchOp::Keep(i, _) => {
+                BranchOp::Insert(k, pn) => builder.push(*k, separator_len(k), pn.0),
+                BranchOp::Keep(i, s) => {
                     let (k, pn) = self.base.as_ref().unwrap().key_value(*i);
-                    builder.push(k, pn.0);
+                    builder.push(k, *s, pn.0);
                 }
             }
         }
@@ -404,10 +403,11 @@ impl BranchUpdater {
 }
 
 struct BranchGauge {
-    first_separator: Option<Key>,
+    // key and length of the first separator if any
+    first_separator: Option<(Key, usize)>,
     prefix_len: usize,
-    // total separator len, not counting prefix.
-    separator_len: usize,
+    // sum of all ingested separator_len, excluding the first one
+    sum_separator_lens: usize,
     n: usize,
 }
 
@@ -416,44 +416,52 @@ impl BranchGauge {
         BranchGauge {
             first_separator: None,
             prefix_len: 0,
-            separator_len: 0,
+            sum_separator_lens: 0,
             n: 0,
         }
     }
 
     fn ingest(&mut self, key: Key, len: usize) {
-        let Some(ref first) = self.first_separator else {
-            self.first_separator = Some(key);
-            self.separator_len = len;
-            self.prefix_len = self.separator_len;
+        let Some((ref first, _)) = self.first_separator else {
+            self.first_separator = Some((key, len));
+            self.prefix_len = len;
 
             self.n = 1;
             return;
         };
 
-        self.separator_len = std::cmp::max(len, self.separator_len);
-        self.prefix_len = std::cmp::min(self.separator_len, prefix_len(first, &key));
+        self.prefix_len = prefix_len(first, &key);
+        self.sum_separator_lens += len;
         self.n += 1;
+    }
+
+    fn total_separators_len(&self, prefix_len: usize) -> usize {
+        match self.first_separator {
+            Some((_, len)) => {
+                len.saturating_sub(prefix_len) + self.sum_separator_lens - (self.n - 1) * prefix_len
+            }
+            None => 0,
+        }
     }
 
     fn body_size_after(&mut self, key: Key, len: usize) -> usize {
         let p;
-        let s;
-        if let Some(ref first) = self.first_separator {
-            s = std::cmp::max(len, self.separator_len);
-            p = std::cmp::min(s, prefix_len(first, &key));
+        let t;
+        if let Some((ref first, _)) = self.first_separator {
+            p = prefix_len(first, &key);
+            t = self.total_separators_len(p) + len.saturating_sub(p);
         } else {
-            s = len;
+            t = 0;
             p = len;
         }
 
-        branch_node::body_size(p, s - p, self.n + 1)
+        branch_node::body_size(p, t, self.n + 1)
     }
 
     fn body_size(&self) -> usize {
         branch_node::body_size(
             self.prefix_len,
-            self.separator_len - self.prefix_len,
+            self.total_separators_len(self.prefix_len),
             self.n,
         )
     }
