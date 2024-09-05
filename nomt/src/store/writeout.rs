@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::{Seek, SeekFrom},
     os::fd::{FromRawFd, IntoRawFd, RawFd},
+    sync::Arc,
 };
 
 use crate::io::{page_pool::FatPage, CompleteIo, IoCommand, IoHandle, IoKind, PAGE_SIZE};
@@ -19,7 +20,7 @@ pub fn run(
     ht_fd: RawFd,
     meta_fd: RawFd,
     wal_blob: (*mut u8, usize),
-    bbn: Vec<BranchNode>,
+    bbn: Vec<Arc<BranchNode>>,
     bbn_free_list_pages: Vec<(PageNumber, FatPage)>,
     bbn_extend_file_sz: Option<u64>,
     ln: Vec<(PageNumber, FatPage)>,
@@ -384,7 +385,7 @@ impl WalWriteOut {
 struct BbnWriteOut {
     bbn_fd: RawFd,
     bbn_extend_file_sz: Option<u64>,
-    bbn: Vec<BranchNode>,
+    bbn: Vec<Arc<BranchNode>>,
     free_list_pages: Vec<(PageNumber, FatPage)>,
     // Initially, set to the len of `bbn`. Each completion will decrement this.
     remaining: usize,
@@ -408,15 +409,14 @@ impl BbnWriteOut {
     }
 
     fn send_writes(&mut self, io: &mut IoDmux) {
-        for mut branch_node in self.bbn.drain(..) {
+        for branch_node in &self.bbn {
             // UNWRAP: the branch node cannot be out of bounds because of the requirement of the
             // sync machine.
-            let wrt = branch_node.as_mut_slice();
+            let wrt = branch_node.as_slice();
             let (ptr, len) = (wrt.as_ptr(), wrt.len());
             let bbn_pn = branch_node.bbn_pn();
 
-            // SAFETY: BBNs are kept alive by the branch node pool. It is safe to drop the view
-            // into the buffer without invalidating the pointer.
+            // SAFETY: We drop the BBNs when this struct drops. It is safe to share the pointer.
             io.send_bbn(IoKind::WriteRaw(self.bbn_fd, bbn_pn as u64, ptr, len));
         }
 

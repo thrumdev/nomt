@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 
 use super::{
     allocator::PageNumber,
-    branch::{self, BranchId},
+    branch,
     index::Index,
     leaf::{self, node::LeafNode},
     Key,
@@ -23,17 +23,12 @@ pub use update::update;
 pub fn lookup(
     key: Key,
     bbn_index: &Index,
-    branch_node_pool: &branch::BranchNodePool,
     leaf_store: &leaf::store::LeafStoreReader,
 ) -> Result<Option<Vec<u8>>> {
-    let branch_id = match bbn_index.lookup(key) {
+    let branch = match bbn_index.lookup(key) {
         None => return Ok(None),
-        Some((_, branch_id)) => branch_id,
+        Some((_, branch)) => branch,
     };
-
-    let branch = branch_node_pool
-        .checkout(branch_id)
-        .expect("missing branch node in pool");
 
     let leaf_pn = match search_branch(&branch, key.clone()) {
         None => return Ok(None),
@@ -108,9 +103,9 @@ pub mod benches {
     use crate::{
         beatree::{
             benches::get_keys,
-            branch::{node::BranchNodeBuilder, BranchNodePool},
+            branch::{node::BranchNodeBuilder, BranchNode},
         },
-        io::PAGE_SIZE,
+        io::{PAGE_SIZE, PagePool},
     };
     use criterion::{BenchmarkId, Criterion};
     use rand::Rng;
@@ -118,8 +113,7 @@ pub mod benches {
     pub fn search_branch_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("search_branch");
         let mut rand = rand::thread_rng();
-
-        let branch_node_pool = BranchNodePool::new();
+        let page_pool = PagePool::new();
 
         for prefix_len_bytes in [1, 4, 8, 12, 16] {
             // fill the branch node with as many separators as possible
@@ -134,8 +128,7 @@ pub mod benches {
             let mut separators = get_keys(prefix_len_bytes, n);
             separators.sort();
 
-            let branch_id = branch_node_pool.allocate();
-            let branch_node = branch_node_pool.checkout(branch_id).unwrap();
+            let branch_node = BranchNode::new_in(&page_pool);
             let mut branch_node_builder =
                 BranchNodeBuilder::new(branch_node, n, prefix_len_bits, 256);
 

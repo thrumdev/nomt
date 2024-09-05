@@ -1,8 +1,8 @@
 use bitvec::prelude::*;
-use std::sync::{Arc, Mutex};
 
-use super::{BranchId, BranchNodePoolInner, BRANCH_NODE_SIZE};
+use super::BRANCH_NODE_SIZE;
 use crate::beatree::Key;
+use crate::io::{FatPage, PagePool};
 
 // Here is the layout of a branch node:
 //
@@ -33,14 +33,18 @@ pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_S
 
 /// A branch node, regardless of its level.
 pub struct BranchNode {
-    pub(super) pool: Arc<Mutex<BranchNodePoolInner>>,
-    pub(super) id: BranchId,
-    pub(super) ptr: *mut u8,
+    pub(super) page: FatPage,
 }
 
 impl BranchNode {
+    pub fn new_in(page_pool: &PagePool) -> Self {
+        BranchNode {
+            page: page_pool.alloc_fat_page(),
+        }
+    }
+
     pub fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr as *const u8, BRANCH_NODE_SIZE) }
+        &*self.page
     }
 
     pub fn view(&self) -> BranchNodeView {
@@ -50,7 +54,7 @@ impl BranchNode {
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, BRANCH_NODE_SIZE) }
+        &mut *self.page
     }
 
     pub fn bbn_pn(&self) -> u32 {
@@ -129,14 +133,6 @@ impl BranchNode {
     fn set_node_pointer(&mut self, i: usize, node_pointer: u32) {
         let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
         self.as_mut_slice()[offset..offset + 4].copy_from_slice(&node_pointer.to_le_bytes());
-    }
-}
-
-impl Drop for BranchNode {
-    fn drop(&mut self) {
-        // Remove the node from the checked out list.
-        let mut inner = self.pool.lock().unwrap();
-        inner.checked_out.retain(|id| *id != self.id);
     }
 }
 

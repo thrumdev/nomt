@@ -4,12 +4,12 @@ use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use threadpool::ThreadPool;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::beatree::{
     allocator::PageNumber,
     bbn,
-    branch::{node::BranchNode, BranchNodePool, BRANCH_NODE_BODY_SIZE},
+    branch::{node::BranchNode, BRANCH_NODE_BODY_SIZE},
     index::Index,
     leaf::{
         node::{LeafNode, LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
@@ -18,8 +18,6 @@ use crate::beatree::{
     },
     Key,
 };
-
-use super::BranchId;
 
 mod branch_stage;
 mod branch_updater;
@@ -41,21 +39,19 @@ const LEAF_MERGE_THRESHOLD: usize = LEAF_NODE_BODY_SIZE / 2;
 const LEAF_BULK_SPLIT_THRESHOLD: usize = (LEAF_NODE_BODY_SIZE * 9) / 5;
 const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 
-/// Change the btree in the specified way. Updates the branch index in-place and returns
-/// a list of branches which have become obsolete.
+/// Change the btree in the specified way. Updates the branch index in-place.
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
     changeset: &BTreeMap<Key, Option<Vec<u8>>>,
     bbn_index: &mut Index,
-    bnp: &mut BranchNodePool,
     leaf_reader: &LeafStoreReader,
     leaf_writer: &mut LeafStoreWriter,
     bbn_writer: &mut bbn::BbnStoreWriter,
     thread_pool: ThreadPool,
     workers: usize,
-) -> Result<Vec<BranchId>> {
-    let leaf_cache = preload_leaves(leaf_reader, &bbn_index, &bnp, changeset.keys().cloned())?;
+) -> Result<()> {
+    let leaf_cache = preload_leaves(leaf_reader, &bbn_index, changeset.keys().cloned())?;
 
     let changeset = changeset
         .iter()
@@ -71,7 +67,7 @@ pub fn update(
         .collect::<_>();
 
     let (leaf_changes, overflow_deleted) =
-        leaf_stage::run(&bbn_index, &bnp, leaf_cache, leaf_reader, leaf_writer.page_pool().clone(), changeset, thread_pool, workers);
+        leaf_stage::run(&bbn_index, leaf_cache, leaf_reader, leaf_writer.page_pool().clone(), changeset, thread_pool, workers);
 
     let branch_changeset = leaf_changes
         .into_iter()
@@ -89,31 +85,27 @@ pub fn update(
         overflow::delete(&overflow_cell, leaf_reader, leaf_writer);
     }
 
-    let (branch_changes, fresh_released) = branch_stage::run(&bbn_index, &bnp, branch_changeset);
+    let branch_changes = branch_stage::run(&bbn_index, leaf_writer.page_pool().clone(), branch_changeset);
 
-    let mut removed_branches = Vec::new();
     for (key, changed_branch) in branch_changes {
         match changed_branch.inserted {
-            Some((branch_id, node)) => {
-                bbn_index.insert(key, branch_id);
-                bbn_writer.allocate(node);
+            Some(mut node) => {
+                bbn_writer.allocate(&mut node);
+                let node = Arc::new(node);
+                bbn_writer.write(node.clone());
+                bbn_index.insert(key, node);
             }
             None => {
                 bbn_index.remove(&key);
             }
         }
 
-        if let Some((deleted_branch_id, deleted_pn)) = changed_branch.deleted {
-            removed_branches.push(deleted_branch_id);
+        if let Some(deleted_pn) = changed_branch.deleted {
             bbn_writer.release(deleted_pn);
         }
     }
 
-    for branch_id in fresh_released {
-        bnp.release(branch_id);
-    }
-
-    Ok(removed_branches)
+    Ok(())
 }
 
 pub fn reconstruct_key(prefix: Option<&BitSlice<u8, Msb0>>, separator: &BitSlice<u8, Msb0>) -> Key {
@@ -144,7 +136,6 @@ pub fn get_key(node: &BranchNode, index: usize) -> Key {
 fn preload_leaves(
     leaf_reader: &LeafStoreReader,
     bbn_index: &Index,
-    bnp: &BranchNodePool,
     keys: impl IntoIterator<Item = Key>,
 ) -> Result<DashMap<PageNumber, LeafNode>> {
     let leaf_pages = DashMap::new();
@@ -152,11 +143,9 @@ fn preload_leaves(
 
     let mut submissions = 0;
     for key in keys {
-        let Some((_, branch_id)) = bbn_index.lookup(key) else {
+        let Some((_, branch)) = bbn_index.lookup(key) else {
             continue;
         };
-        // UNWRAP: all branches in index exist.
-        let branch = bnp.checkout(branch_id).unwrap();
         let Some((_, leaf_pn)) = super::search_branch(&branch, key) else {
             continue;
         };
