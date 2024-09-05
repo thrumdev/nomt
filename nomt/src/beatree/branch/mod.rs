@@ -154,7 +154,7 @@ fn test_branch_node_pool() {
     let pool = BranchNodePool::new();
     let id = pool.allocate();
     let mut node = pool.checkout(id).unwrap();
-    node.set_separator_len(10);
+    node.set_n(10);
 }
 
 #[test]

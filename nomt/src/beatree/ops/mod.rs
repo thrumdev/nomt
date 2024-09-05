@@ -69,8 +69,7 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
         }
     }
 
-    let total_separator_len = prefix.len() + branch.separator_len() as usize;
-    let post_key = &key.view_bits::<Msb0>()[prefix.len()..total_separator_len];
+    let post_key = &key.view_bits::<Msb0>()[prefix.len()..];
 
     let mut low = 0;
     let mut high = branch.n() as usize;
