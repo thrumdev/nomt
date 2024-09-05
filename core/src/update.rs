@@ -36,12 +36,46 @@ pub fn leaf_ops_spliced(
         .filter_map(|(k, o)| o.map(move |value| (k, value)))
 }
 
-/// Indicates the relative position of the next node.
-pub struct VisitControl<'a> {
-    /// How many levels up.
-    pub up: u8,
-    /// Path to follow down.
-    pub down: &'a BitSlice<u8, Msb0>,
+pub enum WriteNode<'a> {
+    Leaf {
+        up: bool,
+        down: &'a BitSlice<u8, Msb0>,
+        leaf_data: LeafData,
+        node: Node,
+    },
+    Internal {
+        internal_data: trie::InternalData,
+        node: Node,
+    },
+    Terminator,
+}
+
+impl<'a> WriteNode<'a> {
+    /// Whether to move up a step before writing the node.
+    pub fn up(&self) -> bool {
+        match self {
+            WriteNode::Leaf { up, .. } => *up,
+            WriteNode::Internal { .. } => true,
+            WriteNode::Terminator => false,
+        }
+    }
+
+    /// What path to follow down (after going up) before writing the node.
+    pub fn down(&self) -> &BitSlice<u8, Msb0> {
+        match self {
+            WriteNode::Leaf { down, .. } => down,
+            _ => BitSlice::empty(),
+        }
+    }
+
+    /// The node itself.
+    pub fn node(&self) -> Node {
+        match self {
+            WriteNode::Leaf { node, .. } => *node,
+            WriteNode::Internal { node, .. } => *node,
+            WriteNode::Terminator => trie::TERMINATOR,
+        }
+    }
 }
 
 // Build a trie out of the given prior terminal and operations. Operations should all start
@@ -52,13 +86,14 @@ pub struct VisitControl<'a> {
 // Provide a visitor which will be called for each computed node of the trie.
 //
 // The visitor is assumed to have a default position at the root of the trie and from
-// there will be controlled with `VisitControl` to indicate the position of the next node.
+// there will be controlled with `WriteNode`. The changes to the position before writing the node
+// can be extracted from the command.
 // The root is always visited at the end. If the written node is a leaf, the leaf-data preimage
 // will be provided.
 pub fn build_trie<H: NodeHasher>(
     skip: usize,
     ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
-    mut visit: impl FnMut(VisitControl, Node, Option<LeafData>),
+    mut visit: impl FnMut(WriteNode),
 ) -> Node {
     // we build a compact addressable sub-trie in-place based on the given set of ordered keys,
     // ignoring deletions as they are implicit in a fresh sub-trie.
@@ -101,14 +136,7 @@ pub fn build_trie<H: NodeHasher>(
     match (b, c) {
         (None, _) => {
             // fast path: delete single node.
-            visit(
-                VisitControl {
-                    up: 0,
-                    down: BitSlice::empty(),
-                },
-                trie::TERMINATOR,
-                None,
-            );
+            visit(WriteNode::Terminator);
             return trie::TERMINATOR;
         }
         (Some((ref k, ref v)), None) => {
@@ -118,15 +146,13 @@ pub fn build_trie<H: NodeHasher>(
                 value_hash: *v,
             };
             let leaf = H::hash_leaf(&leaf_data);
+            visit(WriteNode::Leaf {
+                up: false,
+                down: BitSlice::empty(),
+                leaf_data,
+                node: leaf,
+            });
 
-            visit(
-                VisitControl {
-                    up: 0,
-                    down: BitSlice::empty(),
-                },
-                leaf,
-                Some(leaf_data),
-            );
             return leaf;
         }
         _ => {}
@@ -171,14 +197,12 @@ pub fn build_trie<H: NodeHasher>(
         let down_start = skip + n1.unwrap_or(0);
         let leaf_end_bit = skip + leaf_depth;
 
-        visit(
-            VisitControl {
-                up: n1.map_or(0, |_| 1), // previous iterations always get to current layer + 1
-                down: &this_key.view_bits::<Msb0>()[down_start..leaf_end_bit],
-            },
-            leaf,
-            Some(leaf_data),
-        );
+        visit(WriteNode::Leaf {
+            up: n1.is_some(), // previous iterations always get to current layer + 1
+            down: &this_key.view_bits::<Msb0>()[down_start..leaf_end_bit],
+            node: leaf,
+            leaf_data,
+        });
 
         for bit in this_key.view_bits::<Msb0>()[skip..leaf_end_bit]
             .iter()
@@ -194,7 +218,7 @@ pub fn build_trie<H: NodeHasher>(
                 trie::TERMINATOR
             };
 
-            let node_data = if bit {
+            let internal_data = if bit {
                 trie::InternalData {
                     left: sibling,
                     right: last_node,
@@ -206,15 +230,11 @@ pub fn build_trie<H: NodeHasher>(
                 }
             };
 
-            last_node = H::hash_internal(&node_data);
-            visit(
-                VisitControl {
-                    up: 1,
-                    down: BitSlice::empty(),
-                },
-                last_node,
-                None,
-            );
+            last_node = H::hash_internal(&internal_data);
+            visit(WriteNode::Internal {
+                internal_data,
+                node: last_node,
+            });
         }
         pending_siblings.push((last_node, layer));
 
@@ -274,20 +294,18 @@ mod tests {
             }
         }
 
-        fn visit(&mut self, control: VisitControl, node: Node) {
-            let n = self.key.len() - control.up as usize;
+        fn visit(&mut self, control: WriteNode) {
+            let n = self.key.len() - control.up() as usize;
             self.key.truncate(n);
-            self.key.extend_from_bitslice(&control.down);
-            self.visited.push((self.key.clone(), node));
+            self.key.extend_from_bitslice(control.down());
+            self.visited.push((self.key.clone(), control.node()));
         }
     }
 
     #[test]
     fn build_empty_trie() {
         let mut visited = Visited::default();
-        let root = build_trie::<DummyNodeHasher>(0, vec![], |control, node, _| {
-            visited.visit(control, node)
-        });
+        let root = build_trie::<DummyNodeHasher>(0, vec![], |control| visited.visit(control));
 
         let visited = visited.visited;
 
@@ -301,11 +319,10 @@ mod tests {
         let mut visited = Visited::default();
 
         let (leaf, leaf_hash) = leaf(0xff);
-        let root = build_trie::<DummyNodeHasher>(
-            0,
-            vec![(leaf.key_path, leaf.value_hash)],
-            |control, node, _| visited.visit(control, node),
-        );
+        let root =
+            build_trie::<DummyNodeHasher>(0, vec![(leaf.key_path, leaf.value_hash)], |control| {
+                visited.visit(control)
+            });
 
         let visited = visited.visited;
 
@@ -327,8 +344,7 @@ mod tests {
             .map(|l| (l.key_path, l.value_hash))
             .collect::<Vec<_>>();
 
-        let root =
-            build_trie::<DummyNodeHasher>(4, ops, |control, node, _| visited.visit(control, node));
+        let root = build_trie::<DummyNodeHasher>(4, ops, |control| visited.visit(control));
 
         let visited = visited.visited;
 
@@ -366,8 +382,7 @@ mod tests {
             .map(|l| (l.key_path, l.value_hash))
             .collect::<Vec<_>>();
 
-        let root =
-            build_trie::<DummyNodeHasher>(0, ops, |control, node, _| visited.visit(control, node));
+        let root = build_trie::<DummyNodeHasher>(0, ops, |control| visited.visit(control));
 
         let visited = visited.visited;
 
