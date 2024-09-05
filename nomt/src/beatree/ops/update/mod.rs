@@ -1,6 +1,7 @@
 use anyhow::Result;
 use bitvec::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
+use threadpool::ThreadPool;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -50,6 +51,8 @@ pub fn update(
     leaf_reader: &LeafStoreReader,
     leaf_writer: &mut LeafStoreWriter,
     bbn_writer: &mut bbn::BbnStoreWriter,
+    thread_pool: ThreadPool,
+    workers: usize,
 ) -> Result<Vec<BranchId>> {
     let leaf_cache = preload_leaves(leaf_reader, &bbn_index, &bnp, changeset.keys().cloned())?;
 
@@ -67,7 +70,7 @@ pub fn update(
         .collect::<_>();
 
     let (leaf_changes, overflow_deleted) =
-        leaf_stage::run(&bbn_index, &bnp, leaf_cache, leaf_reader, changeset);
+        leaf_stage::run(&bbn_index, &bnp, leaf_cache, leaf_reader, changeset, thread_pool, workers);
 
     let branch_changeset = leaf_changes
         .into_iter()

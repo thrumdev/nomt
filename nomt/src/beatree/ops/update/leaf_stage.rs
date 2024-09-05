@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
-use std::thread::{Builder, JoinHandle};
 
-use crossbeam_channel::TryRecvError;
+use crossbeam_channel::{Receiver, TryRecvError};
+use threadpool::ThreadPool;
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -111,15 +111,17 @@ pub fn run(
     leaf_cache: HashMap<PageNumber, LeafNode>,
     leaf_reader: &LeafStoreReader,
     changeset: Vec<(Key, Option<(Vec<u8>, bool)>)>,
+    thread_pool: ThreadPool,
+    num_workers: usize,
 ) -> (Vec<(Key, ChangedLeafEntry)>, Vec<Vec<u8>>) {
-    // TODO: use a thread pool or something.
-    let workers = prepare_workers(bbn_index, bnp, &changeset, 8);
+    assert!(num_workers >= 1);
+    let workers = prepare_workers(bbn_index, bnp, &changeset, num_workers);
     assert!(!workers.is_empty());
 
     let leaf_cache = Arc::new(leaf_cache);
     let changeset = Arc::new(changeset);
 
-    let mut join_handles: Vec<JoinHandle<(BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>)>> =
+    let mut worker_results: Vec<Receiver<(BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>)>> =
         Vec::with_capacity(workers.len());
 
     for worker_params in workers {
@@ -129,29 +131,29 @@ pub fn run(
         let leaf_reader = leaf_reader.clone();
         let changeset = changeset.clone();
 
-        // TODO: use a thread pool.
-        let join_handle = Builder::new()
-            .name("beatree-leaf".to_string())
-            .spawn(move || {
-                run_worker(
-                    bbn_index,
-                    bnp,
-                    leaf_cache,
-                    leaf_reader,
-                    changeset,
-                    worker_params,
-                )
-            })
-            .unwrap();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        thread_pool.execute(move || {
+            let res = run_worker(
+                bbn_index,
+                bnp,
+                leaf_cache,
+                leaf_reader,
+                changeset,
+                worker_params,
+            );
 
-        join_handles.push(join_handle);
+            let _ = tx.send(res);
+        });
+
+        worker_results.push(rx);
     }
 
     let mut changes = Vec::new();
     let mut deleted_overflow = Vec::new();
 
-    for worker in join_handles {
-        let (worker_changes, worker_deleted_overflow) = worker.join().unwrap();
+    for worker_result_rx in worker_results {
+        // UNWRAP: results are always sent unless worker panics.
+        let (worker_changes, worker_deleted_overflow) = worker_result_rx.recv().unwrap();
         changes.extend(worker_changes);
         deleted_overflow.extend(worker_deleted_overflow);
     }

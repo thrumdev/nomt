@@ -10,6 +10,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+use threadpool::ThreadPool;
 
 use crate::io::{IoPool, Page};
 
@@ -163,8 +164,11 @@ impl Tree {
 
     /// Asynchronously dump all changes performed by commits to the underlying storage medium.
     ///
+    /// Provide a thread pool and the number of workers to use in beatree update preparation.
+    /// Workers must be >= 1.
+    ///
     /// Either blocks or panics if another sync is inflight.
-    pub fn prepare_sync(&self) -> WriteoutData {
+    pub fn prepare_sync(&self, thread_pool: ThreadPool, workers: usize) -> WriteoutData {
         // Take the sync lock.
         //
         // That will exclude any other syncs from happening. This is a long running operation.
@@ -210,6 +214,8 @@ impl Tree {
                 &sync.leaf_store_rd,
                 &mut sync.leaf_store_wr,
                 &mut sync.bbn_store_wr,
+                thread_pool,
+                workers,
             )
             .unwrap()
         };

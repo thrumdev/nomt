@@ -13,6 +13,7 @@ use std::{
     os::fd::AsRawFd as _,
     sync::Arc,
 };
+use threadpool::ThreadPool;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -38,6 +39,7 @@ struct Shared {
     values: beatree::Tree,
     pages: bitbox::DB,
     io_pool: IoPool,
+    sync_tp: ThreadPool,
     meta_fd: File,
     ln_fd: File,
     bbn_fd: File,
@@ -128,6 +130,7 @@ impl Store {
                 panic_on_sync: o.panic_on_sync,
                 values,
                 pages,
+                sync_tp: ThreadPool::with_name("nomt-sync".into(), o.commit_concurrency),
                 meta_fd,
                 ln_fd,
                 bbn_fd,
@@ -205,7 +208,10 @@ impl Store {
             .shared
             .pages
             .prepare_sync(tx.new_pages, &mut sync.wal_blob_builder)?;
-        let beatree_writeout_data = self.shared.values.prepare_sync();
+        let beatree_writeout_data = self.shared.values.prepare_sync(
+            self.shared.sync_tp.clone(),
+            self.shared.sync_tp.max_count(),
+        );
 
         let new_meta = Meta {
             ln_freelist_pn: beatree_writeout_data.ln_freelist_pn,
