@@ -29,9 +29,11 @@ impl Timer {
             }
         }
 
-        let h = self.spans.entry(span_name).or_insert_with(|| Rc::new(RefCell::new(
-            hdrhistogram::Histogram::<u64>::new(3).unwrap(),
-        )));
+        let h = self.spans.entry(span_name).or_insert_with(|| {
+            Rc::new(RefCell::new(
+                hdrhistogram::Histogram::<u64>::new(3).unwrap(),
+            ))
+        });
 
         RecordSpan {
             h: h.clone(),

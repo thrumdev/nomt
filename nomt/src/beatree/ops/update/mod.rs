@@ -1,9 +1,10 @@
 use anyhow::Result;
 use bitvec::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
+use dashmap::DashMap;
 use threadpool::ThreadPool;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -115,13 +116,14 @@ pub fn update(
     Ok(removed_branches)
 }
 
+// TODO: this should not be necessary with proper warm-ups.
 fn preload_leaves(
     leaf_reader: &LeafStoreReader,
     bbn_index: &Index,
     bnp: &BranchNodePool,
     keys: impl IntoIterator<Item = Key>,
-) -> Result<HashMap<PageNumber, LeafNode>> {
-    let mut leaf_pages = HashMap::new();
+) -> Result<DashMap<PageNumber, LeafNode>> {
+    let leaf_pages = DashMap::new();
     let mut last_pn = None;
 
     let mut submissions = 0;

@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crossbeam_channel::{Receiver, TryRecvError};
+use crossbeam_channel::TryRecvError;
+use dashmap::DashMap;
 use threadpool::ThreadPool;
 
 use crate::beatree::{
@@ -108,7 +109,7 @@ fn indexed_leaf(
 pub fn run(
     bbn_index: &Index,
     bnp: &BranchNodePool,
-    leaf_cache: HashMap<PageNumber, LeafNode>,
+    leaf_cache: DashMap<PageNumber, LeafNode>,
     leaf_reader: &LeafStoreReader,
     changeset: Vec<(Key, Option<(Vec<u8>, bool)>)>,
     thread_pool: ThreadPool,
@@ -121,8 +122,8 @@ pub fn run(
     let leaf_cache = Arc::new(leaf_cache);
     let changeset = Arc::new(changeset);
 
-    let mut worker_results: Vec<Receiver<(BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>)>> =
-        Vec::with_capacity(workers.len());
+    let num_workers = workers.len();
+    let (worker_result_tx, worker_result_rx) = crossbeam_channel::bounded(num_workers);
 
     for worker_params in workers {
         let bbn_index = bbn_index.clone();
@@ -131,27 +132,31 @@ pub fn run(
         let leaf_reader = leaf_reader.clone();
         let changeset = changeset.clone();
 
-        let (tx, rx) = crossbeam_channel::bounded(1);
+        let worker_result_tx = worker_result_tx.clone();
         thread_pool.execute(move || {
+            // passing the large `Arc` values by reference ensures that they are dropped at the
+            // end of this scope, not the end of `run_worker`.
             let res = run_worker(
                 bbn_index,
                 bnp,
-                leaf_cache,
+                &*leaf_cache,
                 leaf_reader,
-                changeset,
+                &*changeset,
                 worker_params,
             );
 
-            let _ = tx.send(res);
+            let _ = worker_result_tx.send(res);
         });
-
-        worker_results.push(rx);
     }
+
+    // we don't want to block other sync steps on deallocating these memory regions.
+    drop(changeset);
+    drop(leaf_cache);
 
     let mut changes = Vec::new();
     let mut deleted_overflow = Vec::new();
 
-    for worker_result_rx in worker_results {
+    for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
         let (worker_changes, worker_deleted_overflow) = worker_result_rx.recv().unwrap();
         changes.extend(worker_changes);
@@ -358,7 +363,7 @@ fn request_range_extension(worker_params: &mut WorkerParams, leaf_changes: &mut 
 fn reset_leaf_base(
     bbn_index: &Index,
     bnp: &BranchNodePool,
-    leaf_cache: &HashMap<PageNumber, LeafNode>,
+    leaf_cache: &DashMap<PageNumber, LeafNode>,
     leaf_reader: &LeafStoreReader,
     leaf_changes: &mut LeafChanges,
     leaf_updater: &mut LeafUpdater,
@@ -430,7 +435,7 @@ fn reset_leaf_base_fresh(
     separator: Key,
     cutoff: Option<Key>,
     leaf_pn: PageNumber,
-    leaf_cache: &HashMap<PageNumber, LeafNode>,
+    leaf_cache: &DashMap<PageNumber, LeafNode>,
     leaf_reader: &LeafStoreReader,
     leaf_changes: &mut LeafChanges,
     leaf_updater: &mut LeafUpdater,
@@ -441,8 +446,8 @@ fn reset_leaf_base_fresh(
 
     let base = BaseLeaf {
         node: leaf_cache
-            .get(&leaf_pn)
-            .map(|l| l.clone())
+            .remove(&leaf_pn)
+            .map(|(_, l)| l)
             .unwrap_or_else(|| LeafNode {
                 inner: leaf_reader.query(leaf_pn),
             }),
@@ -456,9 +461,9 @@ fn reset_leaf_base_fresh(
 fn run_worker(
     bbn_index: Index,
     bnp: BranchNodePool,
-    leaf_cache: Arc<HashMap<PageNumber, LeafNode>>,
+    leaf_cache: &DashMap<PageNumber, LeafNode>,
     leaf_reader: LeafStoreReader,
-    changeset: Arc<Vec<(Key, Option<(Vec<u8>, bool)>)>>,
+    changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     mut worker_params: WorkerParams,
 ) -> (BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>) {
     if changeset.is_empty() {
