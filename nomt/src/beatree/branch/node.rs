@@ -7,12 +7,15 @@ use crate::beatree::Key;
 // Here is the layout of a branch node:
 //
 // ```rust,ignore
-// bbn_pn: u32          // the page number this is stored under,
-//                      // if this is a BBN, 0 otherwise.
+// bbn_pn: u32            // the page number this is stored under,
+//                        // if this is a BBN, 0 otherwise.
 //
-// n: u16               // item count
-// prefix_len: u16      // bits
-// cells: u16[n]        // bit offsets of the end of separators within the separators bitvec
+// n: u16                 // item count
+// prefix_compressed: u16 // number of consecutive separators sharing the prefix,
+//                        // starting from the first one in the separators list,
+//                        // followed by entirely encoded separators
+// prefix_len: u16        // bits
+// cells: u16[n]          // bit offsets of the end of separators within the separators bitvec
 //
 // # To avoid two padding bytes, prefix and separators are stored in a single bitvec.
 //
@@ -25,7 +28,7 @@ use crate::beatree::Key;
 // node_pointers: LNPN or BNID[n]
 // ```
 
-const BRANCH_NODE_HEADER_SIZE: usize = 4 + 2 + 2;
+const BRANCH_NODE_HEADER_SIZE: usize = 4 + 2 + 2 + 2;
 pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_SIZE;
 
 /// A branch node, regardless of its level.
@@ -68,13 +71,22 @@ impl BranchNode {
         slice[4..6].copy_from_slice(&n.to_le_bytes());
     }
 
+    pub fn prefix_compressed(&self) -> u16 {
+        self.view().prefix_compressed()
+    }
+
+    pub fn set_prefix_compressed(&mut self, prefix_compressed: u16) {
+        let slice = self.as_mut_slice();
+        slice[6..8].copy_from_slice(&prefix_compressed.to_le_bytes());
+    }
+
     pub fn prefix_len(&self) -> u16 {
         self.view().prefix_len()
     }
 
     pub fn set_prefix_len(&mut self, len: u16) {
         let slice = self.as_mut_slice();
-        slice[6..8].copy_from_slice(&len.to_le_bytes());
+        slice[8..10].copy_from_slice(&len.to_le_bytes());
     }
 
     pub fn prefix(&self) -> &BitSlice<u8, Msb0> {
@@ -146,8 +158,12 @@ impl<'a> BranchNodeView<'a> {
         u16::from_le_bytes(self.inner[4..6].try_into().unwrap())
     }
 
-    pub fn prefix_len(&self) -> u16 {
+    pub fn prefix_compressed(&self) -> u16 {
         u16::from_le_bytes(self.inner[6..8].try_into().unwrap())
+    }
+
+    pub fn prefix_len(&self) -> u16 {
+        u16::from_le_bytes(self.inner[8..10].try_into().unwrap())
     }
 
     pub fn cell(&self, i: usize) -> usize {
@@ -188,23 +204,31 @@ pub struct BranchNodeBuilder {
     branch: BranchNode,
     index: usize,
     prefix_len: usize,
+    prefix_compressed: usize,
     separator_bit_offset: usize,
 }
 
 impl BranchNodeBuilder {
-    pub fn new(mut branch: BranchNode, n: usize, prefix_len: usize) -> Self {
+    pub fn new(
+        mut branch: BranchNode,
+        n: usize,
+        prefix_compressed: usize,
+        prefix_len: usize,
+    ) -> Self {
         branch.set_n(n as u16);
+        branch.set_prefix_compressed(prefix_compressed as u16);
         branch.set_prefix_len(prefix_len as u16);
 
         BranchNodeBuilder {
             branch,
             index: 0,
             prefix_len,
+            prefix_compressed,
             separator_bit_offset: 0,
         }
     }
 
-    pub fn push(&mut self, key: Key, separator_len: usize, pn: u32) {
+    pub fn push(&mut self, key: Key, mut separator_len: usize, pn: u32) {
         assert!(self.index < self.branch.n() as usize);
 
         if self.index == 0 {
@@ -212,11 +236,14 @@ impl BranchNodeBuilder {
             self.branch.set_prefix(prefix);
         }
 
-        // There are cases, for example a separator made by all zeros, where the
-        // prefix_len could be bigger then the separator_len
-        let separator_len = separator_len.saturating_sub(self.prefix_len);
-
-        let separator = &key.view_bits::<Msb0>()[self.prefix_len..][..separator_len];
+        let separator = if self.index < self.prefix_compressed {
+            // There are cases, for example a separator made by all zeros, where the
+            // prefix_len could be bigger then the separator_len
+            separator_len = separator_len.saturating_sub(self.prefix_len);
+            &key.view_bits::<Msb0>()[self.prefix_len..][..separator_len]
+        } else {
+            &key.view_bits::<Msb0>()[..separator_len]
+        };
 
         let offset_start = self.separator_bit_offset;
         let offset_end = self.separator_bit_offset + separator_len;

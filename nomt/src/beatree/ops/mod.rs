@@ -59,24 +59,36 @@ pub fn lookup(
 /// node pointer whose separator is less than or equal to the given key.
 fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     let prefix = branch.prefix();
+    let n = branch.n() as usize;
+    let prefix_compressed = branch.prefix_compressed() as usize;
 
     match key.view_bits::<Msb0>()[..prefix.len()].cmp(prefix) {
-        Ordering::Equal => {}
         Ordering::Less => return None,
-        Ordering::Greater => {
-            let i = branch.n() as usize - 1;
+        Ordering::Greater if n == prefix_compressed => {
+            let i = n - 1;
             return Some((i, branch.node_pointer(i).into()));
         }
+        Ordering::Equal | Ordering::Greater => {}
     }
 
-    let post_key = &key.view_bits::<Msb0>()[prefix.len()..];
+    let full_key = &key.view_bits::<Msb0>();
+    let post_key = &full_key[prefix.len()..];
 
     let mut low = 0;
     let mut high = branch.n() as usize;
 
     while low < high {
         let mid = low + (high - low) / 2;
-        if post_key < branch.separator(mid) {
+
+        // if mid exceeds the number of prefix_compressed separators,
+        // the full key needs to be used
+        let k = if mid < prefix_compressed {
+            post_key
+        } else {
+            full_key
+        };
+
+        if k < branch.separator(mid) {
             high = mid;
         } else {
             low = mid + 1;

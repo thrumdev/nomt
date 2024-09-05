@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::beatree::{
     allocator::PageNumber,
     bbn,
-    branch::{BranchNodePool, BRANCH_NODE_BODY_SIZE},
+    branch::{BranchNode, BranchNodePool, BRANCH_NODE_BODY_SIZE},
     index::Index,
     leaf::{
         node::{LeafNode, LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
@@ -102,7 +102,7 @@ impl Updater {
             .as_ref()
             .and_then(|node| {
                 if node.n() > 1 {
-                    Some(reconstruct_key(node.prefix(), node.separator(1)))
+                    Some(get_key(node, 1))
                 } else {
                     None
                 }
@@ -111,12 +111,7 @@ impl Updater {
 
         let first_leaf = first_branch
             .as_ref()
-            .map(|node| {
-                (
-                    PageNumber::from(node.node_pointer(0)),
-                    reconstruct_key(node.prefix(), node.separator(0)),
-                )
-            })
+            .map(|node| (PageNumber::from(node.node_pointer(0)), get_key(node, 0)))
             .map(|(id, separator)| BaseLeaf {
                 id,
                 node: leaf_pages.remove(&id).unwrap_or_else(|| LeafNode {
@@ -240,13 +235,10 @@ impl Updater {
                 inner: ctx.leaf_reader.query(leaf_pn),
             });
 
-        let separator = reconstruct_key(branch.node.prefix(), branch.node.separator(i));
+        let separator = branch.key(i);
 
         let cutoff = if branch.node.n() as usize > i + 1 {
-            Some(reconstruct_key(
-                branch.node.prefix(),
-                branch.node.separator(i + 1),
-            ))
+            Some(branch.key(i + 1))
         } else {
             self.branch_updater.cutoff()
         };
@@ -279,11 +271,28 @@ impl Updater {
     }
 }
 
-pub fn reconstruct_key(prefix: &BitSlice<u8, Msb0>, separator: &BitSlice<u8, Msb0>) -> Key {
+pub fn reconstruct_key(prefix: Option<&BitSlice<u8, Msb0>>, separator: &BitSlice<u8, Msb0>) -> Key {
     let mut key = [0u8; 32];
-    key.view_bits_mut::<Msb0>()[..prefix.len()].copy_from_bitslice(prefix);
-    key.view_bits_mut::<Msb0>()[prefix.len()..][..separator.len()].copy_from_bitslice(separator);
+    match prefix {
+        Some(prefix) => {
+            key.view_bits_mut::<Msb0>()[..prefix.len()].copy_from_bitslice(prefix);
+            key.view_bits_mut::<Msb0>()[prefix.len()..][..separator.len()]
+                .copy_from_bitslice(separator);
+        }
+        None => {
+            key.view_bits_mut::<Msb0>()[..separator.len()].copy_from_bitslice(separator);
+        }
+    }
     key
+}
+
+pub fn get_key(node: &BranchNode, index: usize) -> Key {
+    let prefix = if index < node.prefix_compressed() as usize {
+        Some(node.prefix())
+    } else {
+        None
+    };
+    reconstruct_key(prefix, node.separator(index))
 }
 
 fn preload_leaves(
@@ -349,7 +358,7 @@ pub mod benches {
             let separator = &key.view_bits::<Msb0>()[prefix_bytes * 8..];
 
             group.bench_function(BenchmarkId::new("prefix_len_bytes", prefix_bytes), |b| {
-                b.iter(|| super::reconstruct_key(prefix, separator))
+                b.iter(|| super::reconstruct_key(Some(prefix), separator))
             });
         }
 
