@@ -1,7 +1,10 @@
 use anyhow::Result;
 use bitvec::prelude::*;
+use crossbeam_channel::{Receiver, Sender};
+use dashmap::DashMap;
+use threadpool::ThreadPool;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -49,6 +52,8 @@ pub fn update(
     leaf_reader: &LeafStoreReader,
     leaf_writer: &mut LeafStoreWriter,
     bbn_writer: &mut bbn::BbnStoreWriter,
+    thread_pool: ThreadPool,
+    workers: usize,
 ) -> Result<Vec<BranchId>> {
     let leaf_cache = preload_leaves(leaf_reader, &bbn_index, &bnp, changeset.keys().cloned())?;
 
@@ -66,7 +71,7 @@ pub fn update(
         .collect::<_>();
 
     let (leaf_changes, overflow_deleted) =
-        leaf_stage::run(&bbn_index, &bnp, leaf_cache, leaf_reader, leaf_writer.page_pool().clone(), changeset);
+        leaf_stage::run(&bbn_index, &bnp, leaf_cache, leaf_reader, leaf_writer.page_pool().clone(), changeset, thread_pool, workers);
 
     let branch_changeset = leaf_changes
         .into_iter()
@@ -135,13 +140,14 @@ pub fn get_key(node: &BranchNode, index: usize) -> Key {
     reconstruct_key(prefix, node.separator(index))
 }
 
+// TODO: this should not be necessary with proper warm-ups.
 fn preload_leaves(
     leaf_reader: &LeafStoreReader,
     bbn_index: &Index,
     bnp: &BranchNodePool,
     keys: impl IntoIterator<Item = Key>,
-) -> Result<HashMap<PageNumber, LeafNode>> {
-    let mut leaf_pages = HashMap::new();
+) -> Result<DashMap<PageNumber, LeafNode>> {
+    let leaf_pages = DashMap::new();
     let mut last_pn = None;
 
     let mut submissions = 0;
@@ -178,6 +184,25 @@ fn preload_leaves(
     }
 
     Ok(leaf_pages)
+}
+
+// A half-open range [low, high), where each key corresponds to a known separator of a node.
+struct SeparatorRange {
+    low: Option<Key>,
+    high: Option<Key>,
+}
+
+struct LeftNeighbor<T> {
+    rx: Receiver<ExtendRangeRequest<T>>,
+}
+
+struct RightNeighbor<T> {
+    tx: Sender<ExtendRangeRequest<T>>,
+}
+
+// a request to extend the range to the next node following the high bound of the range.
+struct ExtendRangeRequest<T> {
+    tx: Sender<T>,
 }
 
 // separate two keys a and b where b > a
