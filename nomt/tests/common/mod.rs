@@ -27,7 +27,7 @@ pub fn expected_root(accounts: u64) -> Node {
         .map(|a| (a, *blake3::hash(&1000u64.to_le_bytes()).as_bytes()))
         .collect::<Vec<_>>();
     ops.sort_unstable_by_key(|(a, _)| *a);
-    nomt_core::update::build_trie::<nomt::Blake3Hasher>(0, ops, |_, _, _| {})
+    nomt_core::update::build_trie::<nomt::Blake3Hasher>(0, ops, |_| {})
 }
 
 fn opts(path: PathBuf) -> Options {

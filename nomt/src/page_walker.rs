@@ -48,6 +48,7 @@ use nomt_core::{
     page_id::{PageId, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node, NodeHasher, NodeHasherExt, NodeKind, ValueHash},
     trie_pos::TriePosition,
+    update::WriteNode,
 };
 
 use crate::{
@@ -274,49 +275,65 @@ impl<H: NodeHasher> PageWalker<H> {
         let start_position = self.position.clone();
 
         // replace sub-trie at the given position
-        nomt_core::update::build_trie::<H>(
-            self.position.depth() as usize,
-            ops,
-            |mut control, node, leaf_data| {
-                // avoid popping pages off the stack if we are jumping to a sibling.
-                if control.up > 0 && !control.down.is_empty() {
-                    for _ in 0..(control.up - 1) {
-                        self.up();
-                    }
-                    if control.down[0] == !self.position.peek_last_bit() {
-                        // UNWRAP: checked above
-                        self.position.sibling();
-                        control.down = &control.down[1..];
-                    } else {
-                        self.up();
-                    }
-                } else {
-                    for _ in 0..control.up {
-                        self.up();
-                    }
-                }
+        nomt_core::update::build_trie::<H>(self.position.depth() as usize, ops, |control| {
+            let node = control.node();
+            let up = control.up();
+            let mut down = control.down();
 
-                let not_fresh = was_leaf && self.position == start_position;
-                if not_fresh && !control.down.is_empty() {
-                    // first bit is definitely not a fresh page. after that, definitely is.
-                    self.down(&control.down[..1], false);
-                    self.down(&control.down[1..], true);
+            if let WriteNode::Internal {
+                ref internal_data, ..
+            } = control
+            {
+                // we assume pages are not necessarily zeroed. therefore, there might be
+                // some garbage in the sibling slot we need to clear out.
+                let zero_sibling = if self.position.peek_last_bit() {
+                    trie::is_terminator(&internal_data.left)
                 } else {
-                    self.down(&control.down, true);
-                }
+                    trie::is_terminator(&internal_data.right)
+                };
 
-                if self.position.is_root() {
-                    self.root = node;
+                if zero_sibling {
+                    self.set_sibling(write_pass, trie::TERMINATOR);
+                }
+            };
+
+            // avoid popping pages off the stack if we are jumping to a sibling.
+            if up && !down.is_empty() {
+                if down[0] == !self.position.peek_last_bit() {
+                    // UNWRAP: checked above
+                    self.position.sibling();
+                    down = &down[1..];
                 } else {
-                    self.set_node(write_pass, node);
+                    self.up();
                 }
+            } else if up {
+                self.up()
+            }
 
-                if let Some(leaf_data) = leaf_data {
-                    let fresh = !was_leaf || self.position != start_position;
-                    self.write_leaf_children(write_pass, Some(leaf_data), fresh);
-                }
-            },
-        );
+            let under = self.position.depth() > start_position.depth();
+            let fresh = !was_leaf || under;
+
+            if !fresh && !down.is_empty() {
+                // first bit is definitely not a fresh page. after that, definitely is.
+                self.down(&down[..1], false);
+                self.down(&down[1..], true);
+            } else {
+                self.down(&down, true);
+            }
+
+            if self.position.is_root() {
+                self.root = node;
+            } else {
+                self.set_node(write_pass, node);
+            }
+
+            let under = self.position.depth() > start_position.depth();
+            let fresh = !was_leaf || under;
+
+            if let WriteNode::Leaf { leaf_data, .. } = control {
+                self.write_leaf_children(write_pass, Some(leaf_data), fresh);
+            }
+        });
 
         // build_trie should always return us to the original position.
         if !self.position.is_root() {
@@ -562,6 +579,20 @@ impl<H: NodeHasher> PageWalker<H> {
         node: Node,
     ) {
         let node_index = self.position.node_index();
+        let stack_top = self.stack.last_mut().unwrap();
+        stack_top
+            .page
+            .set_node(&self.page_pool, write_pass, node_index, node);
+        stack_top.diff.set_changed(node_index);
+    }
+
+    // set the sibling node in the current page at the given index. panics if no current page.
+    fn set_sibling(
+        &mut self,
+        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
+        node: Node,
+    ) {
+        let node_index = self.position.sibling_index();
         let stack_top = self.stack.last_mut().unwrap();
         stack_top
             .page
@@ -862,7 +893,7 @@ mod tests {
                             (key_path![1, 0], val(3)),
                             (key_path![1, 1], val(4))
                         ],
-                        |_, _, _| {}
+                        |_| {}
                     )
                 );
                 assert_eq!(diffs.len(), 1);
@@ -946,7 +977,7 @@ mod tests {
                             (key_path![0, 0, 0, 0, 0, 0, 0], val(1)),
                             (key_path![0, 0, 0, 0, 0, 0, 1], val(2)),
                         ],
-                        |_, _, _| {}
+                        |_| {}
                     )
                 );
 
@@ -958,7 +989,7 @@ mod tests {
                             (key_path![0, 0, 0, 0, 0, 1, 0], val(3)),
                             (key_path![0, 0, 0, 0, 0, 1, 1], val(4)),
                         ],
-                        |_, _, _| {}
+                        |_| {}
                     )
                 );
             }
@@ -1067,6 +1098,126 @@ mod tests {
             )
             .unwrap();
         assert_eq!(walker.siblings(), &expected_siblings[..4]);
+    }
+
+    #[test]
+    fn internal_node_zeroes_sibling() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
+        let page_pool = PagePool::new();
+
+        let mut write_pass = page_cache.new_write_pass();
+
+        // this is going to create new leaves, with internal nodes going up to the root.
+        let leaf_1 = key_path![0, 0, 0, 0, 0, 0, 0, 0];
+        let leaf_2 = key_path![0, 0, 0, 0, 0, 0, 0, 1];
+
+        let terminator_1 = TriePosition::from_path_and_depth(key_path![1], 1);
+        let terminator_2 = TriePosition::from_path_and_depth(key_path![0, 1], 2);
+        let terminator_3 = TriePosition::from_path_and_depth(key_path![0, 0, 1], 3);
+        let terminator_4 = TriePosition::from_path_and_depth(key_path![0, 0, 0, 1], 4);
+        let terminator_5 = TriePosition::from_path_and_depth(key_path![0, 0, 0, 0, 1], 5);
+        let terminator_6 = TriePosition::from_path_and_depth(key_path![0, 0, 0, 0, 0, 1], 6);
+        let terminator_7 = TriePosition::from_path_and_depth(key_path![0, 0, 0, 0, 0, 0, 1], 7);
+
+        let root_page = page_cache.insert(ROOT_PAGE_ID, None);
+        let page1 = page_cache.insert(terminator_7.page_id().unwrap(), None);
+
+        // we place garbage in all the sibling positions for those internal  nodes.
+        {
+            let garbage: Node = val(69);
+
+            root_page.set_node(
+                &page_pool,
+                &mut write_pass,
+                terminator_1.node_index(),
+                garbage,
+            );
+            root_page.set_node(
+                &page_pool,
+                &mut write_pass,
+                terminator_2.node_index(),
+                garbage,
+            );
+            root_page.set_node(
+                &page_pool,
+                &mut write_pass,
+                terminator_3.node_index(),
+                garbage,
+            );
+            root_page.set_node(
+                &page_pool,
+                &mut write_pass,
+                terminator_4.node_index(),
+                garbage,
+            );
+            root_page.set_node(
+                &page_pool,
+                &mut write_pass,
+                terminator_5.node_index(),
+                garbage,
+            );
+            root_page.set_node(
+                &page_pool,
+                &mut write_pass,
+                terminator_6.node_index(),
+                garbage,
+            );
+            page1.set_node(
+                &page_pool,
+                &mut write_pass,
+                terminator_7.node_index(),
+                garbage,
+            );
+        }
+
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_cache.clone(), page_pool.clone(), None);
+
+        walker
+            .advance_and_replace(
+                &mut write_pass,
+                TriePosition::new(),
+                vec![(leaf_1, val(1)), (leaf_2, val(2))],
+            )
+            .unwrap();
+
+        let Ok(Output::Root(_, _)) = walker.conclude(&mut write_pass) else {
+            panic!()
+        };
+
+        // building the internal nodes must zero the garbage slots, now, anything reachable from the
+        // root is consistent.
+        {
+            assert_eq!(
+                root_page.node(write_pass.downgrade(), terminator_1.node_index()),
+                trie::TERMINATOR
+            );
+            assert_eq!(
+                root_page.node(write_pass.downgrade(), terminator_2.node_index()),
+                trie::TERMINATOR
+            );
+            assert_eq!(
+                root_page.node(write_pass.downgrade(), terminator_3.node_index()),
+                trie::TERMINATOR
+            );
+            assert_eq!(
+                root_page.node(write_pass.downgrade(), terminator_4.node_index()),
+                trie::TERMINATOR
+            );
+            assert_eq!(
+                root_page.node(write_pass.downgrade(), terminator_5.node_index()),
+                trie::TERMINATOR
+            );
+            assert_eq!(
+                root_page.node(write_pass.downgrade(), terminator_6.node_index()),
+                trie::TERMINATOR
+            );
+            assert_eq!(
+                page1.node(write_pass.downgrade(), terminator_7.node_index()),
+                trie::TERMINATOR
+            );
+        }
     }
 
     // TODO: test that `NeedsPage` is returned when the sibling child page is needed.
