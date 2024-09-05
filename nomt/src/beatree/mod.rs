@@ -1,6 +1,6 @@
 use allocator::{PageNumber, FREELIST_EMPTY};
 use anyhow::{Context, Result};
-use branch::{BranchId, BranchNode, BRANCH_NODE_SIZE};
+use branch::{BranchNode, BRANCH_NODE_SIZE};
 use index::Index;
 use std::{
     collections::BTreeMap,
@@ -42,7 +42,6 @@ struct Shared {
     page_pool: PagePool,
     bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
-    branch_node_pool: branch::BranchNodePool,
     /// Primary staging collects changes that are committed but not synced yet. Upon sync, changes
     /// from here are moved to secondary staging.
     primary_staging: BTreeMap<Key, Option<Vec<u8>>>,
@@ -103,10 +102,9 @@ impl Tree {
             let bbn_fd = bbn_file.try_clone().unwrap();
             bbn::open(&page_pool, bbn_fd, bbn_freelist_pn, bbn_bump)
         };
-        let mut bnp = branch::BranchNodePool::new();
         let index = ops::reconstruct(
             bbn_file.try_clone().unwrap(),
-            &mut bnp,
+            &page_pool,
             &bbn_freelist_tracked,
             bbn_bump,
         )
@@ -115,7 +113,6 @@ impl Tree {
             page_pool: io_pool.page_pool().clone(),
             bbn_index: index,
             leaf_store_rd: leaf_store_rd_shared,
-            branch_node_pool: bnp,
             primary_staging: BTreeMap::new(),
             secondary_staging: None,
         };
@@ -150,7 +147,6 @@ impl Tree {
         ops::lookup(
             key,
             &shared.bbn_index,
-            &shared.branch_node_pool,
             &shared.leaf_store_rd,
         )
         .unwrap()
@@ -188,40 +184,38 @@ impl Tree {
         // Take the shared lock. Briefly.
         let staged_changeset;
         let mut bbn_index;
-        let mut branch_node_pool;
         let page_pool;
         {
             let mut shared = self.shared.lock().unwrap();
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
-            branch_node_pool = shared.branch_node_pool.clone();
             page_pool = shared.page_pool.clone();
         }
 
-        let obsolete_branches = {
+        {
             let sync = sync.deref_mut();
 
-            // Update will use the branch_node_pool in a cow manner to make lookups
-            // possible during sync.
+            // Update will modify the index in a CoW manner.
+            //
             // Nodes that need to be modified are not modified in place but they are
-            // returned as obsolete, and new ones (implying the one created as modification
-            // of existing nodes) are allocated using the previous state of the free list.
+            // removed from the copy of the index,
+            // and new ones (implying the one created as modification of existing nodes) are
+            // allocated.
             //
             // Thus during the update:
             // + The index will just be modified, being a copy of the one used in parallel during lookups
             // + Allocation and releases of the leaf_store_wr will be executed normally,
             //   as everything will be in a pending state until commit
-            // + The branch_node_pool will only allocate new BranchIds.
-            //   All releases will be cached to be performed at the end of the sync.
+            // + All branch page releases will be performed at the end of the sync, when the old
+            //   revision of the index is dropped.
             //   This makes it possible to keep the previous state of the tree (before this sync)
             //   available and reachable from the old index
             // + The bbn_store_wr follows the same reasoning as leaf_store_wr,
             //   so things will be allocated and released following what is being performed
-            //   on the branch_node_pool and commited later on onto disk
+            //   on the branch_node_pool and committed later on onto disk
             ops::update(
                 &staged_changeset,
                 &mut bbn_index,
-                &mut branch_node_pool,
                 &sync.leaf_store_rd,
                 &mut sync.leaf_store_wr,
                 &mut sync.bbn_store_wr,
@@ -229,7 +223,7 @@ impl Tree {
                 workers,
             )
             .unwrap()
-        };
+        }
 
         let (ln, ln_free_list_pages, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
             let LeafStoreCommitOutput {
@@ -277,23 +271,19 @@ impl Tree {
             bbn_freelist_pn,
             bbn_bump,
             bbn_index,
-            obsolete_branches,
         }
     }
 
-    pub fn finish_sync(&self, bbn_index: Index, obsolete_branches: Vec<BranchId>) {
+    pub fn finish_sync(&self, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
         let mut inner = self.shared.lock().unwrap();
         inner.secondary_staging = None;
         inner.bbn_index = bbn_index;
-        for id in obsolete_branches {
-            inner.branch_node_pool.release(id);
-        }
     }
 }
 
 pub struct WriteoutData {
-    pub bbn: Vec<BranchNode>,
+    pub bbn: Vec<Arc<BranchNode>>,
     pub bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub bbn_extend_file_sz: Option<u64>,
     pub ln: Vec<(PageNumber, FatPage)>,
@@ -304,7 +294,6 @@ pub struct WriteoutData {
     pub bbn_freelist_pn: u32,
     pub bbn_bump: u32,
     pub bbn_index: Index,
-    pub obsolete_branches: Vec<BranchId>,
 }
 
 /// Creates the required files for the beatree.

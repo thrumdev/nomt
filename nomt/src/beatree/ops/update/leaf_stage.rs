@@ -8,7 +8,6 @@ use threadpool::ThreadPool;
 
 use crate::beatree::{
     allocator::PageNumber,
-    branch::BranchNodePool,
     index::Index,
     leaf::{node::LeafNode, store::LeafStoreReader},
     ops::search_branch,
@@ -83,15 +82,12 @@ impl LeafChanges {
 
 fn indexed_leaf(
     bbn_index: &Index,
-    bnp: &BranchNodePool,
     key: Key,
 ) -> Option<(Key, Option<Key>, PageNumber)> {
-    let Some((_, branch_id)) = bbn_index.lookup(key) else {
+    let Some((_, branch)) = bbn_index.lookup(key) else {
         return None;
     };
 
-    // UNWRAP: branches in index always exist.
-    let branch = bnp.checkout(branch_id).unwrap();
     let Some((i, leaf_pn)) = search_branch(&branch, key) else {
         return None;
     };
@@ -108,7 +104,6 @@ fn indexed_leaf(
 
 pub fn run(
     bbn_index: &Index,
-    bnp: &BranchNodePool,
     leaf_cache: DashMap<PageNumber, LeafNode>,
     leaf_reader: &LeafStoreReader,
     page_pool: PagePool,
@@ -117,7 +112,7 @@ pub fn run(
     num_workers: usize,
 ) -> (Vec<(Key, ChangedLeafEntry)>, Vec<Vec<u8>>) {
     assert!(num_workers >= 1);
-    let workers = prepare_workers(bbn_index, bnp, &changeset, num_workers);
+    let workers = prepare_workers(bbn_index, &changeset, num_workers);
     assert!(!workers.is_empty());
 
     let leaf_cache = Arc::new(leaf_cache);
@@ -128,7 +123,6 @@ pub fn run(
 
     for worker_params in workers {
         let bbn_index = bbn_index.clone();
-        let bnp = bnp.clone();
         let leaf_cache = leaf_cache.clone();
         let leaf_reader = leaf_reader.clone();
         let page_pool = page_pool.clone();
@@ -140,7 +134,6 @@ pub fn run(
             // end of this scope, not the end of `run_worker`.
             let res = run_worker(
                 bbn_index,
-                bnp,
                 &*leaf_cache,
                 leaf_reader,
                 page_pool,
@@ -178,7 +171,6 @@ struct WorkerParams {
 
 fn prepare_workers(
     bbn_index: &Index,
-    bnp: &BranchNodePool,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     worker_count: usize,
 ) -> Vec<WorkerParams> {
@@ -212,7 +204,7 @@ fn prepare_workers(
         // UNWRAP: first worker is pushed at the beginning of the range.
         let prev_worker = workers.last_mut().unwrap();
 
-        match indexed_leaf(bbn_index, bnp, changeset_remaining[pivot_idx].0) {
+        match indexed_leaf(bbn_index, changeset_remaining[pivot_idx].0) {
             None => break,
             Some((_, None, _)) => break,
             Some((separator, Some(_), _)) => {
@@ -365,7 +357,6 @@ fn request_range_extension(worker_params: &mut WorkerParams, leaf_changes: &mut 
 
 fn reset_leaf_base(
     bbn_index: &Index,
-    bnp: &BranchNodePool,
     leaf_cache: &DashMap<PageNumber, LeafNode>,
     leaf_reader: &LeafStoreReader,
     leaf_changes: &mut LeafChanges,
@@ -373,7 +364,7 @@ fn reset_leaf_base(
     has_extended_range: bool,
     key: Key,
 ) {
-    let Some((separator, cutoff, leaf_pn)) = indexed_leaf(bbn_index, bnp, key) else {
+    let Some((separator, cutoff, leaf_pn)) = indexed_leaf(bbn_index, key) else {
         return;
     };
 
@@ -463,7 +454,6 @@ fn reset_leaf_base_fresh(
 
 fn run_worker(
     bbn_index: Index,
-    bnp: BranchNodePool,
     leaf_cache: &DashMap<PageNumber, LeafNode>,
     leaf_reader: LeafStoreReader,
     page_pool: PagePool,
@@ -481,7 +471,6 @@ fn run_worker(
     // point leaf updater at first leaf.
     reset_leaf_base(
         &bbn_index,
-        &bnp,
         &leaf_cache,
         &leaf_reader,
         &mut leaf_changes,
@@ -515,7 +504,6 @@ fn run_worker(
 
             reset_leaf_base(
                 &bbn_index,
-                &bnp,
                 &leaf_cache,
                 &leaf_reader,
                 &mut leaf_changes,
@@ -555,7 +543,6 @@ fn run_worker(
 
             reset_leaf_base(
                 &bbn_index,
-                &bnp,
                 &leaf_cache,
                 &leaf_reader,
                 &mut leaf_changes,

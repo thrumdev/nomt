@@ -9,19 +9,20 @@
 
 use anyhow::{bail, ensure, Ok, Result};
 use bitvec::prelude::*;
-use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd, ptr};
+use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd, ptr, sync::Arc};
 
 use crate::beatree::{
     allocator::PageNumber,
-    branch::{self, BranchNodeView, BRANCH_NODE_SIZE},
+    branch::{BranchNode, BranchNodeView, BRANCH_NODE_SIZE},
     index::Index,
 };
+use crate::io::PagePool;
 
 /// Reconstruct the upper branch nodes of the btree from the bottom branch nodes and the leaf nodes.
 /// This places all branches into the BNP and returns an index into all BBNs.
 pub fn reconstruct(
     bn_fd: File,
-    bnp: &mut branch::BranchNodePool,
+    page_pool: &PagePool,
     bbn_freelist_tracked: &BTreeSet<PageNumber>,
     bump: PageNumber,
 ) -> Result<Index> {
@@ -47,13 +48,8 @@ pub fn reconstruct(
             pn
         );
 
-        let new_branch_id = bnp.allocate();
-
-        // UNWRAP: just allocated
-        bnp.checkout(new_branch_id)
-            .unwrap()
-            .as_mut_slice()
-            .copy_from_slice(node);
+        let mut branch = BranchNode::new_in(&page_pool);
+        branch.as_mut_slice().copy_from_slice(node);
 
         let mut separator = [0u8; 32];
         {
@@ -64,7 +60,7 @@ pub fn reconstruct(
             separator[prefix.len()..prefix.len() + first.len()].copy_from_bitslice(first);
         }
 
-        if let Some(_) = index.insert(separator, new_branch_id) {
+        if let Some(_) = index.insert(separator, Arc::new(branch)) {
             bail!(
                 "2 branch nodes with same separator, separator={:?}",
                 separator

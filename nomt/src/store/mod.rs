@@ -256,7 +256,6 @@ impl Store {
 
         self.shared.values.finish_sync(
             beatree_writeout_data.bbn_index,
-            beatree_writeout_data.obsolete_branches,
         );
 
         Ok(())
