@@ -94,6 +94,10 @@ impl LeafUpdater {
         self.cutoff = cutoff;
     }
 
+    pub fn remove_cutoff(&mut self) {
+        self.cutoff = None;
+    }
+
     /// Ingest a key/cell pair. Provide a callback which is called if this deletes an existing
     /// overflow cell.
     pub fn ingest(
@@ -138,7 +142,7 @@ impl LeafUpdater {
             let node = self.build_leaf(&self.ops[last_ops_start..]);
             let separator = self.separator();
 
-            leaf_changes.insert(separator, node);
+            leaf_changes.insert(separator, node, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -257,14 +261,15 @@ impl LeafUpdater {
                 self.separator_override = Some(separate(&last, &next));
             }
 
-            leaf_changes.insert(separator, new_node);
+            leaf_changes.insert(separator, new_node, self.separator_override.or(self.cutoff));
             start += item_count;
         }
 
         start
     }
 
-    fn separator(&self) -> Key {
+    /// The separator of the next leaf that will be built.
+    pub fn separator(&self) -> Key {
         // the first leaf always gets a separator of all 0.
         self.separator_override
             .or(self.base.as_ref().map(|b| b.separator))
@@ -305,7 +310,7 @@ impl LeafUpdater {
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);
-        leaf_changes.insert(left_separator, left_leaf);
+        leaf_changes.insert(left_separator, left_leaf, Some(right_separator));
 
         let mut right_gauge = LeafGauge::default();
         for op in &self.ops[split_point..] {
@@ -319,7 +324,7 @@ impl LeafUpdater {
 
         if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
-            leaf_changes.insert(right_separator, right_leaf);
+            leaf_changes.insert(right_separator, right_leaf, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();

@@ -8,6 +8,7 @@ use crate::{
 
 use std::fs::File;
 
+#[derive(Clone)]
 pub struct LeafStoreReader {
     allocator_reader: AllocatorReader,
 }

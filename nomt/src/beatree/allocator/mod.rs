@@ -3,6 +3,7 @@ use crate::io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool,
 use std::{
     fs::File,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
+    sync::Arc,
 };
 
 use free_list::FreeList;
@@ -29,8 +30,14 @@ impl From<u32> for PageNumber {
 pub const FREELIST_EMPTY: PageNumber = PageNumber(0);
 
 /// The AllocatorReader enables fetching pages from the store.
+///
+/// HACK: clones will be able to receive completions from each other due to the nature of cloning
+/// an IoHandle.
+#[derive(Clone)]
 pub struct AllocatorReader {
-    store_file: File,
+    // HACK: might be better to not have this struct and instead just expose raw functions over a
+    // file and an Io handle. Not much benefit to owning the Io handle here.
+    store_file: Arc<File>,
     io_handle: IoHandle,
 }
 
@@ -54,7 +61,7 @@ impl AllocatorReader {
     /// creates an AllocatorReader over a possibly already existing File.
     pub fn new(fd: File, io_handle: IoHandle) -> Self {
         AllocatorReader {
-            store_file: fd,
+            store_file: Arc::new(fd),
             io_handle,
         }
     }
