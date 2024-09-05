@@ -331,36 +331,15 @@ impl FreeList {
 }
 
 // returns the previous PageNumber and all the PageNumbers stored in the free list page
-//
-// A free page is laid out in the following form:
-// + prev free page : u32
-// + item_count : u16
-// + free pages : [u32; item_count]
 fn decode_free_list_page(page: FatPage) -> (PageNumber, Vec<PageNumber>) {
-    let prev = {
-        let mut buf = [0u8; 4];
-        buf.copy_from_slice(&page[0..4]);
-        PageNumber(u32::from_le_bytes(buf))
-    };
+    let free_list_page_view = FreeListPageRef(&page[..]);
 
-    let item_count = {
-        let mut buf = [0u8; 2];
-        buf.copy_from_slice(&page[4..6]);
-        u16::from_le_bytes(buf)
-    };
-
+    let prev = free_list_page_view.prev_pn();
+    let item_count = free_list_page_view.item_count();
     let mut free_list = vec![];
     for i in 0..item_count as usize {
-        let page_number = {
-            let mut buf = [0u8; 4];
-
-            let start = 6 + i * 4;
-            buf.copy_from_slice(&page[start..start + 4]);
-
-            u32::from_le_bytes(buf)
-        };
-
-        free_list.push(PageNumber(page_number));
+        let pn = free_list_page_view.item(i);
+        free_list.push(pn);
     }
 
     (prev, free_list)
@@ -369,15 +348,55 @@ fn decode_free_list_page(page: FatPage) -> (PageNumber, Vec<PageNumber>) {
 fn encode_free_list_page(page_pool: &PagePool, prev: PageNumber, pns: &[PageNumber]) -> FatPage {
     let mut page = page_pool.alloc_fat_page();
 
-    page[0..4].copy_from_slice(&prev.0.to_le_bytes());
-    page[4..6].copy_from_slice(&(pns.len() as u16).to_le_bytes());
-
-    for (i, pn) in pns.into_iter().enumerate() {
-        let start = 6 + i * 4;
-        page[start..start + 4].copy_from_slice(&pn.0.to_le_bytes());
+    {
+        let mut e = FreeListPageMut(&mut page[..]);
+        e.set_prev_pn(prev);
+        e.set_item_count(pns.len() as u16);
+        for (i, pn) in pns.into_iter().enumerate() {
+            e.set_item(i, *pn);
+        }
     }
 
     page
+}
+
+// A free page is laid out in the following form:
+// + prev free page : u32
+// + item_count : u16
+// + free pages : [u32; item_count]
+struct FreeListPageRef<'a>(&'a [u8]);
+struct FreeListPageMut<'a>(&'a mut [u8]);
+
+impl<'a> FreeListPageRef<'a> {
+    fn prev_pn(&self) -> PageNumber {
+        PageNumber(u32::from_le_bytes(self.0[0..4].try_into().unwrap()))
+    }
+
+    fn item_count(&self) -> u16 {
+        u16::from_le_bytes(self.0[4..6].try_into().unwrap())
+    }
+
+    fn item(&self, i: usize) -> PageNumber {
+        let start = 6 + i * 4;
+        PageNumber(u32::from_le_bytes(
+            self.0[start..start + 4].try_into().unwrap(),
+        ))
+    }
+}
+
+impl<'a> FreeListPageMut<'a> {
+    fn set_prev_pn(&mut self, pn: PageNumber) {
+        self.0[0..4].copy_from_slice(&pn.0.to_le_bytes());
+    }
+
+    fn set_item_count(&mut self, count: u16) {
+        self.0[4..6].copy_from_slice(&count.to_le_bytes());
+    }
+
+    fn set_item(&mut self, i: usize, pn: PageNumber) {
+        let start = 6 + i * 4;
+        self.0[start..start + 4].copy_from_slice(&pn.0.to_le_bytes());
+    }
 }
 
 #[cfg(test)]
