@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bitvec::prelude::*;
+use crossbeam_channel::{Receiver, Sender};
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -154,6 +155,25 @@ fn preload_leaves(
     }
 
     Ok(leaf_pages)
+}
+
+// A half-open range [low, high), where each key corresponds to a known separator of a node.
+struct SeparatorRange {
+    low: Option<Key>,
+    high: Option<Key>,
+}
+
+struct LeftNeighbor<T> {
+    rx: Receiver<ExtendRangeRequest<T>>,
+}
+
+struct RightNeighbor<T> {
+    tx: Sender<ExtendRangeRequest<T>>,
+}
+
+// a request to extend the range to the next node following the high bound of the range.
+struct ExtendRangeRequest<T> {
+    tx: Sender<T>,
 }
 
 pub fn reconstruct_key(prefix: &BitSlice<u8, Msb0>, separator: &BitSlice<u8, Msb0>) -> Key {

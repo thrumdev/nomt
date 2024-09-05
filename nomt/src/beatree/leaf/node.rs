@@ -46,6 +46,7 @@ pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 23;
 /// We use the high bit to encode whether a cell is an overflow cell.
 const OVERFLOW_BIT: u16 = 1 << 15;
 
+#[derive(Clone)]
 pub struct LeafNode {
     pub inner: Box<Page>,
 }
