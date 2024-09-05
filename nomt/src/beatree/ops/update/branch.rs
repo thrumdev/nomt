@@ -13,7 +13,7 @@ use crate::beatree::{
 };
 
 use super::{
-    reconstruct_key, BranchId, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
+    get_key, BranchId, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
     BRANCH_MERGE_THRESHOLD,
 };
 
@@ -33,7 +33,7 @@ impl BaseBranch {
     }
 
     pub fn key(&self, i: usize) -> Key {
-        reconstruct_key(self.node.prefix(), self.node.separator(i))
+        get_key(&self.node, i)
     }
 
     fn key_value(&self, i: usize) -> (Key, PageNumber) {
@@ -365,7 +365,7 @@ impl BranchUpdater {
 
         // UNWRAP: freshly allocated branch can always be checked out.
         let branch = bnp.checkout(branch_id).unwrap();
-        let mut builder = BranchNodeBuilder::new(branch, gauge.n, gauge.prefix_len);
+        let mut builder = BranchNodeBuilder::new(branch, gauge.n, gauge.n, gauge.prefix_len);
 
         for op in ops {
             match op {
