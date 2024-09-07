@@ -176,13 +176,14 @@ impl BranchUpdater {
             Some(ref mut bulk_splitter) if body_size_after >= BRANCH_BULK_SPLIT_TARGET => {
                 let accept_item = body_size_after <= BRANCH_NODE_BODY_SIZE || {
                     if self.gauge.body_size() < BRANCH_MERGE_THRESHOLD {
-                        // super degenerate split! node grew from underfull to overfull in one
-                        // item. only thing to do here is merge leftwards, unfortunately.
-                        // save this for later to do another pass with.
-                        todo!()
+                        // rare case: body was artifically small due to long shared prefix.
+                        // start applying items without prefix compression. we assume items are less
+                        // than half the body size, so the next item should apply cleanly.
+                        self.gauge.stop_prefix_compression();
+                        true
+                    } else {
+                        false
                     }
-
-                    false
                 };
 
                 let n = if accept_item {
@@ -240,11 +241,13 @@ impl BranchUpdater {
 
             if left_gauge.body_size_after(key, separator_len) > BRANCH_NODE_BODY_SIZE {
                 if left_gauge.body_size() < BRANCH_MERGE_THRESHOLD {
-                    // super degenerate split! jumped from underfull to overfull in a single step.
-                    todo!()
+                    // rare case: body was artifically small due to long shared prefix.
+                    // start applying items without prefix compression. we assume items are less
+                    // than half the body size, so the next item should apply cleanly.
+                    left_gauge.stop_prefix_compression();
+                } else {
+                    break;
                 }
-
-                break;
             }
 
             left_gauge.ingest(key, separator_len);
@@ -300,7 +303,12 @@ impl BranchUpdater {
         let branch = BranchNode::new_in(&self.page_pool);
 
         // UNWRAP: freshly allocated branch can always be checked out.
-        let mut builder = BranchNodeBuilder::new(branch, gauge.n, gauge.n, gauge.prefix_len);
+        let mut builder = BranchNodeBuilder::new(
+            branch,
+            gauge.n,
+            gauge.prefix_compressed_items(),
+            gauge.prefix_len,
+        );
 
         for op in ops {
             match op {
@@ -341,8 +349,11 @@ struct BranchGauge {
     // key and length of the first separator if any
     first_separator: Option<(Key, usize)>,
     prefix_len: usize,
-    // sum of all ingested separator_len, excluding the first one
-    sum_separator_lens: usize,
+    // sum of all separator lengths.
+    sum_separator_lengths: usize,
+    // the number of items that are prefix compressed, paired with their total lengths prior
+    // to compression. `None` means everything will be compressed.
+    prefix_compressed: Option<(usize, usize)>,
     n: usize,
 }
 
@@ -351,7 +362,8 @@ impl BranchGauge {
         BranchGauge {
             first_separator: None,
             prefix_len: 0,
-            sum_separator_lens: 0,
+            sum_separator_lengths: 0,
+            prefix_compressed: None,
             n: 0,
         }
     }
@@ -365,15 +377,38 @@ impl BranchGauge {
             return;
         };
 
-        self.prefix_len = prefix_len(first, &key);
-        self.sum_separator_lens += len;
+        if self.prefix_compressed.is_none() {
+            self.prefix_len = prefix_len(first, &key);
+        }
+        self.sum_separator_lengths += len;
         self.n += 1;
+    }
+
+    fn stop_prefix_compression(&mut self) {
+        assert!(self.prefix_compressed.is_none());
+        self.prefix_compressed = Some((self.n, self.sum_separator_lengths));
+    }
+
+    fn prefix_compressed_items(&self) -> usize {
+        self.prefix_compressed.map(|(k, _)| k).unwrap_or(self.n)
     }
 
     fn total_separator_lengths(&self, prefix_len: usize) -> usize {
         match self.first_separator {
-            Some((_, len)) => {
-                len.saturating_sub(prefix_len) + self.sum_separator_lens - (self.n - 1) * prefix_len
+            Some((_, first_len)) => {
+                let (prefix_compressed_items, pre_compression_lengths) = self
+                    .prefix_compressed
+                    .unwrap_or((self.n, self.sum_separator_lengths));
+
+                let prefix_uncompressed_lengths =
+                    self.sum_separator_lengths - pre_compression_lengths;
+
+                // first length can be less than the shared prefix due to trailing zero compression.
+                // then add the lengths of the compressed items after compression.
+                // then add the lengths of the uncompressed items.
+                first_len.saturating_sub(prefix_len) + pre_compression_lengths
+                    - (prefix_compressed_items - 1) * prefix_len
+                    + prefix_uncompressed_lengths
             }
             None => 0,
         }
@@ -383,8 +418,13 @@ impl BranchGauge {
         let p;
         let t;
         if let Some((ref first, _)) = self.first_separator {
-            p = prefix_len(first, &key);
-            t = self.total_separator_lengths(p) + len.saturating_sub(p);
+            if self.prefix_compressed.is_none() {
+                p = prefix_len(first, &key);
+                t = self.total_separator_lengths(p) + len.saturating_sub(p);
+            } else {
+                p = self.prefix_len;
+                t = self.total_separator_lengths(p) + len;
+            }
         } else {
             t = 0;
             p = len;
@@ -412,5 +452,49 @@ impl BranchBulkSplitter {
     fn push(&mut self, count: usize, gauge: BranchGauge) {
         self.items.push((count, gauge));
         self.total_count += count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::separator_len;
+    use super::*;
+
+    #[test]
+    fn gauge_stop_uncompressed() {
+        let mut gauge = BranchGauge::new();
+
+        gauge.ingest([0; 32], 0);
+
+        // push items with a long (16-byte) shared prefix until just before the halfway point.
+        let mut items: Vec<Key> = (1..1000u16)
+            .map(|i| {
+                let mut key = [0; 32];
+                key[16..18].copy_from_slice(&i.to_le_bytes());
+                key
+            })
+            .collect();
+
+        items.sort();
+
+        for item in items {
+            let len = separator_len(&item);
+            if gauge.body_size_after(item, len) >= BRANCH_MERGE_THRESHOLD {
+                break;
+            }
+
+            gauge.ingest(item, len);
+        }
+
+        assert!(gauge.body_size() < BRANCH_MERGE_THRESHOLD);
+
+        // now insert an item that collapses the prefix, causing the previously underfull node to
+        // become overfull.
+        let unprefixed_key = [0xff; 32];
+        assert!(gauge.body_size_after(unprefixed_key, 256) > BRANCH_NODE_BODY_SIZE);
+
+        // stop compression. now we can accept more items without collapsing the prefix.
+        gauge.stop_prefix_compression();
+        assert!(gauge.body_size_after(unprefixed_key, 256) < BRANCH_NODE_BODY_SIZE);
     }
 }
