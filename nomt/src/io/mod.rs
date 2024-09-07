@@ -16,7 +16,7 @@ pub mod page_pool;
 
 pub const PAGE_SIZE: usize = 4096;
 
-pub use page_pool::{PagePool, FatPage};
+pub use page_pool::{FatPage, PagePool};
 
 pub enum IoKind {
     Read(RawFd, u64, FatPage),

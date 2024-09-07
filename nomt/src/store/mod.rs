@@ -219,10 +219,10 @@ impl Store {
             tx.new_pages,
             &mut sync.wal_blob_builder,
         )?;
-        let beatree_writeout_data = self.shared.values.prepare_sync(
-            self.shared.sync_tp.clone(),
-            self.shared.sync_tp.max_count(),
-        );
+        let beatree_writeout_data = self
+            .shared
+            .values
+            .prepare_sync(self.shared.sync_tp.clone(), self.shared.sync_tp.max_count());
 
         let new_meta = Meta {
             ln_freelist_pn: beatree_writeout_data.ln_freelist_pn,
@@ -254,9 +254,9 @@ impl Store {
             self.shared.panic_on_sync,
         );
 
-        self.shared.values.finish_sync(
-            beatree_writeout_data.bbn_index,
-        );
+        self.shared
+            .values
+            .finish_sync(beatree_writeout_data.bbn_index);
 
         Ok(())
     }

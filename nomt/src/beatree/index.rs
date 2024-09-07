@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use im::OrdMap;
 
-use crate::beatree::branch::BranchNode;
 use super::Key;
+use crate::beatree::branch::BranchNode;
 
 #[derive(Default, Clone)]
 pub struct Index {

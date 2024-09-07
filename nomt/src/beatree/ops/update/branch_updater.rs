@@ -3,16 +3,14 @@ use std::sync::Arc;
 
 use crate::beatree::{
     allocator::PageNumber,
-    branch::{
-        self as branch_node, BranchNode, BranchNodeBuilder, BRANCH_NODE_BODY_SIZE,
-    },
+    branch::{self as branch_node, BranchNode, BranchNodeBuilder, BRANCH_NODE_BODY_SIZE},
     Key,
 };
 use crate::io::PagePool;
 
 use super::{
-    branch_stage::BranchChanges, prefix_len, get_key, separator_len,
-    BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD, BRANCH_MERGE_THRESHOLD,
+    branch_stage::BranchChanges, get_key, prefix_len, separator_len, BRANCH_BULK_SPLIT_TARGET,
+    BRANCH_BULK_SPLIT_THRESHOLD, BRANCH_MERGE_THRESHOLD,
 };
 
 pub struct BaseBranch {
@@ -88,10 +86,7 @@ impl BranchUpdater {
         }
     }
 
-    pub fn digest(
-        &mut self,
-        branch_changes: &mut BranchChanges,
-    ) -> DigestResult {
+    pub fn digest(&mut self, branch_changes: &mut BranchChanges) -> DigestResult {
         self.keep_up_to(None);
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
@@ -110,8 +105,7 @@ impl BranchUpdater {
             );
             self.split(branch_changes)
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
-            let node =
-                self.build_branch(&self.ops[last_ops_start..], &self.gauge);
+            let node = self.build_branch(&self.ops[last_ops_start..], &self.gauge);
             let separator = self.op_key(&self.ops[last_ops_start]);
             branch_changes.insert(separator, node);
 
@@ -210,10 +204,7 @@ impl BranchUpdater {
         }
     }
 
-    fn build_bulk_splitter_branches(
-        &mut self,
-        branch_changes: &mut BranchChanges,
-    ) -> usize {
+    fn build_bulk_splitter_branches(&mut self, branch_changes: &mut BranchChanges) -> usize {
         let Some(splitter) = self.bulk_split.take() else {
             return 0;
         };
@@ -305,11 +296,7 @@ impl BranchUpdater {
         }
     }
 
-    fn build_branch(
-        &self,
-        ops: &[BranchOp],
-        gauge: &BranchGauge,
-    ) -> BranchNode {
+    fn build_branch(&self, ops: &[BranchOp], gauge: &BranchGauge) -> BranchNode {
         let branch = BranchNode::new_in(&self.page_pool);
 
         // UNWRAP: freshly allocated branch can always be checked out.

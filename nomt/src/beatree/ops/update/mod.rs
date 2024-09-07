@@ -66,8 +66,15 @@ pub fn update(
         })
         .collect::<_>();
 
-    let (leaf_changes, overflow_deleted) =
-        leaf_stage::run(&bbn_index, leaf_cache, leaf_reader, leaf_writer.page_pool().clone(), changeset, thread_pool, workers);
+    let (leaf_changes, overflow_deleted) = leaf_stage::run(
+        &bbn_index,
+        leaf_cache,
+        leaf_reader,
+        leaf_writer.page_pool().clone(),
+        changeset,
+        thread_pool,
+        workers,
+    );
 
     let branch_changeset = leaf_changes
         .into_iter()
@@ -85,7 +92,11 @@ pub fn update(
         overflow::delete(&overflow_cell, leaf_reader, leaf_writer);
     }
 
-    let branch_changes = branch_stage::run(&bbn_index, leaf_writer.page_pool().clone(), branch_changeset);
+    let branch_changes = branch_stage::run(
+        &bbn_index,
+        leaf_writer.page_pool().clone(),
+        branch_changeset,
+    );
 
     for (key, changed_branch) in branch_changes {
         match changed_branch.inserted {

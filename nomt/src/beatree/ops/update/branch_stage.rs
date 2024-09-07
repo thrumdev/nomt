@@ -1,17 +1,10 @@
 use std::collections::BTreeMap;
 
-use crate::beatree::{
-    allocator::PageNumber,
-    branch::node::BranchNode,
-    index::Index,
-    Key,
-};
+use crate::beatree::{allocator::PageNumber, branch::node::BranchNode, index::Index, Key};
 
 use crate::io::PagePool;
 
-use super::{
-    branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult},
-};
+use super::branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
 
 pub struct ChangedBranchEntry {
     pub deleted: Option<PageNumber>,
@@ -107,15 +100,8 @@ pub fn run(
     }
 
     loop {
-        if let BranchDigestResult::NeedsMerge(cutoff) =
-            branch_updater.digest(&mut branch_changes)
-        {
-            reset_branch_base(
-                bbn_index,
-                &mut branch_changes,
-                &mut branch_updater,
-                cutoff,
-            );
+        if let BranchDigestResult::NeedsMerge(cutoff) = branch_updater.digest(&mut branch_changes) {
+            reset_branch_base(bbn_index, &mut branch_changes, &mut branch_updater, cutoff);
             continue;
         }
         break;
