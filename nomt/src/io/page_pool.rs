@@ -13,56 +13,27 @@ use std::{
 // 1. it's big enough so that we don't have to allocate too often.
 // 2. it's a multiple of 2 MiB which is the size of huge-page on x86-64 and aarch64.
 // 3. it fits 65k 4 KiB pages which requires 2 bytes to address making it nice round number.
-//
-// If we take 16 bits for the slot index, we are left with another 16 bit which we can use to address
-// 64K regions. That makes up a total of 16 TiB of memory, way beyond of the current hardware limits.
-// Because of that, we limit ourselves to 4096 regions which gives us only 1 TiB of memory.
 const REGION_SLOT_BITS: u32 = 16;
-const REGION_SLOT_MASK: u32 = (1 << REGION_SLOT_BITS) - 1;
 const SLOTS_PER_REGION: usize = 1 << REGION_SLOT_BITS;
 const REGION_BYTE_SIZE: usize = SLOTS_PER_REGION * PAGE_SIZE;
 const REGION_COUNT: usize = 4096;
 
-#[derive(Clone, Copy)]
-struct PageIndex(u32);
-
-impl PageIndex {
-    /// Creates a new page index from a region and a slot.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the region index is less than `REGION_COUNT` and the slot index
-    /// is less than `REGION_SLOT_MASK`.
-    fn from_region_and_slot(region: u32, slot: u32) -> Self {
-        assert!(region < REGION_COUNT as u32);
-        assert!(slot < SLOTS_PER_REGION as u32);
-        Self((region << REGION_SLOT_BITS) | slot)
-    }
-
-    /// Extracts the region index from the reference.
-    fn region(&self) -> usize {
-        (self.0 >> REGION_SLOT_BITS) as usize
-    }
-
-    /// Extracts the slot index within the region.
-    fn slot_index(&self) -> usize {
-        (self.0 & REGION_SLOT_MASK) as usize
-    }
-}
-
 /// A page reference to the pool.
 #[derive(Clone)]
-pub struct Page(PageIndex);
+pub struct Page(*mut u8);
+
+unsafe impl Send for Page {}
+unsafe impl Sync for Page {}
 
 impl Page {
     /// Returns a pointer to the page.
-    pub fn as_ptr(&self, pool: &PagePool) -> *const u8 {
-        pool.data_ptr(self.0) as *const u8
+    pub fn as_ptr(&self) -> *const u8 {
+        self.0
     }
 
     /// Returns a mutable pointer to the page.
-    pub fn as_mut_ptr(&self, pool: &PagePool) -> *mut u8 {
-        pool.data_ptr(self.0)
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.0
     }
 
     /// This is a convenience function that uses [`std::slice::from_raw_parts_mut`] to create a
@@ -76,8 +47,8 @@ impl Page {
     /// 2. that the [`PagePool`] is the same that was used to allocate the page.
     /// 3. that the [`PagePool`] is not dropped while the slice is used.
     /// 4. that there is only a single mutable slice into the page at any given time.
-    pub unsafe fn as_mut_slice(&self, pool: &PagePool) -> &mut [u8] {
-        std::slice::from_raw_parts_mut(self.as_mut_ptr(pool), PAGE_SIZE)
+    pub unsafe fn as_mut_slice(&self) -> &mut [u8] {
+        std::slice::from_raw_parts_mut(self.as_mut_ptr(), PAGE_SIZE)
     }
 }
 
@@ -93,13 +64,13 @@ pub struct FatPage {
 
 impl FatPage {
     /// See [`Page::as_ptr`].
-    pub fn as_ptr(&self, pool: &PagePool) -> *const u8 {
-        self.page.as_ptr(pool)
+    pub fn as_ptr(&self) -> *const u8 {
+        self.page.as_ptr()
     }
 
     /// See [`Page::as_mut_ptr`].
-    pub fn as_mut_ptr(&self, pool: &PagePool) -> *mut u8 {
-        self.page.as_mut_ptr(pool)
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.page.as_mut_ptr()
     }
 }
 
@@ -107,13 +78,13 @@ impl Deref for FatPage {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { self.page.as_mut_slice(&self.page_pool) }
+        unsafe { self.page.as_mut_slice() }
     }
 }
 
 impl DerefMut for FatPage {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.page.as_mut_slice(&self.page_pool) }
+        unsafe { self.page.as_mut_slice() }
     }
 }
 
@@ -177,9 +148,9 @@ impl PagePool {
             }
         };
         unsafe {
-            // SAFETY: `page` is trivially a valid page that was allocated by this pool and not yet 
+            // SAFETY: `page` is trivially a valid page that was allocated by this pool and not yet
             //         freed.
-            page.as_mut_slice(self).fill(0);
+            page.as_mut_slice().fill(0);
         }
         page
     }
@@ -222,20 +193,11 @@ impl PagePool {
 
         // Finally, we need to populate the freelist with the pages in the new region.
         for slot in 0..SLOTS_PER_REGION {
-            freelist_guard.push(Page(PageIndex::from_region_and_slot(
-                region_ix,
-                slot as u32,
-            )));
+            let page_ptr = unsafe { region_ptr.add(slot * PAGE_SIZE) } as *mut u8;
+            freelist_guard.push(Page(page_ptr));
         }
         // UNWRAP: we know that the freelist is not empty, because we just filled it.
         freelist_guard.pop().unwrap()
-    }
-
-    fn data_ptr(&self, page_index: PageIndex) -> *mut u8 {
-        let region = page_index.region();
-        assert!(region < self.inner.n_regions.load(Ordering::Acquire) as usize);
-        let region_ptr = self.inner.regions[region].load(Ordering::Relaxed);
-        unsafe { region_ptr.add(page_index.slot_index() * PAGE_SIZE) }
     }
 }
 
