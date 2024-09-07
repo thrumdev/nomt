@@ -105,7 +105,7 @@ pub mod benches {
             benches::get_keys,
             branch::{node::BranchNodeBuilder, BranchNode},
         },
-        io::{PAGE_SIZE, PagePool},
+        io::{PagePool, PAGE_SIZE},
     };
     use criterion::{BenchmarkId, Criterion};
     use rand::Rng;

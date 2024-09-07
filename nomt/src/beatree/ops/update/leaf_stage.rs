@@ -16,8 +16,9 @@ use crate::beatree::{
 use crate::io::PagePool;
 
 use super::{
+    get_key,
     leaf_updater::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater},
-    get_key, SeparatorRange,
+    SeparatorRange,
 };
 
 struct ExtendRangeResponse {
@@ -80,10 +81,7 @@ impl LeafChanges {
     }
 }
 
-fn indexed_leaf(
-    bbn_index: &Index,
-    key: Key,
-) -> Option<(Key, Option<Key>, PageNumber)> {
+fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNumber)> {
     let Some((_, branch)) = bbn_index.lookup(key) else {
         return None;
     };
@@ -221,7 +219,7 @@ fn prepare_workers(
 
                 if prev_worker_ops == 0 {
                     changeset_remaining = &changeset_remaining[pivot_idx..];
-                    continue
+                    continue;
                 }
 
                 let op_partition_index =

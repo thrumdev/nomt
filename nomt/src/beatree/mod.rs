@@ -144,12 +144,7 @@ impl Tree {
         }
 
         // Finally, look up in the btree.
-        ops::lookup(
-            key,
-            &shared.bbn_index,
-            &shared.leaf_store_rd,
-        )
-        .unwrap()
+        ops::lookup(key, &shared.bbn_index, &shared.leaf_store_rd).unwrap()
     }
 
     /// Commit a set of changes to the btree.
