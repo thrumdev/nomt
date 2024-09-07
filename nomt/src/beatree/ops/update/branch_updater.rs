@@ -383,7 +383,7 @@ impl BranchGauge {
         self.n += 1;
     }
 
-    fn total_separators_len(&self, prefix_len: usize) -> usize {
+    fn total_separator_lengths(&self, prefix_len: usize) -> usize {
         match self.first_separator {
             Some((_, len)) => {
                 len.saturating_sub(prefix_len) + self.sum_separator_lens - (self.n - 1) * prefix_len
@@ -397,7 +397,7 @@ impl BranchGauge {
         let t;
         if let Some((ref first, _)) = self.first_separator {
             p = prefix_len(first, &key);
-            t = self.total_separators_len(p) + len.saturating_sub(p);
+            t = self.total_separator_lengths(p) + len.saturating_sub(p);
         } else {
             t = 0;
             p = len;
@@ -409,7 +409,7 @@ impl BranchGauge {
     fn body_size(&self) -> usize {
         branch_node::body_size(
             self.prefix_len,
-            self.total_separators_len(self.prefix_len),
+            self.total_separator_lengths(self.prefix_len),
             self.n,
         )
     }
