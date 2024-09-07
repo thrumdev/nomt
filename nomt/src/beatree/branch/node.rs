@@ -233,8 +233,8 @@ impl BranchNodeBuilder {
         }
 
         let separator = if self.index < self.prefix_compressed {
-            // There are cases, for example a separator made by all zeros, where the
-            // prefix_len could be bigger then the separator_len
+            // The first separator can have length less than prefix due to trailing zero
+            // compression.
             separator_len = separator_len.saturating_sub(self.prefix_len);
             &key.view_bits::<Msb0>()[self.prefix_len..][..separator_len]
         } else {
