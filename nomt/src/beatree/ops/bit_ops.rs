@@ -52,6 +52,7 @@ pub fn reconstruct_key(prefix: Option<&BitSlice<u8, Msb0>>, separator: &BitSlice
 
 #[cfg(feature = "benchmarks")]
 pub mod benches {
+    use crate::beatree::benches::get_key_pair;
     use bitvec::{prelude::Msb0, view::BitView};
     use criterion::{BenchmarkId, Criterion};
     use rand::RngCore;

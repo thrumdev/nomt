@@ -1,10 +1,7 @@
 #![cfg(feature = "benchmarks")]
 
 use crate::beatree::{
-    bit_ops::benches::*,
-    branch::node::benches::*,
-    leaf::node::benches::*,
-    ops::{benches::*, update::benches::*},
+    branch::node::benches::*, leaf::node::benches::*, ops::benches::*, ops::bit_ops::benches::*,
     Key,
 };
 use rand::RngCore;
