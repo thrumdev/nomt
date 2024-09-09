@@ -208,7 +208,7 @@ fn recover(
     // We now write those pages out to the HT file.
     for changed_meta_page_ix in changed_meta_page_ixs {
         unsafe {
-            let page = page_pool.alloc_zeroed();
+            let page = page_pool.alloc();
             // SAFETY: page is a fresh allocation from page pool and it's not aliased.
             let page_data = page.as_mut_slice();
             page_data[..].copy_from_slice(meta_map.page_slice(changed_meta_page_ix));
