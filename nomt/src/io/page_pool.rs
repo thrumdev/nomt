@@ -130,15 +130,17 @@ impl PagePool {
 
     /// Allocates a new [`FatPage`].
     pub fn alloc_fat_page(&self) -> FatPage {
-        let page = self.alloc_zeroed();
+        let page = self.alloc();
         FatPage {
             page_pool: self.clone(),
             page,
         }
     }
 
-    /// Allocates a new [`Page`] and fills it with zeroes.
-    pub fn alloc_zeroed(&self) -> Page {
+    /// Allocates a new [`Page`].
+    ///
+    /// The contents of the page are undefined.
+    pub fn alloc(&self) -> Page {
         let page = {
             let mut freelist = self.inner.freelist.write();
             if freelist.is_empty() {
@@ -147,11 +149,6 @@ impl PagePool {
                 freelist.pop().unwrap()
             }
         };
-        unsafe {
-            // SAFETY: `page` is trivially a valid page that was allocated by this pool and not yet
-            //         freed.
-            page.as_mut_slice().fill(0);
-        }
         page
     }
 
