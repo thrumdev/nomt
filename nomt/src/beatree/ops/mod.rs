@@ -13,7 +13,7 @@ use super::{
     Key,
 };
 
-mod bit_ops;
+pub(crate) mod bit_ops;
 mod reconstruction;
 mod update;
 
@@ -105,6 +105,8 @@ pub mod benches {
         beatree::{
             benches::get_keys,
             branch::{node::BranchNodeBuilder, BranchNode},
+            ops::bit_ops::separator_len,
+            Key,
         },
         io::{PagePool, PAGE_SIZE},
     };
@@ -126,15 +128,18 @@ pub mod benches {
             let separator_len_bits = (32 - prefix_len_bytes) * 8;
             let n = (8 * body_size_target - prefix_len_bits) / (separator_len_bits + 8 * 4);
 
-            let mut separators = get_keys(prefix_len_bytes, n);
-            separators.sort();
+            let mut separators: Vec<(usize, Key)> = get_keys(prefix_len_bytes, n)
+                .into_iter()
+                .map(|s| (separator_len(&s), s))
+                .collect();
+            separators.sort_by(|a, b| a.1.cmp(&b.1));
 
             let branch_node = BranchNode::new_in(&page_pool);
             let mut branch_node_builder =
                 BranchNodeBuilder::new(branch_node, n, prefix_len_bits, 256);
 
-            for (index, separator) in separators.iter().enumerate() {
-                branch_node_builder.push(separator.clone(), index as u32);
+            for (index, (separator_len, separator)) in separators.iter().enumerate() {
+                branch_node_builder.push(separator.clone(), *separator_len, index as u32);
             }
 
             let branch = branch_node_builder.finish();
@@ -145,7 +150,7 @@ pub mod benches {
                     b.iter_batched(
                         || {
                             let index = rand.gen_range(0..separators.len());
-                            separators[index].clone()
+                            separators[index].1.clone()
                         },
                         |separator| super::search_branch(&branch, separator),
                         criterion::BatchSize::SmallInput,

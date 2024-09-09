@@ -263,10 +263,14 @@ impl BranchNodeBuilder {
 pub mod benches {
     use crate::{
         beatree::{
-            benches::get_keys,
-            branch::{BranchNodeBuilder, BranchNodePool},
+            ops::bit_ops::separator_len,
+            Key,
+            {
+                benches::get_keys,
+                branch::{BranchNode, BranchNodeBuilder},
+            },
         },
-        io::PAGE_SIZE,
+        io::{PagePool, PAGE_SIZE},
     };
     use criterion::{BenchmarkId, Criterion};
 
@@ -276,33 +280,35 @@ pub mod benches {
         // benchmark the branch builder creating an almost full branch node
         // given different prefix sizes
 
-        let branch_node_pool = BranchNodePool::new();
+        let page_pool = PagePool::new();
 
         for prefix_len_bytes in [1, 4, 8, 12, 16] {
-            // body_size = (prefix_len_bits + (separator_len_bits * n) + 7)/8 + 4 * n
-            // n = (8 * body_size - prefix_len_bits) / (separator_len_bits + 8*4)
+            // body_size = (2 * n) + (prefix_len_bits + (separator_len_bits * n) + 7)/8 + (4 * n)
+            // n = (8 * body_size - prefix_len_bits) / (separator_len_bits + 8*6)
             let body_size_target = PAGE_SIZE - 8;
             let prefix_len_bits = prefix_len_bytes * 8;
             let separator_len_bits = (32 - prefix_len_bytes) * 8;
-            let n = (8 * body_size_target - prefix_len_bits) / (separator_len_bits + 8 * 4);
+            let n = (8 * body_size_target - prefix_len_bits) / (separator_len_bits + 8 * 6);
 
-            let mut separators = get_keys(prefix_len_bytes, n);
-            separators.sort();
+            let mut separators: Vec<(usize, Key)> = get_keys(prefix_len_bytes, n)
+                .into_iter()
+                .map(|s| (separator_len(&s), s))
+                .collect();
+            separators.sort_by(|a, b| a.1.cmp(&b.1));
 
             group.bench_function(
                 BenchmarkId::new("prefix_len_bytes", prefix_len_bytes),
                 |b| {
                     b.iter_batched(
-                        || {
-                            let branch_id = branch_node_pool.allocate();
-                            branch_node_pool.checkout(branch_id).unwrap()
-                        },
-                        |branch_node| {
+                        || (BranchNode::new_in(&page_pool), separators.clone()),
+                        |(branch_node, separators)| {
                             let mut branch_node_builder =
-                                BranchNodeBuilder::new(branch_node, n, prefix_len_bits, 256);
+                                BranchNodeBuilder::new(branch_node, n, n, prefix_len_bits);
 
-                            for (index, separator) in separators.iter().enumerate() {
-                                branch_node_builder.push(separator.clone(), index as u32);
+                            for (index, (separator_len, separator)) in
+                                separators.into_iter().enumerate()
+                            {
+                                branch_node_builder.push(separator, separator_len, index as u32);
                             }
 
                             branch_node_builder.finish();

@@ -181,9 +181,12 @@ fn search(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
 #[cfg(feature = "benchmarks")]
 pub mod benches {
 
-    use crate::beatree::{
-        benches::get_keys,
-        leaf::node::{LeafBuilder, LEAF_NODE_BODY_SIZE},
+    use crate::{
+        beatree::{
+            benches::get_keys,
+            leaf::node::{LeafBuilder, LEAF_NODE_BODY_SIZE},
+        },
+        io::PagePool,
     };
     use criterion::{BatchSize, BenchmarkId, Criterion};
     use rand::Rng;
@@ -192,13 +195,15 @@ pub mod benches {
         let mut group = c.benchmark_group("search_leaf");
         let mut rand = rand::thread_rng();
 
+        let page_pool = PagePool::new();
+
         // we fill the leaf with as much as possible 4B values
         // leaf_body_size = b = n * 34 + value_size_sum
         //                    = n * 34 + (n * 4)
         //                  n = b / 38
 
         let n = LEAF_NODE_BODY_SIZE / 38;
-        let mut leaf_builder = LeafBuilder::new(n, n * 4);
+        let mut leaf_builder = LeafBuilder::new(&page_pool, n, n * 4);
 
         let mut keys = get_keys(0, n);
         keys.sort();
@@ -227,6 +232,8 @@ pub mod benches {
         // benchmark the leaf builder creating an almost full leaf node
         // given different value sizes
 
+        let page_pool = PagePool::new();
+
         for value_size in [4, 8, 16, 32, 64, 128] {
             // leaf_body_size = b = n * 34 + value_size_sum
             //                  b = n * 34 + (n * value_size)
@@ -245,7 +252,7 @@ pub mod benches {
                         )
                     },
                     |(keys, value)| {
-                        let mut leaf_builder = LeafBuilder::new(n, n * value_size);
+                        let mut leaf_builder = LeafBuilder::new(&page_pool, n, n * value_size);
                         for k in keys.into_iter() {
                             leaf_builder.push_cell(k, &value[..], false);
                         }
