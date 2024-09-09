@@ -4,7 +4,7 @@ use parking_lot::{ArcRwLockReadGuard, RwLock};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    os::fd::RawFd,
+    os::{fd::RawFd, unix::fs::FileExt},
     sync::Arc,
 };
 
@@ -138,7 +138,7 @@ impl DB {
 
 /// Perform recovery by applying the WAL to the HT file.
 fn recover(
-    mut ht_fd: &File,
+    ht_fd: &File,
     mut wal_fd: &File,
     page_pool: &PagePool,
     ht_offsets: &HTOffsets,
@@ -146,7 +146,7 @@ fn recover(
     seed: [u8; 16],
 ) -> anyhow::Result<()> {
     use crate::bitbox::wal::WalBlobReader;
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom};
 
     wal_fd.seek(SeekFrom::Start(0))?;
 
@@ -196,8 +196,7 @@ fn recover(
                 }
                 page_diff.unpack_changed_nodes(&changed_nodes, &mut page);
 
-                ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
-                ht_fd.write_all(&page)?;
+                ht_fd.write_all_at(&page, pn * PAGE_SIZE as u64)?;
             }
         }
     }
@@ -214,8 +213,7 @@ fn recover(
             page_data[..].copy_from_slice(meta_map.page_slice(changed_meta_page_ix));
 
             let pn = ht_offsets.meta_bytes_index(changed_meta_page_ix as u64);
-            ht_fd.seek(SeekFrom::Start(pn * PAGE_SIZE as u64))?;
-            ht_fd.write_all(&page_data)?;
+            ht_fd.write_all_at(page_data, pn * PAGE_SIZE as u64)?;
 
             page_pool.dealloc(page);
         }
