@@ -1,6 +1,7 @@
 #![cfg(feature = "benchmarks")]
 
 use crate::beatree::{
+    bit_ops::benches::*,
     branch::node::benches::*,
     leaf::node::benches::*,
     ops::{benches::*, update::benches::*},

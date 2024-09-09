@@ -4,13 +4,14 @@ use std::sync::Arc;
 use crate::beatree::{
     allocator::PageNumber,
     branch::{self as branch_node, BranchNode, BranchNodeBuilder, BRANCH_NODE_BODY_SIZE},
+    ops::bit_ops::{prefix_len, separator_len},
     Key,
 };
 use crate::io::PagePool;
 
 use super::{
-    branch_stage::BranchChanges, get_key, prefix_len, separator_len, BRANCH_BULK_SPLIT_TARGET,
-    BRANCH_BULK_SPLIT_THRESHOLD, BRANCH_MERGE_THRESHOLD,
+    branch_stage::BranchChanges, get_key, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
+    BRANCH_MERGE_THRESHOLD,
 };
 
 pub struct BaseBranch {
@@ -457,8 +458,8 @@ impl BranchBulkSplitter {
 
 #[cfg(test)]
 mod tests {
-    use super::super::separator_len;
     use super::*;
+    use crate::beatree::ops::bit_ops::separator_len;
 
     #[test]
     fn gauge_stop_uncompressed() {

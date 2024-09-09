@@ -2,12 +2,13 @@ use std::cmp::Ordering;
 
 use crate::beatree::{
     leaf::node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},
+    ops::bit_ops::separate,
     Key,
 };
 use crate::io::PagePool;
 
 use super::{
-    leaf_stage::LeafChanges, separate, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
+    leaf_stage::LeafChanges, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
     LEAF_MERGE_THRESHOLD,
 };
 
