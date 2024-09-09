@@ -194,13 +194,15 @@ impl<'a> BranchNodeView<'a> {
             };
         }
 
+        let bit_init = bit_offset_start % 8;
         let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let start = start_separators + (bit_offset_start / 8);
-        let end = start + ((bit_len + 7) / 8) + 1;
+        // load only slices into BranchNodeSeparator that have a length multiple of 8 bytes
+        let byte_len = (((bit_init + bit_len) + 7) / 8).next_multiple_of(8);
 
         BranchNodeSeparator {
-            bytes: &self.inner[start..end],
-            bit_init: bit_offset_start % 8,
+            bytes: &self.inner[start..start + byte_len],
+            bit_init,
             bit_len,
         }
     }
@@ -217,26 +219,23 @@ unsafe impl Send for BranchNode {}
 // and is exactly `bit_len` bits long
 pub struct BranchNodePrefix<'a> {
     pub bit_len: usize,
-    bytes: &'a [u8],
+    pub bytes: &'a [u8],
 }
 
 impl<'a> BranchNodePrefix<'a> {
     pub fn bits(&self) -> &BitSlice<u8, Msb0> {
         &self.bytes.view_bits()[..self.bit_len]
     }
-
-    #[cfg(feature = "benchmarks")]
-    pub fn new(bit_len: usize, bytes: &'a [u8]) -> Self {
-        BranchNodePrefix { bit_len, bytes }
-    }
 }
 
 // The separator starts at `bit_init` (within the first byte)
 // and is exactly `bit_len` bits long.
+//
+// `bytes` are always a multiple of 8 bytes in length
 pub struct BranchNodeSeparator<'a> {
     pub bit_len: usize,
-    bit_init: usize,
-    bytes: &'a [u8],
+    pub bit_init: usize,
+    pub bytes: &'a [u8],
 }
 
 impl<'a> BranchNodeSeparator<'a> {
@@ -245,15 +244,6 @@ impl<'a> BranchNodeSeparator<'a> {
             &self.bytes.view_bits()[self.bit_init..][..self.bit_len]
         } else {
             BitSlice::empty()
-        }
-    }
-
-    #[cfg(feature = "benchmarks")]
-    pub fn new(bit_len: usize, bit_init: usize, bytes: &'a [u8]) -> Self {
-        BranchNodeSeparator {
-            bit_len,
-            bit_init,
-            bytes,
         }
     }
 }
