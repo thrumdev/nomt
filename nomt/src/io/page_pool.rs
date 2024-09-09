@@ -1,12 +1,14 @@
 use super::PAGE_SIZE;
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::{
+    cell::RefCell,
     ops::{Deref, DerefMut},
     sync::{
         atomic::{AtomicPtr, AtomicU32, Ordering},
         Arc,
     },
 };
+use thread_local::ThreadLocal;
 
 // Region is 256 MiB. The choice is mostly arbitrary, but:
 //
@@ -17,6 +19,8 @@ const REGION_SLOT_BITS: u32 = 16;
 const SLOTS_PER_REGION: usize = 1 << REGION_SLOT_BITS;
 const REGION_BYTE_SIZE: usize = SLOTS_PER_REGION * PAGE_SIZE;
 const REGION_COUNT: usize = 4096;
+
+const TLS_FREELIST_CAPACITY: usize = 1024;
 
 /// A page reference to the pool.
 #[derive(Clone)]
@@ -111,6 +115,8 @@ struct Inner {
     regions: [AtomicPtr<u8>; REGION_COUNT],
     n_regions: AtomicU32,
     freelist: RwLock<Vec<Page>>,
+    // The local freelist for the current thread used to avoid contention on the global freelist.
+    tls_freelist: ThreadLocal<RefCell<Vec<Page>>>,
 }
 
 impl PagePool {
@@ -124,6 +130,7 @@ impl PagePool {
                 regions,
                 n_regions: AtomicU32::new(0),
                 freelist,
+                tls_freelist: ThreadLocal::new(),
             }),
         }
     }
@@ -141,15 +148,25 @@ impl PagePool {
     ///
     /// The contents of the page are undefined.
     pub fn alloc(&self) -> Page {
-        let page = {
-            let mut freelist = self.inner.freelist.write();
-            if freelist.is_empty() {
-                self.grow(&mut freelist)
-            } else {
-                freelist.pop().unwrap()
-            }
-        };
-        page
+        // fast path: try to serve request from the thread-local freelist.
+        let mut tls_freelist = self.tls_freelist();
+        if let Some(page) = tls_freelist.pop() {
+            return page;
+        }
+
+        // if none is available, try to replenish the thread-local freelist from the global one.
+        let mut freelist = self.inner.freelist.write();
+
+        if freelist.len() < TLS_FREELIST_CAPACITY {
+            // ensure that the global freelist has enough pages to refill the thread-local one.
+            self.grow(&mut freelist);
+            assert!(freelist.len() >= TLS_FREELIST_CAPACITY);
+        }
+
+        // transfer at most TLS_FREELIST_CAPACITY pages from the global freelist to the
+        // thread-local freelist.
+        tls_freelist.extend(freelist.drain(..TLS_FREELIST_CAPACITY));
+        tls_freelist.pop().unwrap()
     }
 
     /// Deallocates a [`Page`].
@@ -157,9 +174,15 @@ impl PagePool {
         self.inner.freelist.write().push(page);
     }
 
-    fn grow(&self, freelist_guard: &mut RwLockWriteGuard<Vec<Page>>) -> Page {
-        assert!(freelist_guard.is_empty());
+    fn tls_freelist<'a>(&'a self) -> std::cell::RefMut<'a, Vec<Page>> {
+        self.inner
+            .tls_freelist
+            .get_or(|| RefCell::new(Vec::with_capacity(TLS_FREELIST_CAPACITY)))
+            .borrow_mut()
+    }
 
+    #[cold]
+    fn grow(&self, freelist_guard: &mut RwLockWriteGuard<Vec<Page>>) {
         // First step is to allocate a new region.
         let region_ptr = unsafe {
             libc::mmap(
@@ -193,8 +216,6 @@ impl PagePool {
             let page_ptr = unsafe { region_ptr.add(slot * PAGE_SIZE) } as *mut u8;
             freelist_guard.push(Page(page_ptr));
         }
-        // UNWRAP: we know that the freelist is not empty, because we just filled it.
-        freelist_guard.pop().unwrap()
     }
 }
 
