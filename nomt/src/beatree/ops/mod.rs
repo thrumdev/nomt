@@ -13,6 +13,7 @@ use super::{
     Key,
 };
 
+mod bit_ops;
 mod reconstruction;
 mod update;
 
