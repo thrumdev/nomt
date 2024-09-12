@@ -93,7 +93,7 @@ impl BranchNode {
         slice[8..10].copy_from_slice(&len.to_le_bytes());
     }
 
-    pub fn prefix(&self) -> &BitSlice<u8, Msb0> {
+    pub fn prefix(&self) -> BranchNodePrefix {
         self.view().prefix()
     }
 
@@ -103,7 +103,7 @@ impl BranchNode {
         self.as_mut_slice()[start..].view_bits_mut()[..prefix_len].copy_from_bitslice(prefix);
     }
 
-    pub fn separator(&self, i: usize) -> &BitSlice<u8, Msb0> {
+    pub fn separator(&self, i: usize) -> BranchNodeSeparator {
         self.view().separator(i)
     }
 
@@ -167,19 +167,42 @@ impl<'a> BranchNodeView<'a> {
         u16::from_le_bytes(self.inner[cell_offset..][..2].try_into().unwrap()) as usize
     }
 
-    pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
+    pub fn prefix(&self) -> BranchNodePrefix<'a> {
+        let bit_len = self.prefix_len() as usize;
+
         let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
-        &self.inner[start..].view_bits()[..self.prefix_len() as usize]
+        let end = start + ((bit_len + 7) / 8);
+
+        BranchNodePrefix {
+            bytes: &self.inner[start..end],
+            bit_len,
+        }
     }
 
-    pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
-        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
-
+    pub fn separator(&self, i: usize) -> BranchNodeSeparator<'a> {
         let mut bit_offset_start = self.prefix_len() as usize;
         bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
         let bit_offset_end = self.prefix_len() as usize + self.cell(i);
 
-        &self.inner[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
+        let bit_len = bit_offset_end - bit_offset_start;
+
+        if bit_len == 0 {
+            return BranchNodeSeparator {
+                bit_len,
+                bit_init: 0,
+                bytes: &[],
+            };
+        }
+
+        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let start = start_separators + (bit_offset_start / 8);
+        let end = start + ((bit_len + 7) / 8) + 1;
+
+        BranchNodeSeparator {
+            bytes: &self.inner[start..end],
+            bit_init: bit_offset_start % 8,
+            bit_len,
+        }
     }
 
     pub fn node_pointer(&self, i: usize) -> u32 {
@@ -189,6 +212,51 @@ impl<'a> BranchNodeView<'a> {
 }
 
 unsafe impl Send for BranchNode {}
+
+// The prefix always starts at the beginning of the bytes
+// and is exactly `bit_len` bits long
+pub struct BranchNodePrefix<'a> {
+    pub bit_len: usize,
+    bytes: &'a [u8],
+}
+
+impl<'a> BranchNodePrefix<'a> {
+    pub fn bits(&self) -> &BitSlice<u8, Msb0> {
+        &self.bytes.view_bits()[..self.bit_len]
+    }
+
+    #[cfg(feature = "benchmarks")]
+    pub fn new(bit_len: usize, bytes: &'a [u8]) -> Self {
+        BranchNodePrefix { bit_len, bytes }
+    }
+}
+
+// The separator starts at `bit_init` (within the first byte)
+// and is exactly `bit_len` bits long.
+pub struct BranchNodeSeparator<'a> {
+    pub bit_len: usize,
+    bit_init: usize,
+    bytes: &'a [u8],
+}
+
+impl<'a> BranchNodeSeparator<'a> {
+    pub fn bits(&self) -> &BitSlice<u8, Msb0> {
+        if self.bit_len != 0 {
+            &self.bytes.view_bits()[self.bit_init..][..self.bit_len]
+        } else {
+            BitSlice::empty()
+        }
+    }
+
+    #[cfg(feature = "benchmarks")]
+    pub fn new(bit_len: usize, bit_init: usize, bytes: &'a [u8]) -> Self {
+        BranchNodeSeparator {
+            bit_len,
+            bit_init,
+            bytes,
+        }
+    }
+}
 
 pub fn body_size(prefix_len: usize, total_separator_lengths: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round

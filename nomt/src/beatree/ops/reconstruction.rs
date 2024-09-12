@@ -55,9 +55,10 @@ pub fn reconstruct(
         {
             let prefix = view.prefix();
             let separator = separator.view_bits_mut::<Msb0>();
-            separator[..prefix.len()].copy_from_bitslice(prefix);
+            separator[..prefix.bit_len].copy_from_bitslice(prefix.bits());
             let first = view.separator(0);
-            separator[prefix.len()..prefix.len() + first.len()].copy_from_bitslice(first);
+            separator[prefix.bit_len..prefix.bit_len + first.bit_len]
+                .copy_from_bitslice(first.bits());
         }
 
         if let Some(_) = index.insert(separator, Arc::new(branch)) {

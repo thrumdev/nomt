@@ -58,7 +58,7 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
     let n = branch.n() as usize;
     let prefix_compressed = branch.prefix_compressed() as usize;
 
-    match key.view_bits::<Msb0>()[..prefix.len()].cmp(prefix) {
+    match key.view_bits::<Msb0>()[..prefix.bit_len].cmp(prefix.bits()) {
         Ordering::Less => return None,
         Ordering::Greater if n == prefix_compressed => {
             let i = n - 1;
@@ -68,7 +68,7 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
     }
 
     let full_key = &key.view_bits::<Msb0>();
-    let post_key = &full_key[prefix.len()..];
+    let post_key = &full_key[prefix.bit_len..];
 
     let mut low = 0;
     let mut high = branch.n() as usize;
@@ -84,7 +84,7 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
             full_key
         };
 
-        if k < branch.separator(mid) {
+        if k < branch.separator(mid).bits() {
             high = mid;
         } else {
             low = mid + 1;

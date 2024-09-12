@@ -1,6 +1,9 @@
-use bitvec::{order::Msb0, slice::BitSlice, view::BitView};
+use bitvec::{order::Msb0, view::BitView};
 
-use crate::beatree::Key;
+use crate::beatree::{
+    branch::node::{BranchNodePrefix, BranchNodeSeparator},
+    Key,
+};
 
 // separate two keys a and b where b > a
 pub fn separate(a: &Key, b: &Key) -> Key {
@@ -35,16 +38,17 @@ pub fn separator_len(key: &Key) -> usize {
     key.len() - key.trailing_zeros()
 }
 
-pub fn reconstruct_key(prefix: Option<&BitSlice<u8, Msb0>>, separator: &BitSlice<u8, Msb0>) -> Key {
+pub fn reconstruct_key(prefix: Option<BranchNodePrefix>, separator: BranchNodeSeparator) -> Key {
     let mut key = [0u8; 32];
+    let key_bits = key.view_bits_mut::<Msb0>();
+
     match prefix {
         Some(prefix) => {
-            key.view_bits_mut::<Msb0>()[..prefix.len()].copy_from_bitslice(prefix);
-            key.view_bits_mut::<Msb0>()[prefix.len()..][..separator.len()]
-                .copy_from_bitslice(separator);
+            key_bits[..prefix.bit_len].copy_from_bitslice(&prefix.bits());
+            key_bits[prefix.bit_len..][..separator.bit_len].copy_from_bitslice(&separator.bits());
         }
         None => {
-            key.view_bits_mut::<Msb0>()[..separator.len()].copy_from_bitslice(separator);
+            key_bits[..separator.bit_len].copy_from_bitslice(&separator.bits());
         }
     }
     key
@@ -52,8 +56,10 @@ pub fn reconstruct_key(prefix: Option<&BitSlice<u8, Msb0>>, separator: &BitSlice
 
 #[cfg(feature = "benchmarks")]
 pub mod benches {
-    use crate::beatree::benches::get_key_pair;
-    use bitvec::{prelude::Msb0, view::BitView};
+    use crate::beatree::{
+        benches::get_key_pair,
+        branch::node::{BranchNodePrefix, BranchNodeSeparator},
+    };
     use criterion::{BenchmarkId, Criterion};
     use rand::RngCore;
 
@@ -83,14 +89,37 @@ pub mod benches {
                 let mut key = [0; 32];
                 rand.fill_bytes(&mut key);
 
-                let prefix = &key.view_bits::<Msb0>()[0..prefix_bits];
-                let mut separator = &key.view_bits::<Msb0>()[prefix_bits..];
-                if i == 0 {
-                    separator = &separator[..64];
-                }
+                let prefix_bytes = (prefix_bits + 7) / 8;
+                let separator_bit_init = prefix_bits % 8;
+                let separator_bit_len = if i == 0 {
+                    57 // 57 to ensure the separator to use less the 8 bytes
+                } else {
+                    256 - prefix_bits
+                };
+
+                let separator_byte_init = if prefix_bytes == 0 {
+                    0
+                } else if prefix_bits % 8 == 0 {
+                    prefix_bytes
+                } else {
+                    prefix_bytes - 1
+                };
 
                 group.bench_function(BenchmarkId::new("prefix_len_bits", prefix_bits), |b| {
-                    b.iter(|| super::reconstruct_key(Some(prefix), separator))
+                    b.iter_batched(
+                        || {
+                            (
+                                BranchNodePrefix::new(prefix_bits, &key[0..prefix_bytes]),
+                                BranchNodeSeparator::new(
+                                    separator_bit_init,
+                                    separator_bit_len,
+                                    &key[separator_byte_init..],
+                                ),
+                            )
+                        },
+                        |(prefix, separator)| super::reconstruct_key(Some(prefix), separator),
+                        criterion::BatchSize::SmallInput,
+                    )
                 });
             }
 
