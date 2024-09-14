@@ -71,22 +71,31 @@ pub mod benches {
     }
 
     pub fn reconstruct_key_benchmark(c: &mut Criterion) {
-        let mut group = c.benchmark_group("reconstruct_key");
+        for i in 0..2 {
+            let mut group = if i == 0 {
+                c.benchmark_group("reconstruct_key_small_separtor")
+            } else {
+                c.benchmark_group("reconstruct_key_big_separtor")
+            };
 
-        for prefix_bytes in [0, 4, 8, 12, 16, 20] {
-            let mut rand = rand::thread_rng();
-            let mut key = [0; 32];
-            rand.fill_bytes(&mut key);
+            for prefix_bits in [0, 1, 4, 7, 8, 9, 12, 15, 18] {
+                let mut rand = rand::thread_rng();
+                let mut key = [0; 32];
+                rand.fill_bytes(&mut key);
 
-            let prefix = &key.view_bits::<Msb0>()[0..prefix_bytes * 8];
-            let separator = &key.view_bits::<Msb0>()[prefix_bytes * 8..];
+                let prefix = &key.view_bits::<Msb0>()[0..prefix_bits];
+                let mut separator = &key.view_bits::<Msb0>()[prefix_bits..];
+                if i == 0 {
+                    separator = &separator[..64];
+                }
 
-            group.bench_function(BenchmarkId::new("prefix_len_bytes", prefix_bytes), |b| {
-                b.iter(|| super::reconstruct_key(Some(prefix), separator))
-            });
+                group.bench_function(BenchmarkId::new("prefix_len_bits", prefix_bits), |b| {
+                    b.iter(|| super::reconstruct_key(Some(prefix), separator))
+                });
+            }
+
+            group.finish();
         }
-
-        group.finish();
     }
 
     pub fn separator_len_benchmark(c: &mut Criterion) {
