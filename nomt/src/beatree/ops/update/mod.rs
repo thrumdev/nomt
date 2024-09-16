@@ -121,11 +121,11 @@ pub fn update(
 
 pub fn get_key(node: &BranchNode, index: usize) -> Key {
     let prefix = if index < node.prefix_compressed() as usize {
-        Some(node.prefix())
+        Some(node.raw_prefix())
     } else {
         None
     };
-    reconstruct_key(prefix, node.separator(index))
+    reconstruct_key(prefix, node.raw_separator(index))
 }
 
 // TODO: this should not be necessary with proper warm-ups.
