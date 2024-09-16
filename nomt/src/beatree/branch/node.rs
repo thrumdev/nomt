@@ -97,6 +97,10 @@ impl BranchNode {
         self.view().prefix()
     }
 
+    pub fn raw_prefix(&self) -> RawPrefix {
+        self.view().raw_prefix()
+    }
+
     fn set_prefix(&mut self, prefix: &BitSlice<u8, Msb0>) {
         let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let prefix_len = self.prefix_len() as usize;
@@ -105,6 +109,10 @@ impl BranchNode {
 
     pub fn separator(&self, i: usize) -> &BitSlice<u8, Msb0> {
         self.view().separator(i)
+    }
+
+    pub fn raw_separator(&self, i: usize) -> RawSeparator {
+        self.view().raw_separator(i)
     }
 
     fn set_separator(
@@ -167,19 +175,46 @@ impl<'a> BranchNodeView<'a> {
         u16::from_le_bytes(self.inner[cell_offset..][..2].try_into().unwrap()) as usize
     }
 
+    pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
+        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let mut bit_offset_start = self.prefix_len() as usize;
+        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
+        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
+        &self.inner[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
+    }
+
+    pub fn raw_separator(&self, i: usize) -> RawSeparator<'a> {
+        let mut bit_offset_start = self.prefix_len() as usize;
+        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
+        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
+
+        let bit_len = bit_offset_end - bit_offset_start;
+
+        if bit_len == 0 {
+            return (&[], 0, bit_len);
+        }
+
+        let bit_init = bit_offset_start % 8;
+        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let start = start_separators + (bit_offset_start / 8);
+        // load only slices into RawSeparator that have a length multiple of 8 bytes
+        let byte_len = (((bit_init + bit_len) + 7) / 8).next_multiple_of(8);
+
+        (&self.inner[start..start + byte_len], bit_init, bit_len)
+    }
+
     pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
         let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         &self.inner[start..].view_bits()[..self.prefix_len() as usize]
     }
 
-    pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
-        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+    pub fn raw_prefix(&self) -> RawPrefix<'a> {
+        let bit_len = self.prefix_len() as usize;
 
-        let mut bit_offset_start = self.prefix_len() as usize;
-        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
-        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
+        let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let end = start + ((bit_len + 7) / 8);
 
-        &self.inner[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
+        (&self.inner[start..end], bit_len)
     }
 
     pub fn node_pointer(&self, i: usize) -> u32 {
@@ -189,6 +224,15 @@ impl<'a> BranchNodeView<'a> {
 }
 
 unsafe impl Send for BranchNode {}
+
+// A RawPrefix is made by a tuple of raw bytes and the relative bit length
+pub type RawPrefix<'a> = (&'a [u8], usize);
+// A RawSeparator is made by a triple, the raw bytes, the bit-offset
+// at which the separator starts to be encoded in the first byte
+// and the relative bit length
+//
+// The raw bytes are always a multiple of 8 bytes in length
+pub type RawSeparator<'a> = (&'a [u8], usize, usize);
 
 pub fn body_size(prefix_len: usize, total_separator_lengths: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round
