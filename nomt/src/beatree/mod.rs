@@ -1,7 +1,6 @@
 use allocator::{PageNumber, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::{BranchNode, BRANCH_NODE_SIZE};
-use index::Index;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -27,12 +26,15 @@ pub(crate) mod branch;
 mod index;
 mod leaf;
 pub(crate) mod ops;
+pub(crate) mod writeout;
+pub(crate) use index::Index;
 
 #[cfg(feature = "benchmarks")]
 pub mod benches;
 
 pub type Key = [u8; 32];
 
+#[derive(Clone)]
 pub struct Tree {
     shared: Arc<Mutex<Shared>>,
     sync: Arc<Mutex<Sync>>,
@@ -54,6 +56,8 @@ struct Sync {
     leaf_store_wr: LeafStoreWriter,
     leaf_store_rd: LeafStoreReader,
     bbn_store_wr: BbnStoreWriter,
+    tp: ThreadPool,
+    commit_concurrency: usize,
 }
 
 impl Shared {
@@ -75,6 +79,7 @@ impl Tree {
         bbn_bump: u32,
         bbn_file: &File,
         ln_file: &File,
+        commit_concurrency: usize,
     ) -> Result<Tree> {
         let ln_freelist_pn = Some(ln_freelist_pn)
             .map(PageNumber)
@@ -121,6 +126,8 @@ impl Tree {
             leaf_store_wr,
             leaf_store_rd: leaf_store_rd_sync,
             bbn_store_wr,
+            tp: ThreadPool::with_name("beatree-sync".into(), commit_concurrency),
+            commit_concurrency,
         };
 
         Ok(Tree {
@@ -166,11 +173,8 @@ impl Tree {
 
     /// Asynchronously dump all changes performed by commits to the underlying storage medium.
     ///
-    /// Provide a thread pool and the number of workers to use in beatree update preparation.
-    /// Workers must be >= 1.
-    ///
     /// Either blocks or panics if another sync is inflight.
-    pub fn prepare_sync(&self, thread_pool: ThreadPool, workers: usize) -> WriteoutData {
+    pub fn prepare_sync(&self) -> WriteoutData {
         // Take the sync lock.
         //
         // That will exclude any other syncs from happening. This is a long running operation.
@@ -216,13 +220,13 @@ impl Tree {
                 &sync.leaf_store_rd,
                 &mut sync.leaf_store_wr,
                 &mut sync.bbn_store_wr,
-                thread_pool,
-                workers,
+                sync.tp.clone(),
+                sync.commit_concurrency,
             )
             .unwrap()
         }
 
-        let (ln, ln_free_list_pages, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
+        let (ln, ln_freelist_pages, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
             let LeafStoreCommitOutput {
                 pending,
                 free_list_pages,
@@ -261,7 +265,7 @@ impl Tree {
             bbn_freelist_pages,
             bbn_extend_file_sz,
             ln,
-            ln_free_list_pages,
+            ln_freelist_pages,
             ln_extend_file_sz,
             ln_freelist_pn,
             ln_bump,
@@ -284,7 +288,7 @@ pub struct WriteoutData {
     pub bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub bbn_extend_file_sz: Option<u64>,
     pub ln: Vec<(PageNumber, FatPage)>,
-    pub ln_free_list_pages: Vec<(PageNumber, FatPage)>,
+    pub ln_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub ln_extend_file_sz: Option<u64>,
     pub ln_freelist_pn: u32,
     pub ln_bump: u32,

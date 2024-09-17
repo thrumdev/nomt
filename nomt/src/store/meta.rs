@@ -1,6 +1,7 @@
 /// The utility functions for handling the metadata file.
 use anyhow::Result;
 use std::fs::File;
+use std::os::unix::fs::FileExt as _;
 
 use crate::io::{self, PagePool};
 
@@ -66,5 +67,13 @@ impl Meta {
         let page = io::read_page(page_pool, fd, 0)?;
         let meta = Meta::decode(&page[..40]);
         Ok(meta)
+    }
+
+    pub fn write(page_pool: &PagePool, fd: &File, meta: &Meta) -> Result<()> {
+        let mut page = page_pool.alloc_fat_page();
+        meta.encode_to(&mut page.as_mut()[..40]);
+        fd.write_all_at(&page[..], 0)?;
+        fd.sync_all()?;
+        Ok(())
     }
 }

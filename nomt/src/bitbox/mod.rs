@@ -21,11 +21,13 @@ pub use wal::WalBlobBuilder;
 mod ht_file;
 mod meta_map;
 mod wal;
+pub(crate) mod writeout;
 
 /// The index of a bucket within the map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BucketIndex(u64);
 
+#[derive(Clone)]
 pub struct DB {
     shared: Arc<Shared>,
 }
