@@ -3,6 +3,7 @@ use crate::{
     beatree::{self, allocator::PageNumber, branch::BranchNode},
     bitbox,
     io::{FatPage, IoPool, PagePool},
+    rollback,
 };
 
 use crossbeam::channel::{self, Receiver};
@@ -25,7 +26,7 @@ impl Sync {
         panic_on_sync: bool,
     ) -> Self {
         Self {
-            tp: ThreadPool::new(5),
+            tp: ThreadPool::new(6),
             sync_seqn,
             bitbox_num_pages,
             bitbox_seed,
@@ -39,10 +40,12 @@ impl Sync {
         mut tx: Transaction,
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
+        rollback: Option<rollback::Rollback>,
     ) -> anyhow::Result<()> {
         self.sync_seqn += 1;
         let sync_seqn = self.sync_seqn;
 
+        let rollback_writeout_wd = spawn_rollback_writeout(&self.tp, rollback);
         let (bitbox_ht_wd, bitbox_wal_wd) = spawn_prepare_sync_bitbox(
             &self.tp,
             shared.io_pool.page_pool().clone(),
@@ -67,6 +70,7 @@ impl Sync {
         bitbox_writeout_done.recv().unwrap();
 
         let beatree_meta_wd = meta_wd.recv().unwrap();
+        let rollback_writeout_wd = rollback_writeout_wd.recv().unwrap();
 
         let new_meta = Meta {
             ln_freelist_pn: beatree_meta_wd.ln_freelist_pn,
@@ -76,6 +80,8 @@ impl Sync {
             sync_seqn,
             bitbox_num_pages: self.bitbox_num_pages,
             bitbox_seed: self.bitbox_seed,
+            rollback_active_segment_id: rollback_writeout_wd.active_segment_id,
+            rollback_active_segment_size: rollback_writeout_wd.active_segment_size,
         };
         Meta::write(&shared.io_pool.page_pool(), &shared.meta_fd, &new_meta)?;
 
@@ -262,5 +268,28 @@ fn spawn_wal_writeout(
             let _ = result_tx.send(());
         }
     });
+    result_rx
+}
+
+fn spawn_rollback_writeout(
+    tp: &ThreadPool,
+    rollback: Option<rollback::Rollback>,
+) -> Receiver<rollback::WriteoutData> {
+    let (result_tx, result_rx) = channel::bounded(1);
+    match rollback {
+        None => {
+            // The rollback is disabled: put the default value into the channel.
+            let _ = result_tx.send(rollback::WriteoutData {
+                active_segment_id: 0,
+                active_segment_size: 0,
+            });
+        }
+        Some(rollback) => {
+            tp.execute(move || {
+                let writeout_data = rollback.sync_rollback().unwrap();
+                let _ = result_tx.send(writeout_data);
+            });
+        }
+    }
     result_rx
 }

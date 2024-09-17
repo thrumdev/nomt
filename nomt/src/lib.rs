@@ -43,6 +43,7 @@ mod page_cache;
 mod page_diff;
 mod page_region;
 mod page_walker;
+mod rollback;
 mod rw_pass_cell;
 mod seek;
 mod store;
@@ -123,6 +124,14 @@ impl KeyReadWrite {
                 v.as_ref()
             }
         }
+    }
+
+    /// Returns true if the key was written to.
+    pub fn is_write(&self) -> bool {
+        matches!(
+            self,
+            KeyReadWrite::Write(_) | KeyReadWrite::ReadThenWrite(_, _)
+        )
     }
 
     /// Updates the state of the given slot.
@@ -225,8 +234,10 @@ impl Nomt {
             .session_cnt
             .swap(1, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(prev, 0, "only one session could be active at a time");
+        let store = self.store.clone();
+        let rollback_delta = self.store.rollback().map(|r| r.detla_builder());
         Session {
-            store: self.store.clone(),
+            store,
             committer: Some(self.commit_pool.begin::<Blake3Hasher>(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
@@ -235,6 +246,7 @@ impl Nomt {
             )),
             session_cnt: self.session_cnt.clone(),
             metrics: self.metrics.clone(),
+            rollback_delta,
         }
     }
 
@@ -285,6 +297,12 @@ impl Nomt {
         actuals: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
     ) -> anyhow::Result<(Node, Option<Witness>, Option<WitnessedOperations>)> {
+        if let Some(rollback) = self.store.rollback() {
+            // UNWRAP: rollback delta always `Some` if rollback is enabled.
+            let delta = session.rollback_delta.take().unwrap();
+            rollback.commit(self.store.clone(), &actuals, delta);
+        }
+
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
             compact_actuals.push((path.clone(), read_write.to_compact()));
@@ -317,6 +335,36 @@ impl Nomt {
         Ok((new_root, commit.witness, commit.witnessed_operations))
     }
 
+    /// Perform a rollback of the last `n` commits.
+    ///
+    /// This function assumes no other sessions are active.
+    pub fn rollback_n(&self, n: usize) -> anyhow::Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let Some(rollback) = self.store.rollback() else {
+            anyhow::bail!("rollback: not enabled");
+        };
+        let Some(traceback) = rollback.traceback(n) else {
+            anyhow::bail!("rollback: not enough logged for rolling back");
+        };
+
+        let mut sess = self.begin_session();
+        let mut actuals = Vec::new();
+        for (key, value) in traceback {
+            sess.tentative_write_slot(key);
+            let value = KeyReadWrite::Write(value.map(Rc::new));
+            actuals.push((key, value));
+        }
+
+        let commit_result = self.commit_inner(sess, actuals, false);
+        if commit_result.is_ok() {
+            rollback.truncate(n).unwrap();
+        }
+        commit_result?;
+        Ok(())
+    }
+
     /// Return Nomt's metrics.
     /// To collect them, they need to be activated at [`Nomt`] creation
     pub fn metrics(&self) -> Metrics {
@@ -335,6 +383,7 @@ pub struct Session {
     committer: Option<Committer>, // always `Some` during lifecycle.
     session_cnt: Arc<AtomicUsize>,
     metrics: Metrics,
+    rollback_delta: Option<rollback::ReverseDeltaBuilder>,
 }
 
 impl Session {
@@ -355,6 +404,9 @@ impl Session {
     pub fn tentative_write_slot(&mut self, path: KeyPath) {
         // UNWRAP: committer always `Some` during lifecycle.
         self.committer.as_mut().unwrap().warm_up(path);
+        if let Some(ref mut rollback) = self.rollback_delta {
+            rollback.tentative_preserve_prior(self.store.clone(), path);
+        }
     }
 }
 

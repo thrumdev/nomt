@@ -30,11 +30,20 @@ pub struct Meta {
     pub bitbox_num_pages: u32,
     /// The random seed used for populating the hash-table in a unique way.
     pub bitbox_seed: [u8; 16],
+    /// The ID of the active segment file.
+    ///
+    /// 0 means there is no active segment.
+    pub rollback_active_segment_id: u32,
+    /// The size of the active segment in bytes, multiple of 4096 bytes.
+    ///
+    /// This indicates the valid portion of the segment file. The data in the segment file after
+    /// this offset is not valid.
+    pub rollback_active_segment_size: u32,
 }
 
 impl Meta {
     pub fn encode_to(&self, buf: &mut [u8]) {
-        assert_eq!(buf.len(), 40);
+        assert_eq!(buf.len(), 48);
         buf[0..4].copy_from_slice(&self.ln_freelist_pn.to_le_bytes());
         buf[4..8].copy_from_slice(&self.ln_bump.to_le_bytes());
         buf[8..12].copy_from_slice(&self.bbn_freelist_pn.to_le_bytes());
@@ -42,6 +51,8 @@ impl Meta {
         buf[16..20].copy_from_slice(&self.sync_seqn.to_le_bytes());
         buf[20..24].copy_from_slice(&self.bitbox_num_pages.to_le_bytes());
         buf[24..40].copy_from_slice(&self.bitbox_seed);
+        buf[40..44].copy_from_slice(&self.rollback_active_segment_id.to_le_bytes());
+        buf[44..48].copy_from_slice(&self.rollback_active_segment_size.to_le_bytes());
     }
 
     pub fn decode(buf: &[u8]) -> Self {
@@ -52,6 +63,8 @@ impl Meta {
         let sync_seqn = u32::from_le_bytes(buf[16..20].try_into().unwrap());
         let bitbox_num_pages = u32::from_le_bytes(buf[20..24].try_into().unwrap());
         let bitbox_seed = buf[24..40].try_into().unwrap();
+        let rollback_active_segment_id = u32::from_le_bytes(buf[40..44].try_into().unwrap());
+        let rollback_active_segment_size = u32::from_le_bytes(buf[44..48].try_into().unwrap());
         Self {
             ln_freelist_pn,
             ln_bump,
@@ -60,18 +73,37 @@ impl Meta {
             sync_seqn,
             bitbox_num_pages,
             bitbox_seed,
+            rollback_active_segment_id,
+            rollback_active_segment_size,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut errors = Vec::new();
+        if self.rollback_active_segment_size % crate::rollback::BATCH_ALIGNMENT as u32 != 0 {
+            errors.push(format!(
+                "rollback_active_segment_size is not a multiple of 4096: {}",
+                self.rollback_active_segment_size
+            ));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            // Collect all the errors and return them in a single anyhow error.
+            Err(anyhow::anyhow!(errors.join("\n")))
         }
     }
 
     pub fn read(page_pool: &PagePool, fd: &File) -> Result<Self> {
         let page = io::read_page(page_pool, fd, 0)?;
-        let meta = Meta::decode(&page[..40]);
+        let meta = Meta::decode(&page[..48]);
         Ok(meta)
     }
 
     pub fn write(page_pool: &PagePool, fd: &File, meta: &Meta) -> Result<()> {
         let mut page = page_pool.alloc_fat_page();
-        meta.encode_to(&mut page.as_mut()[..40]);
+        meta.encode_to(&mut page.as_mut()[..48]);
         fd.write_all_at(&page[..], 0)?;
         fd.sync_all()?;
         Ok(())
