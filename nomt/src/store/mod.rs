@@ -8,17 +8,13 @@ use crate::{
     io::{self, page_pool::FatPage, IoPool, PagePool},
     page_diff::PageDiff,
 };
-use crossbeam::channel::Receiver;
 use meta::Meta;
 use nomt_core::{page_id::PageId, trie::KeyPath};
 use parking_lot::Mutex;
 use std::{
     fs::{File, OpenOptions},
-    mem,
-    os::fd::AsRawFd as _,
     sync::Arc,
 };
-use threadpool::ThreadPool;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -28,25 +24,20 @@ pub use bitbox::BucketIndex;
 
 mod meta;
 mod page_loader;
-mod writeout;
+mod sync;
 
 /// This is a lightweight handle and can be cloned cheaply.
 #[derive(Clone)]
 pub struct Store {
     shared: Arc<Shared>,
-    sync: Arc<Mutex<Sync>>,
+    sync: Arc<Mutex<sync::Sync>>,
 }
 
 struct Shared {
-    bitbox_num_pages: u32,
-    bitbox_seed: [u8; 16],
-    panic_on_sync: bool,
-    commit_concurrency: usize,
     values: beatree::Tree,
     pages: bitbox::DB,
     page_pool: PagePool,
     io_pool: IoPool,
-    sync_tp: ThreadPool,
     meta_fd: File,
     ln_fd: File,
     bbn_fd: File,
@@ -54,11 +45,6 @@ struct Shared {
     // keep alive.
     #[allow(unused)]
     wal_fd: File,
-}
-
-struct Sync {
-    sync_seqn: u32,
-    io_handle: io::IoHandle,
 }
 
 impl Store {
@@ -126,6 +112,7 @@ impl Store {
             meta.bbn_bump,
             &bbn_fd,
             &ln_fd,
+            o.commit_concurrency,
         )?;
         let pages = bitbox::DB::open(
             meta.bitbox_num_pages,
@@ -134,31 +121,24 @@ impl Store {
             &ht_fd,
             &wal_fd,
         )?;
-        let io_handle = io_pool.make_handle();
         Ok(Self {
             shared: Arc::new(Shared {
                 page_pool,
-                bitbox_num_pages: meta.bitbox_num_pages,
-                bitbox_seed: meta.bitbox_seed,
-                panic_on_sync: o.panic_on_sync,
-                commit_concurrency: o.commit_concurrency,
                 values,
                 pages,
-                sync_tp: ThreadPool::with_name(
-                    "nomt-sync".into(),
-                    o.commit_concurrency + 2, /* + sync_beatree + sync_bitbox thread */
-                ),
+                io_pool,
                 meta_fd,
                 ln_fd,
                 bbn_fd,
                 ht_fd,
                 wal_fd,
-                io_pool,
             }),
-            sync: Arc::new(Mutex::new(Sync {
-                sync_seqn: meta.sync_seqn,
-                io_handle,
-            })),
+            sync: Arc::new(Mutex::new(sync::Sync::new(
+                meta.sync_seqn,
+                meta.bitbox_num_pages,
+                meta.bitbox_seed,
+                o.panic_on_sync,
+            ))),
         })
     }
 
@@ -212,91 +192,16 @@ impl Store {
     ///
     /// After this function returns, accessor methods such as [`Self::load_page`] will return the
     /// updated values.
-    pub fn commit(&self, mut tx: Transaction) -> anyhow::Result<()> {
+    pub fn commit(&self, tx: Transaction) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
-        sync.sync_seqn += 1;
-
-        // store the sequence number of this sync.
-        let sync_seqn = sync.sync_seqn;
-
-        let bitbox_wd = self.sync_bitbox(&mut tx)?;
-        let beatree_wd = self.sync_beatree(&mut tx)?;
-
-        // This unwrap is fine, because it can only happen if the channel is disconnected, which
-        // indicates a panic happened in the thread above, and we don't want to be silent about
-        // that. That said,
-        // TODO: we should actually catch_unwind followed by resume_unwind to improve the panic
-        // message.
-        let bitbox_wd = bitbox_wd.recv().unwrap();
-        let beatree_wd = beatree_wd.recv().unwrap();
-
-        let new_meta = Meta {
-            ln_freelist_pn: beatree_wd.ln_freelist_pn,
-            ln_bump: beatree_wd.ln_bump,
-            bbn_freelist_pn: beatree_wd.bbn_freelist_pn,
-            bbn_bump: beatree_wd.bbn_bump,
-            sync_seqn,
-            bitbox_num_pages: self.shared.bitbox_num_pages,
-            bitbox_seed: self.shared.bitbox_seed,
-        };
-
-        writeout::run(
-            sync.io_handle.clone(),
-            self.shared.wal_fd.as_raw_fd(),
-            self.shared.bbn_fd.as_raw_fd(),
-            self.shared.ln_fd.as_raw_fd(),
-            self.shared.ht_fd.as_raw_fd(),
-            self.shared.meta_fd.as_raw_fd(),
-            bitbox_wd.wal_blob,
-            beatree_wd.bbn,
-            beatree_wd.bbn_freelist_pages,
-            beatree_wd.bbn_extend_file_sz,
-            beatree_wd.ln,
-            beatree_wd.ln_free_list_pages,
-            beatree_wd.ln_extend_file_sz,
-            bitbox_wd.ht_pages,
-            new_meta,
-            self.shared.panic_on_sync,
-        );
-
-        self.shared.values.finish_sync(beatree_wd.bbn_index);
-
+        sync.sync(
+            &self.shared,
+            tx,
+            self.shared.pages.clone(),
+            self.shared.values.clone(),
+        )
+        .unwrap();
         Ok(())
-    }
-
-    fn sync_bitbox(&self, tx: &mut Transaction) -> anyhow::Result<Receiver<bitbox::WriteoutData>> {
-        let shared = self.shared.clone();
-        // oneshot for getting the result.
-        let (result_tx, result_rx) = crossbeam::channel::bounded(1);
-        let new_pages = mem::take(&mut tx.new_pages);
-        self.shared.sync_tp.execute(move || {
-            let writeout_data = shared
-                .pages
-                .prepare_sync(&shared.page_pool, new_pages)
-                // TODO: handle error.
-                .unwrap();
-            let _ = result_tx.send(writeout_data);
-        });
-        Ok(result_rx)
-    }
-
-    fn sync_beatree(
-        &self,
-        tx: &mut Transaction,
-    ) -> anyhow::Result<Receiver<beatree::WriteoutData>> {
-        let shared = self.shared.clone();
-        let batch = mem::take(&mut tx.batch);
-        let (result_tx, result_rx) = crossbeam::channel::bounded(1);
-        self.shared.sync_tp.execute({
-            let tp = self.shared.sync_tp.clone();
-            let commit_concurrency = self.shared.commit_concurrency;
-            move || {
-                shared.values.commit(batch);
-                let data = shared.values.prepare_sync(tp, commit_concurrency);
-                let _ = result_tx.send(data);
-            }
-        });
-        Ok(result_rx)
     }
 }
 
