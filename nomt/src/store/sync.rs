@@ -3,6 +3,7 @@ use crate::{
     beatree::{self, allocator::PageNumber, branch::BranchNode},
     bitbox,
     io::{FatPage, IoPool, PagePool},
+    rollback,
 };
 
 use crossbeam::channel::{self, Receiver};
@@ -25,7 +26,7 @@ impl Sync {
         panic_on_sync: bool,
     ) -> Self {
         Self {
-            tp: ThreadPool::with_name("store-sync".into(), 5),
+            tp: ThreadPool::with_name("store-sync".into(), 6),
             sync_seqn,
             bitbox_num_pages,
             bitbox_seed,
@@ -39,10 +40,12 @@ impl Sync {
         mut tx: Transaction,
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
+        rollback: Option<rollback::Rollback>,
     ) -> anyhow::Result<()> {
         self.sync_seqn += 1;
         let sync_seqn = self.sync_seqn;
 
+        let rollback_writeout_wd_rx = spawn_rollback_writeout_start(&self.tp, &rollback);
         let (bitbox_ht_wd, bitbox_wal_wd) = spawn_prepare_sync_bitbox(
             &self.tp,
             shared.io_pool.page_pool().clone(),
@@ -66,8 +69,26 @@ impl Sync {
         ln_writeout_done.recv().unwrap();
         bitbox_writeout_done.recv().unwrap();
 
-        let beatree_meta_wd = meta_wd.recv().unwrap();
+        let rollback_writeout_wd = rollback_writeout_wd_rx
+            .map(|rollback_writeout_wd| rollback_writeout_wd.recv().unwrap());
 
+        let rollback_start_live;
+        let rollback_end_live;
+        let rollback_prune_to_new_start_live;
+        let rollback_prune_to_new_end_live;
+        if let Some(rollback_writeout_wd) = &rollback_writeout_wd {
+            rollback_start_live = rollback_writeout_wd.rollback_start_live;
+            rollback_end_live = rollback_writeout_wd.rollback_end_live;
+            rollback_prune_to_new_start_live = rollback_writeout_wd.prune_to_new_start_live;
+            rollback_prune_to_new_end_live = rollback_writeout_wd.prune_to_new_end_live;
+        } else {
+            rollback_start_live = 0;
+            rollback_end_live = 0;
+            rollback_prune_to_new_start_live = None;
+            rollback_prune_to_new_end_live = None;
+        }
+
+        let beatree_meta_wd = meta_wd.recv().unwrap();
         let new_meta = Meta {
             ln_freelist_pn: beatree_meta_wd.ln_freelist_pn,
             ln_bump: beatree_meta_wd.ln_bump,
@@ -76,6 +97,8 @@ impl Sync {
             sync_seqn,
             bitbox_num_pages: self.bitbox_num_pages,
             bitbox_seed: self.bitbox_seed,
+            rollback_start_live,
+            rollback_end_live,
         };
         Meta::write(&shared.io_pool.page_pool(), &shared.meta_fd, &new_meta)?;
 
@@ -83,11 +106,27 @@ impl Sync {
             panic!("panic_on_sync is true");
         }
 
+        // Spawn a task to finish off the rollback writeout, if required.
+        let rollback_writeout_end_rx = if let Some(rollback) = rollback {
+            spawn_rollback_writeout_end(
+                &self.tp,
+                &rollback,
+                rollback_prune_to_new_start_live,
+                rollback_prune_to_new_end_live,
+            )
+        } else {
+            let (tx, rx) = channel::bounded(1);
+            tx.send(()).unwrap();
+            rx
+        };
+
         let HtWriteoutData { ht_pages } = bitbox_ht_wd.recv().unwrap();
         bitbox::writeout::write_ht(shared.io_pool.make_handle(), &shared.ht_fd, ht_pages)?;
         bitbox::writeout::truncate_wal(&shared.wal_fd)?;
 
         beatree.finish_sync(beatree_meta_wd.bbn_index);
+
+        rollback_writeout_end_rx.recv().unwrap();
 
         Ok(())
     }
@@ -262,6 +301,39 @@ fn spawn_wal_writeout(
             bitbox::writeout::write_wal(&mut wal_fd, wal_blob).unwrap();
             let _ = result_tx.send(());
         }
+    });
+    result_rx
+}
+
+fn spawn_rollback_writeout_start(
+    tp: &ThreadPool,
+    rollback: &Option<rollback::Rollback>,
+) -> Option<Receiver<rollback::WriteoutData>> {
+    match rollback {
+        None => None,
+        Some(rollback) => {
+            let (result_tx, result_rx) = channel::bounded(1);
+            let rollback = rollback.clone();
+            tp.execute(move || {
+                let writeout_data = rollback.writeout_start().unwrap();
+                let _ = result_tx.send(writeout_data);
+            });
+            Some(result_rx)
+        }
+    }
+}
+
+fn spawn_rollback_writeout_end(
+    tp: &ThreadPool,
+    rollback: &rollback::Rollback,
+    new_start_live: Option<u64>,
+    new_end_live: Option<u64>,
+) -> Receiver<()> {
+    let (result_tx, result_rx) = channel::bounded(1);
+    let rollback = rollback.clone();
+    tp.execute(move || {
+        rollback.writeout_end(new_start_live, new_end_live).unwrap();
+        let _ = result_tx.send(());
     });
     result_rx
 }

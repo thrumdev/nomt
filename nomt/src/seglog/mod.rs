@@ -21,8 +21,6 @@
 //! There is a limit on the maximum size of a record payload, which is currently set to 1 GiB.
 //! However, this limit may be subject to change in future versions.
 
-#![allow(dead_code)]
-
 use anyhow::{ensure, Context, Result};
 use std::{
     fmt,
@@ -267,7 +265,10 @@ impl SegmentedLog {
     ///
     /// Prunes segments that lie outside of the new live range, i.e. deletes the old segments.
     ///
-    /// This function updates the live range.
+    /// This function updates the live range. Note, that this function is destructive, it deletes
+    /// segments from the file system. Should a crash happen after this function was executed but
+    /// before the manifest was updated, the recovery will fail. Therefore, you must ensure that
+    /// the manifest was updated before calling this function.
     ///
     /// It's possible to return remove all items from the log, i.e. to reset the log to an empty
     /// state, by setting the new live end to zero. That would update the live range to `(0, 0)`.
@@ -324,7 +325,10 @@ impl SegmentedLog {
     /// Prunes segments that lie outside of the new live range, i.e. deletes and truncates the
     /// segments to not include the items that lie after the new live end.
     ///
-    /// This function updates the live range.
+    /// This function updates the live range. Note, that this function is destructive, it deletes
+    /// segments from the file system. Should a crash happen after this function was executed but
+    /// before the manifest was updated, the recovery will fail. Therefore, you must ensure that
+    /// the manifest was updated before calling this function.
     ///
     /// It's possible to return remove all items from the log, i.e. to reset the log to an empty
     /// state, by setting the new live end to zero. That would update the live range to `(0, 0)`.

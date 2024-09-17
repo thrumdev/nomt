@@ -673,6 +673,7 @@ dependencies = [
  "crossbeam-channel",
  "dashmap",
  "fxhash",
+ "hex",
  "hex-literal",
  "im",
  "io-uring",
