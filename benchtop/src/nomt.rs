@@ -17,13 +17,16 @@ impl NomtDB {
         io_workers: usize,
         hashtable_buckets: Option<u32>,
     ) -> Self {
+        let nomt_db_folder =
+            std::env::var("NOMT_DB_FOLDER").unwrap_or_else(|_| NOMT_DB_FOLDER.to_string());
+
         if reset {
             // Delete previously existing db
-            let _ = std::fs::remove_dir_all(NOMT_DB_FOLDER);
+            let _ = std::fs::remove_dir_all(&nomt_db_folder);
         }
 
         let mut opts = Options::new();
-        opts.path(NOMT_DB_FOLDER);
+        opts.path(nomt_db_folder);
         opts.commit_concurrency(commit_concurrency);
         opts.io_workers(io_workers);
         opts.metrics(true);
