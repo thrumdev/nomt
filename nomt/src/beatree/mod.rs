@@ -151,6 +151,8 @@ impl Tree {
     ///
     /// The changeset is a list of key value pairs to be added or removed from the btree.
     /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
+    // There might be some temptation to unify this with prepare_sync, but this should not be done
+    // because in the future sync and commit will be called on different threads at different times.
     pub fn commit(&self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
         if changeset.is_empty() {
             return;
