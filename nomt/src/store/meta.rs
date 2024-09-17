@@ -30,11 +30,15 @@ pub struct Meta {
     pub bitbox_num_pages: u32,
     /// The random seed used for populating the hash-table in a unique way.
     pub bitbox_seed: [u8; 16],
+    /// The first live record ID in the rollback seglog.
+    pub rollback_start_live: u64,
+    /// The last live record ID in the rollback seglog.
+    pub rollback_end_live: u64,
 }
 
 impl Meta {
     pub fn encode_to(&self, buf: &mut [u8]) {
-        assert_eq!(buf.len(), 40);
+        assert_eq!(buf.len(), 56);
         buf[0..4].copy_from_slice(&self.ln_freelist_pn.to_le_bytes());
         buf[4..8].copy_from_slice(&self.ln_bump.to_le_bytes());
         buf[8..12].copy_from_slice(&self.bbn_freelist_pn.to_le_bytes());
@@ -42,6 +46,8 @@ impl Meta {
         buf[16..20].copy_from_slice(&self.sync_seqn.to_le_bytes());
         buf[20..24].copy_from_slice(&self.bitbox_num_pages.to_le_bytes());
         buf[24..40].copy_from_slice(&self.bitbox_seed);
+        buf[40..48].copy_from_slice(&self.rollback_start_live.to_le_bytes());
+        buf[48..56].copy_from_slice(&self.rollback_end_live.to_le_bytes());
     }
 
     pub fn decode(buf: &[u8]) -> Self {
@@ -52,6 +58,8 @@ impl Meta {
         let sync_seqn = u32::from_le_bytes(buf[16..20].try_into().unwrap());
         let bitbox_num_pages = u32::from_le_bytes(buf[20..24].try_into().unwrap());
         let bitbox_seed = buf[24..40].try_into().unwrap();
+        let rollback_start_live = u64::from_le_bytes(buf[40..48].try_into().unwrap());
+        let rollback_end_live = u64::from_le_bytes(buf[48..56].try_into().unwrap());
         Self {
             ln_freelist_pn,
             ln_bump,
@@ -60,18 +68,40 @@ impl Meta {
             sync_seqn,
             bitbox_num_pages,
             bitbox_seed,
+            rollback_start_live,
+            rollback_end_live,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut errors = Vec::new();
+        let is_rollback_start_live_nil = self.rollback_start_live == 0;
+        let is_rollback_end_live_nil = self.rollback_end_live == 0;
+        if is_rollback_start_live_nil ^ is_rollback_end_live_nil {
+            errors.push(format!(
+                "rollback_start_live and rollback_end_live must both be nil or both be non-nil, got start: {}, end: {}",
+                self.rollback_start_live,
+                self.rollback_end_live,
+            ));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            // Collect all the errors and return them in a single anyhow error.
+            Err(anyhow::anyhow!(errors.join("\n")))
         }
     }
 
     pub fn read(page_pool: &PagePool, fd: &File) -> Result<Self> {
         let page = io::read_page(page_pool, fd, 0)?;
-        let meta = Meta::decode(&page[..40]);
+        let meta = Meta::decode(&page[..56]);
         Ok(meta)
     }
 
     pub fn write(page_pool: &PagePool, fd: &File, meta: &Meta) -> Result<()> {
         let mut page = page_pool.alloc_fat_page();
-        meta.encode_to(&mut page.as_mut()[..40]);
+        meta.encode_to(&mut page.as_mut()[..56]);
         fd.write_all_at(&page[..], 0)?;
         fd.sync_all()?;
         Ok(())

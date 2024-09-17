@@ -169,5 +169,6 @@ impl<'a> Transaction for Tx<'a> {
         }
 
         self.session.warm_up(key_path);
+        self.session.preserve_prior_value(key_path);
     }
 }

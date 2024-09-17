@@ -7,6 +7,7 @@ use crate::{
     beatree, bitbox,
     io::{self, page_pool::FatPage, IoPool, PagePool},
     page_diff::PageDiff,
+    rollback::Rollback,
 };
 use meta::Meta;
 use nomt_core::{page_id::PageId, trie::KeyPath};
@@ -36,6 +37,7 @@ pub struct Store {
 struct Shared {
     values: beatree::Tree,
     pages: bitbox::DB,
+    rollback: Option<Rollback>,
     page_pool: PagePool,
     io_pool: IoPool,
     meta_fd: File,
@@ -45,6 +47,8 @@ struct Shared {
     // keep alive.
     #[allow(unused)]
     wal_fd: File,
+    #[allow(unused)]
+    db_dir_fd: File,
 }
 
 impl Store {
@@ -53,6 +57,20 @@ impl Store {
         if !o.path.exists() {
             create(o)?;
         }
+
+        // TODO: fix TOCTOU race and lock the directory.
+        //
+        // We want to perform the opening of the directory in an atomic way, so it won't happen that
+        // between the check and the opening of the directory, another instance of the program
+        // creates the directory.
+        //
+        // At the moment of writing, we assume the exclusive access to the directory and it would be
+        // good to put some safeguards around it.
+        let db_dir_fd = {
+            let mut options = OpenOptions::new();
+            options.read(true);
+            options.open(&o.path)?
+        };
 
         let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
 
@@ -103,6 +121,7 @@ impl Store {
         }
 
         let meta = meta::Meta::read(&page_pool, &meta_fd)?;
+        meta.validate()?;
         let values = beatree::Tree::open(
             page_pool.clone(),
             &io_pool,
@@ -121,12 +140,27 @@ impl Store {
             &ht_fd,
             &wal_fd,
         )?;
+        let rollback = o
+            .rollback
+            .then(|| {
+                let db_dir_fd = db_dir_fd.try_clone().unwrap();
+                Rollback::read(
+                    o.max_rollback_log_len,
+                    o.path.clone(),
+                    db_dir_fd,
+                    meta.rollback_start_live,
+                    meta.rollback_end_live,
+                )
+            })
+            .transpose()?;
         Ok(Self {
             shared: Arc::new(Shared {
+                rollback,
                 page_pool,
                 values,
                 pages,
                 io_pool,
+                db_dir_fd,
                 meta_fd,
                 ln_fd,
                 bbn_fd,
@@ -140,6 +174,11 @@ impl Store {
                 o.panic_on_sync,
             ))),
         })
+    }
+
+    /// Returns a handle to the rollback object. `None` if the rollback feature is not enabled.
+    pub fn rollback(&self) -> Option<&Rollback> {
+        self.shared.rollback.as_ref()
     }
 
     /// Loads the flat value stored under the given key.
@@ -199,6 +238,7 @@ impl Store {
             tx,
             self.shared.pages.clone(),
             self.shared.values.clone(),
+            self.shared.rollback.clone(),
         )
         .unwrap();
         Ok(())
@@ -263,8 +303,10 @@ fn create(o: &crate::Options) -> anyhow::Result<()> {
         sync_seqn: 0,
         bitbox_num_pages: o.bitbox_num_pages,
         bitbox_seed: o.bitbox_seed,
+        rollback_start_live: 0,
+        rollback_end_live: 0,
     }
-    .encode_to(&mut buf[0..40]);
+    .encode_to(&mut buf[0..56]);
     meta_fd.write_all(&buf)?;
     meta_fd.sync_all()?;
     drop(meta_fd);

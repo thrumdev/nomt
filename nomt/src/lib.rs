@@ -42,6 +42,7 @@ mod page_cache;
 mod page_diff;
 mod page_region;
 mod page_walker;
+mod rollback;
 mod rw_pass_cell;
 mod seek;
 mod seglog;
@@ -123,6 +124,14 @@ impl KeyReadWrite {
                 v.as_deref()
             }
         }
+    }
+
+    /// Returns true if the key was written to.
+    pub fn is_write(&self) -> bool {
+        matches!(
+            self,
+            KeyReadWrite::Write(_) | KeyReadWrite::ReadThenWrite(_, _)
+        )
     }
 
     /// Updates the state of the given slot.
@@ -227,6 +236,16 @@ impl Nomt {
         self.root() == TERMINATOR
     }
 
+    /// Returns the value stored under the given key.
+    ///
+    /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
+    ///
+    /// This is used for testing for now.
+    #[doc(hidden)]
+    pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
+        self.store.load_value(path)
+    }
+
     /// Creates a new [`Session`] object, that serves a purpose of capturing the reads and writes
     /// performed by the application, updating the trie and creating a [`Witness`], allowing to
     /// re-execute the same operations without having access to the full trie.
@@ -234,12 +253,22 @@ impl Nomt {
     /// Only a single session may be created at a time. Creating a new session without dropping or
     /// committing an existing open session will lead to a panic.
     pub fn begin_session(&self) -> Session {
+        self.begin_session_inner(/* allow_rollback */ true)
+    }
+
+    fn begin_session_inner(&self, allow_rollback: bool) -> Session {
         let prev = self
             .session_cnt
             .swap(1, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(prev, 0, "only one session could be active at a time");
+        let store = self.store.clone();
+        let rollback_delta = if allow_rollback {
+            self.store.rollback().map(|r| r.delta_builder())
+        } else {
+            None
+        };
         Session {
-            store: self.store.clone(),
+            store,
             committer: Some(self.commit_pool.begin(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
@@ -248,6 +277,7 @@ impl Nomt {
             )),
             session_cnt: self.session_cnt.clone(),
             metrics: self.metrics.clone(),
+            rollback_delta,
         }
     }
 
@@ -304,6 +334,11 @@ impl Nomt {
                 );
             }
         }
+        if let Some(delta_builder) = session.rollback_delta.take() {
+            // UNWRAP: if rollback_delta is `Some``, then rollback must be also `Some`.
+            let rollback = self.store.rollback().unwrap();
+            rollback.commit(self.store.clone(), &actuals, delta_builder)?;
+        }
 
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
@@ -335,6 +370,38 @@ impl Nomt {
         Ok((new_root, commit.witness, commit.witnessed_operations))
     }
 
+    /// Perform a rollback of the last `n` commits.
+    ///
+    /// This function assumes no sessions are active and panics otherwise.
+    pub fn rollback(&self, n: usize) -> anyhow::Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let Some(rollback) = self.store.rollback() else {
+            anyhow::bail!("rollback: not enabled");
+        };
+        let Some(traceback) = rollback.truncate(n)? else {
+            anyhow::bail!("rollback: not enough logged for rolling back");
+        };
+
+        // Begin a new session. We do not allow rollback for this operation because that would
+        // interfere with the rollback log: if another rollback were to be issued, it must rollback
+        // the changes in the rollback log and not the changes performed by the current rollback.
+        let sess = self.begin_session_inner(/* allow_rollback */ false);
+
+        // Convert the traceback into a series of write commands.
+        let mut actuals = Vec::new();
+        for (key, value) in traceback {
+            sess.warm_up(key);
+            let value = KeyReadWrite::Write(value);
+            actuals.push((key, value));
+        }
+
+        self.commit_inner(sess, actuals, /* witness */ false)?;
+
+        Ok(())
+    }
+
     /// Return Nomt's metrics.
     /// To collect them, they need to be activated at [`Nomt`] creation
     pub fn metrics(&self) -> Metrics {
@@ -353,6 +420,7 @@ pub struct Session {
     committer: Option<Committer>, // always `Some` during lifecycle.
     session_cnt: Arc<AtomicUsize>,
     metrics: Metrics,
+    rollback_delta: Option<rollback::ReverseDeltaBuilder>,
 }
 
 impl Session {
@@ -378,6 +446,29 @@ impl Session {
     pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
         self.store.load_value(path)
+    }
+
+    /// Signals that the given key is going to be written to. Relevant only if rollback is enabled.
+    ///
+    /// This function initiates an I/O load operation to fetch and preserve the prior value of the key.
+    /// It serves as a hint to reduce I/O operations during the commit process by pre-loading values
+    /// that are likely to be needed.
+    ///
+    /// Important considerations:
+    /// 1. This function does not perform deduplication. Calling it multiple times for the same key
+    ///    will result in multiple load operations, which can be wasteful.
+    /// 2. The definitive set of values to be committed is determined by the [`Nomt::commit`] call.
+    ///    It's safe to call this function for keys that may not ultimately be written, and keys
+    ///    not marked here but included in the final set will still be preserved.
+    /// 3. While this function helps optimize I/O, it's not strictly necessary for correctness.
+    ///    The commit process will ensure all required prior values are preserved.
+    ///
+    /// For best performance, call this function once for each key you expect to write during the
+    /// session. The earlier this call is issued, the better for efficiency.
+    pub fn preserve_prior_value(&self, path: KeyPath) {
+        if let Some(rollback) = &self.rollback_delta {
+            rollback.tentative_preserve_prior(self.store.clone(), path);
+        }
     }
 }
 

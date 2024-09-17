@@ -13,6 +13,9 @@ pub struct Options {
     pub(crate) bitbox_num_pages: u32,
     pub(crate) bitbox_seed: [u8; 16],
     pub(crate) panic_on_sync: bool,
+    pub(crate) rollback: bool,
+    /// The maximum number of commits that can be rolled back.
+    pub(crate) max_rollback_log_len: u32,
 }
 
 impl Options {
@@ -30,6 +33,8 @@ impl Options {
             bitbox_num_pages: 64_000,
             bitbox_seed,
             panic_on_sync: false,
+            rollback: false,
+            max_rollback_log_len: 100,
         }
     }
 
@@ -80,5 +85,15 @@ impl Options {
     /// Useful to test WAL recovery.
     pub fn panic_on_sync(&mut self, panic_on_sync: bool) {
         self.panic_on_sync = panic_on_sync;
+    }
+
+    /// Set to `true` to enable rolling back committed sessions.
+    pub fn rollback(&mut self, rollback: bool) {
+        self.rollback = rollback;
+    }
+
+    /// Set the maximum number of commits that can be rolled back.
+    pub fn max_rollback_log_len(&mut self, max_rollback_log_len: u32) {
+        self.max_rollback_log_len = max_rollback_log_len;
     }
 }
