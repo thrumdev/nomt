@@ -1,6 +1,6 @@
 use crossbeam::channel::{TryRecvError, TrySendError};
 use nomt_core::page_id::PageId;
-use parking_lot::{ArcRwLockReadGuard, RwLock};
+use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -34,6 +34,7 @@ pub struct Shared {
     store: HTOffsets,
     seed: [u8; 16],
     meta_map: Arc<RwLock<MetaMap>>,
+    wal_blob_builder: Arc<Mutex<WalBlobBuilder>>,
 }
 
 impl DB {
@@ -56,11 +57,13 @@ impl DB {
             recover(ht_fd, wal_fd, page_pool, &store, &mut meta_map, seed)?;
         }
 
+        let wal_blob_builder = WalBlobBuilder::new();
         Ok(Self {
             shared: Arc::new(Shared {
                 store,
                 seed,
                 meta_map: Arc::new(RwLock::new(meta_map)),
+                wal_blob_builder: Arc::new(Mutex::new(wal_blob_builder)),
             }),
         })
     }
@@ -78,9 +81,9 @@ impl DB {
         &self,
         page_pool: &PagePool,
         changes: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
-        wal_blob_builder: &mut WalBlobBuilder,
     ) -> anyhow::Result<WriteoutData> {
         let mut meta_map = self.shared.meta_map.write();
+        let mut wal_blob_builder = self.shared.wal_blob_builder.lock();
 
         let mut changed_meta_pages = HashSet::new();
         let mut ht_pages = Vec::new();
@@ -132,7 +135,9 @@ impl DB {
             assert_eq!(orig_len, ht_pages.len());
         }
 
-        Ok(WriteoutData { ht_pages })
+        let wal_blob = wal_blob_builder.finalize();
+
+        Ok(WriteoutData { ht_pages, wal_blob })
     }
 }
 
@@ -228,7 +233,13 @@ fn recover(
 pub struct WriteoutData {
     /// The pages to write out to the ht file.
     pub ht_pages: Vec<(u64, FatPage)>,
+    /// The WAL blob to write out to the WAL file.
+    pub wal_blob: (*mut u8, usize),
 }
+
+// TODO: remove this once we split up the writeout logic.
+unsafe impl Send for WriteoutData {}
+unsafe impl Sync for WriteoutData {}
 
 /// A utility for loading pages from bitbox.
 pub struct PageLoader {
