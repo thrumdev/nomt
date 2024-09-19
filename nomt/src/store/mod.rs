@@ -1,4 +1,7 @@
-//! A wrapper around RocksDB for avoiding prolifiration of RocksDB-specific code.
+//! The store module abstracts the storage layer of Nomt.
+//!
+//! It provides storage facilities for the binary trie pages based on a hash-table (bitbox) and the
+//! b-tree key-value storage (beatree).
 
 use crate::{
     beatree, bitbox,
