@@ -109,6 +109,10 @@ pub fn run(
     thread_pool: ThreadPool,
     num_workers: usize,
 ) -> (Vec<(Key, ChangedLeafEntry)>, Vec<Vec<u8>>) {
+    if changeset.is_empty() {
+        return (vec![], vec![]);
+    }
+
     assert!(num_workers >= 1);
     let workers = prepare_workers(bbn_index, &changeset, num_workers);
     assert!(!workers.is_empty());
@@ -199,6 +203,13 @@ fn prepare_workers(
     while remaining_workers > 0 && changeset_remaining.len() > 0 {
         let pivot_idx = changeset_remaining.len() / (remaining_workers + 1);
 
+        // If pivot_idx == 0 the number of changeset_remaining
+        // is less than the number of remaining workers.
+        // Everything remaining will be covered by the previous worker.
+        if pivot_idx == 0 {
+            break;
+        }
+
         // UNWRAP: first worker is pushed at the beginning of the range.
         let prev_worker = workers.last_mut().unwrap();
 
@@ -243,7 +254,7 @@ fn prepare_workers(
                     },
                 });
                 remaining_workers -= 1;
-                changeset_remaining = &changeset_remaining[pivot_idx..];
+                changeset_remaining = &changeset_remaining[prev_worker_ops..];
             }
         }
     }
@@ -458,9 +469,6 @@ fn run_worker(
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     mut worker_params: WorkerParams,
 ) -> (BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>) {
-    if changeset.is_empty() {
-        return (BTreeMap::new(), Vec::new());
-    }
     let mut leaf_changes = LeafChanges::default();
     let mut leaf_updater = LeafUpdater::new(page_pool, None, None);
     let mut pending_left_request = None;
