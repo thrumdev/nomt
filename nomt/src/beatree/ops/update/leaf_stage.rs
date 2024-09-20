@@ -161,6 +161,8 @@ pub fn run(
         deleted_overflow.extend(worker_deleted_overflow);
     }
 
+    changes.sort_by_key(|(k, _)| *k);
+
     (changes, deleted_overflow)
 }
 
