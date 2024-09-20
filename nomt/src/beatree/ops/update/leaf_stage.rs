@@ -424,7 +424,7 @@ fn reset_leaf_base(
                 separator: *new_key,
             };
             leaf_updater.reset_base(Some(base), new_entry.next_separator);
-            break;
+            return;
         }
     }
 
