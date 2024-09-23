@@ -268,6 +268,7 @@ fn try_answer_left_neighbor(
     pending_request: &mut Option<ExtendRangeRequest>,
     worker_params: &mut WorkerParams,
     leaf_changes: &mut LeafChanges,
+    has_finished_workload: bool,
 ) {
     let Some(ref left_neighbor) = worker_params.left_neighbor else {
         return;
@@ -308,7 +309,9 @@ fn try_answer_left_neighbor(
 
     let consumed_whole_range = next_separator == worker_params.range.high;
 
-    if !found_next_node && !consumed_whole_range {
+    // wait to respond if no next node was found or if the entire range was consumed but
+    // the worker didn't finish to interact with the right neighbor
+    if !found_next_node && !(consumed_whole_range && has_finished_workload) {
         *pending_request = Some(request);
         return;
     }
@@ -320,7 +323,7 @@ fn try_answer_left_neighbor(
         .map(|_| leaf_changes.inner.pop_first().unwrap())
         .collect::<Vec<_>>();
 
-    let new_right_neighbor = if consumed_whole_range {
+    let new_right_neighbor = if consumed_whole_range && has_finished_workload {
         // left neighbor consumed our entire range. link them up with our right neighbor.
         worker_params.left_neighbor = None;
         Some(worker_params.right_neighbor.take())
@@ -396,30 +399,10 @@ fn reset_leaf_base(
     // UNWRAP: extending our range gave us at least one additional deleted/inserted leaf.
     let range = leaf_changes.inner.range_mut(key..);
 
+    // Iterate over all provided new entries and
+    // if a new inserted one is found use it as new base
     for (new_key, new_entry) in range {
-        // Right worker's first mutated item starts beyond the current range.
-        if new_key > &key {
-            let cutoff = if cutoff.map_or(true, |c| &c > new_key) {
-                Some(*new_key)
-            } else {
-                cutoff
-            };
-
-            reset_leaf_base_fresh(
-                separator,
-                cutoff,
-                leaf_pn,
-                leaf_cache,
-                leaf_reader,
-                leaf_changes,
-                leaf_updater,
-            );
-            return;
-        } else if new_entry.inserted.is_none() {
-            continue;
-        } else {
-            // UNWRAP: right worker sent us a node that covered the next key we asked for.
-            let base_node = new_entry.inserted.take().unwrap();
+        if let Some(base_node) = new_entry.inserted.take() {
             let base = BaseLeaf {
                 node: base_node,
                 iter_pos: 0,
@@ -475,6 +458,7 @@ fn run_worker(
     let mut leaf_updater = LeafUpdater::new(page_pool, None, None);
     let mut pending_left_request = None;
     let mut has_extended_range = false;
+    let mut has_finished_workload = false;
 
     // point leaf updater at first leaf.
     reset_leaf_base(
@@ -503,6 +487,7 @@ fn run_worker(
                 &mut pending_left_request,
                 &mut worker_params,
                 &mut leaf_changes,
+                has_finished_workload,
             );
 
             if worker_params.range.high.map_or(false, |high| k >= high) {
@@ -530,45 +515,45 @@ fn run_worker(
         leaf_updater.ingest(*key, value_change, overflow, delete_overflow);
     }
 
-    loop {
-        let res = leaf_updater.digest(&mut leaf_changes);
-
+    while let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut leaf_changes) {
         try_answer_left_neighbor(
             &mut pending_left_request,
             &mut worker_params,
             &mut leaf_changes,
+            has_finished_workload,
         );
 
-        if let LeafDigestResult::NeedsMerge(cutoff) = res {
-            if worker_params
-                .range
-                .high
-                .map_or(false, |high| cutoff >= high)
-            {
-                has_extended_range = true;
-                request_range_extension(&mut worker_params, &mut leaf_changes);
-            }
-
-            reset_leaf_base(
-                &bbn_index,
-                &leaf_cache,
-                &leaf_reader,
-                &mut leaf_changes,
-                &mut leaf_updater,
-                has_extended_range,
-                cutoff,
-            );
-
-            continue;
+        if worker_params
+            .range
+            .high
+            .map_or(false, |high| cutoff >= high)
+        {
+            has_extended_range = true;
+            request_range_extension(&mut worker_params, &mut leaf_changes);
         }
-        break;
+
+        reset_leaf_base(
+            &bbn_index,
+            &leaf_cache,
+            &leaf_reader,
+            &mut leaf_changes,
+            &mut leaf_updater,
+            has_extended_range,
+            cutoff,
+        );
     }
 
-    // answer any outstanding pending request
+    // Now we are safe to send over our right neighbor to the left one
+    // because we're sure to have finished interacting with it
+    has_finished_workload = true;
+
+    // TODO: https://github.com/thrumdev/nomt/issues/425
+    // answer any outstanding pending request.
     try_answer_left_neighbor(
         &mut pending_left_request,
         &mut worker_params,
         &mut leaf_changes,
+        has_finished_workload,
     );
     assert!(pending_left_request.is_none());
 
@@ -577,7 +562,12 @@ fn run_worker(
         match worker_params.left_neighbor.as_ref().map(|l| l.rx.recv()) {
             None => continue,
             Some(Ok(item)) => {
-                try_answer_left_neighbor(&mut Some(item), &mut worker_params, &mut leaf_changes);
+                try_answer_left_neighbor(
+                    &mut Some(item),
+                    &mut worker_params,
+                    &mut leaf_changes,
+                    has_finished_workload,
+                );
             }
             Some(Err(_)) => {
                 worker_params.left_neighbor = None;
