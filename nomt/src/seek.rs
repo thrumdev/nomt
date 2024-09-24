@@ -226,9 +226,13 @@ impl Seeker {
 
     /// Take the result of a complete request.
     pub fn take_completion(&mut self) -> Option<Completion> {
-        if let Some(SinglePageRequestState::Completed) = self.single_page_request {
-            self.single_page_request = None;
-            return Some(Completion::SinglePage);
+        match self.single_page_request {
+            Some(SinglePageRequestState::Completed) => {
+                self.single_page_request = None;
+                return Some(Completion::SinglePage);
+            }
+            Some(_) => return None,
+            None => (),
         }
 
         if self.requests.front().map_or(false, |r| r.is_completed()) {
