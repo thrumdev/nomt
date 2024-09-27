@@ -40,7 +40,7 @@ use nomt_core::trie::KeyPath;
 use parking_lot::Mutex;
 use threadpool::ThreadPool;
 
-use crate::{store::Store, KeyReadWrite};
+use crate::KeyReadWrite;
 
 mod segment;
 
@@ -60,9 +60,9 @@ struct ActiveSegment {
     size: u32,
 }
 
+// NOTE: the in-memory cache is currently constrainted to a single delta staged by commit for
+//       sync. This is going to be fixed once we allow batches that contain multiple deltas.
 struct InMemory {
-    // NOTE: the in-memory cache is currently constrainted to a single delta staged by commit for
-    //       sync. This is going to be fixed once we allow batches that contain multiple deltas.
     /// The most recent delta that we have staged.
     head: Option<Delta>,
     /// The log of deltas that we have accumulated so far modulo the [`Self::head`].
@@ -120,12 +120,20 @@ impl InMemory {
         }
     }
 
-    fn push_back(&mut self, delta: Delta) {
-        // This is a temporary invariant that should go away once we have a proper implementation.
-        // See the notes for the `InMemory` type.
-        assert!(self.head.is_none());
+    /// Push a delta into the in-memory cache.
+    ///
+    /// `stage` indicates whether we should set up the delta for staging (and thus the eventual
+    /// dumping into the active segment file).
+    fn push_back(&mut self, delta: Delta, stage: bool) {
+        if stage {
+            // This is a temporary invariant that should go away once we have a proper implementation.
+            // See the notes for the `InMemory` type.
+            assert!(self.head.is_none());
+            self.head = Some(delta);
+        } else {
+            self.tail.push_back(delta);
+        }
 
-        self.head = Some(delta);
         // So if the total number of deltas
         if self.total_len() > self.limit_log_len {
             self.tail.pop_front();
@@ -285,12 +293,12 @@ impl Rollback {
     /// key paths in ascending order.
     pub fn commit(
         &self,
-        store: Store,
+        store: impl LoadValue,
         actuals: &[(KeyPath, KeyReadWrite)],
         delta: ReverseDeltaBuilder,
     ) {
         let delta = delta.finalize(store, actuals);
-        self.shared.in_memory.lock().push_back(delta);
+        self.shared.in_memory.lock().push_back(delta, true);
     }
 
     /// Returns the changes that need to be performed to rollback the last `n` commits.
@@ -424,7 +432,10 @@ fn read_segment(mut fd: &File, in_memory: &mut InMemory) -> anyhow::Result<()> {
 
     let mut cursor = Cursor::new(&mut active_segment_contents);
     while let Some(delta) = read_batch(&mut cursor)? {
-        in_memory.push_back(delta);
+        // The fact that we are reading the delta from the segment file means that the delta has
+        // already been synced to a segment file and that we don't need to dump it, therefore
+        // we push_back without staging.
+        in_memory.push_back(delta, /* stage */ false);
     }
 
     Ok(())
@@ -461,6 +472,13 @@ where
 }
 
 impl Delta {
+    #[cfg(test)]
+    fn empty() -> Self {
+        Self {
+            priors: HashMap::new(),
+        }
+    }
+
     /// Encode the delta into a buffer.
     ///
     /// Returns the number of bytes written.
@@ -537,6 +555,7 @@ impl Delta {
         // Read the number of keys to reinstate.
         reader.read_exact(&mut buf)?;
         let to_reinsate_len = u32::from_le_bytes(buf);
+        // Read the keys to reinstate along with their values.
         for _ in 0..to_reinsate_len {
             // Read the key path.
             let mut key_path = [0; 32];
@@ -564,13 +583,23 @@ pub struct ReverseDeltaBuilder {
     priors: Arc<Mutex<HashMap<KeyPath, Option<Vec<u8>>>>>,
 }
 
+pub trait LoadValue: Clone + Send + Sync + 'static {
+    fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>>;
+}
+
+impl LoadValue for crate::store::Store {
+    fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>> {
+        self.load_value(key_path)
+    }
+}
+
 impl ReverseDeltaBuilder {
     /// Note that a write might be made to a key and that the rollback should preserve the prior
     /// value. This function is speculative; the rollback delta may later be committed with a
     /// different set of operations, and some of the tentative operations may be discarded.
     ///
     /// This function doesn't block.
-    pub fn tentative_preserve_prior(&self, store: Store, key_path: KeyPath) {
+    pub fn tentative_preserve_prior(&self, store: impl LoadValue, key_path: KeyPath) {
         self.tp.execute({
             let priors = self.priors.clone();
             move || {
@@ -581,7 +610,7 @@ impl ReverseDeltaBuilder {
     }
 
     /// Finalize the delta.
-    fn finalize(self, store: Store, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
+    fn finalize(self, store: impl LoadValue, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
         // Wait for all tentative writes issued so far to complete.
         //
         // NB: This doesn't take into account other users of `tp`. If there are any, we will be
@@ -634,6 +663,8 @@ impl ReverseDeltaBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex_literal::hex;
+    use std::rc::Rc;
 
     #[test]
     fn delta_roundtrip() {
@@ -710,5 +741,96 @@ mod tests {
         read_segment(&file, &mut in_memory).unwrap();
         let delta2 = in_memory.pop_back().unwrap();
         assert_eq!(delta.priors, delta2.priors);
+    }
+
+    /// A mock implementation of `LoadValue` for testing. Describes the "current" state of the
+    /// database.
+    #[derive(Clone)]
+    struct MockStore {
+        values: HashMap<KeyPath, Option<Vec<u8>>>,
+    }
+
+    impl MockStore {
+        fn insert(&mut self, key_path: KeyPath, value: Option<Vec<u8>>) {
+            self.values.insert(key_path, value);
+        }
+    }
+
+    impl LoadValue for MockStore {
+        fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>> {
+            match self.values.get(&key_path) {
+                Some(value) => return Ok(value.clone()),
+                None => panic!("the caller requested a value that was not inserted by the test"),
+            }
+        }
+    }
+
+    #[test]
+    fn traceback_works() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_dir_path = temp_dir.path().join("db");
+        std::fs::create_dir_all(&db_dir_path).unwrap();
+        let db_dir_fd = std::fs::OpenOptions::new()
+            .read(true)
+            .open(db_dir_path.clone())
+            .unwrap();
+
+        let mut store = MockStore {
+            values: HashMap::new(),
+        };
+        store.insert(
+            hex!("0101010101010101010101010101010101010101010101010101010101010101"),
+            Some(b"old_value1".to_vec()),
+        );
+        store.insert(
+            hex!("0202020202020202020202020202020202020202020202020202020202020202"),
+            Some(b"old_value2".to_vec()),
+        );
+        store.insert(
+            hex!("0303030303030303030303030303030303030303030303030303030303030303"),
+            Some(b"old_value3".to_vec()),
+        );
+
+        let rollback = Rollback::read(0, 0, db_dir_path, db_dir_fd).unwrap();
+        let builder = rollback.detla_builder();
+        builder.tentative_preserve_prior(store.clone(), [1; 32]);
+        builder.tentative_preserve_prior(store.clone(), [2; 32]);
+        builder.tentative_preserve_prior(store.clone(), [3; 32]);
+        rollback.commit(
+            store.clone(),
+            &[
+                (
+                    hex!("0101010101010101010101010101010101010101010101010101010101010101"),
+                    KeyReadWrite::Write(Some(Rc::new(b"new_value1".to_vec()))),
+                ),
+                (
+                    hex!("0202020202020202020202020202020202020202020202020202020202020202"),
+                    KeyReadWrite::Write(Some(Rc::new(b"new_value2".to_vec()))),
+                ),
+            ],
+            builder,
+        );
+
+        // We want to see the old values for all the keys that have been changed during the commit.
+        let traceback = rollback.traceback(1).unwrap();
+        assert_eq!(traceback.len(), 2);
+        assert_eq!(
+            traceback
+                .get(&hex!(
+                    "0101010101010101010101010101010101010101010101010101010101010101"
+                ))
+                .unwrap()
+                .clone(),
+            Some(b"old_value1".to_vec())
+        );
+        assert_eq!(
+            traceback
+                .get(&hex!(
+                    "0202020202020202020202020202020202020202020202020202020202020202"
+                ))
+                .unwrap()
+                .clone(),
+            Some(b"old_value2".to_vec())
+        );
     }
 }

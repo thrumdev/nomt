@@ -31,7 +31,7 @@ impl Options {
             bitbox_num_pages: 64_000,
             bitbox_seed,
             panic_on_sync: false,
-            rollback: true,
+            rollback: false,
         }
     }
 
