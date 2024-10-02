@@ -8,7 +8,7 @@ use crate::beatree::{
 use crate::io::PagePool;
 
 use super::{
-    leaf_stage::LeafChanges, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
+    leaf_stage::LeavesTracker, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
     LEAF_MERGE_THRESHOLD,
 };
 
@@ -119,14 +119,14 @@ impl LeafUpdater {
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
     // separator_override is set.
     // If `Finished` is returned, `ops` is guaranteed empty and separator_override is empty.
-    pub fn digest(&mut self, leaf_changes: &mut LeafChanges) -> DigestResult {
+    pub fn digest(&mut self, leaves_tracker: &mut LeavesTracker) -> DigestResult {
         // no cells are going to be deleted from this point onwards - this keeps everything.
         self.keep_up_to(None, |_| {});
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_leaves(leaf_changes);
+        let last_ops_start = self.build_bulk_splitter_leaves(leaves_tracker);
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
@@ -138,12 +138,12 @@ impl LeafUpdater {
                 last_ops_start, 0,
                 "normal split can only occur when not bulk splitting"
             );
-            self.split(leaf_changes)
+            self.split(leaves_tracker)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_leaf(&self.ops[last_ops_start..]);
             let separator = self.separator();
 
-            leaf_changes.insert(separator, node, self.cutoff);
+            leaves_tracker.insert_leaf(separator, node, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -237,7 +237,7 @@ impl LeafUpdater {
         }
     }
 
-    fn build_bulk_splitter_leaves(&mut self, leaf_changes: &mut LeafChanges) -> usize {
+    fn build_bulk_splitter_leaves(&mut self, leaves_tracker: &mut LeavesTracker) -> usize {
         let Some(splitter) = self.bulk_split.take() else {
             return 0;
         };
@@ -262,7 +262,11 @@ impl LeafUpdater {
                 self.separator_override = Some(separate(&last, &next));
             }
 
-            leaf_changes.insert(separator, new_node, self.separator_override.or(self.cutoff));
+            leaves_tracker.insert_leaf(
+                separator,
+                new_node,
+                self.separator_override.or(self.cutoff),
+            );
             start += item_count;
         }
 
@@ -277,7 +281,7 @@ impl LeafUpdater {
             .unwrap_or([0u8; 32])
     }
 
-    fn split(&mut self, leaf_changes: &mut LeafChanges) -> DigestResult {
+    fn split(&mut self, leaves_tracker: &mut LeavesTracker) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -311,7 +315,7 @@ impl LeafUpdater {
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);
-        leaf_changes.insert(left_separator, left_leaf, Some(right_separator));
+        leaves_tracker.insert_leaf(left_separator, left_leaf, Some(right_separator));
 
         let mut right_gauge = LeafGauge::default();
         for op in &self.ops[split_point..] {
@@ -325,7 +329,7 @@ impl LeafUpdater {
 
         if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
-            leaf_changes.insert(right_separator, right_leaf, self.cutoff);
+            leaves_tracker.insert_leaf(right_separator, right_leaf, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
