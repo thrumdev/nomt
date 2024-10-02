@@ -7,6 +7,7 @@ fn wal_recovery_test() {
     // Initialize the db with panic on sync equals true.
     let mut t = Test::new_with_params(
         "wal_add_remove_1000",
+        /* commit_concurrency */ 1,
         /* panic_on_sync */ true,
         /* clean */ true,
     );
@@ -24,6 +25,7 @@ fn wal_recovery_test() {
     // Re-open the db without cleaning the DB dir and without panic on sync.
     let mut t = Test::new_with_params(
         "wal_add_remove_1000",
+        /* commit_concurrency */ 1,
         /* panic_on_sync */ false,
         /* clean */ false,
     );
