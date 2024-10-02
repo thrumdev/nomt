@@ -45,10 +45,15 @@ pub struct Test {
 
 impl Test {
     pub fn new(name: impl AsRef<Path>) -> Self {
-        Self::new_with_params(name, false, true)
+        Self::new_with_params(name, 1, false, true)
     }
 
-    pub fn new_with_params(name: impl AsRef<Path>, panic_on_sync: bool, cleanup_dir: bool) -> Self {
+    pub fn new_with_params(
+        name: impl AsRef<Path>,
+        commit_concurrency: usize,
+        panic_on_sync: bool,
+        cleanup_dir: bool,
+    ) -> Self {
         let path = {
             let mut p = PathBuf::from("test");
             p.push(name);
@@ -60,6 +65,7 @@ impl Test {
         let mut o = opts(path);
         o.panic_on_sync(panic_on_sync);
         o.bitbox_seed([0; 16]);
+        o.commit_concurrency(commit_concurrency);
         let nomt = Nomt::open(o).unwrap();
         let session = nomt.begin_session();
         Self {
