@@ -45,6 +45,7 @@ mod page_region;
 mod page_walker;
 mod rw_pass_cell;
 mod seek;
+mod seglog;
 mod store;
 
 mod io;
