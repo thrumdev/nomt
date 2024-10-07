@@ -21,6 +21,12 @@ pub fn write_wal(mut wal_fd: &File, wal_blob: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn truncate_wal(mut wal_fd: &File) -> anyhow::Result<()> {
+    wal_fd.set_len(0)?;
+    wal_fd.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
 pub fn write_ht(io_handle: IoHandle, ht_fd: &File, ht: Vec<(u64, FatPage)>) -> anyhow::Result<()> {
     let mut sent = 0;
     for (pn, page) in ht {
