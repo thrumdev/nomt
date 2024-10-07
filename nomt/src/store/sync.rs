@@ -25,7 +25,7 @@ impl Sync {
         panic_on_sync: bool,
     ) -> Self {
         Self {
-            tp: ThreadPool::new(5),
+            tp: ThreadPool::with_name("store-sync".into(), 5),
             sync_seqn,
             bitbox_num_pages,
             bitbox_seed,
