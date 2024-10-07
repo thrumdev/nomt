@@ -85,6 +85,7 @@ impl Sync {
 
         let HtWriteoutData { ht_pages } = bitbox_ht_wd.recv().unwrap();
         bitbox::writeout::write_ht(shared.io_pool.make_handle(), &shared.ht_fd, ht_pages)?;
+        bitbox::writeout::truncate_wal(&shared.wal_fd)?;
 
         beatree.finish_sync(beatree_meta_wd.bbn_index);
 
