@@ -17,7 +17,7 @@ use nomt_core::{
     trie_pos::{ChildNodeIndices, TriePosition},
 };
 use parking_lot::{Mutex, RwLock};
-use std::{fmt, num::NonZeroUsize, sync::Arc};
+use std::{borrow::Cow, fmt, num::NonZeroUsize, sync::Arc};
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
 // of the rootless sub-binary tree stored in a page following this formula:
@@ -184,25 +184,25 @@ impl fmt::Debug for Page {
 /// Given a trie position and a current page corresponding to that trie position (None at the root)
 /// along with a function for synchronously loading a new page, get the page and indices where the
 /// leaf data for a leaf at `trie_pos` should be stored.
-pub fn locate_leaf_data<E>(
+pub fn locate_leaf_data<'a, E>(
     trie_pos: &TriePosition,
-    current_page: Option<(&PageId, &Page)>,
+    current_page: Option<(&PageId, &'a Page)>,
     load: impl Fn(PageId) -> Result<Page, E>,
-) -> Result<(Page, PageId, ChildNodeIndices), E> {
+) -> Result<(Cow<'a, Page>, PageId, ChildNodeIndices), E> {
     Ok(match current_page {
         None => {
             assert!(trie_pos.is_root());
             let page = load(ROOT_PAGE_ID)?;
-            (page, ROOT_PAGE_ID, ChildNodeIndices::from_left(0))
+            (Cow::Owned(page), ROOT_PAGE_ID, ChildNodeIndices::from_left(0))
         }
         Some((page_id, page)) => {
             let depth_in_page = trie_pos.depth_in_page();
             if depth_in_page == DEPTH {
                 let child_page_id = page_id.child_page_id(trie_pos.child_page_index()).unwrap();
                 let child_page = load(child_page_id.clone())?;
-                (child_page, child_page_id, ChildNodeIndices::from_left(0))
+                (Cow::Owned(child_page), child_page_id, ChildNodeIndices::from_left(0))
             } else {
-                (page.clone(), page_id.clone(), trie_pos.child_node_indices())
+                (Cow::Borrowed(page), page_id.clone(), trie_pos.child_node_indices())
             }
         }
     })

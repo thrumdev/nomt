@@ -34,7 +34,7 @@ pub const MAX_PAGE_DEPTH: usize = 42;
 ///  - An ID's child IDs are always less than any sibling IDs to the right of the ID.
 ///
 /// This property lets us refer to sub-trees cleanly with simple ordering statements.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageId {
     path: ArrayVec<u8, MAX_PAGE_DEPTH>,
 }
@@ -66,6 +66,21 @@ impl ChildPageIndex {
 
     pub fn to_u8(self) -> u8 {
         self.0
+    }
+}
+
+impl Clone for PageId {
+    fn clone(&self) -> Self {
+        let mut new_path = ArrayVec::new();
+        unsafe {
+            // SAFETY: values are POD and lengths match.
+            new_path.set_len(self.path.len());
+        }
+
+        new_path.copy_from_slice(&self.path);
+        PageId {
+            path: new_path
+        }
     }
 }
 
