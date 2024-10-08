@@ -41,7 +41,7 @@ pub fn init(params: InitParams) -> Result<()> {
         workload_params.io_workers,
         workload_params.hashtable_buckets,
     );
-    db.execute(None, &mut *init);
+    db.execute(None, &mut *init, None);
 
     Ok(())
 }
@@ -67,16 +67,15 @@ pub fn run(params: RunParams) -> Result<()> {
     );
 
     if params.reset {
-        db.execute(None, &mut *init);
+        db.execute(None, &mut *init, None);
     }
 
     let mut timer = Timer::new(format!("{}", params.backend));
-    if let Some(time_limit) = params.limits.time {
-        let timeout = std::time::Instant::now() + time_limit.into();
-        db.execute_with_timeout(Some(&mut timer), &mut *workload, timeout);
-    } else {
-        db.execute(Some(&mut timer), &mut *workload);
-    }
+    let timeout = params
+        .limits
+        .time
+        .map(|time_limit| std::time::Instant::now() + time_limit.into());
+    db.execute(Some(&mut timer), &mut *workload, timeout);
 
     db.print_metrics();
     timer.print();

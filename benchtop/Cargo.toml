@@ -21,6 +21,7 @@ ruint = { version = "1.12.1" }
 toml = "0.8.12"
 serde = "1.0.199"
 humantime = "2.1.0"
+rayon = "1.10"
 
 # sov-db
 sov-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }

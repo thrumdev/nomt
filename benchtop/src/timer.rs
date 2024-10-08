@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::hash_map::{Entry, HashMap},
+    rc::Rc,
+};
 
 // At least three spans are expected to be measured
 // + `workload`
@@ -38,6 +42,27 @@ impl Timer {
         RecordSpan {
             h: h.clone(),
             start: std::time::Instant::now(),
+        }
+    }
+
+    pub fn freeze(self) -> FrozenTimer {
+        FrozenTimer {
+            spans: self
+                .spans
+                .into_iter()
+                .map(|(name, histogram)| (name, Rc::into_inner(histogram).unwrap().into_inner()))
+                .collect(),
+        }
+    }
+
+    pub fn add(&mut self, other: FrozenTimer) {
+        for (span_name, new_data) in other.spans {
+            match self.spans.entry(span_name) {
+                Entry::Occupied(e) => e.get().borrow_mut().add(new_data).unwrap(),
+                Entry::Vacant(e) => {
+                    let _ = e.insert(Rc::new(RefCell::new(new_data)));
+                }
+            }
         }
     }
 
@@ -94,6 +119,10 @@ impl Timer {
             )
         }
     }
+}
+
+pub struct FrozenTimer {
+    spans: HashMap<&'static str, hdrhistogram::Histogram<u64>>,
 }
 
 pub fn pretty_display_ns(ns: u64) -> String {
