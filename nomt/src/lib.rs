@@ -219,7 +219,8 @@ impl Nomt {
     /// performed by the application, updating the trie and creating a [`Witness`], allowing to
     /// re-execute the same operations without having access to the full trie.
     ///
-    /// Only a single session could be created at a time.
+    /// Only a single session may be created at a time. Creating a new session without dropping or
+    /// committing an existing open session will lead to a panic.
     pub fn begin_session(&self) -> Session {
         let prev = self
             .session_cnt
@@ -339,9 +340,9 @@ impl Session {
     /// Synchronously read the value stored at the given key.
     ///
     /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
-    pub fn tentative_read_slot(&mut self, path: KeyPath) -> anyhow::Result<Option<Value>> {
+    pub fn tentative_read_slot(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         // UNWRAP: committer always `Some` during lifecycle.
-        self.committer.as_mut().unwrap().warm_up(path);
+        self.committer.as_ref().unwrap().warm_up(path);
 
         let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
 
@@ -350,9 +351,9 @@ impl Session {
     }
 
     /// Signals that the given key is going to be written to.
-    pub fn tentative_write_slot(&mut self, path: KeyPath) {
+    pub fn tentative_write_slot(&self, path: KeyPath) {
         // UNWRAP: committer always `Some` during lifecycle.
-        self.committer.as_mut().unwrap().warm_up(path);
+        self.committer.as_ref().unwrap().warm_up(path);
     }
 }
 
@@ -390,5 +391,16 @@ fn compute_root_node<H: NodeHasher>(page_cache: &PageCache) -> Node {
         })
     } else {
         H::hash_internal(&InternalData { left, right })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn session_is_sync() {
+        fn is_sync<T: Sync>() {}
+
+        is_sync::<crate::Session>();
     }
 }

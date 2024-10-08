@@ -11,7 +11,7 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 
-use std::sync::{Arc, Barrier};
+use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Barrier};
 
 use crate::{
     io::PagePool,
@@ -120,7 +120,7 @@ impl CommitPool {
             worker_tp: self.worker_tp.clone(),
             workers,
             page_cache,
-            worker_round_robin: 0,
+            worker_round_robin: AtomicUsize::new(0),
         }
     }
 }
@@ -132,17 +132,14 @@ pub struct Committer {
     worker_tp: ThreadPool,
     page_cache: PageCache,
     workers: Vec<WorkerHandle>,
-    worker_round_robin: usize,
+    worker_round_robin: AtomicUsize,
 }
 
 impl Committer {
     /// Warm up the given key-path by pre-fetching the relevant pages.
-    pub fn warm_up(&mut self, key_path: KeyPath) {
-        let worker = self.worker_round_robin;
-        self.worker_round_robin += 1;
-        self.worker_round_robin %= self.workers.len();
-
-        let _ = self.workers[worker]
+    pub fn warm_up(&self, key_path: KeyPath) {
+        let worker = self.worker_round_robin.fetch_add(1, Ordering::Relaxed);
+        let _ = self.workers[worker % self.workers.len()]
             .warmup_tx
             .send(WarmUpCommand { key_path });
     }

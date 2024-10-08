@@ -23,7 +23,7 @@ impl NomtDB {
         //
         // Writes do not occur immediately, instead,
         // they are cached and applied all at once later on
-        let mut session = nomt.begin_session();
+        let session = nomt.begin_session();
 
         // Here we will move the data saved under b"key1" to b"key2" and deletes it
         //

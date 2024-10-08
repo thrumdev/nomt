@@ -13,7 +13,7 @@ fuzz_target!(|run: Run| {
     for call in run.calls.calls {
         match call {
             NomtCall::BeginSession { session_calls } => {
-                let mut session = db.begin_session();
+                let session = db.begin_session();
                 for session_call in session_calls {
                     match session_call {
                         SessionCall::TentativeRead {

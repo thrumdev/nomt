@@ -15,7 +15,7 @@ fn main() -> Result<()> {
 
     // Instantiate a new Session object to handle read and write operations
     // and generate a Witness later on
-    let mut session = nomt.begin_session();
+    let session = nomt.begin_session();
 
     // Reading a key from the database
     let key_path = sha2::Sha256::digest(b"key").into();
