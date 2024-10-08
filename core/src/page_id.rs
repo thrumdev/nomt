@@ -78,9 +78,7 @@ impl Clone for PageId {
         }
 
         new_path.copy_from_slice(&self.path);
-        PageId {
-            path: new_path
-        }
+        PageId { path: new_path }
     }
 }
 
