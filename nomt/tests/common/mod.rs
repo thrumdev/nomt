@@ -3,7 +3,6 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     mem,
     path::{Path, PathBuf},
-    rc::Rc,
 };
 
 pub fn account_path(id: u64) -> KeyPath {
@@ -77,7 +76,6 @@ impl Test {
 
     pub fn write(&mut self, id: u64, value: Option<Vec<u8>>) {
         let path = account_path(id);
-        let value = value.map(Rc::new);
         match self.access.entry(path) {
             Entry::Occupied(mut o) => {
                 o.get_mut().write(value);
@@ -90,10 +88,10 @@ impl Test {
     }
 
     #[allow(unused)]
-    pub fn read(&mut self, id: u64) -> Option<Rc<Vec<u8>>> {
+    pub fn read(&mut self, id: u64) -> Option<Vec<u8>> {
         let path = account_path(id);
         match self.access.entry(path) {
-            Entry::Occupied(o) => o.get().last_value().cloned(),
+            Entry::Occupied(o) => o.get().last_value().map(|v| v.to_vec()),
             Entry::Vacant(v) => {
                 let value = self
                     .session

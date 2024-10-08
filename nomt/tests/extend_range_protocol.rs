@@ -50,7 +50,7 @@ fn insert_delete_and_read(name: impl AsRef<Path>, to_delete: Vec<u8>) {
             let res = t.read(k as u64);
             assert_eq!(None, res);
         } else {
-            let value = std::rc::Rc::new(vec![k; value_size]);
+            let value = vec![k; value_size];
             let res = t.read(k as u64);
             assert_eq!(Some(value), res);
         }
