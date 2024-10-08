@@ -8,6 +8,7 @@ fn wal_recovery_test() {
     let mut t = Test::new_with_params(
         "wal_add_remove_1000",
         /* commit_concurrency */ 1,
+        /* hashtable_buckets */ 1000000,
         /* panic_on_sync */ true,
         /* clean */ true,
     );
@@ -26,6 +27,7 @@ fn wal_recovery_test() {
     let mut t = Test::new_with_params(
         "wal_add_remove_1000",
         /* commit_concurrency */ 1,
+        /* hashtable_buckets */ 1000000,
         /* panic_on_sync */ false,
         /* clean */ false,
     );

@@ -44,12 +44,13 @@ pub struct Test {
 
 impl Test {
     pub fn new(name: impl AsRef<Path>) -> Self {
-        Self::new_with_params(name, 1, false, true)
+        Self::new_with_params(name, 1, 64_000, false, true)
     }
 
     pub fn new_with_params(
         name: impl AsRef<Path>,
         commit_concurrency: usize,
+        hashtable_buckets: u32,
         panic_on_sync: bool,
         cleanup_dir: bool,
     ) -> Self {
@@ -64,6 +65,7 @@ impl Test {
         let mut o = opts(path);
         o.panic_on_sync(panic_on_sync);
         o.bitbox_seed([0; 16]);
+        o.hashtable_buckets(hashtable_buckets);
         o.commit_concurrency(commit_concurrency);
         let nomt = Nomt::open(o).unwrap();
         let session = nomt.begin_session();
@@ -74,9 +76,12 @@ impl Test {
         }
     }
 
-    pub fn write(&mut self, id: u64, value: Option<Vec<u8>>) {
-        let path = account_path(id);
-        match self.access.entry(path) {
+    pub fn write_id(&mut self, id: u64, value: Option<Vec<u8>>) {
+        self.write(account_path(id), value);
+    }
+
+    pub fn write(&mut self, key: KeyPath, value: Option<Vec<u8>>) {
+        match self.access.entry(key) {
             Entry::Occupied(mut o) => {
                 o.get_mut().write(value);
             }
@@ -84,20 +89,22 @@ impl Test {
                 v.insert(KeyReadWrite::Write(value));
             }
         }
-        self.session.as_mut().unwrap().tentative_write_slot(path);
+        self.session.as_mut().unwrap().tentative_write_slot(key);
     }
 
-    #[allow(unused)]
-    pub fn read(&mut self, id: u64) -> Option<Vec<u8>> {
-        let path = account_path(id);
-        match self.access.entry(path) {
+    pub fn read_id(&mut self, id: u64) -> Option<Vec<u8>> {
+        self.read(account_path(id))
+    }
+
+    pub fn read(&mut self, key: KeyPath) -> Option<Vec<u8>> {
+        match self.access.entry(key) {
             Entry::Occupied(o) => o.get().last_value().map(|v| v.to_vec()),
             Entry::Vacant(v) => {
                 let value = self
                     .session
                     .as_mut()
                     .unwrap()
-                    .tentative_read_slot(path)
+                    .tentative_read_slot(key)
                     .unwrap();
                 v.insert(KeyReadWrite::Read(value.clone()));
                 value
@@ -116,12 +123,12 @@ impl Test {
 }
 
 pub fn read_balance(t: &mut Test, id: u64) -> Option<u64> {
-    t.read(id)
+    t.read_id(id)
         .map(|v| u64::from_le_bytes(v[..].try_into().unwrap()))
 }
 
 pub fn set_balance(t: &mut Test, id: u64, balance: u64) {
-    t.write(id, Some(balance.to_le_bytes().to_vec()));
+    t.write_id(id, Some(balance.to_le_bytes().to_vec()));
 }
 
 #[allow(unused)]
@@ -137,5 +144,5 @@ pub fn transfer(t: &mut Test, from: u64, to: u64, amount: u64) {
 
 #[allow(unused)]
 pub fn kill(t: &mut Test, from: u64) {
-    t.write(from, None);
+    t.write_id(from, None);
 }

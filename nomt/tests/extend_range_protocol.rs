@@ -30,28 +30,28 @@ const KEYS_AND_VALUE_SIZES: [(u8, usize); 16] =[
 // and all the remaining keys to the next worker. This makes possible
 // to expect the type of communication between the two workers
 fn insert_delete_and_read(name: impl AsRef<Path>, to_delete: Vec<u8>) {
-    let mut t = Test::new_with_params(name, 2, false, true);
+    let mut t = Test::new_with_params(name, 2, 64_000, false, true);
 
     // insert values
     for (k, value_size) in KEYS_AND_VALUE_SIZES.clone() {
-        t.write(k as u64, Some(vec![k; value_size]));
+        t.write_id(k as u64, Some(vec![k; value_size]));
     }
     t.commit();
 
     // delete values
     for k in to_delete.clone() {
-        t.write(k as u64, None);
+        t.write_id(k as u64, None);
     }
     t.commit();
 
     // read values
     for (k, value_size) in KEYS_AND_VALUE_SIZES.clone() {
         if to_delete.contains(&k) {
-            let res = t.read(k as u64);
+            let res = t.read_id(k as u64);
             assert_eq!(None, res);
         } else {
             let value = vec![k; value_size];
-            let res = t.read(k as u64);
+            let res = t.read_id(k as u64);
             assert_eq!(Some(value), res);
         }
     }
