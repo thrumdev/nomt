@@ -7,7 +7,6 @@ use io::PagePool;
 use metrics::{Metric, Metrics};
 use std::{
     mem,
-    rc::Rc,
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -53,7 +52,7 @@ mod io;
 const MAX_COMMIT_CONCURRENCY: usize = 64;
 
 /// A full value stored within the trie.
-pub type Value = Rc<Vec<u8>>;
+pub type Value = Vec<u8>;
 
 struct Shared {
     /// The current root of the trie.
@@ -118,10 +117,10 @@ pub enum KeyReadWrite {
 
 impl KeyReadWrite {
     /// Returns the last recorded value for the slot.
-    pub fn last_value(&self) -> Option<&Value> {
+    pub fn last_value(&self) -> Option<&[u8]> {
         match self {
             KeyReadWrite::Read(v) | KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) => {
-                v.as_ref()
+                v.as_deref()
             }
         }
     }
@@ -300,10 +299,10 @@ impl Nomt {
 
         let mut tx = self.store.new_tx();
         for (path, read_write) in actuals {
-            if let KeyReadWrite::Write(ref value) | KeyReadWrite::ReadThenWrite(_, ref value) =
+            if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) =
                 read_write
             {
-                tx.write_value(path, value.as_ref().map(|x| &x[..]));
+                tx.write_value(path, value);
             }
         }
 
@@ -348,7 +347,7 @@ impl Session {
 
         let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
 
-        let value = self.store.load_value(path)?.map(Rc::new);
+        let value = self.store.load_value(path)?;
         Ok(value)
     }
 

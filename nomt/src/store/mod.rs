@@ -215,8 +215,8 @@ pub struct Transaction {
 
 impl Transaction {
     /// Write a value to flat storage.
-    pub fn write_value(&mut self, path: KeyPath, value: Option<&[u8]>) {
-        self.batch.push((path, value.map(|v| v.to_vec())))
+    pub fn write_value(&mut self, path: KeyPath, value: Option<Vec<u8>>) {
+        self.batch.push((path, value))
     }
 
     /// Write a page to storage in its entirety.

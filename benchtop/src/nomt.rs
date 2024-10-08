@@ -89,7 +89,7 @@ impl<'a> Transaction for Tx<'a> {
 
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let key_path = sha2::Sha256::digest(key).into();
-        let value = value.map(|v| std::rc::Rc::new(v.to_vec()));
+        let value = value.map(|v| v.to_vec());
 
         match self.access.entry(key_path) {
             Entry::Occupied(mut o) => {
