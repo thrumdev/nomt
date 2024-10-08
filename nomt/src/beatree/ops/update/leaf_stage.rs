@@ -22,8 +22,7 @@ use super::{
 };
 
 struct ExtendRangeResponse {
-    deleted: Vec<(Key, ChangedLeafEntry)>,
-    new_base: Option<(Key, LeafNode, Option<Key>)>,
+    changed: Vec<(Key, ChangedLeafEntry)>,
     new_high_range: Option<Key>,
     new_right_neighbor: Option<Option<RightNeighbor>>,
 }
@@ -40,14 +39,9 @@ pub struct ChangedLeafEntry {
     next_separator: Option<Key>,
 }
 
-pub enum LeavesTrackerEntry {
-    ChangedLeaf(ChangedLeafEntry),
-    UnchangedRange(SeparatorRange),
-}
-
 #[derive(Default)]
 pub struct LeavesTracker {
-    inner: BTreeMap<Key, LeavesTrackerEntry>,
+    inner: BTreeMap<Key, ChangedLeafEntry>,
     // pending base received from the right worker which will be used as new base
     pending_base: Option<(Key, LeafNode, Option<Key>)>,
     overflow_deleted: Vec<Vec<u8>>,
@@ -55,76 +49,32 @@ pub struct LeavesTracker {
 
 impl LeavesTracker {
     pub fn delete_leaf(&mut self, key: Key, pn: PageNumber, next_separator: Option<Key>) {
-        let entry = self
-            .inner
-            .entry(key)
-            .or_insert(LeavesTrackerEntry::ChangedLeaf(ChangedLeafEntry {
-                deleted: None,
-                inserted: None,
-                next_separator,
-            }));
-
-        let changed_entry = match entry {
-            LeavesTrackerEntry::ChangedLeaf(changed_entry) => changed_entry,
-            LeavesTrackerEntry::UnchangedRange(_) => panic!("TODO"),
-        };
+        let entry = self.inner.entry(key).or_insert(ChangedLeafEntry {
+            deleted: None,
+            inserted: None,
+            next_separator,
+        });
 
         // we can only delete a leaf once.
-        assert!(changed_entry.deleted.is_none());
+        assert!(entry.deleted.is_none());
 
-        changed_entry.deleted.replace(pn);
-        changed_entry.next_separator = next_separator;
+        entry.deleted.replace(pn);
+        entry.next_separator = next_separator;
     }
 
     pub fn insert_leaf(&mut self, key: Key, node: LeafNode, next_separator: Option<Key>) {
-        if let Some(last_entry_next_separator) = self.higher_next_separator() {
-            // there is a range of unchanged leaves
-            if last_entry_next_separator < key {
-                self.insert_range(last_entry_next_separator, Some(key));
-            }
-        }
+        let entry = self.inner.entry(key).or_insert(ChangedLeafEntry {
+            deleted: None,
+            inserted: None,
+            next_separator,
+        });
 
-        let entry = self
-            .inner
-            .entry(key)
-            .or_insert(LeavesTrackerEntry::ChangedLeaf(ChangedLeafEntry {
-                deleted: None,
-                inserted: None,
-                next_separator,
-            }));
-
-        let changed_entry = match entry {
-            LeavesTrackerEntry::ChangedLeaf(changed_entry) => changed_entry,
-            LeavesTrackerEntry::UnchangedRange(_) => panic!("TODO"),
-        };
-
-        changed_entry.next_separator = next_separator;
-        changed_entry.inserted.replace(node);
-    }
-
-    pub fn insert_range(&mut self, low: Key, high: Option<Key>) {
-        let res = self.inner.insert(
-            low,
-            LeavesTrackerEntry::UnchangedRange(SeparatorRange {
-                low: Some(low),
-                high,
-            }),
-        );
-        // an unchanged range cannot replace something alredy present
-        assert!(res.is_none());
+        entry.next_separator = next_separator;
+        entry.inserted.replace(node);
     }
 
     fn delete_overflow(&mut self, overflow_cell: &[u8]) {
         self.overflow_deleted.push(overflow_cell.to_vec());
-    }
-
-    fn higher_next_separator(&self) -> Option<Key> {
-        self.inner
-            .last_key_value()
-            .and_then(|(_, entry)| match entry {
-                LeavesTrackerEntry::ChangedLeaf(changed_entry) => changed_entry.next_separator,
-                _ => None,
-            })
     }
 }
 
@@ -337,78 +287,74 @@ fn try_answer_left_neighbor(
     // A modified leaf could be used as a node by the left worker, or we provide a new
     // high range to let the left worker use new fresh leaves
     let mut found_next_node = false;
+    // an unchanged range is given by a difference between the next_separator
+    // of a changed item the the key associated to the next item
     let mut found_unchanged_range = false;
-    let mut new_high_range = worker_params.range.low.clone();
+    let mut new_high_range = None;
 
-    let take = leaves_tracker
+    let mut separator = None;
+    let mut take = leaves_tracker
         .inner
         .iter()
-        .take_while(|(_, entry)| match entry {
-            LeavesTrackerEntry::UnchangedRange(range) => {
-                found_unchanged_range = true;
-                new_high_range = range.high;
-                false
+        .take_while(|(key, entry)| {
+            if let Some(low) = separator {
+                if low < **key {
+                    found_unchanged_range = true;
+                    new_high_range = Some(**key);
+                    return false;
+                }
             }
-            LeavesTrackerEntry::ChangedLeaf(entry) if entry.inserted.is_some() => {
+
+            if entry.inserted.is_some() {
                 found_next_node = true;
                 new_high_range = entry.next_separator.clone();
-                false
+                return false;
             }
-            _ => true,
+
+            separator = entry.next_separator.clone();
+
+            true
         })
         .count();
 
-    // Keep the request pending only if no inserted node has been found or any unchanged range,
-    // and if the worker has not finished with the right worker
-    if !(found_next_node || found_unchanged_range) && !has_finished_workload {
-        *pending_request = Some(request);
-        return;
+    if !(found_next_node || found_unchanged_range) {
+        if has_finished_workload {
+            // separator is None only if leaves_tracker.inner.is_empty
+            // or the last deleted item has next separator = None.
+            // If there are some elements in leaves_tracker.inner
+            // they will be for sure all changes with a deleted leaf
+            // and they will be passed to the left worker
+
+            if let Some(low) = separator {
+                if worker_params.range.high.map_or(true, |high| low < high) {
+                    // special case where there is one unchanged range left,
+                    // which is the last one, up to the worker.range.high
+                    found_unchanged_range = true;
+                }
+            }
+
+            new_high_range = worker_params.range.high;
+        } else {
+            // Keep the request pending only if no inserted node has been found or any unchanged range,
+            // and if the worker has not finished with the right worker
+            *pending_request = Some(request);
+            return;
+        }
     }
 
     // `self.low` and `left.high` are kept equal
     worker_params.range.low = new_high_range;
 
-    let mut deleted = (0..take)
+    if found_next_node {
+        take += 1;
+    }
+
+    let changed = (0..take)
         .map(|_| {
             // UNWRAP: the existance and variant of `take` leaves_tracker items was previously checked
-            leaves_tracker
-                .inner
-                .pop_first()
-                .and_then(|(key, entry)| match entry {
-                    LeavesTrackerEntry::ChangedLeaf(changed_entry) => Some((key, changed_entry)),
-                    _ => None,
-                })
-                .unwrap()
+            leaves_tracker.inner.pop_first().unwrap()
         })
         .collect::<Vec<_>>();
-
-    let new_base = if found_next_node {
-        // UNWRAPs: the entry is already checked to be a ChangedLeaf variant with an inserted leaf
-        let (last_entry_key, mut last_entry) = leaves_tracker
-            .inner
-            .pop_first()
-            .and_then(|(key, entry)| match entry {
-                LeavesTrackerEntry::ChangedLeaf(changed_entry) => Some((key, changed_entry)),
-                _ => None,
-            })
-            .unwrap();
-
-        let base = last_entry.inserted.take().unwrap();
-        let separator = last_entry.next_separator;
-
-        // new_base has also an associated deleted leaf
-        deleted.push((last_entry_key, last_entry));
-
-        Some((last_entry_key, base, separator))
-    } else {
-        None
-    };
-
-    if found_unchanged_range {
-        // remove the unchanged range from the local tracker
-        // UNWRAP: the last entry is already checked to exists and to be an UnchangedRange variant
-        leaves_tracker.inner.pop_first().unwrap();
-    }
 
     let new_right_neighbor = if !(found_next_node || found_unchanged_range) && has_finished_workload
     {
@@ -423,8 +369,7 @@ fn try_answer_left_neighbor(
     request
         .tx
         .send(ExtendRangeResponse {
-            deleted,
-            new_base,
+            changed,
             new_high_range,
             new_right_neighbor,
         })
@@ -443,22 +388,28 @@ fn request_range_extension(worker_params: &mut WorkerParams, leaves_tracker: &mu
     right_neighbor.tx.send(request).unwrap();
 
     // UNWRAP: right neighbor never drops until left neighbor is done.
-    let response = rx.recv().unwrap();
+    let mut response = rx.recv().unwrap();
 
     worker_params.range.high = response.new_high_range;
-    leaves_tracker.pending_base = response.new_base;
-    leaves_tracker.inner.extend(
-        response
-            .deleted
-            .into_iter()
-            .map(|(k, e)| (k, LeavesTrackerEntry::ChangedLeaf(e))),
-    );
+
+    if let Some((last_key, last_changed_entry)) = response.changed.last_mut() {
+        if last_changed_entry.inserted.is_some() {
+            // UNWRAP: the entry has just been checked to have an inserted leaf
+            leaves_tracker.pending_base = Some((
+                *last_key,
+                last_changed_entry.inserted.take().unwrap(),
+                last_changed_entry.next_separator,
+            ));
+        }
+    }
+
+    leaves_tracker.inner.extend(response.changed);
 
     if let Some(new_right_neighbor) = response.new_right_neighbor {
         worker_params.right_neighbor = new_right_neighbor;
         if worker_params.right_neighbor.is_some() {
-            // exhausting the range means we didn't get a node to merge with. try again with
-            // the next right neighbor.
+            // exhausting the range means we didn't get a node to merge with.
+            // try again with the next right neighbor.
             request_range_extension(worker_params, leaves_tracker);
         }
     }
@@ -493,8 +444,11 @@ fn reset_leaf_base(
         };
         leaf_updater.reset_base(Some(base), next_separator);
     } else {
-        if let Some(separator) = leaves_tracker.higher_next_separator() {
-            // skip deleted leaves if provided by the right worker
+        if let Some(separator) = leaves_tracker
+            .inner
+            .last_key_value()
+            .and_then(|(_, entry)| entry.next_separator)
+        {
             if separator > key {
                 key = separator;
             }
@@ -644,14 +598,6 @@ fn run_worker(
         );
     }
 
-    // All the changese has been applied, thus the only unchanged range left
-    // could only be from the last changed next_separator to worker_params.range.high
-    if let Some(low) = leaves_tracker.higher_next_separator() {
-        if worker_params.range.high.map_or(true, |high| low < high) {
-            leaves_tracker.insert_range(low, worker_params.range.high);
-        }
-    }
-
     // Now we are safe to send over our right neighbor to the left one
     // because we're sure to have finished interacting with it
     has_finished_workload = true;
@@ -680,13 +626,5 @@ fn run_worker(
         }
     }
 
-    let changed = leaves_tracker
-        .inner
-        .into_iter()
-        .filter_map(|(key, entry)| match entry {
-            LeavesTrackerEntry::ChangedLeaf(changed_entry) => Some((key, changed_entry)),
-            _ => None,
-        })
-        .collect();
-    (changed, leaves_tracker.overflow_deleted)
+    (leaves_tracker.inner, leaves_tracker.overflow_deleted)
 }
