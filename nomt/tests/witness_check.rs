@@ -19,12 +19,12 @@ fn produced_witness_validity() {
     let (new_root, witness, witnessed) = {
         // read all existing accounts.
         for i in 0..accounts {
-            t.read(i);
+            t.read_id(i);
         }
 
         // read some nonexistent accounts.
         for i in 100..105 {
-            t.read(i);
+            t.read_id(i);
         }
 
         // kill half the existing ones.
