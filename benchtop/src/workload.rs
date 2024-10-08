@@ -12,7 +12,7 @@ use crate::{backend::Transaction, custom_workload, transfer_workload};
 use anyhow::Result;
 
 /// An interface for generating new sets of actions.
-pub trait Workload {
+pub trait Workload: Send {
     /// Run a step of the workload against the given database transaction.
     ///
     /// Workloads may be run repeatedly and should vary from run to run.

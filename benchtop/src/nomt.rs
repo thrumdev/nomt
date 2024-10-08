@@ -41,8 +41,9 @@ impl NomtDB {
     pub fn execute(&self, mut timer: Option<&mut Timer>, workload: &mut dyn Workload) {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
+        let session = self.nomt.begin_session();
         let mut transaction = Tx {
-            session: self.nomt.begin_session(),
+            session: &session,
             access: FxHashMap::default(),
             timer,
         };
@@ -50,13 +51,68 @@ impl NomtDB {
         workload.run_step(&mut transaction);
 
         let Tx {
-            session,
-            access,
-            mut timer,
+            access, mut timer, ..
         } = transaction;
 
         let _timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
         let mut actual_access: Vec<_> = access.into_iter().collect();
+        actual_access.sort_by_key(|(k, _)| *k);
+        self.nomt.commit_and_prove(session, actual_access).unwrap();
+    }
+
+    // note: this is only intended to be used with workloads which are disjoint, i.e. no workload
+    // writes a key which another workload reads. re-implementing BlockSTM or other OCC methods are
+    // beyond the scope of benchtop.
+    pub fn parallel_execute(
+        &self,
+        mut timer: Option<&mut Timer>,
+        thread_pool: &rayon::ThreadPool,
+        workloads: &mut [&mut dyn Workload],
+    ) {
+        let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
+
+        let session = self.nomt.begin_session();
+        let mut results: Vec<Option<_>> = (0..workloads.len()).map(|_| None).collect();
+
+        let use_timer = timer.is_some();
+        thread_pool.in_place_scope(|scope| {
+            for (workload, result) in workloads.into_iter().zip(results.iter_mut()) {
+                let session = &session;
+                scope.spawn(move |_| {
+                    let mut workload_timer = if use_timer {
+                        Some(Timer::new(String::new()))
+                    } else {
+                        None
+                    };
+                    let mut transaction = Tx {
+                        session,
+                        access: FxHashMap::default(),
+                        timer: workload_timer.as_mut(),
+                    };
+                    workload.run_step(&mut transaction);
+                    *result = Some((transaction.access, workload_timer.map(|t| t.freeze())));
+                })
+            }
+        });
+
+        // absorb instrumented times from workload timers.
+        for workload_timer in results
+            .iter_mut()
+            .flatten()
+            .map(|(_, ref mut workload_timer)| workload_timer)
+        {
+            if let (Some(ref mut t), Some(wt)) = (timer.as_mut(), workload_timer.take()) {
+                t.add(wt);
+            }
+        }
+
+        let _timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
+        let mut actual_access: Vec<_> = results
+            .into_iter()
+            .flatten()
+            .map(|(access, _)| access)
+            .flatten()
+            .collect();
         actual_access.sort_by_key(|(k, _)| *k);
         self.nomt.commit_and_prove(session, actual_access).unwrap();
     }
@@ -68,7 +124,7 @@ impl NomtDB {
 
 struct Tx<'a> {
     timer: Option<&'a mut Timer>,
-    session: Session,
+    session: &'a Session,
     access: FxHashMap<KeyPath, KeyReadWrite>,
 }
 

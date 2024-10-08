@@ -52,27 +52,18 @@ pub enum DB {
 }
 
 impl DB {
-    /// Execute a workload repeatedly until done.
-    pub fn execute(&mut self, mut timer: Option<&mut Timer>, workload: &mut dyn Workload) {
-        while !workload.is_done() {
-            let timer = timer.as_mut().map(|x| &mut **x);
-            match self {
-                DB::Sov(db) => db.execute(timer, workload),
-                DB::SpTrie(db) => db.execute(timer, workload),
-                DB::Nomt(db) => db.execute(timer, workload),
-            }
-        }
-    }
-
     /// Execute a workload repeatedly until done or a time limit is reached.
-    pub fn execute_with_timeout(
+    pub fn execute(
         &mut self,
         mut timer: Option<&mut Timer>,
         workload: &mut dyn Workload,
-        timeout: std::time::Instant,
+        timeout: Option<std::time::Instant>,
     ) {
         while !workload.is_done() {
-            if std::time::Instant::now() > timeout {
+            if timeout
+                .as_ref()
+                .map_or(false, |t| std::time::Instant::now() > *t)
+            {
                 break;
             }
             let timer = timer.as_deref_mut();
@@ -82,6 +73,38 @@ impl DB {
                 DB::Nomt(db) => db.execute(timer, workload),
             }
         }
+    }
+
+    /// Execute several workloads in parallel, repeatedly, until all done or a time limit is reached.
+    ///
+    /// Only works with the NOMT backend.
+    pub fn parallel_execute(
+        &mut self,
+        mut timer: Option<&mut Timer>,
+        thread_pool: &rayon::ThreadPool,
+        workloads: &mut [&mut dyn Workload],
+        timeout: Option<std::time::Instant>,
+    ) -> anyhow::Result<()> {
+        while workloads.iter().any(|w| !w.is_done()) {
+            if timeout
+                .as_ref()
+                .map_or(false, |t| std::time::Instant::now() > *t)
+            {
+                break;
+            }
+            let timer = timer.as_deref_mut();
+            match self {
+                DB::Sov(_) => {
+                    anyhow::bail!("parallel execution is only supported with the NOMT backend.")
+                }
+                DB::SpTrie(_) => {
+                    anyhow::bail!("parallel execution is only supported with the NOMT backend.")
+                }
+                DB::Nomt(db) => db.parallel_execute(timer, thread_pool, workloads),
+            }
+        }
+
+        Ok(())
     }
 
     /// Print metrics collected by the Backend if it supports metrics collection
