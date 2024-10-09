@@ -28,48 +28,59 @@ pub fn parse(
     db_size: u64,
     fresh: Option<u8>,
     op_limit: u64,
-) -> Result<(Box<dyn Workload>, Box<dyn Workload>)> {
+    threads: usize,
+) -> Result<(Box<dyn Workload>, Vec<Box<dyn Workload>>)> {
+    fn dyn_vec(v: Vec<impl Workload + 'static>) -> Vec<Box<dyn Workload>> {
+        v.into_iter()
+            .map(|w| Box::new(w) as Box<dyn Workload>)
+            .collect()
+    }
+
     Ok(match name {
         "transfer" => (
             Box::new(transfer_workload::init(db_size)),
-            Box::new(transfer_workload::build(
+            dyn_vec(transfer_workload::build(
                 db_size,
                 workload_size,
                 fresh.unwrap_or(0),
                 op_limit,
+                threads,
             )),
         ),
         "randw" => (
             Box::new(custom_workload::init(db_size)),
-            Box::new(custom_workload::build(
+            dyn_vec(custom_workload::build(
                 0,
                 100,
                 workload_size,
                 fresh.unwrap_or(0),
                 db_size,
                 op_limit,
+                threads,
             )),
         ),
         "randr" => (
             Box::new(custom_workload::init(db_size)),
-            Box::new(custom_workload::build(
+            dyn_vec(custom_workload::build(
                 100,
                 0,
                 workload_size,
                 fresh.unwrap_or(0),
                 db_size,
                 op_limit,
+                threads,
             )),
         ),
         "randrw" => (
             Box::new(custom_workload::init(db_size)),
-            Box::new(custom_workload::build(
+            dyn_vec(custom_workload::build(
                 50,
                 50,
                 workload_size,
                 fresh.unwrap_or(0),
                 db_size,
                 op_limit,
+                threads,
             )),
         ),
         name => anyhow::bail!("invalid workload name: {}", name),

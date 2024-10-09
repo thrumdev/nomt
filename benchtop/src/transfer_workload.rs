@@ -64,24 +64,37 @@ pub fn build(
     workload_size: u64,
     percentage_cold_transfer: u8,
     op_limit: u64,
-) -> TransferWorkload {
-    TransferWorkload {
-        num_accounts,
-        workload_size,
-        runs: 0,
-        percentage_cold_transfer,
-        ops_remaining: op_limit,
-    }
+    threads: usize,
+) -> Vec<TransferWorkload> {
+    let thread_workload_size = workload_size / threads as u64;
+    let num_accounts_step = num_accounts / threads as u64;
+
+    (0..threads)
+        .map(|i| TransferWorkload {
+            start_account: num_accounts_step * i as u64,
+            end_account: if i == threads - 1 {
+                num_accounts
+            } else {
+                num_accounts_step * (i as u64 + 1)
+            },
+            num_accounts,
+            workload_size: thread_workload_size,
+            percentage_cold_transfer,
+            ops_remaining: op_limit / threads as u64,
+        })
+        .collect()
 }
 
 /// A transfer-like workload.
 pub struct TransferWorkload {
+    /// The start of the account range (inclusive) this workload handles.
+    pub start_account: u64,
+    /// The end of the account range (exclusive) this workload handles.
+    pub end_account: u64,
     /// The number of accounts in the system.
     pub num_accounts: u64,
     /// The size of the workload.
     pub workload_size: u64,
-    /// The number of runs performed.
-    pub runs: usize,
     /// The percentage of transfers to make to fresh accounts.
     pub percentage_cold_transfer: u8,
     /// The number of remaining operations before being considered 'done'.
@@ -91,19 +104,22 @@ pub struct TransferWorkload {
 impl Workload for TransferWorkload {
     fn run_step(&mut self, transaction: &mut dyn Transaction) {
         let cold_sends =
-            (self.num_accounts as f64 * (self.percentage_cold_transfer as f64 / 100.0)) as u64;
+            (self.workload_size as f64 * (self.percentage_cold_transfer as f64 / 100.0)) as u64;
         let warm_sends = self.workload_size - cold_sends;
 
-        let mut start_offset =
-            (self.runs * self.workload_size as usize) % self.num_accounts as usize;
-
+        let mut rng = rand::thread_rng();
         for i in 0..self.workload_size {
-            // totally arbitrary choice.
-            let send_account = start_offset as u64;
+            let send_account = rng.gen_range(self.start_account..self.end_account);
             let recv_account = if i < warm_sends {
-                self.num_accounts - start_offset as u64
+                let mut r = rng.gen_range(self.start_account..self.end_account);
+                while r == send_account {
+                    r = rng.gen_range(self.start_account..self.end_account);
+                }
+                r
             } else {
-                rand::thread_rng().gen_range(self.num_accounts * 2..u64::max_value())
+                // odds of two threads generating the same random account here are
+                // incredibly low.
+                rng.gen_range(self.num_accounts..u64::max_value())
             };
 
             let send_balance = decode_balance(
@@ -130,12 +146,9 @@ impl Workload for TransferWorkload {
                 &encode_id(recv_account),
                 Some(&encode_balance(new_recv_balance)),
             );
-
-            start_offset = (start_offset + 1) % self.num_accounts as usize;
         }
 
         self.ops_remaining = self.ops_remaining.saturating_sub(self.workload_size);
-        self.runs += 1;
     }
 
     fn is_done(&self) -> bool {

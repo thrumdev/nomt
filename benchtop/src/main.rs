@@ -33,6 +33,7 @@ pub fn init(params: InitParams) -> Result<()> {
             .unwrap_or(0),
         workload_params.fresh,
         u64::max_value(),
+        1,
     )?;
 
     let mut db = params.backend.instantiate(
@@ -48,7 +49,7 @@ pub fn init(params: InitParams) -> Result<()> {
 
 pub fn run(params: RunParams) -> Result<()> {
     let workload_params = params.workload;
-    let (mut init, mut workload) = workload::parse(
+    let (mut init, mut workloads) = workload::parse(
         workload_params.name.as_str(),
         workload_params.size,
         workload_params
@@ -57,6 +58,7 @@ pub fn run(params: RunParams) -> Result<()> {
             .unwrap_or(0),
         workload_params.fresh,
         params.limits.ops.unwrap_or(u64::max_value()),
+        1,
     )?;
 
     let mut db = params.backend.instantiate(
@@ -75,7 +77,7 @@ pub fn run(params: RunParams) -> Result<()> {
         .limits
         .time
         .map(|time_limit| std::time::Instant::now() + time_limit.into());
-    db.execute(Some(&mut timer), &mut *workload, timeout);
+    db.execute(Some(&mut timer), &mut *workloads[0], timeout);
 
     db.print_metrics();
     timer.print();
