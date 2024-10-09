@@ -82,7 +82,7 @@ impl DB {
         &mut self,
         mut timer: Option<&mut Timer>,
         thread_pool: &rayon::ThreadPool,
-        workloads: &mut [&mut dyn Workload],
+        workloads: &mut [Box<dyn Workload>],
         timeout: Option<std::time::Instant>,
     ) -> anyhow::Result<()> {
         while workloads.iter().any(|w| !w.is_done()) {

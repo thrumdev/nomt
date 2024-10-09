@@ -67,7 +67,7 @@ impl NomtDB {
         &self,
         mut timer: Option<&mut Timer>,
         thread_pool: &rayon::ThreadPool,
-        workloads: &mut [&mut dyn Workload],
+        workloads: &mut [Box<dyn Workload>],
     ) {
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 

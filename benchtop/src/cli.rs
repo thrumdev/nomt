@@ -108,12 +108,17 @@ pub struct WorkloadParams {
     #[clap(value_parser=clap::value_parser!(u8).range(0..64))]
     pub initial_capacity: Option<u8>,
 
-    /// Number of concurrent fetches to perform. Only used with the Nomt backend.
+    /// The number of threads to use in NOMT Merkle commit. Only used with the Nomt backend.
     ///
     /// Default value is 1
-    #[arg(long = "fetch-concurrency", short)]
+    #[arg(long = "commit-concurrency")]
     #[clap(default_value = "1")]
     pub commit_concurrency: usize,
+
+    /// The number of threads to use in executing workloads. Only used with the Nomt backend.
+    #[arg(long = "workload-concurrency")]
+    #[clap(default_value = "1", value_parser=clap::value_parser!(u32).range(1..))]
+    pub workload_concurrency: u32,
 
     /// Number of io_uring instances (or I/O threads on non-Linux). Only used with the Nomt backend.
     ///
