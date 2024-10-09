@@ -34,27 +34,33 @@ fn insert_delete_and_read(name: impl AsRef<Path>, to_delete: Vec<u8>) {
 
     // insert values
     for (k, value_size) in KEYS_AND_VALUE_SIZES.clone() {
-        t.write_id(k as u64, Some(vec![k; value_size]));
+        t.write(key(k), Some(vec![k; value_size]));
     }
     t.commit();
 
     // delete values
     for k in to_delete.clone() {
-        t.write_id(k as u64, None);
+        t.write(key(k), None);
     }
     t.commit();
 
     // read values
     for (k, value_size) in KEYS_AND_VALUE_SIZES.clone() {
         if to_delete.contains(&k) {
-            let res = t.read_id(k as u64);
+            let res = t.read(key(k));
             assert_eq!(None, res);
         } else {
             let value = vec![k; value_size];
-            let res = t.read_id(k as u64);
+            let res = t.read(key(k));
             assert_eq!(Some(value), res);
         }
     }
+}
+
+fn key(id: u8) -> [u8; 32] {
+    let mut key = [0; 32];
+    key[0] = id;
+    key
 }
 
 #[test]
@@ -77,5 +83,5 @@ fn extend_range_protocol_remove_cutoff() {
     insert_delete_and_read(
         "remove_cutoff",
         vec![7, 8, 10, 11, 13, 15, 16, 17, 18, 19, 20],
-    )
+    );
 }
