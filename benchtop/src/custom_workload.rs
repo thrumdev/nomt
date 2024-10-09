@@ -1,6 +1,5 @@
 use crate::{backend::Transaction, workload::Workload};
-use rand::{Rng, SeedableRng as _};
-use std::time::{SystemTime, UNIX_EPOCH};
+use rand::Rng;
 
 #[derive(Clone)]
 pub struct RwInit {
@@ -44,7 +43,7 @@ fn encode_id(id: u64) -> [u8; 8] {
     id.to_be_bytes()
 }
 
-/// Build a RwWorkload.
+/// Build N `RwWorkload`s, one for each thread.
 pub fn build(
     reads: u8,
     writes: u8,
@@ -52,15 +51,26 @@ pub fn build(
     fresh: u8,
     db_size: u64,
     op_limit: u64,
-) -> RwWorkload {
-    RwWorkload {
-        reads,
-        writes,
-        workload_size,
-        fresh,
-        db_size,
-        ops_remaining: op_limit,
-    }
+    threads: usize,
+) -> Vec<RwWorkload> {
+    let thread_workload_size = workload_size / threads as u64;
+    let db_step = db_size / threads as u64;
+
+    (0..threads)
+        .map(|i| RwWorkload {
+            reads,
+            writes,
+            fresh,
+            workload_size: if i == threads - 1 {
+                thread_workload_size + workload_size % threads as u64
+            } else {
+                thread_workload_size
+            },
+            db_size: db_step,
+            db_start: db_step * i as u64,
+            ops_remaining: op_limit / threads as u64,
+        })
+        .collect()
 }
 
 // The read-write workload will follow these rules:
@@ -68,13 +78,16 @@ pub fn build(
 // 2. The DB size indicates the number of entries in the database.
 // 3. The workload size represents the total number of operations, where reads and writes
 //     are numbers that need to sum to 100 and represent a percentage of the total size.
-// 4. Fresh indicates the percentage of reads and writes that will be performed on non
+// 4. Fresh indicates the percentage of reads and writes that will be performed on
 //     non-existing keys
 pub struct RwWorkload {
     pub reads: u8,
     pub writes: u8,
     pub workload_size: u64,
     pub fresh: u8,
+    // the first account in the DB used by this workload
+    pub db_start: u64,
+    // the number of accounts in the DB owned by this workload
     pub db_size: u64,
     pub ops_remaining: u64,
 }
@@ -91,15 +104,7 @@ impl Workload for RwWorkload {
         let n_reads_fresh = fresh(n_reads);
         let n_writes_fresh = fresh(n_writes);
 
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("no time?")
-            .as_nanos()
-            .to_le_bytes()[0..16]
-            .try_into()
-            .unwrap();
-
-        let mut rng = rand_pcg::Lcg64Xsh32::from_seed(seed);
+        let mut rng = rand::thread_rng();
 
         let key_range = std::cmp::max(self.db_size, 1);
         for i in 0..n_reads {
@@ -110,7 +115,7 @@ impl Workload for RwWorkload {
                 transaction.read(&rand_key(&mut rng))
             } else {
                 // read already existing key
-                let key = rng.gen_range(0..key_range);
+                let key = rng.gen_range(self.db_start..self.db_start + key_range);
                 transaction.read(&encode_id(key))
             };
         }
@@ -122,7 +127,7 @@ impl Workload for RwWorkload {
                 transaction.write(&rand_key(&mut rng), Some(&value));
             } else {
                 // substitute key
-                let key = rng.gen_range(0..key_range);
+                let key = rng.gen_range(self.db_start..self.db_start + key_range);
                 transaction.write(&encode_id(key), Some(&value));
             };
         }
