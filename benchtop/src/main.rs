@@ -58,7 +58,7 @@ pub fn run(params: RunParams) -> Result<()> {
             .unwrap_or(0),
         workload_params.fresh,
         params.limits.ops.unwrap_or(u64::max_value()),
-        1,
+        workload_params.workload_concurrency as usize,
     )?;
 
     let mut db = params.backend.instantiate(
@@ -77,7 +77,16 @@ pub fn run(params: RunParams) -> Result<()> {
         .limits
         .time
         .map(|time_limit| std::time::Instant::now() + time_limit.into());
-    db.execute(Some(&mut timer), &mut *workloads[0], timeout);
+
+    if workload_params.workload_concurrency == 1 {
+        db.execute(Some(&mut timer), &mut *workloads[0], timeout);
+    } else {
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .thread_name(|_| "benchtop-workload".into())
+            .num_threads(workload_params.workload_concurrency as usize)
+            .build()?;
+        db.parallel_execute(Some(&mut timer), &thread_pool, &mut workloads, timeout)?;
+    }
 
     db.print_metrics();
     timer.print();
