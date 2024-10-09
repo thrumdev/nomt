@@ -7,8 +7,9 @@ use std::{
     mem,
     ops::DerefMut,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+use parking_lot::{Mutex, RwLock};
 use threadpool::ThreadPool;
 
 use crate::io::{page_pool::FatPage, IoPool, PagePool};
@@ -36,7 +37,7 @@ pub type Key = [u8; 32];
 
 #[derive(Clone)]
 pub struct Tree {
-    shared: Arc<Mutex<Shared>>,
+    shared: Arc<RwLock<Shared>>,
     sync: Arc<Mutex<Sync>>,
 }
 
@@ -131,14 +132,14 @@ impl Tree {
         };
 
         Ok(Tree {
-            shared: Arc::new(Mutex::new(shared)),
+            shared: Arc::new(RwLock::new(shared)),
             sync: Arc::new(Mutex::new(sync)),
         })
     }
 
     /// Lookup a key in the btree.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.read();
 
         // First look up in the primary staging which contains the most recent changes.
         if let Some(val) = shared.primary_staging.get(&key) {
@@ -164,7 +165,7 @@ impl Tree {
         if changeset.is_empty() {
             return;
         }
-        let mut inner = self.shared.lock().unwrap();
+        let mut inner = self.shared.write();
         let staging = &mut inner.primary_staging;
         for (key, value) in changeset {
             staging.insert(key, value);
@@ -180,14 +181,14 @@ impl Tree {
         // That will exclude any other syncs from happening. This is a long running operation.
         //
         // Note the ordering of taking locks is important.
-        let mut sync = self.sync.lock().unwrap();
+        let mut sync = self.sync.lock();
 
         // Take the shared lock. Briefly.
         let staged_changeset;
         let mut bbn_index;
         let page_pool;
         {
-            let mut shared = self.shared.lock().unwrap();
+            let mut shared = self.shared.write();
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
@@ -277,7 +278,7 @@ impl Tree {
 
     pub fn finish_sync(&self, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
-        let mut inner = self.shared.lock().unwrap();
+        let mut inner = self.shared.write();
         inner.secondary_staging = None;
         inner.bbn_index = bbn_index;
     }
