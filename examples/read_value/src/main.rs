@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nomt::{Nomt, Options};
+use nomt::{KeyReadWrite, Nomt, Options};
 use sha2::Digest;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
@@ -10,7 +10,7 @@ fn main() -> Result<()> {
     opts.path(NOMT_DB_FOLDER);
     opts.commit_concurrency(1);
 
-    // Open nomt database, it will create the folder if it does not exist
+    // Open nomt database. This will create the folder if it does not exist
     let nomt = Nomt::open(opts)?;
 
     // Instantiate a new Session object to handle read and write operations
@@ -19,7 +19,13 @@ fn main() -> Result<()> {
 
     // Reading a key from the database
     let key_path = sha2::Sha256::digest(b"key").into();
-    let _value = session.tentative_read_slot(key_path)?;
+    let value = session.read(key_path)?;
+
+    // Even though this key is only being read, we ask NOMT to warm up the on-disk data because
+    // we will prove the read.
+    session.warm_up(key_path);
+
+    let _witness = nomt.commit_and_prove(session, vec![(key_path, KeyReadWrite::Read(value))])?;
 
     Ok(())
 }

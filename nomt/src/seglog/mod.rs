@@ -266,7 +266,7 @@ impl SegmentedLog {
     /// Prunes segments that lie outside of the new live range, i.e. deletes the old segments.
     ///
     /// This function updates the live range.
-    /// 
+    ///
     /// It's possible to return remove all items from the log, i.e. to reset the log to an empty
     /// state, by setting the new live end to zero. That would update the live range to `(0, 0)`.
     ///

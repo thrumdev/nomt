@@ -1,15 +1,8 @@
 use allocator::{PageNumber, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::{BranchNode, BRANCH_NODE_SIZE};
-use std::{
-    collections::BTreeMap,
-    fs::File,
-    mem,
-    ops::DerefMut,
-    path::Path,
-    sync::Arc,
-};
 use parking_lot::{Mutex, RwLock};
+use std::{collections::BTreeMap, fs::File, mem, ops::DerefMut, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::io::{page_pool::FatPage, IoPool, PagePool};

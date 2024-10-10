@@ -89,7 +89,7 @@ impl Test {
                 v.insert(KeyReadWrite::Write(value));
             }
         }
-        self.session.as_mut().unwrap().tentative_write_slot(key);
+        self.session.as_mut().unwrap().warm_up(key);
     }
 
     pub fn read_id(&mut self, id: u64) -> Option<Vec<u8>> {
@@ -100,12 +100,9 @@ impl Test {
         match self.access.entry(key) {
             Entry::Occupied(o) => o.get().last_value().map(|v| v.to_vec()),
             Entry::Vacant(v) => {
-                let value = self
-                    .session
-                    .as_mut()
-                    .unwrap()
-                    .tentative_read_slot(key)
-                    .unwrap();
+                let session = self.session.as_mut().unwrap();
+                let value = session.read(key).unwrap();
+                session.warm_up(key);
                 v.insert(KeyReadWrite::Read(value.clone()));
                 value
             }

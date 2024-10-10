@@ -242,9 +242,7 @@ impl Nomt {
     /// Commit the transaction and returns the new root.
     ///
     /// The actuals are a list of key paths and the corresponding read/write operations. The list
-    /// must be sorted by the key paths in ascending order. The key paths must be unique. For every
-    /// key in the actuals, the function [`Session::tentative_read_slot`] or
-    /// [`Session::tentative_write_slot`] must be called before committing.
+    /// must be sorted by the key paths in ascending order. The key paths must be unique.
     pub fn commit(
         &self,
         session: Session,
@@ -260,9 +258,7 @@ impl Nomt {
     /// Commit the transaction and create a proof for the given session. Also, returns the new root.
     ///
     /// The actuals are a list of key paths and the corresponding read/write operations. The list
-    /// must be sorted by the key paths in ascending order. The key paths must be unique. For every
-    /// key in the actuals, the function [`Session::tentative_read_slot`] or
-    /// [`Session::tentative_write_slot`] must be called before committing.
+    /// must be sorted by the key paths in ascending order. The key paths must be unique.
     pub fn commit_and_prove(
         &self,
         session: Session,
@@ -337,23 +333,28 @@ pub struct Session {
 }
 
 impl Session {
-    /// Synchronously read the value stored at the given key.
+    /// Signal to the backend to warm up the merkle paths and b-tree pages for a key, so they are
+    /// ready by the time you commit the session.
     ///
-    /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
-    pub fn tentative_read_slot(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
+    /// This should be called for every logical write within the session, as well as every logical
+    /// read if you expect to generate a merkle proof for the session. If you do not expect to
+    /// prove this session, you can skip calling this for reads, but still need to warm up logical
+    /// writes.
+    ///
+    /// The purpose of warming up is to move I/O out of the critical path of committing a
+    /// session to maximize throughput.
+    /// There is no correctness issue with doing too many warm-ups, but there is a cost for I/O.
+    pub fn warm_up(&self, path: KeyPath) {
         // UNWRAP: committer always `Some` during lifecycle.
         self.committer.as_ref().unwrap().warm_up(path);
-
-        let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
-
-        let value = self.store.load_value(path)?;
-        Ok(value)
     }
 
-    /// Signals that the given key is going to be written to.
-    pub fn tentative_write_slot(&self, path: KeyPath) {
-        // UNWRAP: committer always `Some` during lifecycle.
-        self.committer.as_ref().unwrap().warm_up(path);
+    /// Synchronously read the value stored under the given key.
+    ///
+    /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
+    pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
+        let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
+        self.store.load_value(path)
     }
 }
 

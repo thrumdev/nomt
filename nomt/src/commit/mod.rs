@@ -11,7 +11,10 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Barrier};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Barrier,
+};
 
 use crate::{
     io::PagePool,
