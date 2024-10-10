@@ -76,6 +76,11 @@ impl LeavesTracker {
     fn delete_overflow(&mut self, overflow_cell: &[u8]) {
         self.overflow_deleted.push(overflow_cell.to_vec());
     }
+
+    #[cfg(test)]
+    pub fn get(&self, key: Key) -> Option<&ChangedLeafEntry> {
+        self.inner.get(&key)
+    }
 }
 
 fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNumber)> {
