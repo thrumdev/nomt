@@ -70,7 +70,7 @@ impl Timer {
         let h = self
             .spans
             .get("workload")
-            .ok_or(anyhow::anyhow!("`workload` span not recordered"))?;
+            .ok_or(anyhow::anyhow!("`workload` span not recorded"))?;
 
         Ok(h.borrow()
             .iter_recorded()
@@ -83,12 +83,12 @@ impl Timer {
         Ok(self
             .spans
             .get("workload")
-            .ok_or(anyhow::anyhow!("`workload` span not recordered"))?
+            .ok_or(anyhow::anyhow!("`workload` span not recorded"))?
             .borrow()
             .mean() as u64)
     }
 
-    pub fn print(&mut self) {
+    pub fn print(&mut self, workload_size: u64) {
         println!("{}", self.name);
 
         let expected_spans = ["workload", "read", "commit_and_prove"];
@@ -104,6 +104,11 @@ impl Timer {
                 ),
                 None => println!("{} not measured", span_name),
             };
+        }
+
+        if let Ok(workload_mean_ns) = self.get_mean_workload_duration() {
+            let ops_per_second = workload_size as f64 / (workload_mean_ns as f64 / 1_000_000_000.0);
+            println!("  mean throughput: {ops_per_second:.1} ops/s");
         }
 
         // print all other measured spans
