@@ -33,16 +33,13 @@ impl NomtDB {
 
         // First, read what is under key_path_1
         //
-        // `tentative_read_slot` will immediately return the value present in the database
-        let value = session.tentative_read_slot(key_path_1)?;
+        // `read` will immediately return the value present in the database
+        let value = session.read(key_path_1)?;
 
-        // Second, write the value to key_path_2 and delete key_path_1
-        //
-        // As we can observe, the value is not being written at the moment.
-        // NOMT is just advertised here to inform that those keys
-        // will be written during the commit and prove stage
-        session.tentative_write_slot(key_path_1);
-        session.tentative_write_slot(key_path_2);
+        // We are going to perform writes on both key-paths, so we have NOMT warm up the on-disk
+        // data for both.
+        session.warm_up(key_path_1);
+        session.warm_up(key_path_2);
 
         // Retrieve the previous value of the root before committing changes
         let prev_root = nomt.root();

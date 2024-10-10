@@ -132,7 +132,9 @@ impl<'a> Transaction for Tx<'a> {
         match self.access.entry(key_path) {
             Entry::Occupied(o) => o.get().last_value().map(|v| v.to_vec()),
             Entry::Vacant(v) => {
-                let value = self.session.tentative_read_slot(key_path).unwrap();
+                let value = self.session.read(key_path).unwrap();
+                self.session.warm_up(key_path);
+
                 v.insert(KeyReadWrite::Read(value.clone()));
                 value.map(|v| v.to_vec())
             }
@@ -152,6 +154,6 @@ impl<'a> Transaction for Tx<'a> {
             }
         }
 
-        self.session.tentative_write_slot(key_path);
+        self.session.warm_up(key_path);
     }
 }

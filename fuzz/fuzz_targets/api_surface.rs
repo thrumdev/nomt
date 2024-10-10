@@ -20,11 +20,12 @@ fuzz_target!(|run: Run| {
                             key_path,
                             expected_value,
                         } => {
-                            let actual_value = session.tentative_read_slot(key_path).unwrap();
+                            let actual_value = session.read(key_path).unwrap();
+                            session.warm_up(key_path);
                             assert_eq!(actual_value, expected_value);
                         }
                         SessionCall::TentativeWrite { key_path } => {
-                            session.tentative_write_slot(key_path);
+                            session.warm_up(key_path);
                         }
                         SessionCall::CommitAndProve { keys } => {
                             let _ = db.commit_and_prove(session, keys);
