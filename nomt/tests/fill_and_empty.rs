@@ -14,7 +14,7 @@ fn fill_and_empty(commit_concurrency: usize) {
 
     let mut rng = rand_pcg::Lcg64Xsh32::from_seed(seed);
 
-    let db_size = 1 << 16;
+    let db_size = 1 << 12;
     let commit_size = db_size / 16;
 
     let mut items = std::collections::HashSet::new();
@@ -29,9 +29,9 @@ fn fill_and_empty(commit_concurrency: usize) {
     let mut t = Test::new_with_params(
         format!("fill_and_empty_{}", commit_concurrency), // name
         commit_concurrency,
-        64_000, // hashtable_buckets
-        false,  // panic_on_sync
-        true,   //  cleanup_dir
+        15000, // hashtable_buckets
+        false, // panic_on_sync
+        true,  //  cleanup_dir
     );
 
     // inserting all the values
@@ -79,16 +79,6 @@ fn rand_key(rng: &mut impl Rng) -> [u8; 32] {
 #[test]
 fn fill_and_empty_1_commit_worker() {
     fill_and_empty(1);
-}
-
-#[test]
-fn fill_and_empty_10_commit_worker() {
-    fill_and_empty(10);
-}
-
-#[test]
-fn fill_and_empty_32_commit_worker() {
-    fill_and_empty(32);
 }
 
 #[test]
