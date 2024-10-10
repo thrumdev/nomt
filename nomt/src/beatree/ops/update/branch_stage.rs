@@ -37,6 +37,11 @@ impl BranchChanges {
 
         entry.inserted = Some(node);
     }
+
+    #[cfg(test)]
+    pub fn get(&self, key: Key) -> Option<&ChangedBranchEntry> {
+        self.inner.get(&key)
+    }
 }
 
 fn reset_branch_base(
