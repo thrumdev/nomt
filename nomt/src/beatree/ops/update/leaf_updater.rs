@@ -45,6 +45,7 @@ impl BaseLeaf {
     }
 }
 
+#[derive(Debug, PartialEq)]
 enum LeafOp {
     Insert(Key, Vec<u8>, bool),
     Keep(usize, usize),
@@ -425,5 +426,358 @@ impl LeafGauge {
 
     fn body_size(&self) -> usize {
         leaf_node::body_size(self.n, self.value_size_sum)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    lazy_static::lazy_static! {
+        static ref PAGE_POOL: PagePool = PagePool::new();
+    }
+
+    fn key(x: u8) -> Key {
+        [x; 32]
+    }
+
+    fn make_leaf(vs: Vec<(Key, Vec<u8>, bool)>) -> LeafNode {
+        let n = vs.len();
+        let total_value_size = vs.iter().map(|(_, v, _)| v.len()).sum();
+
+        let mut builder = LeafBuilder::new(&PAGE_POOL, n, total_value_size);
+        for (k, v, overflow) in vs {
+            builder.push_cell(k, &v, overflow);
+        }
+
+        builder.finish()
+    }
+
+    #[test]
+    fn is_in_scope() {
+        let mut updater = LeafUpdater::new(PAGE_POOL.clone(), None, None);
+        assert!(updater.is_in_scope(&key(0xff)));
+
+        updater.reset_base(None, Some(key(0xfe)));
+        assert!(updater.is_in_scope(&key(0xf0)));
+        assert!(updater.is_in_scope(&key(0xfd)));
+        assert!(!updater.is_in_scope(&key(0xfe)));
+        assert!(!updater.is_in_scope(&key(0xff)));
+    }
+
+    #[test]
+    fn update() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1000], false),
+            (key(2), vec![1u8; 1000], false),
+            (key(3), vec![1u8; 1000], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(2), Some(vec![2u8; 1000]), false, |_| {});
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+
+        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+
+        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_leaf.n(), 3);
+        assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 1000]);
+        assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[2u8; 1000]);
+        assert_eq!(new_leaf.get(&key(3)).unwrap().0, &[1u8; 1000]);
+    }
+
+    #[test]
+    fn insert_rightsized() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 900], false),
+            (key(2), vec![1u8; 900], false),
+            (key(3), vec![1u8; 900], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(4), Some(vec![1u8; 900]), false, |_| {});
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+
+        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+
+        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_leaf.n(), 4);
+        assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 900]);
+        assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[1u8; 900]);
+        assert_eq!(new_leaf.get(&key(3)).unwrap().0, &[1u8; 900]);
+        assert_eq!(new_leaf.get(&key(4)).unwrap().0, &[1u8; 900]);
+    }
+
+    #[test]
+    fn insert_overflowing() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1200], false),
+            (key(2), vec![1u8; 1200], false),
+            (key(3), vec![1u8; 1200], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(4), Some(vec![1u8; 1200]), false, |_| {});
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+
+        let new_leaf_entry_1 = leaves_tracker.get(key(1)).unwrap();
+        let new_leaf_entry_2 = leaves_tracker.get(separate(&key(2), &key(3))).unwrap();
+
+        let new_leaf_1 = new_leaf_entry_1.inserted.as_ref().unwrap();
+        let new_leaf_2 = new_leaf_entry_2.inserted.as_ref().unwrap();
+
+        assert_eq!(new_leaf_1.n(), 2);
+        assert_eq!(new_leaf_2.n(), 2);
+
+        assert_eq!(new_leaf_1.get(&key(1)).unwrap().0, &[1u8; 1200]);
+        assert_eq!(new_leaf_1.get(&key(2)).unwrap().0, &[1u8; 1200]);
+        assert_eq!(new_leaf_2.get(&key(3)).unwrap().0, &[1u8; 1200]);
+        assert_eq!(new_leaf_2.get(&key(4)).unwrap().0, &[1u8; 1200]);
+    }
+
+    #[test]
+    fn delete() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1200], false),
+            (key(2), vec![1u8; 1200], false),
+            (key(3), vec![1u8; 1200], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(2), None, false, |_| {});
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+
+        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+
+        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_leaf.n(), 2);
+        assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 1200]);
+        assert_eq!(new_leaf.get(&key(3)).unwrap().0, &[1u8; 1200]);
+    }
+
+    #[test]
+    fn delete_underflow_and_merge() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 800], false),
+            (key(2), vec![1u8; 800], false),
+            (key(3), vec![1u8; 800], false),
+        ]);
+
+        let leaf2 = make_leaf(vec![
+            (key(4), vec![1u8; 1100], false),
+            (key(5), vec![1u8; 1100], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            Some(key(4)),
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(2), None, false, |_| {});
+        let DigestResult::NeedsMerge(merge_key) = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+        assert_eq!(merge_key, key(4));
+
+        assert!(leaves_tracker.get(key(1)).is_none());
+
+        updater.reset_base(
+            Some(BaseLeaf {
+                node: leaf2,
+                iter_pos: 0,
+                separator: key(4),
+            }),
+            None,
+        );
+
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+
+        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_leaf.n(), 4);
+        assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 800]);
+        assert_eq!(new_leaf.get(&key(3)).unwrap().0, &[1u8; 800]);
+        assert_eq!(new_leaf.get(&key(4)).unwrap().0, &[1u8; 1100]);
+        assert_eq!(new_leaf.get(&key(5)).unwrap().0, &[1u8; 1100]);
+    }
+
+    #[test]
+    fn delete_calls_with_deleted_overflow() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1200], false),
+            (key(2), vec![1u8; 1200], true),
+            (key(3), vec![1u8; 1200], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        let mut called = false;
+        updater.ingest(key(2), None, false, |_| called = true);
+        assert!(called);
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+    }
+
+    #[test]
+    fn delete_completely() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1200], false),
+            (key(2), vec![1u8; 1200], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(1), None, false, |_| {});
+        updater.ingest(key(2), None, false, |_| {});
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+
+        assert!(leaves_tracker.get(key(1)).is_none());
+    }
+
+    #[test]
+    fn delete_underflow_rightmost() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1200], false),
+            (key(2), vec![1u8; 1200], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(1), None, false, |_| {});
+        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+
+        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_leaf.n(), 1);
+        assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[1u8; 1200]);
+    }
+
+    #[test]
+    fn split_with_underflow() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1800], false),
+            (key(2), vec![1u8; 1800], false),
+            (key(3), vec![1u8; 300], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf,
+                iter_pos: 0,
+                separator: key(1),
+            }),
+            Some(key(5)),
+        );
+        let mut leaves_tracker = LeavesTracker::new();
+
+        updater.ingest(key(4), Some(vec![1; 300]), false, |_| {});
+        let DigestResult::NeedsMerge(merge_key) = updater.digest(&mut leaves_tracker) else {
+            panic!()
+        };
+        assert_eq!(merge_key, key(5));
+
+        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_leaf.n(), 2);
+        assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 1800]);
+        assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[1u8; 1800]);
+
+        assert_eq!(updater.separator_override, Some(separate(&key(2), &key(3))));
+        assert_eq!(
+            updater.ops,
+            vec![
+                LeafOp::Insert(key(3), vec![1u8; 300], false),
+                LeafOp::Insert(key(4), vec![1u8; 300], false),
+            ]
+        );
     }
 }
