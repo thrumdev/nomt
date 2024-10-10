@@ -115,11 +115,10 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator)
 
         let mut chunk_shifted = chunk.to_be_bytes();
 
-        // move bits remainder between chunk bounderies
+        // move bits remainder between chunk boundaries
         match &mut shift {
             Some(Shift::Left(amount)) if chunk_index < n_chunks - 1 => {
-                let mask = !(1 << (8 - *amount) - 1);
-                let remainder_bits = (separator_bytes[(chunk_index + 1) * 8] & mask) >> *amount;
+                let remainder_bits = (separator_bytes[(chunk_index + 1) * 8]) >> (8 - *amount);
                 chunk_shifted[7] |= remainder_bits;
             }
             Some(Shift::Right(_, prev_remainder, curr_remainder)) => {
