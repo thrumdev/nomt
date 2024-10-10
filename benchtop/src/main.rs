@@ -89,7 +89,7 @@ pub fn run(params: RunParams) -> Result<()> {
     }
 
     db.print_metrics();
-    timer.print();
+    timer.print(workload_params.size);
 
     Ok(())
 }
