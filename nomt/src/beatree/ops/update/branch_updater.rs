@@ -91,7 +91,7 @@ impl BranchUpdater {
         self.keep_up_to(None);
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
-        // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
+        // branch of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
         let last_ops_start = self.build_bulk_splitter_branches(branches_tracker);
 
@@ -465,6 +465,10 @@ mod tests {
     use super::*;
     use crate::beatree::ops::bit_ops::separator_len;
 
+    lazy_static::lazy_static! {
+        static ref PAGE_POOL: PagePool = PagePool::new();
+    }
+
     #[test]
     fn gauge_stop_uncompressed() {
         let mut gauge = BranchGauge::new();
@@ -501,5 +505,379 @@ mod tests {
         // stop compression. now we can accept more items without collapsing the prefix.
         gauge.stop_prefix_compression();
         assert!(gauge.body_size_after(unprefixed_key, 256) < BRANCH_NODE_BODY_SIZE);
+    }
+
+    fn key(x: u8) -> Key {
+        prefixed_key(x, 1, 0)
+    }
+
+    fn prefixed_key(prefix_byte: u8, prefix_len: usize, i: usize) -> Key {
+        let mut k = [0u8; 32];
+        for x in k.iter_mut().take(prefix_len) {
+            *x = prefix_byte;
+        }
+        k[prefix_len..prefix_len + 2].copy_from_slice(&(i as u16).to_be_bytes());
+        k
+    }
+
+    fn make_branch(vs: Vec<(Key, usize)>) -> Arc<BranchNode> {
+        let n = vs.len();
+        let prefix_len = if vs.len() == 1 {
+            separator_len(&vs[0].0)
+        } else {
+            prefix_len(&vs[0].0, &vs[vs.len() - 1].0)
+        };
+
+        let branch = BranchNode::new_in(&PAGE_POOL);
+        let mut builder = BranchNodeBuilder::new(branch, n, n, prefix_len);
+        for (k, pn) in vs {
+            builder.push(k, separator_len(&k), pn as u32);
+        }
+
+        Arc::new(builder.finish())
+    }
+
+    fn make_branch_with_body_size_target(
+        mut key: impl FnMut(usize) -> Key,
+        mut body_size_predicate: impl FnMut(usize) -> bool,
+    ) -> Arc<BranchNode> {
+        let mut gauge = BranchGauge::new();
+        let mut items = Vec::new();
+        loop {
+            let next_key = key(items.len());
+            let s_len = separator_len(&next_key);
+
+            let size = gauge.body_size_after(next_key, s_len);
+            if !body_size_predicate(size) {
+                break;
+            }
+            items.push((next_key, items.len()));
+            gauge.ingest(next_key, s_len);
+        }
+
+        make_branch(items)
+    }
+
+    #[test]
+    fn is_in_scope() {
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+        assert!(updater.is_in_scope(&[0xff; 32]));
+
+        updater.reset_base(None, Some([0xfe; 32]));
+        assert!(updater.is_in_scope(&[0xf0; 32]));
+        assert!(updater.is_in_scope(&[0xfd; 32]));
+        assert!(!updater.is_in_scope(&[0xfe; 32]));
+        assert!(!updater.is_in_scope(&[0xff; 32]));
+    }
+
+    #[test]
+    fn update() {
+        let key = |i| prefixed_key(0x11, 5, i);
+        let branch = make_branch((0..500).map(|i| (key(i), i)).collect());
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        updater.ingest(key(250), Some(9999.into()));
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+
+        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_branch.n(), 500);
+        assert_eq!(new_branch.node_pointer(0), 0);
+        assert_eq!(new_branch.node_pointer(499), 499);
+        assert_eq!(new_branch.node_pointer(250), 9999);
+    }
+
+    #[test]
+    fn insert_rightsized() {
+        let key = |i| prefixed_key(0x11, 5, i);
+        let branch = make_branch((0..500).map(|i| (key(i * 2), i)).collect());
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        updater.ingest(key(251), Some(9999.into()));
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+
+        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_branch.n(), 501);
+        assert_eq!(new_branch.node_pointer(0), 0);
+        assert_eq!(new_branch.node_pointer(500), 499);
+        assert_eq!(new_branch.node_pointer(126), 9999);
+    }
+
+    #[test]
+    fn insert_overflowing() {
+        let key = |i| prefixed_key(0x11, 5, i);
+        let branch = make_branch_with_body_size_target(key, |size| size <= BRANCH_NODE_BODY_SIZE);
+        let n = branch.n() as usize;
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        updater.ingest(key(n), Some(PageNumber(n as u32)));
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        let new_branch_entry_1 = branch_tracker.get(key(0)).unwrap();
+        let new_branch_1 = new_branch_entry_1.inserted.as_ref().unwrap();
+
+        let new_branch_entry_2 = branch_tracker.get(key(new_branch_1.n() as usize)).unwrap();
+        let new_branch_2 = new_branch_entry_2.inserted.as_ref().unwrap();
+
+        assert_eq!(new_branch_1.node_pointer(0), 0);
+        assert_eq!(
+            new_branch_2.node_pointer((new_branch_2.n() - 1) as usize),
+            n as u32
+        );
+    }
+
+    #[test]
+    fn delete() {
+        let key = |i| prefixed_key(0x11, 5, i);
+        let branch = make_branch((0..500).map(|i| (key(i), i)).collect());
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        updater.ingest(key(250), None);
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+
+        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_branch.n(), 499);
+        assert_eq!(new_branch.node_pointer(0), 0);
+        assert_eq!(new_branch.node_pointer(498), 499);
+    }
+
+    #[test]
+    fn delete_underflow_and_merge() {
+        let key = |i| prefixed_key(0xff, 5, i);
+        let key2 = |i| prefixed_key(0xff, 6, i);
+
+        let mut rightsized = false;
+        let branch = make_branch_with_body_size_target(key, |size| {
+            let res = !rightsized;
+            rightsized = size >= BRANCH_MERGE_THRESHOLD;
+            res
+        });
+        rightsized = false;
+        let branch2 = make_branch_with_body_size_target(key2, |size| {
+            let res = !rightsized;
+            rightsized = size >= BRANCH_MERGE_THRESHOLD;
+            res
+        });
+
+        let n = branch.n() as usize;
+        let n2 = branch2.n() as usize;
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            Some(key2(0)),
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        // delete all except the first
+        for i in 1..n {
+            updater.ingest(key(i), None);
+        }
+        let DigestResult::NeedsMerge(_) = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        updater.reset_base(
+            Some(BaseBranch {
+                node: branch2,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+
+        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_branch.n() as usize, n2 + 1);
+        assert_eq!(new_branch.node_pointer(0), 0);
+        assert_eq!(new_branch.node_pointer(n2), (n2 - 1) as u32);
+    }
+
+    #[test]
+    fn delete_completely() {
+        let key = |i| prefixed_key(0x11, 5, i);
+        let branch = make_branch((0..500).map(|i| (key(i), i)).collect());
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        for i in 0..500 {
+            updater.ingest(key(i), None);
+        }
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        assert!(branch_tracker.get(key(0)).is_none());
+    }
+
+    #[test]
+    fn delete_underflow_rightmost() {
+        let key = |i| prefixed_key(0x11, 5, i);
+        let branch = make_branch((0..500).map(|i| (key(i), i)).collect());
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        for i in 0..499 {
+            updater.ingest(key(i), None);
+        }
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        let new_branch_entry = branch_tracker.get(key(499)).unwrap();
+
+        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        assert_eq!(new_branch.n(), 1);
+    }
+
+    #[test]
+    fn shared_prefix_collapse() {
+        let key = |i| prefixed_key(0x00, 24, i);
+        let key2 = |i| prefixed_key(0xff, 24, i);
+
+        let mut rightsized = false;
+        let branch = make_branch_with_body_size_target(key, |size| {
+            let res = !rightsized;
+            rightsized = size >= BRANCH_MERGE_THRESHOLD;
+            res
+        });
+        rightsized = false;
+        let branch2 = make_branch_with_body_size_target(key2, |size| {
+            let res = !rightsized;
+            rightsized = size >= BRANCH_MERGE_THRESHOLD;
+            res
+        });
+
+        let n = branch.n() as usize;
+        let n2 = branch2.n() as usize;
+
+        let mut updater = BranchUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseBranch {
+                node: branch,
+                iter_pos: 0,
+            }),
+            Some(key2(0)),
+        );
+        let mut branch_tracker = BranchesTracker::new();
+
+        // delete the last item, causing a situation where prefix compression needs to be
+        // disabled.
+        updater.ingest(key(n - 1), None);
+        let DigestResult::NeedsMerge(_) = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        updater.reset_base(
+            Some(BaseBranch {
+                node: branch2,
+                iter_pos: 0,
+            }),
+            None,
+        );
+        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+            panic!()
+        };
+
+        let new_branch_entry_1 = branch_tracker.get(key(0)).unwrap();
+        let new_branch_1 = new_branch_entry_1.inserted.as_ref().unwrap();
+
+        // first item has no shared prefix with any other key, causing the size to balloon.
+        assert!(new_branch_1.prefix_compressed() != new_branch_1.n());
+
+        assert_eq!(
+            get_key(&new_branch_1, new_branch_1.n() as usize - 1),
+            key2(0)
+        );
+
+        let branch_1_body_size = {
+            let mut gauge = BranchGauge::new();
+            for i in 0..new_branch_1.n() as usize {
+                let key = get_key(&new_branch_1, i);
+                gauge.ingest(key, separator_len(&key))
+            }
+            gauge.body_size()
+        };
+        assert!(branch_1_body_size >= BRANCH_MERGE_THRESHOLD);
+
+        let new_branch_entry_2 = branch_tracker.get(key2(1)).unwrap();
+        let new_branch_2 = new_branch_entry_2.inserted.as_ref().unwrap();
+
+        assert_eq!(new_branch_2.n() + new_branch_1.n(), (n + n2 - 1) as u16);
+        assert_eq!(
+            new_branch_2.node_pointer(new_branch_2.n() as usize - 1),
+            n2 as u32 - 1
+        );
     }
 }
