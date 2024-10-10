@@ -1,5 +1,4 @@
 use anyhow::Result;
-use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use threadpool::ThreadPool;
 
@@ -227,5 +226,11 @@ impl<Node> NodesTracker<Node> {
 
         entry.next_separator = next_separator;
         entry.inserted.replace(node);
+    }
+
+
+    #[cfg(test)]
+    pub fn get(&self, key: Key) -> Option<&ChangedNodeEntry<Node>> {
+        self.inner.get(&key)
     }
 }

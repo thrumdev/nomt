@@ -21,6 +21,8 @@
 //! There is a limit on the maximum size of a record payload, which is currently set to 1 GiB.
 //! However, this limit may be subject to change in future versions.
 
+#![allow(unused)]
+
 use anyhow::{ensure, Context, Result};
 use std::{
     fmt,
