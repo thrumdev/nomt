@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crossbeam_channel::TryRecvError;
 use dashmap::DashMap;
 use threadpool::ThreadPool;
 
@@ -10,73 +9,24 @@ use crate::beatree::{
     allocator::PageNumber,
     index::Index,
     leaf::{node::LeafNode, store::LeafStoreReader},
-    ops::search_branch,
+    ops::{
+        search_branch,
+        update::{
+            extend_range_protocol::{
+                request_range_extension, try_answer_left_neighbor, LeftNeighbor, RightNeighbor,
+                SeparatorRange, WorkerParams,
+            },
+            get_key,
+            leaf_updater::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater},
+        },
+    },
     Key,
 };
 use crate::io::PagePool;
 
-use super::{
-    get_key,
-    leaf_updater::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater},
-    SeparatorRange,
-};
-
-struct ExtendRangeResponse {
-    changed: Vec<(Key, ChangedLeafEntry)>,
-    new_high_range: Option<Key>,
-    new_right_neighbor: Option<Option<RightNeighbor>>,
-}
-
-type LeftNeighbor = super::LeftNeighbor<ExtendRangeResponse>;
-type RightNeighbor = super::RightNeighbor<ExtendRangeResponse>;
-type ExtendRangeRequest = super::ExtendRangeRequest<ExtendRangeResponse>;
-
-pub struct ChangedLeafEntry {
-    pub deleted: Option<PageNumber>,
-    pub inserted: Option<LeafNode>,
-
-    // the separator of the next node.
-    next_separator: Option<Key>,
-}
-
-#[derive(Default)]
-pub struct LeavesTracker {
-    inner: BTreeMap<Key, ChangedLeafEntry>,
-    // pending base received from the right worker which will be used as new base
-    pending_base: Option<(Key, LeafNode, Option<Key>)>,
-    overflow_deleted: Vec<Vec<u8>>,
-}
-
-impl LeavesTracker {
-    pub fn delete_leaf(&mut self, key: Key, pn: PageNumber, next_separator: Option<Key>) {
-        let entry = self.inner.entry(key).or_insert(ChangedLeafEntry {
-            deleted: None,
-            inserted: None,
-            next_separator,
-        });
-
-        // we can only delete a leaf once.
-        assert!(entry.deleted.is_none());
-
-        entry.deleted.replace(pn);
-        entry.next_separator = next_separator;
-    }
-
-    pub fn insert_leaf(&mut self, key: Key, node: LeafNode, next_separator: Option<Key>) {
-        let entry = self.inner.entry(key).or_insert(ChangedLeafEntry {
-            deleted: None,
-            inserted: None,
-            next_separator,
-        });
-
-        entry.next_separator = next_separator;
-        entry.inserted.replace(node);
-    }
-
-    fn delete_overflow(&mut self, overflow_cell: &[u8]) {
-        self.overflow_deleted.push(overflow_cell.to_vec());
-    }
-}
+/// Tracker of all changes that happen to leaves during an update
+pub type LeavesTracker = super::NodesTracker<LeafNode>;
+type ChangedLeafEntry = super::ChangedNodeEntry<LeafNode>;
 
 fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNumber)> {
     let Some((_, branch)) = bbn_index.lookup(key) else {
@@ -97,6 +47,7 @@ fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNu
     Some((separator, cutoff, leaf_pn))
 }
 
+/// Change the btree's leaves in the specified way
 pub fn run(
     bbn_index: &Index,
     leaf_cache: DashMap<PageNumber, LeafNode>,
@@ -163,18 +114,11 @@ pub fn run(
     (changes, deleted_overflow)
 }
 
-struct WorkerParams {
-    left_neighbor: Option<LeftNeighbor>,
-    right_neighbor: Option<RightNeighbor>,
-    range: SeparatorRange,
-    op_range: Range<usize>,
-}
-
 fn prepare_workers(
     bbn_index: &Index,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     worker_count: usize,
-) -> Vec<WorkerParams> {
+) -> Vec<WorkerParams<LeafNode>> {
     let mut remaining_workers = worker_count;
     let mut changeset_remaining = changeset;
 
@@ -261,160 +205,6 @@ fn prepare_workers(
     workers
 }
 
-fn try_answer_left_neighbor(
-    pending_request: &mut Option<ExtendRangeRequest>,
-    worker_params: &mut WorkerParams,
-    leaves_tracker: &mut LeavesTracker,
-    has_finished_workload: bool,
-) {
-    let Some(ref left_neighbor) = worker_params.left_neighbor else {
-        return;
-    };
-
-    let request = match pending_request.take() {
-        Some(r) => r,
-        None => match left_neighbor.rx.try_recv() {
-            Ok(r) => r,
-            Err(TryRecvError::Disconnected) => {
-                worker_params.left_neighbor = None;
-                return;
-            }
-            _ => return,
-        },
-    };
-
-    // We send the left side information it needs to deduce the nodes to use next.
-    // A modified leaf could be used as a node by the left worker, or we provide a new
-    // high range to let the left worker use new fresh leaves
-    let mut found_next_node = false;
-    // an unchanged range is given by a difference between the next_separator
-    // of a changed item the the key associated to the next item
-    let mut found_unchanged_range = false;
-    let mut new_high_range = None;
-
-    let mut separator = None;
-    let mut take = leaves_tracker
-        .inner
-        .iter()
-        .take_while(|(key, entry)| {
-            if let Some(low) = separator {
-                if low < **key {
-                    found_unchanged_range = true;
-                    new_high_range = Some(**key);
-                    return false;
-                }
-            }
-
-            if entry.inserted.is_some() {
-                found_next_node = true;
-                new_high_range = entry.next_separator.clone();
-                return false;
-            }
-
-            separator = entry.next_separator.clone();
-
-            true
-        })
-        .count();
-
-    if !(found_next_node || found_unchanged_range) {
-        if has_finished_workload {
-            // separator is None only if leaves_tracker.inner.is_empty
-            // or the last deleted item has next separator = None.
-            // If there are some elements in leaves_tracker.inner
-            // they will be for sure all changes with a deleted leaf
-            // and they will be passed to the left worker
-
-            if let Some(low) = separator {
-                if worker_params.range.high.map_or(true, |high| low < high) {
-                    // special case where there is one unchanged range left,
-                    // which is the last one, up to the worker.range.high
-                    found_unchanged_range = true;
-                }
-            }
-
-            new_high_range = worker_params.range.high;
-        } else {
-            // Keep the request pending only if no inserted node has been found or any unchanged range,
-            // and if the worker has not finished with the right worker
-            *pending_request = Some(request);
-            return;
-        }
-    }
-
-    // `self.low` and `left.high` are kept equal
-    worker_params.range.low = new_high_range;
-
-    if found_next_node {
-        take += 1;
-    }
-
-    let changed = (0..take)
-        .map(|_| {
-            // UNWRAP: the existance and variant of `take` leaves_tracker items was previously checked
-            leaves_tracker.inner.pop_first().unwrap()
-        })
-        .collect::<Vec<_>>();
-
-    let new_right_neighbor = if !(found_next_node || found_unchanged_range) && has_finished_workload
-    {
-        // left neighbor consumed our entire range. link them up with our right neighbor.
-        worker_params.left_neighbor = None;
-        Some(worker_params.right_neighbor.take())
-    } else {
-        None
-    };
-
-    // UNWRAP: neighbor waiting on request will never drop.
-    request
-        .tx
-        .send(ExtendRangeResponse {
-            changed,
-            new_high_range,
-            new_right_neighbor,
-        })
-        .unwrap();
-}
-
-fn request_range_extension(worker_params: &mut WorkerParams, leaves_tracker: &mut LeavesTracker) {
-    // UNWRAP: we should only be requesting a range extension when we have a right neighbor.
-    // workers with no right neighbor have no limit to their range.
-    let right_neighbor = worker_params.right_neighbor.as_ref().unwrap();
-
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let request = ExtendRangeRequest { tx };
-
-    // UNWRAP: right neighbor never drops until left neighbor is done.
-    right_neighbor.tx.send(request).unwrap();
-
-    // UNWRAP: right neighbor never drops until left neighbor is done.
-    let mut response = rx.recv().unwrap();
-
-    worker_params.range.high = response.new_high_range;
-
-    if let Some((last_key, last_changed_entry)) = response.changed.last_mut() {
-        if last_changed_entry.inserted.is_some() {
-            // UNWRAP: the entry has just been checked to have an inserted leaf
-            leaves_tracker.pending_base = Some((
-                *last_key,
-                last_changed_entry.inserted.take().unwrap(),
-                last_changed_entry.next_separator,
-            ));
-        }
-    }
-
-    leaves_tracker.inner.extend(response.changed);
-
-    if let Some(new_right_neighbor) = response.new_right_neighbor {
-        worker_params.right_neighbor = new_right_neighbor;
-        if worker_params.right_neighbor.is_some() {
-            // exhausting the range means we didn't get a node to merge with.
-            // try again with the next right neighbor.
-            request_range_extension(worker_params, leaves_tracker);
-        }
-    }
-}
-
 fn reset_leaf_base(
     bbn_index: &Index,
     leaf_cache: &DashMap<PageNumber, LeafNode>,
@@ -483,7 +273,7 @@ fn reset_leaf_base_fresh(
 
     // we intend to work on this leaf, therefore, we delete it.
     // any new leaves produced by the updater will replace it.
-    leaves_tracker.delete_leaf(separator, leaf_pn, cutoff);
+    leaves_tracker.delete(separator, leaf_pn, cutoff);
 
     let base = BaseLeaf {
         node: leaf_cache
@@ -505,10 +295,11 @@ fn run_worker(
     leaf_reader: LeafStoreReader,
     page_pool: PagePool,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
-    mut worker_params: WorkerParams,
+    mut worker_params: WorkerParams<LeafNode>,
 ) -> (BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>) {
-    let mut leaves_tracker = LeavesTracker::default();
+    let mut leaves_tracker = LeavesTracker::new();
     let mut leaf_updater = LeafUpdater::new(page_pool, None, None);
+    let mut overflow_deleted = Vec::new();
     let mut pending_left_request = None;
     let mut has_extended_range = false;
     let mut has_finished_workload = false;
@@ -546,7 +337,10 @@ fn run_worker(
             has_extended_range = false;
             if worker_params.range.high.map_or(false, |high| k >= high) {
                 has_extended_range = true;
-                request_range_extension(&mut worker_params, &mut leaves_tracker);
+                super::extend_range_protocol::request_range_extension(
+                    &mut worker_params,
+                    &mut leaves_tracker,
+                );
             }
 
             reset_leaf_base(
@@ -565,7 +359,7 @@ fn run_worker(
             Some((v, overflow)) => (Some(v.clone()), *overflow),
         };
 
-        let delete_overflow = |overflow_cell: &[u8]| leaves_tracker.delete_overflow(overflow_cell);
+        let delete_overflow = |overflow_cell: &[u8]| overflow_deleted.push(overflow_cell.to_vec());
         leaf_updater.ingest(*key, value_change, overflow, delete_overflow);
     }
 
@@ -626,5 +420,5 @@ fn run_worker(
         }
     }
 
-    (leaves_tracker.inner, leaves_tracker.overflow_deleted)
+    (leaves_tracker.inner, overflow_deleted)
 }

@@ -21,6 +21,7 @@ use crate::beatree::{
 
 mod branch_stage;
 mod branch_updater;
+mod extend_range_protocol;
 mod leaf_stage;
 mod leaf_updater;
 
@@ -119,6 +120,7 @@ pub fn update(
     Ok(())
 }
 
+/// Extract the key at a given index from a BranchNode
 pub fn get_key(node: &BranchNode, index: usize) -> Key {
     let prefix = if index < node.prefix_compressed() as usize {
         Some(node.raw_prefix())
@@ -171,21 +173,59 @@ fn preload_leaves(
     Ok(leaf_pages)
 }
 
-// A half-open range [low, high), where each key corresponds to a known separator of a node.
-struct SeparatorRange {
-    low: Option<Key>,
-    high: Option<Key>,
+/// Container of possible changes made to a node
+pub struct ChangedNodeEntry<Node> {
+    /// PageNumber of the Node that is being replaced by the current entry
+    pub deleted: Option<PageNumber>,
+    /// New or modified Node that will be written
+    pub inserted: Option<Node>,
+    /// Separator of the next node.
+    pub next_separator: Option<Key>,
 }
 
-struct LeftNeighbor<T> {
-    rx: Receiver<ExtendRangeRequest<T>>,
+/// Tracker of all changes that happen to the nodes during an update
+pub struct NodesTracker<Node> {
+    /// Elements being tracked by the NodesTracker, each Separator
+    /// is associated with a ChangedNodeEntry
+    pub inner: BTreeMap<Key, ChangedNodeEntry<Node>>,
+    /// Pending base received from the right worker which will be used as new base
+    pub pending_base: Option<(Key, Node, Option<Key>)>,
 }
 
-struct RightNeighbor<T> {
-    tx: Sender<ExtendRangeRequest<T>>,
-}
+impl<Node> NodesTracker<Node> {
+    /// Create a new NodesTracker
+    pub fn new() -> Self {
+        Self {
+            inner: BTreeMap::new(),
+            pending_base: None,
+        }
+    }
 
-// a request to extend the range to the next node following the high bound of the range.
-struct ExtendRangeRequest<T> {
-    tx: Sender<T>,
+    /// Add or modify a ChangedNodeEntry specifying a deleted PageNumber.
+    /// If the entry is already present, it cannot be associated with another deleted PageNumber.
+    pub fn delete(&mut self, key: Key, pn: PageNumber, next_separator: Option<Key>) {
+        let entry = self.inner.entry(key).or_insert(ChangedNodeEntry {
+            deleted: None,
+            inserted: None,
+            next_separator,
+        });
+
+        // we can only delete a node once.
+        assert!(entry.deleted.is_none());
+
+        entry.deleted.replace(pn);
+        entry.next_separator = next_separator;
+    }
+
+    /// Add or modify a ChangedNodeEntry specifying an inserted Node.
+    pub fn insert(&mut self, key: Key, node: Node, next_separator: Option<Key>) {
+        let entry = self.inner.entry(key).or_insert(ChangedNodeEntry {
+            deleted: None,
+            inserted: None,
+            next_separator,
+        });
+
+        entry.next_separator = next_separator;
+        entry.inserted.replace(node);
+    }
 }

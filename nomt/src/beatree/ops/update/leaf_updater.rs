@@ -143,7 +143,7 @@ impl LeafUpdater {
             let node = self.build_leaf(&self.ops[last_ops_start..]);
             let separator = self.separator();
 
-            leaves_tracker.insert_leaf(separator, node, self.cutoff);
+            leaves_tracker.insert(separator, node, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -262,11 +262,7 @@ impl LeafUpdater {
                 self.separator_override = Some(separate(&last, &next));
             }
 
-            leaves_tracker.insert_leaf(
-                separator,
-                new_node,
-                self.separator_override.or(self.cutoff),
-            );
+            leaves_tracker.insert(separator, new_node, self.separator_override.or(self.cutoff));
             start += item_count;
         }
 
@@ -315,7 +311,7 @@ impl LeafUpdater {
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);
-        leaves_tracker.insert_leaf(left_separator, left_leaf, Some(right_separator));
+        leaves_tracker.insert(left_separator, left_leaf, Some(right_separator));
 
         let mut right_gauge = LeafGauge::default();
         for op in &self.ops[split_point..] {
@@ -329,7 +325,7 @@ impl LeafUpdater {
 
         if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
-            leaves_tracker.insert_leaf(right_separator, right_leaf, self.cutoff);
+            leaves_tracker.insert(right_separator, right_leaf, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
