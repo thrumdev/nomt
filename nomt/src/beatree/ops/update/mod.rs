@@ -21,6 +21,7 @@ use crate::beatree::{
 
 mod branch_stage;
 mod branch_updater;
+mod extend_range_protocol;
 mod leaf_stage;
 mod leaf_updater;
 
@@ -171,21 +172,50 @@ fn preload_leaves(
     Ok(leaf_pages)
 }
 
-// A half-open range [low, high), where each key corresponds to a known separator of a node.
-struct SeparatorRange {
-    low: Option<Key>,
-    high: Option<Key>,
+pub struct ChangedNodeEntry<Node> {
+    pub deleted: Option<PageNumber>,
+    pub inserted: Option<Node>,
+
+    // the separator of the next node.
+    pub next_separator: Option<Key>,
 }
 
-struct LeftNeighbor<T> {
-    rx: Receiver<ExtendRangeRequest<T>>,
+pub struct NodesTracker<Node> {
+    pub inner: BTreeMap<Key, ChangedNodeEntry<Node>>,
+    // pending base received from the right worker which will be used as new base
+    pub pending_base: Option<(Key, Node, Option<Key>)>,
 }
 
-struct RightNeighbor<T> {
-    tx: Sender<ExtendRangeRequest<T>>,
-}
+impl<Node> NodesTracker<Node> {
+    pub fn new() -> Self {
+        Self {
+            inner: BTreeMap::new(),
+            pending_base: None,
+        }
+    }
 
-// a request to extend the range to the next node following the high bound of the range.
-struct ExtendRangeRequest<T> {
-    tx: Sender<T>,
+    pub fn delete(&mut self, key: Key, pn: PageNumber, next_separator: Option<Key>) {
+        let entry = self.inner.entry(key).or_insert(ChangedNodeEntry {
+            deleted: None,
+            inserted: None,
+            next_separator,
+        });
+
+        // we can only delete a node once.
+        assert!(entry.deleted.is_none());
+
+        entry.deleted.replace(pn);
+        entry.next_separator = next_separator;
+    }
+
+    pub fn insert(&mut self, key: Key, node: Node, next_separator: Option<Key>) {
+        let entry = self.inner.entry(key).or_insert(ChangedNodeEntry {
+            deleted: None,
+            inserted: None,
+            next_separator,
+        });
+
+        entry.next_separator = next_separator;
+        entry.inserted.replace(node);
+    }
 }
