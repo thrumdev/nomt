@@ -73,7 +73,7 @@ pub fn update(
         leaf_reader,
         leaf_writer.page_pool().clone(),
         changeset,
-        thread_pool,
+        thread_pool.clone(),
         workers,
     );
 
@@ -97,6 +97,8 @@ pub fn update(
         &bbn_index,
         leaf_writer.page_pool().clone(),
         branch_changeset,
+        thread_pool,
+        workers,
     );
 
     for (key, changed_branch) in branch_changes {

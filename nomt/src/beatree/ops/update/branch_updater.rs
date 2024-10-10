@@ -10,7 +10,7 @@ use crate::beatree::{
 use crate::io::PagePool;
 
 use super::{
-    branch_stage::BranchChanges, get_key, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
+    branch_stage::BranchesTracker, get_key, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
     BRANCH_MERGE_THRESHOLD,
 };
 
@@ -87,13 +87,13 @@ impl BranchUpdater {
         }
     }
 
-    pub fn digest(&mut self, branch_changes: &mut BranchChanges) -> DigestResult {
+    pub fn digest(&mut self, branches_tracker: &mut BranchesTracker) -> DigestResult {
         self.keep_up_to(None);
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_branches(branch_changes);
+        let last_ops_start = self.build_bulk_splitter_branches(branches_tracker);
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
@@ -104,11 +104,11 @@ impl BranchUpdater {
                 last_ops_start, 0,
                 "normal split can only occur when not bulk splitting"
             );
-            self.split(branch_changes)
+            self.split(branches_tracker)
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_branch(&self.ops[last_ops_start..], &self.gauge);
             let separator = self.op_key(&self.ops[last_ops_start]);
-            branch_changes.insert(separator, node);
+            branches_tracker.insert(separator, node, self.cutoff);
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
@@ -127,6 +127,10 @@ impl BranchUpdater {
     pub fn reset_base(&mut self, base: Option<BaseBranch>, cutoff: Option<Key>) {
         self.base = base;
         self.cutoff = cutoff;
+    }
+
+    pub fn remove_cutoff(&mut self) {
+        self.cutoff = None;
     }
 
     fn keep_up_to(&mut self, up_to: Option<&Key>) {
@@ -206,7 +210,7 @@ impl BranchUpdater {
         }
     }
 
-    fn build_bulk_splitter_branches(&mut self, branch_changes: &mut BranchChanges) -> usize {
+    fn build_bulk_splitter_branches(&mut self, branches_tracker: &mut BranchesTracker) -> usize {
         let Some(splitter) = self.bulk_split.take() else {
             return 0;
         };
@@ -217,7 +221,7 @@ impl BranchUpdater {
             let separator = self.op_key(&self.ops[start]);
             let new_node = self.build_branch(branch_ops, &gauge);
 
-            branch_changes.insert(separator, new_node);
+            branches_tracker.insert(separator, new_node, self.cutoff);
 
             start += item_count;
         }
@@ -225,7 +229,7 @@ impl BranchUpdater {
         start
     }
 
-    fn split(&mut self, branch_changes: &mut BranchChanges) -> DigestResult {
+    fn split(&mut self, branches_tracker: &mut BranchesTracker) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -263,7 +267,7 @@ impl BranchUpdater {
 
         let left_node = self.build_branch(left_ops, &left_gauge);
 
-        branch_changes.insert(left_separator, left_node);
+        branches_tracker.insert(left_separator, left_node, Some(right_separator));
 
         let mut right_gauge = BranchGauge::new();
         for op in &self.ops[split_point..] {
@@ -282,7 +286,7 @@ impl BranchUpdater {
         if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_node = self.build_branch(right_ops, &right_gauge);
 
-            branch_changes.insert(right_separator, right_node);
+            branches_tracker.insert(right_separator, right_node, self.cutoff);
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
