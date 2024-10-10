@@ -96,10 +96,9 @@ impl NomtDB {
         });
 
         // absorb instrumented times from workload timers.
-        for workload_timer in results
+        for (_, ref mut workload_timer) in results
             .iter_mut()
             .flatten()
-            .map(|(_, ref mut workload_timer)| workload_timer)
         {
             if let (Some(ref mut t), Some(wt)) = (timer.as_mut(), workload_timer.take()) {
                 t.add(wt);
