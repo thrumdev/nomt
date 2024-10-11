@@ -8,9 +8,14 @@
 ///
 /// Each workload will set up the DB differently and reads and writes arbitrarily,
 /// whether the key is not present or already present.
-use crate::{backend::Transaction, cli::WorkloadParams, custom_workload, transfer_workload};
+use crate::{
+    backend::Transaction,
+    cli::{StateItemDistribution, WorkloadParams},
+    custom_workload, transfer_workload,
+};
 use anyhow::Result;
 use lru::LruCache;
+use rand::{distributions::Distribution as _, Rng};
 
 /// An interface for generating new sets of actions.
 pub trait Workload: Send {
@@ -34,6 +39,7 @@ pub fn parse(
         workload_concurrency: threads,
         fresh,
         cache_size,
+        distribution,
         ..
     } = workload_params.clone();
 
@@ -65,6 +71,7 @@ pub fn parse(
                     fresh.unwrap_or(0),
                     op_limit,
                     threads as usize,
+                    distribution,
                 ),
             ),
         ),
@@ -81,6 +88,7 @@ pub fn parse(
                     db_size,
                     op_limit,
                     threads as usize,
+                    distribution,
                 ),
             ),
         ),
@@ -97,6 +105,7 @@ pub fn parse(
                     db_size,
                     op_limit,
                     threads as usize,
+                    distribution,
                 ),
             ),
         ),
@@ -113,6 +122,7 @@ pub fn parse(
                     db_size,
                     op_limit,
                     threads as usize,
+                    distribution,
                 ),
             ),
         ),
@@ -174,5 +184,44 @@ impl<'a> Transaction for LruCacheTransaction<'a> {
             .cache
             .push(key.to_vec(), value.as_ref().map(|v| v.to_vec()));
         self.inner.write(key, value);
+    }
+}
+
+pub enum Distribution {
+    Uniform(rand::distributions::Uniform<u64>),
+    Pareto(rand_distr::Pareto<f64>, u64, u64),
+}
+
+impl Distribution {
+    pub fn new(param: StateItemDistribution, low: u64, high: u64) -> Self {
+        match param {
+            StateItemDistribution::Uniform => {
+                Distribution::Uniform(rand::distributions::Uniform::new(low, high))
+            }
+            StateItemDistribution::Pareto => Distribution::Pareto(
+                // shape of log_4(5) = 1.16 gives an 80/20 relationship
+                // scale of 1.0 gives 99.5% of samples below 100.
+                rand_distr::Pareto::new(1.0, 1.16).unwrap(),
+                low,
+                high,
+            ),
+        }
+    }
+
+    pub fn sample(&mut self, r: &mut impl Rng) -> u64 {
+        match self {
+            Distribution::Uniform(ref mut distr) => distr.sample(r),
+            Distribution::Pareto(ref mut distr, low, high) => loop {
+                // shift and scale to fall between [0, 1), for the most part.
+                let f = (distr.sample(r) - 1.0) / 100.0;
+
+                // discard the long tail (~.5% of samples).
+                if f >= 1.0 {
+                    continue;
+                }
+                let i = (f * (*high - *low) as f64).round() as u64 + *low;
+                return std::cmp::min(i, *high - 1);
+            },
+        }
     }
 }

@@ -1,4 +1,8 @@
-use crate::{backend::Transaction, workload::Workload};
+use crate::{
+    backend::Transaction,
+    cli::StateItemDistribution,
+    workload::{Distribution, Workload},
+};
 use rand::Rng;
 
 #[derive(Clone)]
@@ -52,23 +56,29 @@ pub fn build(
     db_size: u64,
     op_limit: u64,
     threads: usize,
+    distribution: StateItemDistribution,
 ) -> Vec<RwWorkload> {
     let thread_workload_size = workload_size / threads as u64;
     let db_step = db_size / threads as u64;
 
     (0..threads)
-        .map(|i| RwWorkload {
-            reads,
-            writes,
-            fresh,
-            workload_size: if i == threads - 1 {
-                thread_workload_size + workload_size % threads as u64
-            } else {
-                thread_workload_size
-            },
-            db_size: db_step,
-            db_start: db_step * i as u64,
-            ops_remaining: op_limit / threads as u64,
+        .map(|i| {
+            let db_start = db_step * i as u64;
+
+            RwWorkload {
+                reads,
+                writes,
+                fresh,
+                workload_size: if i == threads - 1 {
+                    thread_workload_size + workload_size % threads as u64
+                } else {
+                    thread_workload_size
+                },
+                db_size: db_step,
+                db_start,
+                ops_remaining: op_limit / threads as u64,
+                distribution: Distribution::new(distribution, db_start, db_start + db_step),
+            }
         })
         .collect()
 }
@@ -90,6 +100,7 @@ pub struct RwWorkload {
     // the number of accounts in the DB owned by this workload
     pub db_size: u64,
     pub ops_remaining: u64,
+    pub distribution: Distribution,
 }
 
 impl Workload for RwWorkload {
@@ -106,7 +117,6 @@ impl Workload for RwWorkload {
 
         let mut rng = rand::thread_rng();
 
-        let key_range = std::cmp::max(self.db_size, 1);
         for i in 0..n_reads {
             let _ = if i < n_reads_fresh {
                 // fresh read, technically there is a chance to generate
@@ -115,7 +125,7 @@ impl Workload for RwWorkload {
                 transaction.read(&rand_key(&mut rng))
             } else {
                 // read already existing key
-                let key = rng.gen_range(self.db_start..self.db_start + key_range);
+                let key = self.distribution.sample(&mut rng);
                 transaction.read(&encode_id(key))
             };
         }
@@ -127,7 +137,7 @@ impl Workload for RwWorkload {
                 transaction.write(&rand_key(&mut rng), Some(&value));
             } else {
                 // substitute key
-                let key = rng.gen_range(self.db_start..self.db_start + key_range);
+                let key = self.distribution.sample(&mut rng);
                 transaction.write(&encode_id(key), Some(&value));
             };
         }
@@ -143,9 +153,6 @@ impl Workload for RwWorkload {
 fn rand_key(rng: &mut impl Rng) -> [u8; 32] {
     // keys must be uniformly distributed
     let mut key = [0; 32];
-    key[0..4].copy_from_slice(&rng.next_u32().to_le_bytes());
-    key[4..8].copy_from_slice(&rng.next_u32().to_le_bytes());
-    key[8..12].copy_from_slice(&rng.next_u32().to_le_bytes());
-    key[12..16].copy_from_slice(&rng.next_u32().to_le_bytes());
+    rng.fill(&mut key[..16]);
     key
 }
