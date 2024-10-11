@@ -142,6 +142,18 @@ impl KeyReadWrite {
         }
     }
 
+    /// Updates the state of the given slot.
+    ///
+    /// If the slot was written, it becomes read-then-write.
+    pub fn read(&mut self, read_value: Option<Value>) {
+        match *self {
+            KeyReadWrite::Read(_) | KeyReadWrite::ReadThenWrite(_, _) => {}
+            KeyReadWrite::Write(ref mut value) => {
+                *self = KeyReadWrite::ReadThenWrite(read_value, mem::take(value));
+            }
+        }
+    }
+
     fn to_compact(&self) -> crate::commit::KeyReadWrite {
         let hash = |v: &Value| *blake3::hash(v).as_bytes();
         match self {

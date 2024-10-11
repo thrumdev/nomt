@@ -141,6 +141,20 @@ impl<'a> Transaction for Tx<'a> {
         }
     }
 
+    fn note_read(&mut self, key: &[u8], value: Option<Vec<u8>>) {
+        let key_path = sha2::Sha256::digest(key).into();
+
+        match self.access.entry(key_path) {
+            Entry::Occupied(mut o) => {
+                o.get_mut().read(value);
+            }
+            Entry::Vacant(v) => {
+                self.session.warm_up(key_path);
+                v.insert(KeyReadWrite::Read(value));
+            }
+        }
+    }
+
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let key_path = sha2::Sha256::digest(key).into();
         let value = value.map(|v| v.to_vec());

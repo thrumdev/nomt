@@ -24,17 +24,7 @@ pub fn main() -> Result<()> {
 
 pub fn init(params: InitParams) -> Result<()> {
     let workload_params = params.workload;
-    let (mut init, _) = workload::parse(
-        workload_params.name.as_str(),
-        workload_params.size,
-        workload_params
-            .initial_capacity
-            .map(|s| 1u64 << s)
-            .unwrap_or(0),
-        workload_params.fresh,
-        u64::max_value(),
-        1,
-    )?;
+    let (mut init, _) = workload::parse(&workload_params, u64::max_value())?;
 
     let mut db = params.backend.instantiate(
         true,
@@ -50,15 +40,8 @@ pub fn init(params: InitParams) -> Result<()> {
 pub fn run(params: RunParams) -> Result<()> {
     let workload_params = params.workload;
     let (mut init, mut workloads) = workload::parse(
-        workload_params.name.as_str(),
-        workload_params.size,
-        workload_params
-            .initial_capacity
-            .map(|s| 1u64 << s)
-            .unwrap_or(0),
-        workload_params.fresh,
+        &workload_params,
         params.limits.ops.unwrap_or(u64::max_value()),
-        workload_params.workload_concurrency as usize,
     )?;
 
     let mut db = params.backend.instantiate(

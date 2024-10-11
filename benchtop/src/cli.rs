@@ -131,6 +131,10 @@ pub struct WorkloadParams {
     /// backend
     #[arg(long = "buckets")]
     pub hashtable_buckets: Option<u32>,
+
+    /// The size of the in-memory LRU cache to use, measured in items.
+    #[arg(long = "cache-size")]
+    pub cache_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Args)]
