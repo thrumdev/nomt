@@ -443,6 +443,15 @@ impl PageCache {
         self.shard(shard_index).region.clone()
     }
 
+    /// Get the shard with the given index. This can quickly answer queries directed at a particular
+    /// shard of the page cache, avoiding the overhead of determining which shard to use.
+    pub fn get_shard(&self, shard_index: usize) -> PageCacheShard {
+        PageCacheShard {
+            shared: self.shared.clone(),
+            shard_index,
+        }
+    }
+
     /// Flushes all the dirty pages into the underlying store.
     /// This takes a read pass.
     ///
@@ -518,6 +527,62 @@ impl PageCache {
 
     fn shard(&self, index: usize) -> &CacheShard {
         &self.shared.shards[index]
+    }
+}
+
+/// A shard of the page cache. This should only be used for pages which fall within
+/// that shard, with the exception of the root page, which is accessible via this shard.
+pub struct PageCacheShard {
+    shared: Arc<Shared>,
+    shard_index: usize,
+}
+
+impl PageCacheShard {
+    /// Query the cache for the page data at the given [`PageId`].
+    ///
+    /// Returns `None` if not in the cache.
+    pub fn get(&self, page_id: PageId) -> Option<Page> {
+        self.shared.metrics.count(Metric::PageRequests);
+        if page_id == ROOT_PAGE_ID {
+            let page_data = self.shared.root_page.read().page_data.clone();
+            return Some(Page { inner: page_data });
+        }
+
+        debug_assert!(self.shared.shards[self.shard_index].region.contains_exclusive(&page_id));
+
+        let mut shard = self.shared.shards[self.shard_index].locked.lock();
+        match shard.cached.get(&page_id) {
+            Some(page) => Some(Page {
+                inner: page.page_data.clone(),
+            }),
+            None => {
+                self.shared.metrics.count(Metric::PageCacheMisses);
+                None
+            }
+        }
+    }
+
+    /// Insert a page into the cache by its data. If `Some`, provide the bucket index where the
+    /// page is stored.
+    ///
+    /// This ignores the inputs if the page was already present, and returns that.
+    pub fn insert(&self, page_id: PageId, page: Option<(FatPage, BucketIndex)>) -> Page {
+        let domain = &self.shared.page_rw_pass_domain;
+        if page_id == ROOT_PAGE_ID {
+            let page_data = self.shared.root_page.read().page_data.clone();
+            return Page { inner: page_data };
+        }
+
+        debug_assert!(self.shared.shards[self.shard_index].region.contains_exclusive(&page_id));
+
+        let mut shard = self.shared.shards[self.shard_index].locked.lock();
+        let cache_entry = shard.cached.get_or_insert(page_id, || {
+            CacheEntry::init(domain, ShardIndex::Shard(self.shard_index), page)
+        });
+
+        Page {
+            inner: cache_entry.page_data.clone(),
+        }
     }
 }
 
