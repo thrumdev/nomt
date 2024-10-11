@@ -298,6 +298,21 @@ fn shard_regions(num_shards: usize) -> Vec<(PageRegion, usize)> {
     regions
 }
 
+// see comments in `shard_regions`
+fn shard_index_for(num_shards: usize, first_ancestor: usize) -> usize {
+    let part = NUM_CHILDREN / num_shards;
+    let remainder = NUM_CHILDREN % num_shards;
+
+    if (part + 1) * remainder > first_ancestor {
+        // in a 'remainder' shard
+        first_ancestor / (part + 1)
+    } else {
+        // in a non-remainder shard - take all the remainder shards out, then divide by part,
+        // and add back the remainder to get the final index
+        ((first_ancestor - (part + 1) * remainder) / part) + remainder
+    }
+}
+
 fn make_shards(num_shards: usize) -> Vec<CacheShard> {
     assert!(num_shards > 0);
     shard_regions(num_shards)
@@ -352,15 +367,12 @@ impl PageCache {
         if page_id == &ROOT_PAGE_ID {
             None
         } else {
-            let res = self
-                .shared
-                .shards
-                .iter()
-                .position(|s| s.region.contains_exclusive(&page_id));
-
-            // note: this is ALWAYS `Some` because the whole page space is covered.
-            assert!(res.is_some());
-            res
+            let first_ancestor = page_id.child_index_at_level(0) as usize;
+            let shard_index = shard_index_for(self.shared.shards.len(), first_ancestor);
+            debug_assert!(self.shared.shards[shard_index]
+                .region
+                .contains_exclusive(page_id));
+            Some(shard_index)
         }
     }
 
@@ -548,7 +560,9 @@ impl PageCacheShard {
             return Some(Page { inner: page_data });
         }
 
-        debug_assert!(self.shared.shards[self.shard_index].region.contains_exclusive(&page_id));
+        debug_assert!(self.shared.shards[self.shard_index]
+            .region
+            .contains_exclusive(&page_id));
 
         let mut shard = self.shared.shards[self.shard_index].locked.lock();
         match shard.cached.get(&page_id) {
@@ -573,7 +587,9 @@ impl PageCacheShard {
             return Page { inner: page_data };
         }
 
-        debug_assert!(self.shared.shards[self.shard_index].region.contains_exclusive(&page_id));
+        debug_assert!(self.shared.shards[self.shard_index]
+            .region
+            .contains_exclusive(&page_id));
 
         let mut shard = self.shared.shards[self.shard_index].locked.lock();
         let cache_entry = shard.cached.get_or_insert(page_id, || {

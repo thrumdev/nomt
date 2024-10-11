@@ -230,7 +230,6 @@ impl<Node> NodesTracker<Node> {
         entry.inserted.replace(node);
     }
 
-
     #[cfg(test)]
     pub fn get(&self, key: Key) -> Option<&ChangedNodeEntry<Node>> {
         self.inner.get(&key)

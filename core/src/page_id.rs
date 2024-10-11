@@ -119,6 +119,13 @@ impl PageId {
         Ok(PageId { path })
     }
 
+    /// Get the child index of the page at the given depth.
+    ///
+    /// This panics if the depth of the page is not at least `depth + 1`.
+    pub fn child_index_at_level(&self, depth: usize) -> u8 {
+        self.path[depth]
+    }
+
     /// Encode this page ID to its disambiguated (fixed-width) representation.
     pub fn encode(&self) -> [u8; 32] {
         let mut uint = Uint::<256, 4>::from(0);
