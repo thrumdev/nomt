@@ -21,7 +21,7 @@
 //! There is a limit on the maximum size of a record payload, which is currently set to 1 GiB.
 //! However, this limit may be subject to change in future versions.
 
-#![allow(unused)]
+#![allow(dead_code)]
 
 use anyhow::{ensure, Context, Result};
 use std::{
@@ -433,7 +433,6 @@ impl Recovery {
                 let path = entry.path();
                 if filename.starts_with(&filename_prefix) {
                     let id = segment_filename::parse(filename_prefix, filename)?;
-                    let file_size = entry.metadata()?.len();
                     self.candidates.push(Segment {
                         id,
                         path,

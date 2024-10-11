@@ -162,11 +162,6 @@ impl SegmentFileReader {
     pub fn pos(&mut self) -> Result<u64> {
         Ok(self.buf_reader.stream_position()?)
     }
-
-    /// Returns the file that the reader is reading from.
-    pub fn into_inner(self) -> File {
-        self.buf_reader.into_inner()
-    }
 }
 
 #[cfg(test)]
