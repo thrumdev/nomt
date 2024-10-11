@@ -27,7 +27,6 @@ ahash = "0.8.11"
 im = "15.1.0"
 lru = "0.12.3"
 libc = "0.2.155"
-itertools = "0.13.0"
 criterion = { version = "0.3", optional = true }
 thread_local = "1.1.8"
 
