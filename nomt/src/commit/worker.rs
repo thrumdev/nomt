@@ -34,7 +34,7 @@ use crate::{
     io::PagePool,
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
-    page_walker::{NeedsPage, Output, PageWalker},
+    page_walker::{NeedsPage, Output, PageWalker, PageSource},
     rw_pass_cell::{ReadPass, WritePass},
     seek::{Completion, Seek, Seeker},
     store::Store,
@@ -89,7 +89,9 @@ pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
             );
 
             let output = match commit::<H>(root, page_cache, page_pool, seeker, command, warm_ups) {
-                Err(_) => return,
+                Err(_) => {
+                    return
+                }
                 Ok(o) => o,
             };
             let _ = comms.output_tx.send(output);
@@ -200,7 +202,7 @@ fn commit<H: NodeHasher>(
 
     let pending_ops = shared.take_root_pending();
     let mut root_page_committer =
-        PageWalker::<H>::new(root, page_cache.clone(), page_pool.clone(), None);
+        PageWalker::<H>::new(root, PageSource::PageCache(page_cache.clone()), page_pool.clone(), None);
 
     for (trie_pos, pending_op) in pending_ops {
         match pending_op {
@@ -316,13 +318,19 @@ impl<H: NodeHasher> RangeCommitter<H> {
             .binary_search_by_key(&key_range_end, |x| x.0)
             .unwrap_or_else(|i| i);
 
+        let page_source = match write_pass.region() {
+            ShardIndex::Root => PageSource::PageCache(page_cache.clone()),
+            ShardIndex::Shard(i) =>
+                PageSource::PageCacheShard(page_cache.get_shard(*i))
+        };
+
         RangeCommitter {
             shared,
             write_pass,
             region,
             page_walker: PageWalker::<H>::new(
                 root,
-                page_cache.clone(),
+                page_source,
                 page_pool.clone(),
                 Some(ROOT_PAGE_ID),
             ),
