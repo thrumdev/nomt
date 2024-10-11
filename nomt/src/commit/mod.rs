@@ -11,16 +11,14 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Barrier,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     io::PagePool,
     page_cache::{PageCache, ShardIndex},
     page_diff::PageDiff,
     rw_pass_cell::WritePassEnvelope,
+    seek::Seek,
     store::Store,
     Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
@@ -91,39 +89,28 @@ impl CommitPool {
     /// The Committer expects to have exclusive access to the page cache, so if there
     /// are outstanding read passes, write passes, or threads waiting on write passes,
     /// deadlocks are practically guaranteed at some point during the lifecycle of the Committer.
-    pub fn begin<H: NodeHasher>(
+    pub fn begin(
         &self,
         page_cache: PageCache,
         page_pool: PagePool,
         store: Store,
         root: Node,
     ) -> Committer {
-        let num_workers = page_cache.shard_count();
+        let params = worker::WarmUpParams {
+            page_cache: page_cache.clone(),
+            store: store.clone(),
+            root,
+        };
 
-        let barrier = Arc::new(Barrier::new(num_workers + 1));
-
-        let workers: Vec<WorkerHandle> = (0..num_workers)
-            .map(|_| {
-                let params = worker::Params {
-                    page_cache: page_cache.clone(),
-                    page_pool: page_pool.clone(),
-                    store: store.clone(),
-                    root,
-                    barrier: barrier.clone(),
-                };
-                spawn_worker::<H>(&self.worker_tp, params)
-            })
-            .collect();
-
-        // wait until all workers are spawned and have their read pass, otherwise this can race
-        // with `commit` being called.
-        let _ = barrier.wait();
+        let warm_up = spawn_warm_up(&self.worker_tp, params);
 
         Committer {
             worker_tp: self.worker_tp.clone(),
-            workers,
+            warm_up,
             page_cache,
-            worker_round_robin: AtomicUsize::new(0),
+            root,
+            store,
+            page_pool,
         }
     }
 }
@@ -134,73 +121,64 @@ impl CommitPool {
 pub struct Committer {
     worker_tp: ThreadPool,
     page_cache: PageCache,
-    workers: Vec<WorkerHandle>,
-    worker_round_robin: AtomicUsize,
+    warm_up: WarmUpHandle,
+    root: Node,
+    store: Store,
+    page_pool: PagePool,
 }
 
 impl Committer {
     /// Warm up the given key-path by pre-fetching the relevant pages.
     pub fn warm_up(&self, key_path: KeyPath) {
-        let worker = self.worker_round_robin.fetch_add(1, Ordering::Relaxed);
-        let _ = self.workers[worker % self.workers.len()]
-            .warmup_tx
-            .send(WarmUpCommand { key_path });
+        let _ = self.warm_up.warmup_tx.send(WarmUpCommand { key_path });
     }
 
     /// Commit the given key-value read/write operations. Key-paths should be in sorted order
     /// and should appear at most once within the vector. Witness specify whether or not
     /// collecting the witness of the commit operation.
-    pub fn commit(
-        mut self,
+    pub fn commit<H: NodeHasher>(
+        self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
     ) -> CommitHandle {
+        let _ = self.warm_up.finish_tx.send(());
         let shared = Arc::new(CommitShared {
             witness,
             read_write,
             root_page_pending: Mutex::new(Vec::with_capacity(64)),
         });
 
-        for worker in &self.workers {
-            let _ = worker.commit_tx.send(ToWorker::Prepare);
-        }
+        let num_workers = self.page_cache.shard_count();
+        let mut workers = Vec::with_capacity(num_workers);
+        let shard_regions = (0..num_workers).map(ShardIndex::Shard).collect::<Vec<_>>();
+
+        // receive warm-ups from worker.
+        // TODO: handle error better.
+        let warm_ups = self.warm_up.output_rx.recv().unwrap();
+        let warm_ups = Arc::new(warm_ups);
 
         let write_pass = self.page_cache.new_write_pass();
-        let shard_regions = (0..self.workers.len())
-            .map(ShardIndex::Shard)
-            .collect::<Vec<_>>();
         let worker_passes = write_pass.split_n(shard_regions);
 
-        for (worker, write_pass) in self.workers.iter().zip(worker_passes) {
-            // TODO: handle error better
-            worker
-                .commit_tx
-                .send(ToWorker::Commit(CommitCommand {
-                    shared: shared.clone(),
-                    write_pass: write_pass.into_envelope(),
-                }))
-                .unwrap();
+        for write_pass in worker_passes {
+            let command = CommitCommand {
+                shared: shared.clone(),
+                write_pass: write_pass.into_envelope(),
+            };
+
+            let params = worker::CommitParams {
+                page_cache: self.page_cache.clone(),
+                page_pool: self.page_pool.clone(),
+                store: self.store.clone(),
+                root: self.root,
+                warm_ups: warm_ups.clone(),
+                command,
+            };
+            let worker_handle = spawn_committer::<H>(&self.worker_tp, params);
+            workers.push(worker_handle);
         }
 
-        CommitHandle {
-            shared,
-            workers: std::mem::take(&mut self.workers),
-        }
-    }
-}
-
-impl Drop for Committer {
-    fn drop(&mut self) {
-        if self.workers.is_empty() {
-            return;
-        }
-        self.workers.clear();
-
-        // hack: we need to do this to avoid the store from being dropped in a worker thread,
-        // which RocksDB really doesn't like and is not really thread-safe despite being "safe"
-        // code. remove this line to get a free unlimited supply of SIGSEGV and SIGABRT on shutdown
-        // whenever a `Session` is live.
-        self.worker_tp.join();
+        CommitHandle { shared, workers }
     }
 }
 
@@ -311,13 +289,6 @@ pub struct Output {
     pub witnessed_operations: Option<WitnessedOperations>,
 }
 
-enum ToWorker {
-    // Prepare to commit. Drop any existing read-pass.
-    Prepare,
-    // Shard provided. Load pages and commit upwards.
-    Commit(CommitCommand),
-}
-
 struct CommitCommand {
     shared: Arc<CommitShared>,
     write_pass: WritePassEnvelope<ShardIndex>,
@@ -394,28 +365,37 @@ impl CommitShared {
     }
 }
 
-struct WorkerHandle {
-    output_rx: Receiver<WorkerOutput>,
-    commit_tx: Sender<ToWorker>,
+struct WarmUpHandle {
+    finish_tx: Sender<()>,
     warmup_tx: Sender<WarmUpCommand>,
+    output_rx: Receiver<HashMap<KeyPath, Seek>>,
 }
 
-fn spawn_worker<H: NodeHasher>(worker_tp: &ThreadPool, params: worker::Params) -> WorkerHandle {
-    let (commit_tx, commit_rx) = channel::unbounded();
+struct WorkerHandle {
+    output_rx: Receiver<WorkerOutput>,
+}
+
+fn spawn_warm_up(worker_tp: &ThreadPool, params: worker::WarmUpParams) -> WarmUpHandle {
     let (warmup_tx, warmup_rx) = channel::unbounded();
     let (output_tx, output_rx) = channel::bounded(1);
+    let (finish_tx, finish_rx) = channel::bounded(1);
 
-    let worker_comms = worker::Comms {
-        commit_rx,
-        warmup_rx,
-        output_tx,
-    };
+    worker_tp.execute(move || worker::run_warm_up(params, warmup_rx, finish_rx, output_tx));
 
-    worker_tp.execute(move || worker::run::<H>(worker_comms, params));
-
-    WorkerHandle {
-        commit_tx,
+    WarmUpHandle {
         warmup_tx,
+        finish_tx,
         output_rx,
     }
+}
+
+fn spawn_committer<H: NodeHasher>(
+    worker_tp: &ThreadPool,
+    params: worker::CommitParams,
+) -> WorkerHandle {
+    let (output_tx, output_rx) = channel::bounded(1);
+
+    worker_tp.execute(move || worker::run_commit::<H>(params, output_tx));
+
+    WorkerHandle { output_rx }
 }

@@ -240,7 +240,7 @@ impl Nomt {
         assert_eq!(prev, 0, "only one session could be active at a time");
         Session {
             store: self.store.clone(),
-            committer: Some(self.commit_pool.begin::<Blake3Hasher>(
+            committer: Some(self.commit_pool.begin(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
                 self.store.clone(),
@@ -304,7 +304,7 @@ impl Nomt {
             .committer
             .take()
             .unwrap()
-            .commit(compact_actuals, witness);
+            .commit::<Blake3Hasher>(compact_actuals, witness);
 
         let mut tx = self.store.new_tx();
         for (path, read_write) in actuals {

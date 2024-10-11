@@ -481,6 +481,7 @@ pub enum Completion {
 }
 
 /// The result of a seek.
+#[derive(Clone)]
 pub struct Seek {
     /// The key being sought.
     #[allow(dead_code)]
