@@ -22,12 +22,11 @@ use nomt_core::{
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Barrier},
+    sync::Arc,
 };
 
 use super::{
-    CommitCommand, CommitShared, KeyReadWrite, RootPagePending, ToWorker, WarmUpCommand,
-    WorkerOutput,
+    CommitCommand, CommitShared, KeyReadWrite, RootPagePending, WarmUpCommand, WorkerOutput,
 };
 
 use crate::{
@@ -41,75 +40,81 @@ use crate::{
     PathProof, WitnessedPath,
 };
 
-pub(super) struct Params {
+pub(super) struct CommitParams {
     pub page_cache: PageCache,
     pub page_pool: PagePool,
     pub store: Store,
     pub root: Node,
-    pub barrier: Arc<Barrier>,
+    pub warm_ups: Arc<HashMap<KeyPath, Seek>>,
+    pub command: CommitCommand,
 }
 
-pub(super) struct Comms {
-    pub output_tx: Sender<WorkerOutput>,
-    pub commit_rx: Receiver<ToWorker>,
-    pub warmup_rx: Receiver<WarmUpCommand>,
+pub(super) struct WarmUpParams {
+    pub page_cache: PageCache,
+    pub store: Store,
+    pub root: Node,
 }
 
-pub(super) fn run<H: NodeHasher>(comms: Comms, params: Params) {
-    let Params {
-        page_cache,
-        page_pool,
-        store,
-        root,
-        barrier,
-    } = params;
-
-    let read_pass = page_cache.new_read_pass();
-    barrier.wait();
-
-    let page_loader = store.page_loader();
+pub(super) fn run_warm_up(
+    params: WarmUpParams,
+    warmup_rx: Receiver<WarmUpCommand>,
+    finish_rx: Receiver<()>,
+    output_tx: Sender<HashMap<KeyPath, Seek>>,
+) {
+    let read_pass = params.page_cache.new_read_pass();
+    let page_loader = params.store.page_loader();
     let page_io_receiver = page_loader.io_handle().receiver().clone();
-    let seeker = Seeker::new(root, page_cache.clone(), page_loader, true);
+    let seeker = Seeker::new(params.root, params.page_cache.clone(), page_loader, true);
 
-    let warm_ups = match warm_up_phase(&comms, read_pass, page_io_receiver, seeker) {
-        Ok(warm_ups) => warm_ups,
+    let result = warm_up_phase(read_pass, page_io_receiver, seeker, warmup_rx, finish_rx);
+
+    match result {
         Err(_) => return,
-    };
-
-    match comms.commit_rx.recv() {
-        Err(_) => return, // early exit only.
-        // UNWRAP: Commit always sent after Prepare.
-        Ok(ToWorker::Prepare) => unreachable!(),
-        Ok(ToWorker::Commit(command)) => {
-            let seeker = Seeker::new(
-                root,
-                page_cache.clone(),
-                store.page_loader(),
-                command.shared.witness,
-            );
-
-            let output = match commit::<H>(root, page_cache, page_pool, seeker, command, warm_ups) {
-                Err(_) => return,
-                Ok(o) => o,
-            };
-            let _ = comms.output_tx.send(output);
+        Ok(res) => {
+            let _ = output_tx.send(res);
         }
     }
 }
 
+pub(super) fn run_commit<H: NodeHasher>(params: CommitParams, output_tx: Sender<WorkerOutput>) {
+    let CommitParams {
+        page_cache,
+        page_pool,
+        store,
+        root,
+        warm_ups,
+        command,
+    } = params;
+
+    let seeker = Seeker::new(
+        root,
+        page_cache.clone(),
+        store.page_loader(),
+        command.shared.witness,
+    );
+
+    let output = match commit::<H>(root, page_cache, page_pool, seeker, command, warm_ups) {
+        Err(_) => return,
+        Ok(o) => o,
+    };
+
+    let _ = output_tx.send(output);
+}
+
 fn warm_up_phase(
-    comms: &Comms,
     read_pass: ReadPass<ShardIndex>,
     page_io_receiver: Receiver<crate::io::CompleteIo>,
     mut seeker: Seeker,
+    warmup_rx: Receiver<WarmUpCommand>,
+    finish_rx: Receiver<()>,
 ) -> anyhow::Result<HashMap<KeyPath, Seek>> {
     let mut select_all = Select::new();
-    let warmup_idx = select_all.recv(&comms.warmup_rx);
-    let commit_idx = select_all.recv(&comms.commit_rx);
+    let warmup_idx = select_all.recv(&warmup_rx);
+    let finish_idx = select_all.recv(&finish_rx);
     let page_idx = select_all.recv(&page_io_receiver);
 
     let mut select_no_work = Select::new();
-    let commit_no_work_idx = select_no_work.recv(&comms.commit_rx);
+    let finish_no_work_idx = select_no_work.recv(&finish_rx);
     let page_no_work_idx = select_no_work.recv(&page_io_receiver);
 
     let mut warm_ups = HashMap::new();
@@ -124,12 +129,11 @@ fn warm_up_phase(
         if blocked || !seeker.has_room() {
             // block on interrupt or next page ready.
             let index = select_no_work.ready();
-            if index == commit_no_work_idx {
-                match comms.commit_rx.try_recv() {
+            if index == finish_no_work_idx {
+                match finish_rx.try_recv() {
                     Err(TryRecvError::Empty) => continue,
                     Err(e) => anyhow::bail!(e),
-                    Ok(ToWorker::Prepare) => break,
-                    Ok(ToWorker::Commit(_)) => unreachable!(),
+                    Ok(()) => break,
                 }
             } else if index == page_no_work_idx {
                 seeker.try_recv_page(&read_pass)?;
@@ -139,15 +143,14 @@ fn warm_up_phase(
         } else {
             // not blocked and has room. select on everything, pushing new work as available.
             let index = select_all.ready();
-            if index == commit_idx {
-                match comms.commit_rx.try_recv() {
+            if index == finish_idx {
+                match finish_rx.try_recv() {
                     Err(TryRecvError::Empty) => continue,
                     Err(e) => anyhow::bail!(e),
-                    Ok(ToWorker::Prepare) => break,
-                    Ok(ToWorker::Commit(_)) => unreachable!(),
+                    Ok(()) => break,
                 }
             } else if index == warmup_idx {
-                let warm_up_command = match comms.warmup_rx.try_recv() {
+                let warm_up_command = match warmup_rx.try_recv() {
                     Ok(command) => command,
                     Err(TryRecvError::Empty) => continue,
                     Err(e) => anyhow::bail!(e),
@@ -182,7 +185,7 @@ fn commit<H: NodeHasher>(
     page_pool: PagePool,
     mut seeker: Seeker,
     command: CommitCommand,
-    warm_ups: HashMap<KeyPath, Seek>,
+    warm_ups: Arc<HashMap<KeyPath, Seek>>,
 ) -> anyhow::Result<WorkerOutput> {
     let CommitCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
@@ -501,7 +504,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
         mut self,
         seeker: &mut Seeker,
         output: &mut WorkerOutput,
-        mut warm_ups: HashMap<KeyPath, Seek>,
+        warm_ups: Arc<HashMap<KeyPath, Seek>>,
     ) -> anyhow::Result<Option<WritePass<ShardIndex>>> {
         let mut start_index = self.range_start;
         let mut pushes = 0;
@@ -567,8 +570,8 @@ impl<H: NodeHasher> RangeCommitter<H> {
                 let next_push = start_index + pushes;
                 pushes += 1;
 
-                if let Some(result) = warm_ups.remove(&self.shared.read_write[next_push].0) {
-                    warmed_up.push_back(result);
+                if let Some(result) = warm_ups.get(&self.shared.read_write[next_push].0) {
+                    warmed_up.push_back(result.clone());
                     if warmed_up.len() >= 512 {
                         break;
                     }
