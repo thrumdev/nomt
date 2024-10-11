@@ -57,6 +57,10 @@ pub struct RunParams {
     #[arg(required = true, long, short)]
     pub backend: Backend,
 
+    /// How long to warm up for before collecting data.
+    #[arg(long = "warm-up")]
+    pub warm_up: Option<humantime::Duration>,
+
     /// Whether to reset the database.
     ///
     /// If this is false, no initialization logic will be run and the database is assumed to

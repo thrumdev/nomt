@@ -56,6 +56,25 @@ pub fn run(params: RunParams) -> Result<()> {
     }
 
     let mut timer = Timer::new(format!("{}", params.backend));
+    let warmup_timeout = params
+        .warm_up
+        .map(|time_limit| std::time::Instant::now() + time_limit.into());
+
+    let thread_pool = rayon::ThreadPoolBuilder::new()
+        .thread_name(|_| "benchtop-workload".into())
+        .num_threads(workload_params.workload_concurrency as usize)
+        .build()?;
+
+    if let Some(t) = warmup_timeout {
+        if workload_params.workload_concurrency == 1 {
+            db.execute(Some(&mut timer), &mut *workloads[0], Some(t));
+        } else {
+            db.parallel_execute(Some(&mut timer), &thread_pool, &mut workloads, Some(t))?;
+        };
+
+        timer = Timer::new(format!("{}", params.backend));
+    }
+
     let timeout = params
         .limits
         .time
@@ -64,12 +83,8 @@ pub fn run(params: RunParams) -> Result<()> {
     if workload_params.workload_concurrency == 1 {
         db.execute(Some(&mut timer), &mut *workloads[0], timeout);
     } else {
-        let thread_pool = rayon::ThreadPoolBuilder::new()
-            .thread_name(|_| "benchtop-workload".into())
-            .num_threads(workload_params.workload_concurrency as usize)
-            .build()?;
         db.parallel_execute(Some(&mut timer), &thread_pool, &mut workloads, timeout)?;
-    }
+    };
 
     db.print_metrics();
     timer.print(workload_params.size);
