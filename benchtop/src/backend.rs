@@ -40,6 +40,9 @@ pub trait Transaction {
     /// Read a value from the database. If a value was previously written, return that.
     fn read(&mut self, key: &[u8]) -> Option<Vec<u8>>;
 
+    /// Note that a value was read from a cache, for inclusion in a storage proof.
+    fn note_read(&mut self, key: &[u8], value: Option<Vec<u8>>);
+
     /// Write a value to the database. `None` means to delete the previous value.
     fn write(&mut self, key: &[u8], value: Option<&[u8]>);
 }

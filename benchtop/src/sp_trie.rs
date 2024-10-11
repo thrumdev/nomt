@@ -125,6 +125,11 @@ impl<'a> Transaction for Tx<'a> {
             .get(&key_path)
             .expect("Impossible fetching from sp-trie db")
     }
+
+    fn note_read(&mut self, key: &[u8], _value: Option<Vec<u8>>) {
+        let _ = self.read(key);
+    }
+
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let key_path = sha2::Sha256::digest(key);
 

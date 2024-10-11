@@ -196,6 +196,12 @@ impl<'a> Transaction for Tx<'a> {
         // note: this just reads from flat storage and doesn't do a full trie lookup.
         self.jmt.get(key_hash, self.version).unwrap()
     }
+
+    fn note_read(&mut self, key: &[u8], _value: Option<Vec<u8>>) {
+        let key_hash = KeyHash::with::<sha2::Sha256>(&key);
+        self.reads.insert(key_hash);
+    }
+
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
         let key_hash = KeyHash::with::<sha2::Sha256>(&key);
         let write = match value {
