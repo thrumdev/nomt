@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use clap::{Args, Parser, Subcommand};
+use clap::{builder::PossibleValue, Args, Parser, Subcommand};
 use std::fmt::Display;
 
 #[derive(Parser, Debug)]
@@ -135,6 +135,11 @@ pub struct WorkloadParams {
     /// The size of the in-memory LRU cache to use, measured in items.
     #[arg(long = "cache-size")]
     pub cache_size: Option<u64>,
+
+    /// The distribution workloads will use to sample state items to work on.
+    #[arg(long = "distribution")]
+    #[clap(default_value = "uniform")]
+    pub distribution: StateItemDistribution,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -147,4 +152,32 @@ pub struct RunLimits {
     /// The run is limited by the given duration.
     #[arg(long = "time-limit")]
     pub time: Option<humantime::Duration>,
+}
+
+/// The distribution of accessed state items, when randomly sampled from the key-space.
+#[derive(Debug, Clone, Copy)]
+pub enum StateItemDistribution {
+    /// Uniform sampling from the entire space.
+    Uniform,
+    /// Pareto (80-20) sampling from the key-space.
+    Pareto,
+}
+
+impl clap::ValueEnum for StateItemDistribution {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            StateItemDistribution::Uniform,
+            StateItemDistribution::Pareto,
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(match self {
+            StateItemDistribution::Uniform => {
+                PossibleValue::new("uniform").help("uniform sampling of state items to work on")
+            }
+            StateItemDistribution::Pareto => PossibleValue::new("pareto")
+                .help("pareto (80-20 power-law) sampling of staste items to work on"),
+        })
+    }
 }

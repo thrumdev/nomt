@@ -1,4 +1,8 @@
-use crate::{backend::Transaction, workload::Workload};
+use crate::{
+    backend::Transaction,
+    cli::StateItemDistribution,
+    workload::{Distribution, Workload},
+};
 use rand::Rng;
 
 #[derive(Clone)]
@@ -65,22 +69,28 @@ pub fn build(
     percentage_cold_transfer: u8,
     op_limit: u64,
     threads: usize,
+    distribution: StateItemDistribution,
 ) -> Vec<TransferWorkload> {
     let thread_workload_size = workload_size / threads as u64;
     let num_accounts_step = num_accounts / threads as u64;
 
     (0..threads)
-        .map(|i| TransferWorkload {
-            start_account: num_accounts_step * i as u64,
-            end_account: if i == threads - 1 {
+        .map(|i| {
+            let start_account = num_accounts_step * i as u64;
+            let end_account = if i == threads - 1 {
                 num_accounts
             } else {
                 num_accounts_step * (i as u64 + 1)
-            },
-            num_accounts,
-            workload_size: thread_workload_size,
-            percentage_cold_transfer,
-            ops_remaining: op_limit / threads as u64,
+            };
+            TransferWorkload {
+                start_account,
+                end_account,
+                num_accounts,
+                workload_size: thread_workload_size,
+                percentage_cold_transfer,
+                ops_remaining: op_limit / threads as u64,
+                distribution: Distribution::new(distribution, start_account, end_account),
+            }
         })
         .collect()
 }
@@ -99,6 +109,8 @@ pub struct TransferWorkload {
     pub percentage_cold_transfer: u8,
     /// The number of remaining operations before being considered 'done'.
     pub ops_remaining: u64,
+    /// The random distribution to use to sample state items.
+    pub distribution: Distribution,
 }
 
 impl Workload for TransferWorkload {
@@ -109,11 +121,11 @@ impl Workload for TransferWorkload {
 
         let mut rng = rand::thread_rng();
         for i in 0..self.workload_size {
-            let send_account = rng.gen_range(self.start_account..self.end_account);
+            let send_account = self.distribution.sample(&mut rng);
             let recv_account = if i < warm_sends {
-                let mut r = rng.gen_range(self.start_account..self.end_account);
+                let mut r = self.distribution.sample(&mut rng);
                 while r == send_account {
-                    r = rng.gen_range(self.start_account..self.end_account);
+                    r = self.distribution.sample(&mut rng);
                 }
                 r
             } else {
