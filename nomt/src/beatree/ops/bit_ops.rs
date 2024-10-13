@@ -41,8 +41,18 @@ pub fn separator_len(key: &Key) -> usize {
     if key == &[0u8; 32] {
         return 1;
     }
-    let key = &key.view_bits::<Msb0>();
-    key.len() - key.trailing_zeros()
+    let mut trailing_zeros = 0;
+    'byte_offset: for byte in (0..32).rev() {
+        for bit in (0..8).rev() {
+            let mask = 1 << (7 - bit);
+            if (key[byte] & mask) == mask {
+                break 'byte_offset;
+            }
+            trailing_zeros += 1;
+        }
+    }
+
+    256 - trailing_zeros
 }
 
 // Reconstruct a key starting from a prefix and a misaligned separator.
@@ -269,7 +279,7 @@ pub mod benches {
 mod tests {
     use crate::beatree::{
         branch::node::{RawPrefix, RawSeparator},
-        ops::bit_ops::{prefix_len, reconstruct_key, separate},
+        ops::bit_ops::{prefix_len, reconstruct_key, separate, separator_len},
         Key,
     };
     use bitvec::{prelude::Msb0, view::BitView};
@@ -452,6 +462,25 @@ mod tests {
 
             let expected_res = reference_prefix_len(&a, &b);
             let res = prefix_len(&a, &b);
+
+            assert_eq!(expected_res, res);
+        }
+    }
+
+    #[test]
+    fn test_separator_len() {
+        for separator_bit_len in 0..257 {
+            let mut a = [255; 32];
+            if separator_bit_len != 257 {
+                a.view_bits_mut::<Msb0>()[separator_bit_len..].fill(false);
+            }
+
+            let expected_res = if a == [0u8; 32] {
+                1
+            } else {
+                256 - a.view_bits::<Msb0>().trailing_zeros()
+            };
+            let res = separator_len(&a);
 
             assert_eq!(expected_res, res);
         }
