@@ -8,18 +8,7 @@ use crate::beatree::{
 // separate two keys a and b where b > a
 pub fn separate(a: &Key, b: &Key) -> Key {
     //if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
-    let mut bit_len = 0;
-    'byte_loop: for byte in 0..32 {
-        for bit in 0..8 {
-            let mask = 1 << (7 - bit);
-            if (a[byte] & mask) != (b[byte] & mask) {
-                break 'byte_loop;
-            }
-            bit_len += 1;
-        }
-    }
-    bit_len += 1;
-
+    let bit_len = prefix_len(a, b) + 1;
     let mut separator = [0u8; 32];
 
     let full_bytes = bit_len / 8;
@@ -35,12 +24,17 @@ pub fn separate(a: &Key, b: &Key) -> Key {
 }
 
 pub fn prefix_len(key_a: &Key, key_b: &Key) -> usize {
-    key_a
-        .view_bits::<Msb0>()
-        .iter()
-        .zip(key_b.view_bits::<Msb0>().iter())
-        .take_while(|(a, b)| a == b)
-        .count()
+    let mut bit_len = 0;
+    'byte_loop: for byte in 0..32 {
+        for bit in 0..8 {
+            let mask = 1 << (7 - bit);
+            if (key_a[byte] & mask) != (key_b[byte] & mask) {
+                break 'byte_loop;
+            }
+            bit_len += 1;
+        }
+    }
+    bit_len
 }
 
 pub fn separator_len(key: &Key) -> usize {
@@ -275,7 +269,7 @@ pub mod benches {
 mod tests {
     use crate::beatree::{
         branch::node::{RawPrefix, RawSeparator},
-        ops::bit_ops::{reconstruct_key, separate},
+        ops::bit_ops::{prefix_len, reconstruct_key, separate},
         Key,
     };
     use bitvec::{prelude::Msb0, view::BitView};
@@ -299,17 +293,19 @@ mod tests {
     }
 
     fn reference_separate(a: &Key, b: &Key) -> Key {
-        let len = a
-            .view_bits::<Msb0>()
-            .iter()
-            .zip(b.view_bits::<Msb0>().iter())
-            .take_while(|(a, b)| a == b)
-            .count()
-            + 1;
+        let len = reference_prefix_len(a, b) + 1;
 
         let mut separator = [0u8; 32];
         separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
         separator
+    }
+
+    fn reference_prefix_len(a: &Key, b: &Key) -> usize {
+        a.view_bits::<Msb0>()
+            .iter()
+            .zip(b.view_bits::<Msb0>().iter())
+            .take_while(|(a, b)| a == b)
+            .count()
     }
 
     #[test]
@@ -442,6 +438,20 @@ mod tests {
 
             let expected_res = reference_separate(&a, &b);
             let res = separate(&a, &b);
+
+            assert_eq!(expected_res, res);
+        }
+    }
+
+    #[test]
+    fn test_prefix_len() {
+        for prefix_bit_len in 0..256 {
+            let mut a = [255; 32];
+            a.view_bits_mut::<Msb0>()[prefix_bit_len..].fill(false);
+            let b = [255; 32];
+
+            let expected_res = reference_prefix_len(&a, &b);
+            let res = prefix_len(&a, &b);
 
             assert_eq!(expected_res, res);
         }
