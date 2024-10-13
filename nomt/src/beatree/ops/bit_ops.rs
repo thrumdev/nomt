@@ -257,3 +257,152 @@ pub mod benches {
         group.finish();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::beatree::{
+        branch::node::{RawPrefix, RawSeparator},
+        ops::bit_ops::reconstruct_key,
+        Key,
+    };
+    use bitvec::{prelude::Msb0, view::BitView};
+
+    fn reference_reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator) -> Key {
+        let mut key = [0; 32];
+
+        let mut key_init_separator = 0;
+        if let Some((prefix_bytes, prefix_bit_len)) = maybe_prefix {
+            key.view_bits_mut::<Msb0>()[..prefix_bit_len]
+                .copy_from_bitslice(&prefix_bytes.view_bits::<Msb0>()[..prefix_bit_len]);
+            key_init_separator = prefix_bit_len;
+        }
+
+        let (separator_bytes, separator_bit_init, separator_bit_len) = separator;
+        key.view_bits_mut::<Msb0>()[key_init_separator..][..separator_bit_len].copy_from_bitslice(
+            &separator_bytes.view_bits::<Msb0>()[separator_bit_init..][..separator_bit_len],
+        );
+
+        key
+    }
+
+    #[test]
+    fn test_reconstruct_key_no_prefix() {
+        // with no prefix the only possibilities are:
+        // one iteration without shifts and then all the subsequent are left shifts
+        for i in 0..8 {
+            let separator_bit_init = i;
+            let separator_bit_len = 256 - i;
+            let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+
+            let separator_bytes = vec![170; separator_byte_len];
+
+            let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
+            let expected_key = reference_reconstruct_key(None, separator);
+            let key = reconstruct_key(None, separator);
+
+            assert_eq!(expected_key, key);
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_key_shorter_separator() {
+        // test separator smaller then 256 to ensure the garbage at the end is properly removed
+        for separator_bit_len in 0..256 {
+            let separator_bit_init = 0;
+            let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+
+            let separator_bytes = vec![170; separator_byte_len];
+
+            let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
+            let expected_key = reference_reconstruct_key(None, separator);
+            let key = reconstruct_key(None, separator);
+
+            assert_eq!(expected_key, key);
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_key_no_shift() {
+        // No shift means that the separator bit init is just right
+        // after the end of the prefix, thus no shift for the separator
+        // is required but just an overlap of the common byte between
+        // prefix and separator
+        for i in 0..8 {
+            let mut prefix_bytes = [0; 3];
+            if i != 0 {
+                prefix_bytes[2] = 1 << (8 - i);
+            }
+            let prefix_bit_len = 16 + i;
+            let separator_bit_init = i;
+            let separator_bit_len = 256 - prefix_bit_len;
+            let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+
+            let separator_bytes = vec![170; separator_byte_len];
+
+            let prefix = Some((&prefix_bytes[..], prefix_bit_len));
+            let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
+            let expected_key = reference_reconstruct_key(prefix, separator);
+            let key = reconstruct_key(prefix, separator);
+
+            assert_eq!(expected_key, key);
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_key_left_shift() {
+        // Given a prefix that ends at all bit offset possibilities,
+        // tests all the separators that start after the prefix ends
+        for i in 0..8 {
+            let mut prefix_bytes = [0; 3];
+            if i != 0 {
+                prefix_bytes[2] = 1 << (8 - i);
+            }
+            let prefix_bit_len = 16 + i;
+
+            for separator_bit_init_offset in 1..(8 - i) {
+                let separator_bit_init = i + separator_bit_init_offset;
+                let separator_bit_len = 256 - prefix_bit_len;
+                let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+
+                let separator_bytes = vec![170; separator_byte_len];
+
+                let prefix = Some((&prefix_bytes[..], prefix_bit_len));
+                let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
+
+                let expected_key = reference_reconstruct_key(prefix, separator);
+                let key = reconstruct_key(prefix, separator);
+
+                assert_eq!(expected_key, key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_key_right_shift() {
+        // Given a prefix that ends at all bit offset possibilities,
+        // tests all the separators that start before the prefix ends
+        for i in 0..8 {
+            let mut prefix_bytes = [0; 3];
+            if i != 0 {
+                prefix_bytes[2] = 1 << (8 - i);
+            }
+            let prefix_bit_len = 16 + i;
+
+            for separator_bit_init_offset in 0..i {
+                let separator_bit_init = separator_bit_init_offset;
+                let separator_bit_len = 256 - prefix_bit_len;
+                let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+
+                let separator_bytes = vec![170; separator_byte_len];
+
+                let prefix = Some((&prefix_bytes[..], prefix_bit_len));
+                let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
+
+                let expected_key = reference_reconstruct_key(prefix, separator);
+                let key = reconstruct_key(prefix, separator);
+
+                assert_eq!(expected_key, key);
+            }
+        }
+    }
+}
