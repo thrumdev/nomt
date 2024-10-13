@@ -7,17 +7,30 @@ use crate::beatree::{
 
 // separate two keys a and b where b > a
 pub fn separate(a: &Key, b: &Key) -> Key {
-    // if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
-    let len = a
-        .view_bits::<Msb0>()
-        .iter()
-        .zip(b.view_bits::<Msb0>().iter())
-        .take_while(|(a, b)| a == b)
-        .count()
-        + 1;
+    //if b > a at some point b must have a 1 where a has a 0 and they are equal up to that point.
+    let mut bit_len = 0;
+    'byte_loop: for byte in 0..32 {
+        for bit in 0..8 {
+            let mask = 1 << (7 - bit);
+            if (a[byte] & mask) != (b[byte] & mask) {
+                break 'byte_loop;
+            }
+            bit_len += 1;
+        }
+    }
+    bit_len += 1;
 
     let mut separator = [0u8; 32];
-    separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
+
+    let full_bytes = bit_len / 8;
+    separator[..full_bytes].copy_from_slice(&b[..full_bytes]);
+
+    let remaining = bit_len % 8;
+    if remaining != 0 {
+        let mask = !((1 << (8 - remaining)) - 1);
+        separator[full_bytes] = b[full_bytes] & mask;
+    }
+
     separator
 }
 
@@ -262,7 +275,7 @@ pub mod benches {
 mod tests {
     use crate::beatree::{
         branch::node::{RawPrefix, RawSeparator},
-        ops::bit_ops::reconstruct_key,
+        ops::bit_ops::{reconstruct_key, separate},
         Key,
     };
     use bitvec::{prelude::Msb0, view::BitView};
@@ -283,6 +296,20 @@ mod tests {
         );
 
         key
+    }
+
+    fn reference_separate(a: &Key, b: &Key) -> Key {
+        let len = a
+            .view_bits::<Msb0>()
+            .iter()
+            .zip(b.view_bits::<Msb0>().iter())
+            .take_while(|(a, b)| a == b)
+            .count()
+            + 1;
+
+        let mut separator = [0u8; 32];
+        separator.view_bits_mut::<Msb0>()[..len].copy_from_bitslice(&b.view_bits::<Msb0>()[..len]);
+        separator
     }
 
     #[test]
@@ -403,6 +430,20 @@ mod tests {
 
                 assert_eq!(expected_key, key);
             }
+        }
+    }
+
+    #[test]
+    fn test_separate() {
+        for prefix_bit_len in 0..256 {
+            let mut a = [255; 32];
+            a.view_bits_mut::<Msb0>()[prefix_bit_len..].fill(false);
+            let b = [255; 32];
+
+            let expected_res = reference_separate(&a, &b);
+            let res = separate(&a, &b);
+
+            assert_eq!(expected_res, res);
         }
     }
 }
