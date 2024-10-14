@@ -74,8 +74,6 @@ pub fn build(
                 } else {
                     thread_workload_size
                 },
-                db_size: db_step,
-                db_start,
                 ops_remaining: op_limit / threads as u64,
                 distribution: Distribution::new(distribution, db_start, db_start + db_step),
             }
@@ -95,10 +93,6 @@ pub struct RwWorkload {
     pub writes: u8,
     pub workload_size: u64,
     pub fresh: u8,
-    // the first account in the DB used by this workload
-    pub db_start: u64,
-    // the number of accounts in the DB owned by this workload
-    pub db_size: u64,
     pub ops_remaining: u64,
     pub distribution: Distribution,
 }
