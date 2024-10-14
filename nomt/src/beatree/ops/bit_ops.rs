@@ -277,7 +277,6 @@ pub mod benches {
 mod tests {
     use crate::beatree::{
         branch::node::{RawPrefix, RawSeparator},
-        ops::bit_ops::{prefix_len, reconstruct_key, separate, separator_len},
         Key,
     };
     use bitvec::{prelude::Msb0, view::BitView};
@@ -317,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconstruct_key_no_prefix() {
+    fn reconstruct_key_no_prefix() {
         // with no prefix the only possibilities are:
         // one iteration without shifts and then all the subsequent are left shifts
         for i in 0..8 {
@@ -329,14 +328,14 @@ mod tests {
 
             let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
             let expected_key = reference_reconstruct_key(None, separator);
-            let key = reconstruct_key(None, separator);
+            let key = super::reconstruct_key(None, separator);
 
             assert_eq!(expected_key, key);
         }
     }
 
     #[test]
-    fn test_reconstruct_key_shorter_separator() {
+    fn reconstruct_key_shorter_separator() {
         // test separator smaller then 256 to ensure the garbage at the end is properly removed
         for separator_bit_len in 0..256 {
             let separator_bit_init = 0;
@@ -346,14 +345,14 @@ mod tests {
 
             let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
             let expected_key = reference_reconstruct_key(None, separator);
-            let key = reconstruct_key(None, separator);
+            let key = super::reconstruct_key(None, separator);
 
             assert_eq!(expected_key, key);
         }
     }
 
     #[test]
-    fn test_reconstruct_key_no_shift() {
+    fn reconstruct_key_no_shift() {
         // No shift means that the separator bit init is just right
         // after the end of the prefix, thus no shift for the separator
         // is required but just an overlap of the common byte between
@@ -373,14 +372,14 @@ mod tests {
             let prefix = Some((&prefix_bytes[..], prefix_bit_len));
             let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
             let expected_key = reference_reconstruct_key(prefix, separator);
-            let key = reconstruct_key(prefix, separator);
+            let key = super::reconstruct_key(prefix, separator);
 
             assert_eq!(expected_key, key);
         }
     }
 
     #[test]
-    fn test_reconstruct_key_left_shift() {
+    fn reconstruct_key_left_shift() {
         // Given a prefix that ends at all bit offset possibilities,
         // tests all the separators that start after the prefix ends
         for i in 0..8 {
@@ -401,7 +400,7 @@ mod tests {
                 let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
 
                 let expected_key = reference_reconstruct_key(prefix, separator);
-                let key = reconstruct_key(prefix, separator);
+                let key = super::reconstruct_key(prefix, separator);
 
                 assert_eq!(expected_key, key);
             }
@@ -409,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconstruct_key_right_shift() {
+    fn reconstruct_key_right_shift() {
         // Given a prefix that ends at all bit offset possibilities,
         // tests all the separators that start before the prefix ends
         for i in 0..8 {
@@ -430,7 +429,7 @@ mod tests {
                 let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
 
                 let expected_key = reference_reconstruct_key(prefix, separator);
-                let key = reconstruct_key(prefix, separator);
+                let key = super::reconstruct_key(prefix, separator);
 
                 assert_eq!(expected_key, key);
             }
@@ -438,35 +437,35 @@ mod tests {
     }
 
     #[test]
-    fn test_separate() {
+    fn separate() {
         for prefix_bit_len in 0..256 {
             let mut a = [255; 32];
             a.view_bits_mut::<Msb0>()[prefix_bit_len..].fill(false);
             let b = [255; 32];
 
             let expected_res = reference_separate(&a, &b);
-            let res = separate(&a, &b);
+            let res = super::separate(&a, &b);
 
             assert_eq!(expected_res, res);
         }
     }
 
     #[test]
-    fn test_prefix_len() {
+    fn prefix_len() {
         for prefix_bit_len in 0..256 {
             let mut a = [255; 32];
             a.view_bits_mut::<Msb0>()[prefix_bit_len..].fill(false);
             let b = [255; 32];
 
             let expected_res = reference_prefix_len(&a, &b);
-            let res = prefix_len(&a, &b);
+            let res = super::prefix_len(&a, &b);
 
             assert_eq!(expected_res, res);
         }
     }
 
     #[test]
-    fn test_separator_len() {
+    fn separator_len() {
         for separator_bit_len in 0..257 {
             let mut a = [255; 32];
             if separator_bit_len != 257 {
@@ -478,7 +477,7 @@ mod tests {
             } else {
                 256 - a.view_bits::<Msb0>().trailing_zeros()
             };
-            let res = separator_len(&a);
+            let res = super::separator_len(&a);
 
             assert_eq!(expected_res, res);
         }
