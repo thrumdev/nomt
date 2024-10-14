@@ -83,8 +83,6 @@ pub fn build(
                 num_accounts_step * (i as u64 + 1)
             };
             TransferWorkload {
-                start_account,
-                end_account,
                 num_accounts,
                 workload_size: thread_workload_size,
                 percentage_cold_transfer,
@@ -97,10 +95,6 @@ pub fn build(
 
 /// A transfer-like workload.
 pub struct TransferWorkload {
-    /// The start of the account range (inclusive) this workload handles.
-    pub start_account: u64,
-    /// The end of the account range (exclusive) this workload handles.
-    pub end_account: u64,
     /// The number of accounts in the system.
     pub num_accounts: u64,
     /// The size of the workload.
