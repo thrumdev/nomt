@@ -1,5 +1,3 @@
-use bitvec::{order::Msb0, view::BitView};
-
 use crate::beatree::{
     branch::node::{RawPrefix, RawSeparator},
     Key,
