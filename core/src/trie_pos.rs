@@ -339,7 +339,6 @@ impl ChildNodeIndices {
 mod tests {
     use super::*;
 
-    #[ignore = "to be addressed in followups"]
     #[test]
     fn path_can_go_deeper_255_bit() {
         let mut p = TriePosition::from_str(
