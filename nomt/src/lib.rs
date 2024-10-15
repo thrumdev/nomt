@@ -294,6 +294,17 @@ impl Nomt {
         actuals: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
     ) -> anyhow::Result<(Node, Option<Witness>, Option<WitnessedOperations>)> {
+        if cfg!(debug_assertions) {
+            // Check that the actuals are sorted by key path.
+            for i in 1..actuals.len() {
+                assert!(
+                    actuals[i].0 > actuals[i - 1].0,
+                    "actuals are not sorted at index {}",
+                    i
+                );
+            }
+        }
+
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
             compact_actuals.push((path.clone(), read_write.to_compact()));
