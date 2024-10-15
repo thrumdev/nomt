@@ -1,12 +1,11 @@
 use crate::page_cache::NODES_PER_PAGE;
-use bitvec::prelude::*;
 
 /// A bitfield tracking which nodes have changed within a page.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PageDiff {
     /// Each bit indicates whether the node at the corresponding index has changed.
     /// Later bits are unused.
-    changed_nodes: BitArray<[u8; 16], Lsb0>,
+    changed_nodes: [u64; 2],
 }
 
 impl PageDiff {
@@ -14,20 +13,34 @@ impl PageDiff {
     ///
     /// Returns `None` if any of unused bits are set to 1.
     pub fn from_bytes(bytes: [u8; 16]) -> Option<Self> {
-        let changed_nodes = BitArray::<[u8; 16], Lsb0>::new(bytes);
+        let mut changed_nodes = [0u64; 2];
+        changed_nodes[0] = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        changed_nodes[1] = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+
+        let diff = PageDiff { changed_nodes };
         // Check if the two last bits are set to 1
-        assert!(changed_nodes.len() == 128);
-        if changed_nodes[126] || changed_nodes[127] {
+        if diff.changed(126) || diff.changed(127) {
             return None;
         }
-        Some(Self { changed_nodes })
+        Some(diff)
     }
 
     /// Note that some 32-byte slot in the page data has changed.
     /// The acceptable range is 0..NODES_PER_PAGE
     pub fn set_changed(&mut self, slot_index: usize) {
         assert!(slot_index < NODES_PER_PAGE);
-        self.changed_nodes.set(slot_index, true);
+        let word = slot_index / 64;
+        let index = slot_index % 64;
+        let mask = 1 << index;
+        self.changed_nodes[word] |= mask;
+    }
+
+    /// Whether a bit is set within the page data.
+    pub fn changed(&self, slot_index: usize) -> bool {
+        let word = slot_index / 64;
+        let index = slot_index % 64;
+        let mask = 1 << index;
+        self.changed_nodes[word] & mask == mask
     }
 
     /// Given the page data, collect the nodes that have changed according to this diff.
@@ -35,7 +48,7 @@ impl PageDiff {
         &'b self,
         page: &'a [u8],
     ) -> impl Iterator<Item = [u8; 32]> + 'a {
-        self.changed_nodes.iter_ones().map(|node_index| {
+        self.iter_ones().map(|node_index| {
             let start = node_index * 32;
             let end = start + 32;
             page[start..end].try_into().unwrap()
@@ -47,8 +60,8 @@ impl PageDiff {
     /// Panics if the number of changed nodes doesn't equal to the number of nodes
     /// this diff recorded.
     pub fn unpack_changed_nodes(&self, nodes: &[[u8; 32]], page: &mut [u8]) {
-        assert!(self.changed_nodes.count_ones() == nodes.len());
-        for (node_index, node) in self.changed_nodes.iter_ones().zip(nodes) {
+        assert_eq!(self.count(), nodes.len());
+        for (node_index, node) in self.iter_ones().zip(nodes) {
             let start = node_index * 32;
             let end = start + 32;
             page[start..end].copy_from_slice(&node[..]);
@@ -57,16 +70,65 @@ impl PageDiff {
 
     /// Returns the number of changed nodes. Capped at [NODES_PER_PAGE].
     pub fn count(&self) -> usize {
-        self.changed_nodes.count_ones()
+        (self.changed_nodes[0].count_ones() + self.changed_nodes[1].count_ones()) as usize
     }
 
     /// Get raw bytes representing the PageDiff
     pub fn as_bytes(&self) -> [u8; 16] {
-        self.changed_nodes.data
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&self.changed_nodes[0].to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.changed_nodes[1].to_le_bytes());
+        bytes
+    }
+
+    fn iter_ones(&self) -> impl Iterator<Item = usize> {
+        FastIterOnes(self.changed_nodes[0])
+            .chain(FastIterOnes(self.changed_nodes[1]).map(|i| i + 64))
     }
 }
 
-#[test]
-fn ensure_cap() {
-    assert_eq!(NODES_PER_PAGE, 126);
+struct FastIterOnes(u64);
+
+impl Iterator for FastIterOnes {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        match self.0.trailing_zeros() {
+            64 => None,
+            x => {
+                self.0 &= !(1 << x);
+                Some(x as usize)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PageDiff;
+    use crate::page_cache::NODES_PER_PAGE;
+
+    #[test]
+    fn ensure_cap() {
+        assert_eq!(NODES_PER_PAGE, 126);
+    }
+
+    #[test]
+    fn iter_ones() {
+        let mut diff = PageDiff::default();
+
+        let set_bits = (0..63).map(|i| i * 2).collect::<Vec<_>>();
+        for bit in set_bits.iter().cloned() {
+            diff.set_changed(bit);
+        }
+
+        for bit in set_bits.iter().cloned() {
+            assert!(diff.changed(bit));
+        }
+
+        let mut iterated_set_bits = diff.iter_ones().collect::<Vec<_>>();
+        iterated_set_bits.sort();
+
+        assert_eq!(iterated_set_bits, set_bits);
+    }
 }
