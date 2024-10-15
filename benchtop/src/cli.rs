@@ -181,7 +181,7 @@ impl clap::ValueEnum for StateItemDistribution {
                 PossibleValue::new("uniform").help("uniform sampling of state items to work on")
             }
             StateItemDistribution::Pareto => PossibleValue::new("pareto")
-                .help("pareto (80-20 power-law) sampling of staste items to work on"),
+                .help("pareto (80-20 power-law) sampling of state items to work on"),
         })
     }
 }
