@@ -298,7 +298,7 @@ fn shard_regions(num_shards: usize) -> Vec<(PageRegion, usize)> {
     regions
 }
 
-// see comments in `shard_regions`
+// returns the shard index, according to the allocation in `shard_regions`.
 fn shard_index_for(num_shards: usize, first_ancestor: usize) -> usize {
     let part = NUM_CHILDREN / num_shards;
     let remainder = NUM_CHILDREN % num_shards;
@@ -367,7 +367,7 @@ impl PageCache {
         if page_id == &ROOT_PAGE_ID {
             None
         } else {
-            let first_ancestor = page_id.child_index_at_level(0) as usize;
+            let first_ancestor = page_id.child_index_at_level(0).to_u8() as usize;
             let shard_index = shard_index_for(self.shared.shards.len(), first_ancestor);
             debug_assert!(self.shared.shards[shard_index]
                 .region
