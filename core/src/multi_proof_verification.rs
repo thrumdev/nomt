@@ -251,7 +251,10 @@ fn verify_range<H: NodeHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        verify, InternalData, LeafData, MultiProof, NodeHasher, NodeHasherExt, PathProofTerminal,
+        TERMINATOR,
+    };
     use crate::{proof::PathProof, trie};
 
     /// Hash nodes with blake3.

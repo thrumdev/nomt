@@ -220,7 +220,9 @@ fn read_page<'a>(page: &'a FatPage) -> (impl Iterator<Item = PageNumber> + 'a, &
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        needed_pages, total_needed_pages, BODY_SIZE, MAX_OVERFLOW_CELL_NODE_POINTERS, MAX_PNS,
+    };
 
     #[test]
     fn total_needed_pages_all_in_cell() {

@@ -166,7 +166,10 @@ impl SegmentFileReader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        File, RecordId, SegmentFileReader, SegmentFileWriter, HEADER_SIZE, MAX_RECORD_PAYLOAD_SIZE,
+        RECORD_ALIGNMENT,
+    };
     use tempfile::NamedTempFile;
 
     #[test]

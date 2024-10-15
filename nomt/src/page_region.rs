@@ -175,7 +175,7 @@ unsafe impl RegionContains<PageId> for PageRegion {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ChildPageIndex, PageRegion, ROOT_PAGE_ID};
     use nomt_core::page_id::MAX_CHILD_INDEX;
 
     // test that exclusivity is bidirectional doesn't affect the result, then return the result.
