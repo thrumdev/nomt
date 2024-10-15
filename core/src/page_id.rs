@@ -122,8 +122,8 @@ impl PageId {
     /// Get the child index of the page at the given depth.
     ///
     /// This panics if the depth of the page is not at least `depth + 1`.
-    pub fn child_index_at_level(&self, depth: usize) -> u8 {
-        self.path[depth]
+    pub fn child_index_at_level(&self, depth: usize) -> ChildPageIndex {
+        ChildPageIndex(self.path[depth])
     }
 
     /// Encode this page ID to its disambiguated (fixed-width) representation.
