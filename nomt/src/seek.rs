@@ -134,7 +134,18 @@ impl SeekRequest {
             // `continue_seek`.
         }
 
-        self.state = RequestState::Seeking(cur_node);
+        if self.position.depth() == 256 {
+            // If we have reached the last layer of the trie, we are sure that it needs to be a leaf,
+            // and its children will be part of the same last page, which is only partially used
+            assert!(trie::is_leaf(&cur_node));
+            let children = self.position.child_node_indices();
+            self.state = RequestState::Completed(Some(trie::LeafData {
+                key_path: page.node(&read_pass, children.left()),
+                value_hash: page.node(&read_pass, children.right()),
+            }));
+        } else {
+            self.state = RequestState::Seeking(cur_node);
+        }
     }
 }
 
