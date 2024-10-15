@@ -507,10 +507,6 @@ mod tests {
         assert!(gauge.body_size_after(unprefixed_key, 256) < BRANCH_NODE_BODY_SIZE);
     }
 
-    fn key(x: u8) -> Key {
-        prefixed_key(x, 1, 0)
-    }
-
     fn prefixed_key(prefix_byte: u8, prefix_len: usize, i: usize) -> Key {
         let mut k = [0u8; 32];
         for x in k.iter_mut().take(prefix_len) {
