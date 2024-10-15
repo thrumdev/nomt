@@ -337,7 +337,7 @@ impl ChildNodeIndices {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::TriePosition;
 
     #[test]
     fn path_can_go_deeper_255_bit() {

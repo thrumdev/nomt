@@ -282,9 +282,8 @@ impl WalBlobReader {
 
 #[cfg(test)]
 mod tests {
+    use super::{PageDiff, PagePool, WalBlobBuilder, WalBlobReader, WalEntry};
     use std::{fs::OpenOptions, io::Write as _, os::unix::fs::OpenOptionsExt as _};
-
-    use super::*;
 
     #[test]
     fn test_write_read() {

@@ -431,7 +431,10 @@ impl LeafGauge {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        separate, BaseLeaf, DigestResult, Key, LeafBuilder, LeafNode, LeafOp, LeafUpdater,
+        LeavesTracker, PagePool,
+    };
 
     lazy_static::lazy_static! {
         static ref PAGE_POOL: PagePool = PagePool::new();

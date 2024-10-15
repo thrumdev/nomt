@@ -252,7 +252,10 @@ pub fn build_trie<H: NodeHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        bitvec, build_trie, trie, BitVec, LeafData, Msb0, Node, NodeHasher, NodeHasherExt,
+        WriteNode,
+    };
 
     struct DummyNodeHasher;
 

@@ -267,7 +267,11 @@ impl Iterator for PageIdsIterator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ChildPageIdError, ChildPageIndex, InvalidPageIdBytes, Msb0, PageId, PageIdsIterator, Uint,
+        HIGHEST_ENCODED_42, MAX_CHILD_INDEX, ROOT_PAGE_ID,
+    };
+    use bitvec::prelude::*;
 
     const LOWEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
         0, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16,

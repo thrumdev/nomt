@@ -781,8 +781,12 @@ fn get_page(page_source: &PageSource, page_id: PageId) -> Option<Page> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        trie, Node, NodeHasherExt, Output, PageCache, PagePool, PageSource, PageWalker,
+        TriePosition, ROOT_PAGE_ID,
+    };
     use crate::Blake3Hasher;
+    use bitvec::prelude::*;
     use nomt_core::page_id::ChildPageIndex;
 
     macro_rules! trie_pos {

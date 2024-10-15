@@ -401,7 +401,7 @@ impl<'a> FreeListPageMut<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{FreeList, PageNumber, PagePool, MAX_PNS_PER_PAGE};
 
     #[test]
     fn pop_into_next_portion_one_page_needed() {
