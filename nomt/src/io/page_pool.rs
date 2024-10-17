@@ -271,3 +271,87 @@ impl<'a> Deallocator<'a> {
         self.freelist.push(page);
     }
 }
+
+/// An immutable view into a raw page.
+pub struct UnsafePageView {
+    page: Page,
+}
+
+impl UnsafePageView {
+    /// Create a new view into a page.
+    ///
+    /// ## Safety
+    ///
+    /// The caller is responsible for ensuring that:
+    ///   - The page pool which originated the page will be alive for the lifetime of this view.
+    ///   - No mutable references are taken into the page for the duration of its lifetime.
+    ///   - The page will remain live for the duration of this lifetime.
+    pub unsafe fn new(page: Page) -> UnsafePageView {
+        UnsafePageView {
+            page,
+        }
+    }
+
+    /// Consume this view, accessing the inner page.
+    pub fn into_inner(self) -> Page {
+        self.page
+    }
+}
+
+impl Deref for UnsafePageView {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // SAFETY: aliasing and liveness are guaranteed by this struct being 'unsafe'.
+        unsafe {
+            self.page.as_mut_slice()
+        }
+    }
+}
+
+/// A mutable view into a raw page.
+pub struct UnsafePageViewMut {
+    page: Page,
+}
+
+impl UnsafePageViewMut {
+    /// Create a new view into a page.
+    ///
+    /// ## Safety
+    ///
+    /// The caller is responsible for ensuring that:
+    ///   - The page pool which originated the page will be alive for the lifetime of this view.
+    ///   - No other references are taken into the page data for the duration of its lifetime.
+    ///   - The page will remain live for the duration of its lifetime.
+    pub unsafe fn new(page: Page) -> UnsafePageViewMut {
+        UnsafePageViewMut {
+            page,
+        }
+    }
+
+
+    /// Consume this view, accessing the inner page.
+    pub fn into_inner(self) -> Page {
+        self.page
+    }
+}
+
+impl Deref for UnsafePageViewMut {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // SAFETY: aliasing and liveness are guaranteed by this struct being 'unsafe'.
+        unsafe {
+            self.page.as_mut_slice()
+        }
+    }
+}
+
+impl DerefMut for UnsafePageViewMut {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // SAFETY: aliasing and liveness are guaranteed by this struct being 'unsafe'.
+        unsafe {
+            self.page.as_mut_slice()
+        }
+    }
+}

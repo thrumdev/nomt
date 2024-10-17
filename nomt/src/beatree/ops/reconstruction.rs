@@ -13,7 +13,7 @@ use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd, ptr, sync::Arc};
 
 use crate::beatree::{
     allocator::PageNumber,
-    branch::{BranchNode, BranchNodeView, BRANCH_NODE_SIZE},
+    branch::{BranchNode, BRANCH_NODE_SIZE},
     index::Index,
 };
 use crate::io::PagePool;
@@ -30,7 +30,7 @@ pub fn reconstruct(
 
     let mut chunker = SeqFileReader::new(bn_fd, bump.0)?;
     while let Some((pn, node)) = chunker.next()? {
-        let view = BranchNodeView::from_slice(node);
+        let view = BranchNode::new(&node[..]);
 
         if view.n() == 0 && node == [0; BRANCH_NODE_SIZE] {
             // Just skip empty nodes.
@@ -48,7 +48,7 @@ pub fn reconstruct(
             pn
         );
 
-        let mut branch = BranchNode::new_in(&page_pool);
+        let mut branch = BranchNode::new_fat(&page_pool);
         branch.as_mut_slice().copy_from_slice(node);
 
         let mut separator = [0u8; 32];

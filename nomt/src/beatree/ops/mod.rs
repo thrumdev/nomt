@@ -134,7 +134,7 @@ pub mod benches {
                 .collect();
             separators.sort_by(|a, b| a.1.cmp(&b.1));
 
-            let branch_node = BranchNode::new_in(&page_pool);
+            let branch_node = BranchNode::new_fat(&page_pool);
             let mut branch_node_builder =
                 BranchNodeBuilder::new(branch_node, n, prefix_len_bits, 256);
 
