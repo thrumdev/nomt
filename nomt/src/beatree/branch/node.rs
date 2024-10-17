@@ -2,7 +2,9 @@ use bitvec::prelude::*;
 
 use super::BRANCH_NODE_SIZE;
 use crate::beatree::Key;
-use crate::io::{FatPage, PagePool};
+use crate::io::{FatPage, PagePool, PAGE_SIZE};
+
+use std::ops::{Deref, DerefMut};
 
 // Here is the layout of a branch node:
 //
@@ -31,15 +33,21 @@ use crate::io::{FatPage, PagePool};
 const BRANCH_NODE_HEADER_SIZE: usize = 4 + 2 + 2 + 2;
 pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_SIZE;
 
-/// A branch node, regardless of its level.
-pub struct BranchNode {
-    pub(super) page: FatPage,
+/// A branch node.
+pub struct BranchNode<T = FatPage> {
+    pub(super) page: T,
 }
 
-impl BranchNode {
-    pub fn new_in(page_pool: &PagePool) -> Self {
+impl<T: Deref<Target=[u8]>> BranchNode<T> {
+    /// Create a new read-only branch node.
+    ///
+    /// ## Panics
+    ///
+    /// This panics at runtime if the buffer size is not equal to the expected page size.
+    pub fn new(page: T) -> BranchNode<T> {
+        assert_eq!(page.len(), PAGE_SIZE);
         BranchNode {
-            page: page_pool.alloc_fat_page(),
+            page
         }
     }
 
@@ -47,18 +55,77 @@ impl BranchNode {
         &*self.page
     }
 
-    pub fn view(&self) -> BranchNodeView {
-        BranchNodeView {
-            inner: self.as_slice(),
-        }
+    pub fn bbn_pn(&self) -> u32 {
+        u32::from_le_bytes(self.as_slice()[0..4].try_into().unwrap())
     }
 
+    pub fn n(&self) -> u16 {
+        u16::from_le_bytes(self.as_slice()[4..6].try_into().unwrap())
+    }
+    pub fn prefix_compressed(&self) -> u16 {
+        u16::from_le_bytes(self.as_slice()[6..8].try_into().unwrap())
+    }
+
+    pub fn prefix_len(&self) -> u16 {
+        u16::from_le_bytes(self.as_slice()[8..10].try_into().unwrap())
+    }
+
+    pub fn prefix<'a>(&'a self) -> &'a BitSlice<u8, Msb0> {
+        let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        &self.as_slice()[start..].view_bits()[..self.prefix_len() as usize]
+    }
+
+    pub fn cell(&self, i: usize) -> usize {
+        let cell_offset = BRANCH_NODE_HEADER_SIZE + (i * 2);
+        u16::from_le_bytes(self.as_slice()[cell_offset..][..2].try_into().unwrap()) as usize
+    }
+
+    pub fn raw_prefix<'a>(&'a self) -> RawPrefix<'a> {
+        let bit_len = self.prefix_len() as usize;
+
+        let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let end = start + ((bit_len + 7) / 8);
+
+        (&self.as_slice()[start..end], bit_len)
+    }
+
+    pub fn separator<'a>(&'a self, i: usize) -> &'a BitSlice<u8, Msb0> {
+        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let mut bit_offset_start = self.prefix_len() as usize;
+        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
+        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
+        &self.as_slice()[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
+    }
+
+    pub fn raw_separator<'a>(&'a self, i: usize) -> RawSeparator<'a> {
+        let mut bit_offset_start = self.prefix_len() as usize;
+        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
+        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
+
+        let bit_len = bit_offset_end - bit_offset_start;
+
+        if bit_len == 0 {
+            return (&[], 0, bit_len);
+        }
+
+        let bit_init = bit_offset_start % 8;
+        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        let start = start_separators + (bit_offset_start / 8);
+        // load only slices into RawSeparator that have a length multiple of 8 bytes
+        let byte_len = (((bit_init + bit_len) + 7) / 8).next_multiple_of(8);
+
+        (&self.as_slice()[start..start + byte_len], bit_init, bit_len)
+    }
+
+    pub fn node_pointer(&self, i: usize) -> u32 {
+        let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
+        u32::from_le_bytes(self.as_slice()[offset..offset + 4].try_into().unwrap())
+    }
+}
+
+impl<T: DerefMut<Target=[u8]>> BranchNode<T> {
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut *self.page
-    }
-
-    pub fn bbn_pn(&self) -> u32 {
-        self.view().bbn_pn()
     }
 
     pub fn set_bbn_pn(&mut self, pn: u32) {
@@ -66,17 +133,9 @@ impl BranchNode {
         slice[0..4].copy_from_slice(&pn.to_le_bytes());
     }
 
-    pub fn n(&self) -> u16 {
-        self.view().n()
-    }
-
     pub fn set_n(&mut self, n: u16) {
         let slice = self.as_mut_slice();
         slice[4..6].copy_from_slice(&n.to_le_bytes());
-    }
-
-    pub fn prefix_compressed(&self) -> u16 {
-        self.view().prefix_compressed()
     }
 
     pub fn set_prefix_compressed(&mut self, prefix_compressed: u16) {
@@ -84,35 +143,15 @@ impl BranchNode {
         slice[6..8].copy_from_slice(&prefix_compressed.to_le_bytes());
     }
 
-    pub fn prefix_len(&self) -> u16 {
-        self.view().prefix_len()
-    }
-
     pub fn set_prefix_len(&mut self, len: u16) {
         let slice = self.as_mut_slice();
         slice[8..10].copy_from_slice(&len.to_le_bytes());
-    }
-
-    pub fn prefix(&self) -> &BitSlice<u8, Msb0> {
-        self.view().prefix()
-    }
-
-    pub fn raw_prefix(&self) -> RawPrefix {
-        self.view().raw_prefix()
     }
 
     fn set_prefix(&mut self, prefix: &BitSlice<u8, Msb0>) {
         let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let prefix_len = self.prefix_len() as usize;
         self.as_mut_slice()[start..].view_bits_mut()[..prefix_len].copy_from_bitslice(prefix);
-    }
-
-    pub fn separator(&self, i: usize) -> &BitSlice<u8, Msb0> {
-        self.view().separator(i)
-    }
-
-    pub fn raw_separator(&self, i: usize) -> RawSeparator {
-        self.view().raw_separator(i)
     }
 
     fn set_separator(
@@ -134,96 +173,19 @@ impl BranchNode {
             .copy_from_bitslice(&separator);
     }
 
-    pub fn node_pointer(&self, i: usize) -> u32 {
-        self.view().node_pointer(i)
-    }
-
     fn set_node_pointer(&mut self, i: usize, node_pointer: u32) {
         let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
         self.as_mut_slice()[offset..offset + 4].copy_from_slice(&node_pointer.to_le_bytes());
     }
 }
 
-pub struct BranchNodeView<'a> {
-    inner: &'a [u8],
-}
-
-impl<'a> BranchNodeView<'a> {
-    pub fn from_slice(slice: &'a [u8]) -> Self {
-        assert_eq!(slice.len(), BRANCH_NODE_SIZE);
-        BranchNodeView { inner: slice }
-    }
-
-    pub fn bbn_pn(&self) -> u32 {
-        u32::from_le_bytes(self.inner[0..4].try_into().unwrap())
-    }
-
-    pub fn n(&self) -> u16 {
-        u16::from_le_bytes(self.inner[4..6].try_into().unwrap())
-    }
-
-    pub fn prefix_compressed(&self) -> u16 {
-        u16::from_le_bytes(self.inner[6..8].try_into().unwrap())
-    }
-
-    pub fn prefix_len(&self) -> u16 {
-        u16::from_le_bytes(self.inner[8..10].try_into().unwrap())
-    }
-
-    pub fn cell(&self, i: usize) -> usize {
-        let cell_offset = BRANCH_NODE_HEADER_SIZE + (i * 2);
-        u16::from_le_bytes(self.inner[cell_offset..][..2].try_into().unwrap()) as usize
-    }
-
-    pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
-        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
-        let mut bit_offset_start = self.prefix_len() as usize;
-        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
-        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
-        &self.inner[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
-    }
-
-    pub fn raw_separator(&self, i: usize) -> RawSeparator<'a> {
-        let mut bit_offset_start = self.prefix_len() as usize;
-        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
-        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
-
-        let bit_len = bit_offset_end - bit_offset_start;
-
-        if bit_len == 0 {
-            return (&[], 0, bit_len);
+impl BranchNode<FatPage> {
+    pub fn new_fat(page_pool: &PagePool) -> Self {
+        BranchNode {
+            page: page_pool.alloc_fat_page(),
         }
-
-        let bit_init = bit_offset_start % 8;
-        let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
-        let start = start_separators + (bit_offset_start / 8);
-        // load only slices into RawSeparator that have a length multiple of 8 bytes
-        let byte_len = (((bit_init + bit_len) + 7) / 8).next_multiple_of(8);
-
-        (&self.inner[start..start + byte_len], bit_init, bit_len)
-    }
-
-    pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
-        let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
-        &self.inner[start..].view_bits()[..self.prefix_len() as usize]
-    }
-
-    pub fn raw_prefix(&self) -> RawPrefix<'a> {
-        let bit_len = self.prefix_len() as usize;
-
-        let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
-        let end = start + ((bit_len + 7) / 8);
-
-        (&self.inner[start..end], bit_len)
-    }
-
-    pub fn node_pointer(&self, i: usize) -> u32 {
-        let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
-        u32::from_le_bytes(self.inner[offset..offset + 4].try_into().unwrap())
     }
 }
-
-unsafe impl Send for BranchNode {}
 
 // A RawPrefix is made by a tuple of raw bytes and the relative bit length
 pub type RawPrefix<'a> = (&'a [u8], usize);
@@ -240,17 +202,17 @@ pub fn body_size(prefix_len: usize, total_separator_lengths: usize, n: usize) ->
     (n * 2) + (prefix_len + total_separator_lengths + 7) / 8 + (n * 4)
 }
 
-pub struct BranchNodeBuilder {
-    branch: BranchNode,
+pub struct BranchNodeBuilder<T> {
+    branch: BranchNode<T>,
     index: usize,
     prefix_len: usize,
     prefix_compressed: usize,
     separator_bit_offset: usize,
 }
 
-impl BranchNodeBuilder {
+impl<T: DerefMut<Target=[u8]>> BranchNodeBuilder<T> {
     pub fn new(
-        mut branch: BranchNode,
+        mut branch: BranchNode<T>,
         n: usize,
         prefix_compressed: usize,
         prefix_len: usize,
@@ -298,7 +260,7 @@ impl BranchNodeBuilder {
         self.index += 1;
     }
 
-    pub fn finish(self) -> BranchNode {
+    pub fn finish(self) -> BranchNode<T> {
         self.branch
     }
 }
@@ -344,7 +306,7 @@ pub mod benches {
                 BenchmarkId::new("prefix_len_bytes", prefix_len_bytes),
                 |b| {
                     b.iter_batched(
-                        || (BranchNode::new_in(&page_pool), separators.clone()),
+                        || (BranchNode::new_fat(&page_pool), separators.clone()),
                         |(branch_node, separators)| {
                             let mut branch_node_builder =
                                 BranchNodeBuilder::new(branch_node, n, n, prefix_len_bits);

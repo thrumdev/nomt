@@ -305,7 +305,7 @@ impl BranchUpdater {
     }
 
     fn build_branch(&self, ops: &[BranchOp], gauge: &BranchGauge) -> BranchNode {
-        let branch = BranchNode::new_in(&self.page_pool);
+        let branch = BranchNode::new_fat(&self.page_pool);
 
         // UNWRAP: freshly allocated branch can always be checked out.
         let mut builder = BranchNodeBuilder::new(
@@ -528,7 +528,7 @@ mod tests {
             prefix_len(&vs[0].0, &vs[vs.len() - 1].0)
         };
 
-        let branch = BranchNode::new_in(&PAGE_POOL);
+        let branch = BranchNode::new_fat(&PAGE_POOL);
         let mut builder = BranchNodeBuilder::new(branch, n, n, prefix_len);
         for (k, pn) in vs {
             builder.push(k, separator_len(&k), pn as u32);
