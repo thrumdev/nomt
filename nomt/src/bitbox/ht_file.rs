@@ -72,6 +72,8 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     let page_count = num_pages + num_meta_byte_pages(num_pages);
     let len = page_count as usize * PAGE_SIZE;
     ht_file.set_len(len as u64)?;
+
+    zero_file(&ht_file, len)?;
     ht_file.sync_all()?;
     drop(ht_file);
 
@@ -85,5 +87,35 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
         page_count,
         start.elapsed().as_millis()
     );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn zero_file(file: &File, len: usize) -> std::io::Result<()> {
+    let res = unsafe {
+        use std::os::fd::AsRawFd;
+
+        libc::fallocate(file.as_raw_fd(), libc::FALLOC_FL_ZERO_RANGE, 0 as _, len as _)
+    };
+
+    if res == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn zero_file(mut file: &File, len: usize) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let buf = [0u8; PAGE_SIZE * 4];
+    let mut remaining = len;
+    while remaining > 0 {
+        let len = std::cmp::min(remaining, buf.len());
+        file.write_all(&buf[..len])?;
+        remaining -= len;
+    }
+
     Ok(())
 }
