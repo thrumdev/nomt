@@ -6,7 +6,7 @@
 //!
 //! 1. Create a [`RwPassDomain`] with [`RwPassDomain::new()`].
 //! 2. Protect the data you want to access with a [`RwPassCell`] by calling
-//!    [`RwPassDomain::protect()`].
+//!    [`RwPassDomain::protect_with_id()`].
 //! 3. Obtain a read or write pass by calling [`RwPassDomain::new_read_pass()`] or
 //!    [`RwPassDomain::new_write_pass()`].
 //! 4. Use the pass to access the data within any of [`RwPassCell`]-s created within the domain
@@ -65,9 +65,6 @@ impl RwPassDomain {
     }
 
     /// Protects the given inner value, along with an immutable identifier inside a [`RwPassCell`].
-    ///
-    /// This enables you to make use of [`RegionedWritePass`] to mutably access multiple cells
-    /// simultaneously.
     pub fn protect_with_id<T, Id>(&self, inner: T, id: Id) -> RwPassCell<T, Id> {
         RwPassCell::new(Arc::downgrade(&self.shared), inner, id)
     }
@@ -329,9 +326,6 @@ unsafe impl<R: Send> Send for WritePassEnvelope<R> {}
 
 /// A cell corresponding with a [`RwPassDomain`]. This may be read and written only with a pass from
 /// the domain.
-///
-/// The cell may also hold a unique ID which can be used with the [`RegionedWritePass`] to further
-/// shard access.
 pub struct RwPassCell<T, Id = ()> {
     // A weak reference to the creator of the cell.
     //
