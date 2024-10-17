@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::sync::Arc;
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -7,7 +6,7 @@ use crate::beatree::{
     ops::bit_ops::{prefix_len, separator_len},
     Key,
 };
-use crate::io::PagePool;
+use crate::io::page_pool::{PagePool, UnsafePageView, UnsafePageViewMut};
 
 use super::{
     branch_stage::BranchesTracker, get_key, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
@@ -15,7 +14,7 @@ use super::{
 };
 
 pub struct BaseBranch {
-    pub node: Arc<BranchNode>,
+    pub node: BranchNode<UnsafePageView>,
     pub iter_pos: usize,
 }
 
@@ -304,8 +303,11 @@ impl BranchUpdater {
         }
     }
 
-    fn build_branch(&self, ops: &[BranchOp], gauge: &BranchGauge) -> BranchNode {
-        let branch = BranchNode::new_fat(&self.page_pool);
+    fn build_branch(&self, ops: &[BranchOp], gauge: &BranchGauge) -> BranchNode<UnsafePageViewMut> {
+        let page = self.page_pool.alloc();
+        // SAFETY: page pool is live, and the page is new and unaliased.
+        let view = unsafe { UnsafePageViewMut::new(page) };
+        let branch = BranchNode::new(view);
 
         // UNWRAP: freshly allocated branch can always be checked out.
         let mut builder = BranchNodeBuilder::new(
@@ -463,9 +465,9 @@ impl BranchBulkSplitter {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_key, prefix_len, Arc, BaseBranch, BranchGauge, BranchNode, BranchNodeBuilder,
-        BranchUpdater, BranchesTracker, DigestResult, Key, PageNumber, PagePool,
-        BRANCH_MERGE_THRESHOLD, BRANCH_NODE_BODY_SIZE,
+        get_key, prefix_len, BaseBranch, BranchGauge, BranchNode, BranchNodeBuilder, BranchUpdater,
+        BranchesTracker, DigestResult, Key, PageNumber, PagePool, UnsafePageView,
+        UnsafePageViewMut, BRANCH_MERGE_THRESHOLD, BRANCH_NODE_BODY_SIZE,
     };
     use crate::beatree::ops::bit_ops::separator_len;
 
@@ -520,7 +522,7 @@ mod tests {
         k
     }
 
-    fn make_branch(vs: Vec<(Key, usize)>) -> Arc<BranchNode> {
+    fn make_branch(vs: Vec<(Key, usize)>) -> BranchNode<UnsafePageView> {
         let n = vs.len();
         let prefix_len = if vs.len() == 1 {
             separator_len(&vs[0].0)
@@ -528,19 +530,21 @@ mod tests {
             prefix_len(&vs[0].0, &vs[vs.len() - 1].0)
         };
 
-        let branch = BranchNode::new_fat(&PAGE_POOL);
+        let page = PAGE_POOL.alloc();
+
+        let branch = BranchNode::new(unsafe { UnsafePageViewMut::new(page) });
         let mut builder = BranchNodeBuilder::new(branch, n, n, prefix_len);
         for (k, pn) in vs {
             builder.push(k, separator_len(&k), pn as u32);
         }
 
-        Arc::new(builder.finish())
+        BranchNode::new(builder.finish().into_inner().into_shared())
     }
 
     fn make_branch_with_body_size_target(
         mut key: impl FnMut(usize) -> Key,
         mut body_size_predicate: impl FnMut(usize) -> bool,
-    ) -> Arc<BranchNode> {
+    ) -> BranchNode<UnsafePageView> {
         let mut gauge = BranchGauge::new();
         let mut items = Vec::new();
         loop {
