@@ -1,6 +1,9 @@
-use crate::io::{page_pool::FatPage, PagePool};
+use crate::io::{
+    page_pool::{FatPage, UnsafePageView, UnsafePageViewMut},
+    PagePool,
+};
 
-use std::{collections::BTreeSet, fs::File, sync::Arc};
+use std::{collections::BTreeSet, fs::File};
 
 use super::{
     allocator::{AllocatorCommitOutput, AllocatorWriter, PageNumber},
@@ -12,7 +15,7 @@ use super::{
 /// to storage to reflect the BbnStore's state at that moment
 pub struct BbnStoreWriter {
     allocator_writer: AllocatorWriter,
-    pending: Vec<Arc<BranchNode>>,
+    pending: Vec<BranchNode<UnsafePageView>>,
 }
 
 /// Initializes a BbnStoreWriter over an already existing File and returns all pages tracked
@@ -37,14 +40,14 @@ pub fn open(
 
 impl BbnStoreWriter {
     /// Allocate a PN for the given branch.
-    pub fn allocate(&mut self, branch_node: &mut BranchNode) -> PageNumber {
+    pub fn allocate(&mut self, branch_node: &mut BranchNode<UnsafePageViewMut>) -> PageNumber {
         let pn = self.allocator_writer.allocate();
         branch_node.set_bbn_pn(pn.0);
         pn
     }
 
     /// Prepare the branch node to be written.
-    pub fn write(&mut self, branch_node: Arc<BranchNode>) {
+    pub fn write(&mut self, branch_node: BranchNode<UnsafePageView>) {
         self.pending.push(branch_node);
     }
 
@@ -77,7 +80,7 @@ impl BbnStoreWriter {
 }
 
 pub struct BbnStoreCommitOutput {
-    pub bbn: Vec<Arc<BranchNode>>,
+    pub bbn: Vec<BranchNode<UnsafePageView>>,
     pub free_list_pages: Vec<(PageNumber, FatPage)>,
     pub bump: PageNumber,
     pub extend_file_sz: Option<u64>,

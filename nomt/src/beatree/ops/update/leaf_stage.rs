@@ -7,6 +7,7 @@ use threadpool::ThreadPool;
 
 use crate::beatree::{
     allocator::PageNumber,
+    branch::BranchNode,
     index::Index,
     leaf::{node::LeafNode, store::LeafStoreReader},
     ops::{
@@ -22,7 +23,7 @@ use crate::beatree::{
     },
     Key,
 };
-use crate::io::PagePool;
+use crate::io::page_pool::{PagePool, UnsafePageView};
 
 /// Tracker of all changes that happen to leaves during an update
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
@@ -32,6 +33,10 @@ fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNu
     let Some((_, branch)) = bbn_index.lookup(key) else {
         return None;
     };
+
+    // SAFETY: page pool is alive, pages in index are live and frozen.
+    let view = unsafe { UnsafePageView::new(branch) };
+    let branch = BranchNode::new(view);
 
     let Some((i, leaf_pn)) = search_branch(&branch, key) else {
         return None;

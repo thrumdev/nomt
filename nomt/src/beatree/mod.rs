@@ -5,7 +5,10 @@ use parking_lot::{Mutex, RwLock};
 use std::{collections::BTreeMap, fs::File, mem, ops::DerefMut, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
-use crate::io::{page_pool::FatPage, IoPool, PagePool};
+use crate::io::{
+    page_pool::{FatPage, Page, UnsafePageView},
+    IoPool, PagePool,
+};
 
 use leaf::store::{LeafStoreReader, LeafStoreWriter};
 
@@ -30,12 +33,12 @@ pub type Key = [u8; 32];
 
 #[derive(Clone)]
 pub struct Tree {
+    page_pool: PagePool,
     shared: Arc<RwLock<Shared>>,
     sync: Arc<Mutex<Sync>>,
 }
 
 struct Shared {
-    page_pool: PagePool,
     bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
     /// Primary staging collects changes that are committed but not synced yet. Upon sync, changes
@@ -109,7 +112,6 @@ impl Tree {
         )
         .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
         let shared = Shared {
-            page_pool: io_pool.page_pool().clone(),
             bbn_index: index,
             leaf_store_rd: leaf_store_rd_shared,
             primary_staging: BTreeMap::new(),
@@ -125,6 +127,7 @@ impl Tree {
         };
 
         Ok(Tree {
+            page_pool,
             shared: Arc::new(RwLock::new(shared)),
             sync: Arc::new(Mutex::new(sync)),
         })
@@ -179,15 +182,13 @@ impl Tree {
         // Take the shared lock. Briefly.
         let staged_changeset;
         let mut bbn_index;
-        let page_pool;
         {
             let mut shared = self.shared.write();
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
-            page_pool = shared.page_pool.clone();
         }
 
-        {
+        let bbn_outdated_pages = {
             let sync = sync.deref_mut();
 
             // Update will modify the index in a CoW manner.
@@ -218,7 +219,7 @@ impl Tree {
                 sync.commit_concurrency,
             )
             .unwrap()
-        }
+        };
 
         let (ln, ln_freelist_pages, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
             let LeafStoreCommitOutput {
@@ -227,7 +228,7 @@ impl Tree {
                 extend_file_sz,
                 freelist_head,
                 bump,
-            } = sync.leaf_store_wr.commit(&page_pool);
+            } = sync.leaf_store_wr.commit(&self.page_pool);
             (
                 pending,
                 free_list_pages,
@@ -244,7 +245,7 @@ impl Tree {
                 extend_file_sz,
                 freelist_head,
                 bump,
-            } = sync.bbn_store_wr.commit(&page_pool);
+            } = sync.bbn_store_wr.commit(&self.page_pool);
             (
                 bbn,
                 free_list_pages,
@@ -258,6 +259,7 @@ impl Tree {
             bbn,
             bbn_freelist_pages,
             bbn_extend_file_sz,
+            bbn_outdated_pages,
             ln,
             ln_freelist_pages,
             ln_extend_file_sz,
@@ -269,18 +271,32 @@ impl Tree {
         }
     }
 
-    pub fn finish_sync(&self, bbn_index: Index) {
+    pub fn finish_sync(&self, bbn_index: Index, bbn_outdated_pages: Vec<Vec<Page>>) {
         // Take the shared lock again to complete the update to the new shared state
-        let mut inner = self.shared.write();
-        inner.secondary_staging = None;
-        inner.bbn_index = bbn_index;
+        {
+            let mut inner = self.shared.write();
+            inner.secondary_staging = None;
+            inner.bbn_index = bbn_index;
+        }
+
+        // clean up all the pages outside of the critical section.
+        let mut deallocator = self.page_pool.deallocator();
+        for page in bbn_outdated_pages.into_iter().flatten() {
+            // SAFETY: all pages should originate from this page pool.
+            // they only appear here when the index is swapped, and this is called only after
+            // writeout is complete.
+            unsafe {
+                deallocator.dealloc(page);
+            }
+        }
     }
 }
 
 pub struct WriteoutData {
-    pub bbn: Vec<Arc<BranchNode>>,
+    pub bbn: Vec<BranchNode<UnsafePageView>>,
     pub bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub bbn_extend_file_sz: Option<u64>,
+    pub bbn_outdated_pages: Vec<Vec<Page>>,
     pub ln: Vec<(PageNumber, FatPage)>,
     pub ln_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub ln_extend_file_sz: Option<u64>,

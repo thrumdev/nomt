@@ -2,7 +2,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use threadpool::ThreadPool;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, ops::Deref};
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -17,6 +17,7 @@ use crate::beatree::{
     ops::bit_ops::reconstruct_key,
     Key,
 };
+use crate::io::page_pool::{Page, UnsafePageView};
 
 mod branch_stage;
 mod branch_updater;
@@ -50,7 +51,7 @@ pub fn update(
     bbn_writer: &mut bbn::BbnStoreWriter,
     thread_pool: ThreadPool,
     workers: usize,
-) -> Result<()> {
+) -> Result<Vec<Vec<Page>>> {
     let leaf_cache = preload_leaves(leaf_reader, &bbn_index, changeset.keys().cloned())?;
 
     let changeset = changeset
@@ -92,7 +93,7 @@ pub fn update(
         overflow::delete(&overflow_cell, leaf_reader, leaf_writer);
     }
 
-    let branch_changes = branch_stage::run(
+    let (branch_changes, bbn_outdated_pages) = branch_stage::run(
         &bbn_index,
         leaf_writer.page_pool().clone(),
         branch_changeset,
@@ -104,9 +105,9 @@ pub fn update(
         match changed_branch.inserted {
             Some(mut node) => {
                 bbn_writer.allocate(&mut node);
-                let node = Arc::new(node);
-                bbn_writer.write(node.clone());
-                bbn_index.insert(key, node);
+                let read_only_node = BranchNode::new(node.into_inner().into_shared());
+                bbn_writer.write(read_only_node.clone());
+                bbn_index.insert(key, read_only_node.into_inner().into_inner());
             }
             None => {
                 bbn_index.remove(&key);
@@ -118,11 +119,11 @@ pub fn update(
         }
     }
 
-    Ok(())
+    Ok(bbn_outdated_pages)
 }
 
 /// Extract the key at a given index from a BranchNode
-pub fn get_key(node: &BranchNode, index: usize) -> Key {
+pub fn get_key<T: Deref<Target = [u8]>>(node: &BranchNode<T>, index: usize) -> Key {
     let prefix = if index < node.prefix_compressed() as usize {
         Some(node.raw_prefix())
     } else {
@@ -145,6 +146,10 @@ fn preload_leaves(
         let Some((_, branch)) = bbn_index.lookup(key) else {
             continue;
         };
+        // SAFETY: page pool is alive, pages in index are live and frozen.
+        let view = unsafe { UnsafePageView::new(branch) };
+        let branch = BranchNode::new(view);
+
         let Some((_, leaf_pn)) = super::search_branch(&branch, key) else {
             continue;
         };

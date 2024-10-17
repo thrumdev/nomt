@@ -5,7 +5,7 @@ use threadpool::ThreadPool;
 
 use crate::beatree::{allocator::PageNumber, branch::node::BranchNode, index::Index, Key};
 
-use crate::io::PagePool;
+use crate::io::page_pool::{Page, PagePool, UnsafePageView, UnsafePageViewMut};
 
 use super::branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
 use super::extend_range_protocol::{
@@ -14,8 +14,8 @@ use super::extend_range_protocol::{
 };
 
 /// Tracker of all changes that happen to branch nodes during an update
-pub type BranchesTracker = super::NodesTracker<BranchNode>;
-type ChangedBranchEntry = super::ChangedNodeEntry<BranchNode>;
+pub type BranchesTracker = super::NodesTracker<BranchNode<UnsafePageViewMut>>;
+type ChangedBranchEntry = super::ChangedNodeEntry<BranchNode<UnsafePageViewMut>>;
 
 /// Change the btree's branch nodes in the specified way
 pub fn run(
@@ -24,9 +24,9 @@ pub fn run(
     changeset: Vec<(Key, Option<PageNumber>)>,
     thread_pool: ThreadPool,
     num_workers: usize,
-) -> BTreeMap<Key, ChangedBranchEntry> {
+) -> (BTreeMap<Key, ChangedBranchEntry>, Vec<Vec<Page>>) {
     if changeset.is_empty() {
-        return BTreeMap::new();
+        return (BTreeMap::new(), Vec::new());
     }
 
     assert!(num_workers >= 1);
@@ -56,21 +56,23 @@ pub fn run(
     drop(changeset);
 
     let mut changes = BTreeMap::new();
+    let mut bbn_outdated_pages = Vec::new();
 
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
-        let worker_changes = worker_result_rx.recv().unwrap();
+        let (worker_changes, worker_outdated) = worker_result_rx.recv().unwrap();
         changes.extend(worker_changes);
+        bbn_outdated_pages.push(worker_outdated);
     }
 
-    changes
+    (changes, bbn_outdated_pages)
 }
 
 fn prepare_workers(
     bbn_index: &Index,
     changeset: &[(Key, Option<PageNumber>)],
     worker_count: usize,
-) -> Vec<WorkerParams<BranchNode>> {
+) -> Vec<WorkerParams<BranchNode<UnsafePageViewMut>>> {
     let mut remaining_workers = worker_count;
     let mut changeset_remaining = changeset;
 
@@ -112,6 +114,10 @@ fn prepare_workers(
             // This could happen only on empty db, let one worker handle everything
             break;
         };
+
+        // SAFETY: page pool is alive, pages in index are live and frozen.
+        let view = unsafe { UnsafePageView::new(branch) };
+        let branch = BranchNode::new(view);
 
         let separator = super::get_key(&branch, 0);
 
@@ -160,18 +166,30 @@ fn prepare_workers(
 fn reset_branch_base(
     bbn_index: &Index,
     branches_tracker: &mut BranchesTracker,
+    bbn_outdated_pages: &mut Vec<Page>,
     branch_updater: &mut BranchUpdater,
     has_extended_range: bool,
     mut key: Key,
 ) {
     if !has_extended_range {
-        reset_branch_base_fresh(bbn_index, branches_tracker, branch_updater, key);
+        reset_branch_base_fresh(
+            bbn_index,
+            branches_tracker,
+            bbn_outdated_pages,
+            branch_updater,
+            key,
+        );
         return;
     }
 
     if let Some((_, node, next_separator)) = branches_tracker.pending_base.take() {
+        // We are reusing a branch created by another worker. we need to schedule clean-up
+        // of that branch to avoid a memory leak.
+        let page = node.into_inner().into_shared();
+        bbn_outdated_pages.push(page.clone().into_inner());
+
         let base = BaseBranch {
-            node: Arc::new(node),
+            node: BranchNode::new(page),
             iter_pos: 0,
         };
         branch_updater.reset_base(Some(base), next_separator);
@@ -184,7 +202,13 @@ fn reset_branch_base(
             if separator > key {
                 key = separator;
             }
-            reset_branch_base_fresh(bbn_index, branches_tracker, branch_updater, key);
+            reset_branch_base_fresh(
+                bbn_index,
+                branches_tracker,
+                bbn_outdated_pages,
+                branch_updater,
+                key,
+            );
         } else {
             // special case: all rightward workers deleted every last one of their nodes after the last one
             // we received from a range extension. We are now writing the new rightmost node, which
@@ -197,16 +221,21 @@ fn reset_branch_base(
 fn reset_branch_base_fresh(
     bbn_index: &Index,
     branches_tracker: &mut BranchesTracker,
+    bbn_outdated_pages: &mut Vec<Page>,
     branch_updater: &mut BranchUpdater,
     key: Key,
 ) {
-    let Some((separator, branch)) = bbn_index.lookup(key) else {
+    let Some((separator, branch_page)) = bbn_index.lookup(key) else {
         return;
     };
 
+    // SAFETY: page pool is alive, pages in index are live and frozen.
+    let view = unsafe { UnsafePageView::new(branch_page.clone()) };
+    let branch = BranchNode::new(view);
     let cutoff = bbn_index.next_after(key).map(|(k, _)| k);
 
     branches_tracker.delete(separator, branch.bbn_pn().into(), cutoff);
+    bbn_outdated_pages.push(branch_page);
 
     let base = BaseBranch {
         node: branch,
@@ -219,10 +248,11 @@ fn run_worker(
     bbn_index: Index,
     page_pool: PagePool,
     changeset: &[(Key, Option<PageNumber>)],
-    mut worker_params: WorkerParams<BranchNode>,
-) -> BTreeMap<Key, ChangedBranchEntry> {
+    mut worker_params: WorkerParams<BranchNode<UnsafePageViewMut>>,
+) -> (BTreeMap<Key, ChangedBranchEntry>, Vec<Page>) {
     let mut branches_tracker = BranchesTracker::new();
     let mut branch_updater = BranchUpdater::new(page_pool, None, None);
+    let mut bbn_outdated_pages = Vec::new();
     let mut pending_left_request = None;
     let mut has_extended_range = false;
     let mut has_finished_workload = false;
@@ -231,6 +261,7 @@ fn run_worker(
     reset_branch_base(
         &bbn_index,
         &mut branches_tracker,
+        &mut bbn_outdated_pages,
         &mut branch_updater,
         has_extended_range,
         changeset[worker_params.op_range.start].0,
@@ -264,6 +295,7 @@ fn run_worker(
             reset_branch_base(
                 &bbn_index,
                 &mut branches_tracker,
+                &mut bbn_outdated_pages,
                 &mut branch_updater,
                 has_extended_range,
                 k,
@@ -295,6 +327,7 @@ fn run_worker(
         reset_branch_base(
             &bbn_index,
             &mut branches_tracker,
+            &mut bbn_outdated_pages,
             &mut branch_updater,
             has_extended_range,
             cutoff,
@@ -329,5 +362,5 @@ fn run_worker(
         }
     }
 
-    branches_tracker.inner
+    (branches_tracker.inner, bbn_outdated_pages)
 }

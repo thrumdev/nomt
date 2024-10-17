@@ -273,6 +273,7 @@ impl<'a> Deallocator<'a> {
 }
 
 /// An immutable view into a raw page.
+#[derive(Clone)]
 pub struct UnsafePageView {
     page: Page,
 }
@@ -287,9 +288,7 @@ impl UnsafePageView {
     ///   - No mutable references are taken into the page for the duration of its lifetime.
     ///   - The page will remain live for the duration of this lifetime.
     pub unsafe fn new(page: Page) -> UnsafePageView {
-        UnsafePageView {
-            page,
-        }
+        UnsafePageView { page }
     }
 
     /// Consume this view, accessing the inner page.
@@ -303,9 +302,7 @@ impl Deref for UnsafePageView {
 
     fn deref(&self) -> &[u8] {
         // SAFETY: aliasing and liveness are guaranteed by this struct being 'unsafe'.
-        unsafe {
-            self.page.as_mut_slice()
-        }
+        unsafe { self.page.as_mut_slice() }
     }
 }
 
@@ -324,15 +321,17 @@ impl UnsafePageViewMut {
     ///   - No other references are taken into the page data for the duration of its lifetime.
     ///   - The page will remain live for the duration of its lifetime.
     pub unsafe fn new(page: Page) -> UnsafePageViewMut {
-        UnsafePageViewMut {
-            page,
-        }
+        UnsafePageViewMut { page }
     }
-
 
     /// Consume this view, accessing the inner page.
     pub fn into_inner(self) -> Page {
         self.page
+    }
+
+    /// Make this into a shared view.
+    pub fn into_shared(self) -> UnsafePageView {
+        UnsafePageView { page: self.page }
     }
 }
 
@@ -341,17 +340,13 @@ impl Deref for UnsafePageViewMut {
 
     fn deref(&self) -> &[u8] {
         // SAFETY: aliasing and liveness are guaranteed by this struct being 'unsafe'.
-        unsafe {
-            self.page.as_mut_slice()
-        }
+        unsafe { self.page.as_mut_slice() }
     }
 }
 
 impl DerefMut for UnsafePageViewMut {
     fn deref_mut(&mut self) -> &mut [u8] {
         // SAFETY: aliasing and liveness are guaranteed by this struct being 'unsafe'.
-        unsafe {
-            self.page.as_mut_slice()
-        }
+        unsafe { self.page.as_mut_slice() }
     }
 }

@@ -5,13 +5,16 @@
 // updated and then perform some cleanup.
 
 use super::{allocator::PageNumber, branch::BranchNode};
-use crate::io::{FatPage, IoHandle};
-use std::{fs::File, os::fd::AsRawFd as _, sync::Arc};
+use crate::io::{
+    page_pool::{FatPage, UnsafePageView},
+    IoHandle,
+};
+use std::{fs::File, os::fd::AsRawFd as _};
 
 pub fn write_bbn(
     io_handle: IoHandle,
     bbn_fd: &File,
-    bbn: Vec<Arc<BranchNode>>,
+    bbn: Vec<BranchNode<UnsafePageView>>,
     bbn_free_list_pages: Vec<(PageNumber, FatPage)>,
     bbn_extend_file_sz: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -21,9 +24,11 @@ pub fn write_bbn(
 
     let mut sent = 0;
     for branch_node in bbn {
-        let wrt = branch_node.as_slice();
-        let (ptr, len) = (wrt.as_ptr(), wrt.len());
         let bbn_pn = branch_node.bbn_pn();
+        let page_view = branch_node.into_inner();
+        let ptr = page_view.as_ptr();
+        let len = page_view.len();
+
         io_handle
             .send(crate::io::IoCommand {
                 kind: crate::io::IoKind::WriteRaw(bbn_fd.as_raw_fd(), bbn_pn as u64, ptr, len),

@@ -2,12 +2,15 @@ use super::{meta::Meta, Shared, Transaction};
 use crate::{
     beatree::{self, allocator::PageNumber, branch::BranchNode},
     bitbox,
-    io::{FatPage, IoPool, PagePool},
+    io::{
+        page_pool::{FatPage, Page, PagePool, UnsafePageView},
+        IoPool,
+    },
     rollback,
 };
 
 use crossbeam::channel::{self, Receiver};
-use std::{fs::File, mem, sync::Arc};
+use std::{fs::File, mem};
 use threadpool::ThreadPool;
 
 pub struct Sync {
@@ -124,7 +127,10 @@ impl Sync {
         bitbox::writeout::write_ht(shared.io_pool.make_handle(), &shared.ht_fd, ht_pages)?;
         bitbox::writeout::truncate_wal(&shared.wal_fd)?;
 
-        beatree.finish_sync(beatree_meta_wd.bbn_index);
+        beatree.finish_sync(
+            beatree_meta_wd.bbn_index,
+            beatree_meta_wd.bbn_outdated_pages,
+        );
 
         rollback_writeout_end_rx.recv().unwrap();
 
@@ -162,7 +168,7 @@ fn spawn_prepare_sync_bitbox(
 }
 
 struct BbnWriteoutData {
-    bbn: Vec<Arc<BranchNode>>,
+    bbn: Vec<BranchNode<UnsafePageView>>,
     bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
     bbn_extend_file_sz: Option<u64>,
 }
@@ -179,6 +185,7 @@ struct BeatreePostWriteout {
     bbn_freelist_pn: u32,
     bbn_bump: u32,
     bbn_index: beatree::Index,
+    bbn_outdated_pages: Vec<Vec<Page>>,
 }
 
 fn spawn_prepare_sync_beatree(
@@ -201,6 +208,7 @@ fn spawn_prepare_sync_beatree(
             bbn,
             bbn_freelist_pages,
             bbn_extend_file_sz,
+            bbn_outdated_pages,
             ln,
             ln_freelist_pages,
             ln_extend_file_sz,
@@ -227,6 +235,7 @@ fn spawn_prepare_sync_beatree(
             bbn_freelist_pn,
             bbn_bump,
             bbn_index,
+            bbn_outdated_pages,
         });
     });
     (bbn_result_rx, ln_result_rx, meta_result_rx)

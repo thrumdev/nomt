@@ -2,7 +2,7 @@ use bitvec::prelude::*;
 
 use super::BRANCH_NODE_SIZE;
 use crate::beatree::Key;
-use crate::io::{FatPage, PagePool, PAGE_SIZE};
+use crate::io::{FatPage, PAGE_SIZE};
 
 use std::ops::{Deref, DerefMut};
 
@@ -34,11 +34,19 @@ const BRANCH_NODE_HEADER_SIZE: usize = 4 + 2 + 2 + 2;
 pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_SIZE;
 
 /// A branch node.
+#[derive(Clone)]
 pub struct BranchNode<T = FatPage> {
     pub(super) page: T,
 }
 
-impl<T: Deref<Target=[u8]>> BranchNode<T> {
+impl<T> BranchNode<T> {
+    /// Take the underlying page from the branch node wrapper.
+    pub fn into_inner(self) -> T {
+        self.page
+    }
+}
+
+impl<T: Deref<Target = [u8]>> BranchNode<T> {
     /// Create a new read-only branch node.
     ///
     /// ## Panics
@@ -46,9 +54,7 @@ impl<T: Deref<Target=[u8]>> BranchNode<T> {
     /// This panics at runtime if the buffer size is not equal to the expected page size.
     pub fn new(page: T) -> BranchNode<T> {
         assert_eq!(page.len(), PAGE_SIZE);
-        BranchNode {
-            page
-        }
+        BranchNode { page }
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -123,7 +129,7 @@ impl<T: Deref<Target=[u8]>> BranchNode<T> {
     }
 }
 
-impl<T: DerefMut<Target=[u8]>> BranchNode<T> {
+impl<T: DerefMut<Target = [u8]>> BranchNode<T> {
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut *self.page
     }
@@ -179,8 +185,9 @@ impl<T: DerefMut<Target=[u8]>> BranchNode<T> {
     }
 }
 
+#[cfg(feature = "benchmarks")]
 impl BranchNode<FatPage> {
-    pub fn new_fat(page_pool: &PagePool) -> Self {
+    pub fn new_fat(page_pool: &crate::io::PagePool) -> Self {
         BranchNode {
             page: page_pool.alloc_fat_page(),
         }
@@ -210,7 +217,7 @@ pub struct BranchNodeBuilder<T> {
     separator_bit_offset: usize,
 }
 
-impl<T: DerefMut<Target=[u8]>> BranchNodeBuilder<T> {
+impl<T: DerefMut<Target = [u8]>> BranchNodeBuilder<T> {
     pub fn new(
         mut branch: BranchNode<T>,
         n: usize,

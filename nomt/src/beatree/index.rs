@@ -3,16 +3,15 @@
 
 use std::iter::DoubleEndedIterator;
 use std::ops::{Bound, RangeBounds, RangeToInclusive};
-use std::sync::Arc;
 
 use im::OrdMap;
 
 use super::Key;
-use crate::beatree::branch::BranchNode;
+use crate::io::page_pool::Page;
 
 #[derive(Default, Clone)]
 pub struct Index {
-    first_key_map: OrdMap<Key, Arc<BranchNode>>,
+    first_key_map: OrdMap<Key, Page>,
 }
 
 impl Index {
@@ -20,7 +19,7 @@ impl Index {
     ///
     /// This is either a branch whose separator is exactly equal to this key or the branch with the
     /// highest separator less than the key.
-    pub fn lookup(&self, key: Key) -> Option<(Key, Arc<BranchNode>)> {
+    pub fn lookup(&self, key: Key) -> Option<(Key, Page)> {
         self.first_key_map
             .range(RangeToInclusive { end: key })
             .next_back()
@@ -28,7 +27,7 @@ impl Index {
     }
 
     /// Get the first branch with separator greater than the given key.
-    pub fn next_after(&self, key: Key) -> Option<(Key, Arc<BranchNode>)> {
+    pub fn next_after(&self, key: Key) -> Option<(Key, Page)> {
         self.first_key_map
             .range(RangeFromExclusive { start: key })
             .next()
@@ -36,13 +35,13 @@ impl Index {
     }
 
     /// Remove the branch with the given separator key.
-    pub fn remove(&mut self, separator: &Key) -> Option<Arc<BranchNode>> {
+    pub fn remove(&mut self, separator: &Key) -> Option<Page> {
         self.first_key_map.remove(separator)
     }
 
     /// Insert a branch with the given separator key.
-    pub fn insert(&mut self, separator: Key, branch: Arc<BranchNode>) -> Option<Arc<BranchNode>> {
-        self.first_key_map.insert(separator, branch)
+    pub fn insert(&mut self, separator: Key, branch_page: Page) -> Option<Page> {
+        self.first_key_map.insert(separator, branch_page)
     }
 }
 

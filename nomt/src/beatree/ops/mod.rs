@@ -3,15 +3,16 @@
 use anyhow::Result;
 use bitvec::prelude::*;
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, ops::Deref};
 
 use super::{
     allocator::PageNumber,
-    branch,
+    branch::{self, BranchNode},
     index::Index,
     leaf::{self, node::LeafNode},
     Key,
 };
+use crate::io::page_pool::UnsafePageView;
 
 pub(crate) mod bit_ops;
 mod reconstruction;
@@ -26,10 +27,16 @@ pub fn lookup(
     bbn_index: &Index,
     leaf_store: &leaf::store::LeafStoreReader,
 ) -> Result<Option<Vec<u8>>> {
-    let branch = match bbn_index.lookup(key) {
+    let branch_page = match bbn_index.lookup(key) {
         None => return Ok(None),
         Some((_, branch)) => branch,
     };
+
+    // SAFETY:
+    //   - page pool is live (in leaf_store reader)
+    //   - pages in index are live and frozen.
+    let view = unsafe { UnsafePageView::new(branch_page) };
+    let branch = BranchNode::new(view);
 
     let leaf_pn = match search_branch(&branch, key.clone()) {
         None => return Ok(None),
@@ -53,7 +60,10 @@ pub fn lookup(
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
 /// node pointer whose separator is less than or equal to the given key.
-fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNumber)> {
+fn search_branch<T: Deref<Target = [u8]>>(
+    branch: &branch::BranchNode<T>,
+    key: Key,
+) -> Option<(usize, PageNumber)> {
     let prefix = branch.prefix();
     let n = branch.n() as usize;
     let prefix_compressed = branch.prefix_compressed() as usize;
