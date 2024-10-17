@@ -55,13 +55,16 @@ pub fn write_bbn(
 pub fn write_ln(
     io_handle: IoHandle,
     ln_fd: &File,
-    ln: Vec<(PageNumber, FatPage)>,
-    ln_free_list_pages: Vec<(PageNumber, FatPage)>,
+    mut ln: Vec<(PageNumber, FatPage)>,
+    mut ln_free_list_pages: Vec<(PageNumber, FatPage)>,
     ln_extend_file_sz: Option<u64>,
 ) -> anyhow::Result<()> {
     if let Some(new_len) = ln_extend_file_sz {
         ln_fd.set_len(new_len)?;
     }
+
+    ln.sort_unstable_by_key(|item| item.0.0);
+    ln_free_list_pages.sort_unstable_by_key(|item| item.0.0);
 
     let mut sent = 0;
     for (pn, page) in ln {
