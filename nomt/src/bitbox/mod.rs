@@ -222,6 +222,7 @@ fn recover(
             let pn = ht_offsets.meta_bytes_index(changed_meta_page_ix as u64);
             ht_fd.write_all_at(page_data, pn * PAGE_SIZE as u64)?;
 
+            // SAFETY: the page was just allocated and the page pool is still alive.
             page_pool.dealloc(page);
         }
     }
