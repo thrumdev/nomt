@@ -48,9 +48,8 @@ impl Page {
     /// The caller is responsible for making sure:
     ///
     /// 1. that the page is not freed,
-    /// 2. that the [`PagePool`] is the same that was used to allocate the page.
-    /// 3. that the [`PagePool`] is not dropped while the slice is used.
-    /// 4. that there is only a single mutable slice into the page at any given time.
+    /// 2. that the [`PagePool`] used to allocate the page has not dropped while the slice is used.
+    /// 3. that there is only a single mutable slice into the page at any given time.
     pub unsafe fn as_mut_slice(&self) -> &mut [u8] {
         std::slice::from_raw_parts_mut(self.as_mut_ptr(), PAGE_SIZE)
     }
@@ -82,19 +81,27 @@ impl Deref for FatPage {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
+        // SAFETY: FatPage guarantees that the `Page` is unique and the page pool is alive.
         unsafe { self.page.as_mut_slice() }
     }
 }
 
 impl DerefMut for FatPage {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: FatPage guarantees that the `Page` is unique, the page pool is alive,
+        // and `&mut self` guarantees that borrowing rules are obeyed.
         unsafe { self.page.as_mut_slice() }
     }
 }
 
 impl Drop for FatPage {
     fn drop(&mut self) {
-        self.page_pool.dealloc(self.page.clone());
+        // SAFETY:
+        //   - The page pool has been kept alive by `FatPage`.
+        //   - The `Page` owned by `FatPage` is unique.
+        unsafe {
+            self.page_pool.dealloc(self.page.clone());
+        }
     }
 }
 
@@ -169,9 +176,20 @@ impl PagePool {
         tls_freelist.pop().unwrap()
     }
 
+    /// Get a handle for deallocating many pages.
+    pub fn deallocator(&self) -> Deallocator<'_> {
+        Deallocator {
+            freelist: self.inner.freelist.write(),
+        }
+    }
+
     /// Deallocates a [`Page`].
-    pub fn dealloc(&self, page: Page) {
-        self.inner.freelist.write().push(page);
+    ///
+    /// Safety: The caller of this function must guarantee that
+    ///   1. This page originated from this page pool.
+    ///   2. The page has not been deallocated already.
+    pub unsafe fn dealloc(&self, page: Page) {
+        self.deallocator().dealloc(page);
     }
 
     fn tls_freelist<'a>(&'a self) -> std::cell::RefMut<'a, Vec<Page>> {
@@ -235,3 +253,21 @@ impl Drop for Inner {
 
 unsafe impl Send for PagePool {}
 unsafe impl Sync for PagePool {}
+
+/// A handle used to deallocate pages and return them to the global page pool.
+///
+/// This holds a write lock as long as it's alive.
+pub struct Deallocator<'a> {
+    freelist: RwLockWriteGuard<'a, Vec<Page>>,
+}
+
+impl<'a> Deallocator<'a> {
+    /// Deallocates a [`Page`].
+    ///
+    /// Safety: The caller of this function must guarantee that
+    ///   1. This page originated from this page pool.
+    ///   2. The page has not been deallocated already.
+    pub unsafe fn dealloc(&mut self, page: Page) {
+        self.freelist.push(page);
+    }
+}
