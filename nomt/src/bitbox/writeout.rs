@@ -27,8 +27,10 @@ pub fn truncate_wal(mut wal_fd: &File) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn write_ht(io_handle: IoHandle, ht_fd: &File, ht: Vec<(u64, FatPage)>) -> anyhow::Result<()> {
+pub fn write_ht(io_handle: IoHandle, ht_fd: &File, mut ht: Vec<(u64, FatPage)>) -> anyhow::Result<()> {
     let mut sent = 0;
+
+    ht.sort_unstable_by_key(|item| item.0);
     for (pn, page) in ht {
         io_handle
             .send(IoCommand {
