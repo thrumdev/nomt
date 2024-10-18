@@ -324,7 +324,13 @@ impl LeafUpdater {
             right_gauge.ingest(item_size);
         }
 
-        if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
+        if right_gauge.body_size() > LEAF_NODE_BODY_SIZE {
+            // This is a rare case left uncovered by the bulk split, the threshold to activate it
+            // has not been reached by the sum of all left and right operations. Now the right
+            // leaf is too big, and another split is required to be executed
+            self.ops.drain(..split_point);
+            self.split(leaves_tracker)
+        } else if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
             leaves_tracker.insert(right_separator, right_leaf, self.cutoff);
 
