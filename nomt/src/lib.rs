@@ -462,9 +462,12 @@ impl Session {
     ///    not marked here but included in the final set will still be preserved.
     /// 3. While this function helps optimize I/O, it's not strictly necessary for correctness.
     ///    The commit process will ensure all required prior values are preserved.
+    /// 4. If the path is given to [`Nomt::commit`] with the `ReadThenWrite` operation, calling
+    ///    this function is not needed as the prior value will be taken from there.
     ///
     /// For best performance, call this function once for each key you expect to write during the
-    /// session. The earlier this call is issued, the better for efficiency.
+    /// session, except for those that will be part of a `ReadThenWrite` operation. The earlier
+    /// this call is issued, the better for efficiency.
     pub fn preserve_prior_value(&self, path: KeyPath) {
         if let Some(rollback) = &self.rollback_delta {
             rollback.tentative_preserve_prior(self.store.clone(), path);
