@@ -16,6 +16,7 @@ pub struct Options {
     pub(crate) rollback: bool,
     /// The maximum number of commits that can be rolled back.
     pub(crate) max_rollback_log_len: u32,
+    pub(crate) warm_up: bool,
 }
 
 impl Options {
@@ -35,6 +36,7 @@ impl Options {
             panic_on_sync: false,
             rollback: false,
             max_rollback_log_len: 100,
+            warm_up: false,
         }
     }
 
@@ -95,5 +97,12 @@ impl Options {
     /// Set the maximum number of commits that can be rolled back.
     pub fn max_rollback_log_len(&mut self, max_rollback_log_len: u32) {
         self.max_rollback_log_len = max_rollback_log_len;
+    }
+
+    /// Configure whether merkle page fetches should be warmed up while sessions are ongoing.
+    ///
+    /// Enabling this feature can pessimize performance.
+    pub fn warm_up(&mut self, warm_up: bool) {
+        self.warm_up = warm_up;
     }
 }

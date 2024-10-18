@@ -65,6 +65,7 @@ impl KeyReadWrite {
 /// The commit worker pool.
 pub struct CommitPool {
     worker_tp: ThreadPool,
+    do_warm_up: bool,
 }
 
 impl CommitPool {
@@ -73,12 +74,13 @@ impl CommitPool {
     /// # Panics
     ///
     /// Panics if `num_workers` is zero.
-    pub fn new(num_workers: usize) -> Self {
+    pub fn new(num_workers: usize, do_warm_up: bool) -> Self {
         CommitPool {
             worker_tp: threadpool::Builder::new()
                 .num_threads(num_workers)
                 .thread_name("nomt-commit".to_string())
                 .build(),
+            do_warm_up,
         }
     }
 
@@ -102,7 +104,11 @@ impl CommitPool {
             root,
         };
 
-        let warm_up = spawn_warm_up(&self.worker_tp, params);
+        let warm_up = if self.do_warm_up {
+            Some(spawn_warm_up(&self.worker_tp, params))
+        } else {
+            None
+        };
 
         Committer {
             worker_tp: self.worker_tp.clone(),
@@ -121,7 +127,7 @@ impl CommitPool {
 pub struct Committer {
     worker_tp: ThreadPool,
     page_cache: PageCache,
-    warm_up: WarmUpHandle,
+    warm_up: Option<WarmUpHandle>,
     root: Node,
     store: Store,
     page_pool: PagePool,
@@ -130,7 +136,9 @@ pub struct Committer {
 impl Committer {
     /// Warm up the given key-path by pre-fetching the relevant pages.
     pub fn warm_up(&self, key_path: KeyPath) {
-        let _ = self.warm_up.warmup_tx.send(WarmUpCommand { key_path });
+        if let Some(ref warm_up) = self.warm_up {
+            let _ = warm_up.warmup_tx.send(WarmUpCommand { key_path });
+        }
     }
 
     /// Commit the given key-value read/write operations. Key-paths should be in sorted order
@@ -141,7 +149,9 @@ impl Committer {
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
     ) -> CommitHandle {
-        let _ = self.warm_up.finish_tx.send(());
+        if let Some(ref warm_up) = self.warm_up {
+            let _ = warm_up.finish_tx.send(());
+        }
         let shared = Arc::new(CommitShared {
             witness,
             read_write,
@@ -154,7 +164,11 @@ impl Committer {
 
         // receive warm-ups from worker.
         // TODO: handle error better.
-        let warm_ups = self.warm_up.output_rx.recv().unwrap();
+        let warm_ups = if let Some(ref warm_up) = self.warm_up {
+            warm_up.output_rx.recv().unwrap()
+        } else {
+            HashMap::new()
+        };
         let warm_ups = Arc::new(warm_ups);
 
         let write_pass = self.page_cache.new_write_pass();
