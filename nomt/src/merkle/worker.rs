@@ -24,6 +24,7 @@ use std::{
 };
 
 use super::{
+    page_walker::{NeedsPage, Output, PageSource, PageWalker},
     KeyReadWrite, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand, WorkerOutput,
 };
 
@@ -31,7 +32,6 @@ use crate::{
     io::PagePool,
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
-    page_walker::{NeedsPage, Output, PageSource, PageWalker},
     rw_pass_cell::{ReadPass, WritePass},
     seek::{Completion, Seek, Seeker},
     store::Store,

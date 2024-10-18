@@ -41,7 +41,6 @@ mod options;
 mod page_cache;
 mod page_diff;
 mod page_region;
-mod page_walker;
 mod rollback;
 mod rw_pass_cell;
 mod seek;
