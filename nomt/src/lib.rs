@@ -216,7 +216,7 @@ impl Nomt {
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
         let root = compute_root_node::<Blake3Hasher>(&page_cache);
         Ok(Self {
-            commit_pool: CommitPool::new(o.commit_concurrency),
+            commit_pool: CommitPool::new(o.commit_concurrency, o.warm_up),
             page_cache,
             page_pool,
             store,
