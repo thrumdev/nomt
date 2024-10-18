@@ -76,7 +76,13 @@ struct IoPacket {
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
 pub fn start_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
-    let sender = platform::start_io_worker(io_workers);
+    let sender = platform::start_io_worker(io_workers, true);
+    IoPool { sender, page_pool }
+}
+
+#[cfg(test)]
+pub fn start_test_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
+    let sender = platform::start_io_worker(io_workers, false);
     IoPool { sender, page_pool }
 }
 
