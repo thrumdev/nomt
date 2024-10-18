@@ -203,6 +203,11 @@ impl Store {
         .unwrap();
         Ok(())
     }
+
+    #[cfg(test)]
+    pub fn get_beatree(&self) -> beatree::Tree {
+        self.shared.values.clone()
+    }
 }
 
 /// An atomic transaction to be applied against th estore with [`Store::commit`].
