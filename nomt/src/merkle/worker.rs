@@ -1,13 +1,11 @@
 //! Worker logic.
 //!
-//! Workers have two phases: the random warm-up phase and the sequential commit phase.
-//!
-//! During the random warm-up phase, workers pre-fetch pages necessary for accessing terminals
-//! expected to be used during commit.
-//!
-//! During the sequential commit phase, each worker gets a range of the committed keys
-//! to work on, continues pre-fetching pages for all keys within that range, and performs
+//! During the update phase, each worker gets a range of the keys
+//! to work on, pre-fetches pages for all keys within that range, and performs
 //! page updates.
+//!
+//! This module also exposes a warm-up worker, which can be used to pre-fetch pages before the
+//! update command is issued.
 //!
 //! Updates are performed while the next fetch is pending, unless all fetches in
 //! the range have completed.
@@ -26,7 +24,7 @@ use std::{
 };
 
 use super::{
-    CommitCommand, CommitShared, KeyReadWrite, RootPagePending, WarmUpCommand, WorkerOutput,
+    KeyReadWrite, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand, WorkerOutput,
 };
 
 use crate::{
@@ -40,13 +38,13 @@ use crate::{
     PathProof, WitnessedPath,
 };
 
-pub(super) struct CommitParams {
+pub(super) struct UpdateParams {
     pub page_cache: PageCache,
     pub page_pool: PagePool,
     pub store: Store,
     pub root: Node,
     pub warm_ups: Arc<HashMap<KeyPath, Seek>>,
-    pub command: CommitCommand,
+    pub command: UpdateCommand,
 }
 
 pub(super) struct WarmUpParams {
@@ -76,8 +74,8 @@ pub(super) fn run_warm_up(
     }
 }
 
-pub(super) fn run_commit<H: NodeHasher>(params: CommitParams, output_tx: Sender<WorkerOutput>) {
-    let CommitParams {
+pub(super) fn run_update<H: NodeHasher>(params: UpdateParams, output_tx: Sender<WorkerOutput>) {
+    let UpdateParams {
         page_cache,
         page_pool,
         store,
@@ -93,7 +91,7 @@ pub(super) fn run_commit<H: NodeHasher>(params: CommitParams, output_tx: Sender<
         command.shared.witness,
     );
 
-    let output = match commit::<H>(root, page_cache, page_pool, seeker, command, warm_ups) {
+    let output = match update::<H>(root, page_cache, page_pool, seeker, command, warm_ups) {
         Err(_) => return,
         Ok(o) => o,
     };
@@ -179,30 +177,29 @@ fn warm_up_phase(
     Ok(warm_ups)
 }
 
-fn commit<H: NodeHasher>(
+fn update<H: NodeHasher>(
     root: Node,
     page_cache: PageCache,
     page_pool: PagePool,
     mut seeker: Seeker,
-    command: CommitCommand,
+    command: UpdateCommand,
     warm_ups: Arc<HashMap<KeyPath, Seek>>,
 ) -> anyhow::Result<WorkerOutput> {
-    let CommitCommand { shared, write_pass } = command;
+    let UpdateCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
 
     let mut output = WorkerOutput::new(shared.witness);
 
-    let committer =
-        RangeCommitter::<H>::new(root, shared.clone(), write_pass, &page_cache, &page_pool);
+    let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache, &page_pool);
 
     // one lucky thread gets the master write pass.
-    let mut write_pass = match committer.commit(&mut seeker, &mut output, warm_ups)? {
+    let mut write_pass = match updater.update(&mut seeker, &mut output, warm_ups)? {
         None => return Ok(output),
         Some(write_pass) => write_pass,
     };
 
     let pending_ops = shared.take_root_pending();
-    let mut root_page_committer = PageWalker::<H>::new(
+    let mut root_page_updater = PageWalker::<H>::new(
         root,
         PageSource::PageCache(page_cache.clone()),
         page_pool.clone(),
@@ -212,7 +209,7 @@ fn commit<H: NodeHasher>(
     for (trie_pos, pending_op) in pending_ops {
         match pending_op {
             RootPagePending::Node(node) => loop {
-                let page = match root_page_committer.advance_and_place_node(
+                let page = match root_page_updater.advance_and_place_node(
                     &mut write_pass,
                     trie_pos.clone(),
                     node,
@@ -230,7 +227,7 @@ fn commit<H: NodeHasher>(
                 let ops = subtrie_ops(&shared.read_write[range_start..range_end]);
                 let ops = nomt_core::update::leaf_ops_spliced(prev_terminal, &ops);
                 loop {
-                    let page = match root_page_committer.advance_and_replace(
+                    let page = match root_page_updater.advance_and_replace(
                         &mut write_pass,
                         trie_pos.clone(),
                         ops.clone(),
@@ -246,7 +243,7 @@ fn commit<H: NodeHasher>(
 
     // PANIC: output is always root when no parent page is specified.
     loop {
-        let page = match root_page_committer.conclude(&mut write_pass) {
+        let page = match root_page_updater.conclude(&mut write_pass) {
             Ok(Output::Root(new_root, diffs)) => {
                 output.page_diffs.extend(diffs);
                 output.root = Some(new_root);
@@ -254,7 +251,7 @@ fn commit<H: NodeHasher>(
             }
             Ok(Output::ChildPageRoots(_, _)) => unreachable!(),
             Err((NeedsPage(page), page_walker)) => {
-                root_page_committer = page_walker;
+                root_page_updater = page_walker;
                 page
             }
         };
@@ -288,8 +285,8 @@ fn drive_page_fetch(
 // updates.
 //
 // anything that touches the root page is deferred via `shared.pending`.
-struct RangeCommitter<H> {
-    shared: Arc<CommitShared>,
+struct RangeUpdater<H> {
+    shared: Arc<UpdateShared>,
     write_pass: WritePass<ShardIndex>,
     region: PageRegion,
     page_walker: PageWalker<H>,
@@ -298,10 +295,10 @@ struct RangeCommitter<H> {
     saved_advance: Option<SavedAdvance>,
 }
 
-impl<H: NodeHasher> RangeCommitter<H> {
+impl<H: NodeHasher> RangeUpdater<H> {
     fn new(
         root: Node,
-        shared: Arc<CommitShared>,
+        shared: Arc<UpdateShared>,
         write_pass: WritePass<ShardIndex>,
         page_cache: &PageCache,
         page_pool: &PagePool,
@@ -328,7 +325,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
             ShardIndex::Shard(i) => PageSource::PageCacheShard(page_cache.get_shard(*i)),
         };
 
-        RangeCommitter {
+        RangeUpdater {
             shared,
             write_pass,
             region,
@@ -491,7 +488,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
     }
 
     fn reattempt_advance(&mut self, seeker: &mut Seeker, output: &mut WorkerOutput) {
-        // UNWRAP: guaranteed by behavior of seeker / commit / advance.
+        // UNWRAP: guaranteed by behavior of seeker / update / advance.
         let SavedAdvance {
             ops,
             seek_result,
@@ -500,7 +497,7 @@ impl<H: NodeHasher> RangeCommitter<H> {
         self.attempt_advance(seeker, output, seek_result, ops, batch_size);
     }
 
-    fn commit(
+    fn update(
         mut self,
         seeker: &mut Seeker,
         output: &mut WorkerOutput,
