@@ -25,11 +25,11 @@
 ///
 /// The offset of the first cell also serves to detect potential overlap
 /// between the growth of cell_pointers and cells.
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 
 use crate::{
     beatree::Key,
-    io::{page_pool::FatPage, PagePool, PAGE_SIZE},
+    io::{page_pool::FatPage, PAGE_SIZE},
 };
 
 /// The size of the leaf node body: everything excluding the mandatory header.
@@ -46,17 +46,25 @@ pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 23;
 /// We use the high bit to encode whether a cell is an overflow cell.
 const OVERFLOW_BIT: u16 = 1 << 15;
 
-pub struct LeafNode {
-    pub inner: FatPage,
+#[derive(Clone)]
+pub struct LeafNode<T = FatPage> {
+    pub(super) page: T,
 }
 
-impl LeafNode {
-    pub fn n(&self) -> usize {
-        u16::from_le_bytes(self.inner[0..2].try_into().unwrap()) as usize
+impl<T> LeafNode<T> {
+    pub fn into_inner(self) -> T {
+        self.page
+    }
+}
+
+impl<T: Deref<Target = [u8]>> LeafNode<T> {
+    pub fn new(page: T) -> Self {
+        assert_eq!(page.len(), PAGE_SIZE);
+        LeafNode { page }
     }
 
-    pub fn set_n(&mut self, n: u16) {
-        self.inner[0..2].copy_from_slice(&n.to_le_bytes());
+    pub fn n(&self) -> usize {
+        u16::from_le_bytes(self.page[0..2].try_into().unwrap()) as usize
     }
 
     pub fn key(&self, i: usize) -> Key {
@@ -67,7 +75,7 @@ impl LeafNode {
 
     pub fn value(&self, i: usize) -> (&[u8], bool) {
         let (range, overflow) = self.value_range(self.cell_pointers(), i);
-        (&self.inner[range], overflow)
+        (&self.page[range], overflow)
     }
 
     pub fn get(&self, key: &Key) -> Option<(&[u8], bool)> {
@@ -76,7 +84,7 @@ impl LeafNode {
         search(cell_pointers, key)
             .ok()
             .map(|index| self.value_range(cell_pointers, index))
-            .map(|(range, overflow)| (&self.inner[range], overflow))
+            .map(|(range, overflow)| (&self.page[range], overflow))
     }
 
     // returns the range at which the value of a cell is stored
@@ -93,31 +101,31 @@ impl LeafNode {
 
     fn cell_pointers(&self) -> &[[u8; 34]] {
         unsafe {
-            std::slice::from_raw_parts(self.inner[2..36].as_ptr() as *const [u8; 34], self.n())
-        }
-    }
-
-    fn cell_pointers_mut(&mut self) -> &mut [[u8; 34]] {
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                self.inner[2..36].as_mut_ptr() as *mut [u8; 34],
-                self.n(),
-            )
+            std::slice::from_raw_parts(self.page[2..36].as_ptr() as *const [u8; 34], self.n())
         }
     }
 }
 
-pub struct LeafBuilder {
-    leaf: LeafNode,
+impl<T: DerefMut<Target = [u8]>> LeafNode<T> {
+    fn cell_pointers_mut(&mut self) -> &mut [[u8; 34]] {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.page[2..36].as_mut_ptr() as *mut [u8; 34], self.n())
+        }
+    }
+
+    pub fn set_n(&mut self, n: u16) {
+        self.page[0..2].copy_from_slice(&n.to_le_bytes());
+    }
+}
+
+pub struct LeafBuilder<T> {
+    leaf: LeafNode<T>,
     index: usize,
     remaining_value_size: usize,
 }
 
-impl LeafBuilder {
-    pub fn new(page_pool: &PagePool, n: usize, total_value_size: usize) -> Self {
-        let mut leaf = LeafNode {
-            inner: page_pool.alloc_fat_page(),
-        };
+impl<T: DerefMut<Target = [u8]>> LeafBuilder<T> {
+    pub fn new(mut leaf: LeafNode<T>, n: usize, total_value_size: usize) -> Self {
         leaf.set_n(n as u16);
         LeafBuilder {
             leaf,
@@ -133,13 +141,13 @@ impl LeafBuilder {
         let cell_pointer = &mut self.leaf.cell_pointers_mut()[self.index];
 
         encode_cell_pointer(&mut cell_pointer[..], key, offset, overflow);
-        self.leaf.inner[offset..][..value.len()].copy_from_slice(value);
+        self.leaf.page[offset..][..value.len()].copy_from_slice(value);
 
         self.index += 1;
         self.remaining_value_size -= value.len();
     }
 
-    pub fn finish(self) -> LeafNode {
+    pub fn finish(self) -> LeafNode<T> {
         assert!(self.remaining_value_size == 0);
         self.leaf
     }

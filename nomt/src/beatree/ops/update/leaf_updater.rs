@@ -5,7 +5,7 @@ use crate::beatree::{
     ops::bit_ops::separate,
     Key,
 };
-use crate::io::PagePool;
+use crate::io::page_pool::{PagePool, UnsafePageView, UnsafePageViewMut};
 
 use super::{
     leaf_stage::LeavesTracker, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
@@ -13,7 +13,7 @@ use super::{
 };
 
 pub struct BaseLeaf {
-    pub node: LeafNode,
+    pub node: LeafNode<UnsafePageView>,
     pub iter_pos: usize,
     pub separator: Key,
 }
@@ -376,7 +376,7 @@ impl LeafUpdater {
         }
     }
 
-    fn build_leaf(&self, ops: &[LeafOp]) -> LeafNode {
+    fn build_leaf(&self, ops: &[LeafOp]) -> LeafNode<UnsafePageViewMut> {
         let total_value_size = ops
             .iter()
             .map(|op| match op {
@@ -385,7 +385,13 @@ impl LeafUpdater {
             })
             .sum();
 
-        let mut leaf_builder = LeafBuilder::new(&self.page_pool, ops.len(), total_value_size);
+        let page = self.page_pool.alloc();
+
+        // SAFETY: page pool is alive, page is live and unaliased.
+        let view = unsafe { UnsafePageViewMut::new(page) };
+        let node = LeafNode::new(view);
+
+        let mut leaf_builder = LeafBuilder::new(node, ops.len(), total_value_size);
         for op in ops {
             let (k, v, o) = self.op_cell(op);
 
@@ -433,7 +439,7 @@ impl LeafGauge {
 mod tests {
     use super::{
         separate, BaseLeaf, DigestResult, Key, LeafBuilder, LeafNode, LeafOp, LeafUpdater,
-        LeavesTracker, PagePool,
+        LeavesTracker, PagePool, UnsafePageView, UnsafePageViewMut,
     };
 
     lazy_static::lazy_static! {
@@ -444,16 +450,19 @@ mod tests {
         [x; 32]
     }
 
-    fn make_leaf(vs: Vec<(Key, Vec<u8>, bool)>) -> LeafNode {
+    fn make_leaf(vs: Vec<(Key, Vec<u8>, bool)>) -> LeafNode<UnsafePageView> {
         let n = vs.len();
         let total_value_size = vs.iter().map(|(_, v, _)| v.len()).sum();
 
-        let mut builder = LeafBuilder::new(&PAGE_POOL, n, total_value_size);
+        let page = PAGE_POOL.alloc();
+        let view = unsafe { UnsafePageViewMut::new(page) };
+        let leaf = LeafNode::new(view);
+        let mut builder = LeafBuilder::new(leaf, n, total_value_size);
         for (k, v, overflow) in vs {
             builder.push_cell(k, &v, overflow);
         }
 
-        builder.finish()
+        LeafNode::new(builder.finish().into_inner().into_shared())
     }
 
     #[test]

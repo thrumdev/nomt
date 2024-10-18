@@ -3,7 +3,10 @@ use crate::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},
         leaf::node::LeafNode,
     },
-    io::{page_pool::FatPage, IoCommand, IoHandle, IoPool, PagePool},
+    io::{
+        page_pool::{FatPage, Page, UnsafePageView, UnsafePageViewMut},
+        IoCommand, IoHandle, IoPool, PagePool,
+    },
 };
 
 use std::fs::File;
@@ -18,7 +21,7 @@ pub struct LeafStoreReader {
 /// to storage to reflect the LeafStore's state at that moment
 pub struct LeafStoreWriter {
     allocator_writer: AllocatorWriter,
-    pending: Vec<(PageNumber, FatPage)>,
+    pending: Vec<(PageNumber, UnsafePageView)>,
     page_pool: PagePool,
 }
 
@@ -63,13 +66,26 @@ impl LeafStoreReader {
         self.allocator_reader.query(pn)
     }
 
+    /// Reads the leaf page with the specified page number into the provided buffer.
+    pub fn query_into(&self, buf: &mut [u8], pn: PageNumber) {
+        self.allocator_reader.query_into(buf, pn)
+    }
+
+    /// Get a reference to the I/O handle.
     pub fn io_handle(&self) -> &IoHandle {
         self.allocator_reader.io_handle()
     }
 
-    /// Create an I/O command for querying a page by number.
-    pub fn io_command(&self, pn: PageNumber, user_data: u64) -> IoCommand {
-        self.allocator_reader.io_command(pn, user_data)
+    /// Get a reference to the page pool.
+    pub fn page_pool(&self) -> &PagePool {
+        self.allocator_reader.page_pool()
+    }
+
+    /// Create an I/O command for querying a page by number into the given page.
+    ///
+    /// Safety: the page must be live and unaliased until the command is dropped or completed.
+    pub unsafe fn io_command(&self, pn: PageNumber, user_data: u64, page: &Page) -> IoCommand {
+        self.allocator_reader.io_command(pn, user_data, page)
     }
 }
 
@@ -80,14 +96,14 @@ impl LeafStoreWriter {
     }
 
     /// Write a leaf node, allocating a page number.
-    pub fn write(&mut self, leaf_page: LeafNode) -> PageNumber {
+    pub fn write(&mut self, leaf_page: LeafNode<UnsafePageViewMut>) -> PageNumber {
         let pn = self.allocator_writer.allocate();
-        self.write_preallocated(pn, leaf_page.inner);
+        self.write_preallocated(pn, leaf_page.into_inner().into_shared());
         pn
     }
 
     /// Write a page under a preallocated page number.
-    pub fn write_preallocated(&mut self, pn: PageNumber, page: FatPage) {
+    pub fn write_preallocated(&mut self, pn: PageNumber, page: UnsafePageView) {
         self.pending.push((pn, page));
     }
 
@@ -124,7 +140,7 @@ impl LeafStoreWriter {
 }
 
 pub struct LeafStoreCommitOutput {
-    pub pending: Vec<(PageNumber, FatPage)>,
+    pub pending: Vec<(PageNumber, UnsafePageView)>,
     pub free_list_pages: Vec<(PageNumber, FatPage)>,
     pub bump: PageNumber,
     pub extend_file_sz: Option<u64>,

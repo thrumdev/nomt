@@ -10,7 +10,7 @@ use crate::beatree::{
     branch::{node::BranchNode, BRANCH_NODE_BODY_SIZE},
     index::Index,
     leaf::{
-        node::{LeafNode, LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
+        node::{LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
         overflow,
         store::{LeafStoreReader, LeafStoreWriter},
     },
@@ -137,7 +137,7 @@ fn preload_leaves(
     leaf_reader: &LeafStoreReader,
     bbn_index: &Index,
     keys: impl IntoIterator<Item = Key>,
-) -> Result<DashMap<PageNumber, LeafNode>> {
+) -> Result<DashMap<PageNumber, Page>> {
     let leaf_pages = DashMap::new();
     let mut last_pn = None;
 
@@ -157,11 +157,17 @@ fn preload_leaves(
             continue;
         }
         last_pn = Some(leaf_pn);
+
+        let page = leaf_reader.page_pool().alloc();
+
+        // SAFETY: the page is kept alive and unaliased until the submission is reaped.
+        let command = unsafe { leaf_reader.io_command(leaf_pn, 0, &page) };
         leaf_reader
             .io_handle()
-            .send(leaf_reader.io_command(leaf_pn, leaf_pn.0 as u64))
+            .send(command)
             .expect("I/O Pool Disconnected");
 
+        leaf_pages.insert(leaf_pn, page);
         submissions += 1;
     }
 
@@ -171,9 +177,6 @@ fn preload_leaves(
             .recv()
             .expect("I/O Pool Disconnected");
         completion.result?;
-        let pn = PageNumber(completion.command.user_data as u32);
-        let page = completion.command.kind.unwrap_buf();
-        leaf_pages.insert(pn, LeafNode { inner: page });
     }
 
     Ok(leaf_pages)

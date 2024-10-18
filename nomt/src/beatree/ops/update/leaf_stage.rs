@@ -23,11 +23,11 @@ use crate::beatree::{
     },
     Key,
 };
-use crate::io::page_pool::{PagePool, UnsafePageView};
+use crate::io::page_pool::{Page, PagePool, UnsafePageView, UnsafePageViewMut};
 
 /// Tracker of all changes that happen to leaves during an update
-pub type LeavesTracker = super::NodesTracker<LeafNode>;
-type ChangedLeafEntry = super::ChangedNodeEntry<LeafNode>;
+pub type LeavesTracker = super::NodesTracker<LeafNode<UnsafePageViewMut>>;
+type ChangedLeafEntry = super::ChangedNodeEntry<LeafNode<UnsafePageViewMut>>;
 
 fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNumber)> {
     let Some((_, branch)) = bbn_index.lookup(key) else {
@@ -55,7 +55,7 @@ fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNu
 /// Change the btree's leaves in the specified way
 pub fn run(
     bbn_index: &Index,
-    leaf_cache: DashMap<PageNumber, LeafNode>,
+    leaf_cache: DashMap<PageNumber, Page>,
     leaf_reader: &LeafStoreReader,
     page_pool: PagePool,
     changeset: Vec<(Key, Option<(Vec<u8>, bool)>)>,
@@ -87,16 +87,26 @@ pub fn run(
         thread_pool.execute(move || {
             // passing the large `Arc` values by reference ensures that they are dropped at the
             // end of this scope, not the end of `run_worker`.
-            let res = run_worker(
+            let (changes, deleted_overflow, deleted_pages) = run_worker(
                 bbn_index,
                 &*leaf_cache,
                 leaf_reader,
-                page_pool,
+                page_pool.clone(),
                 &*changeset,
                 worker_params,
             );
 
-            let _ = worker_result_tx.send(res);
+            let _ = worker_result_tx.send((changes, deleted_overflow));
+
+            let mut deallocator = page_pool.deallocator();
+
+            for page in deleted_pages {
+                // SAFETY: each worker works on disjoint sets of leaves. each leaf may only be updated
+                // once, as we use a left-to-right sweep.
+                unsafe {
+                    deallocator.dealloc(page);
+                }
+            }
         });
     }
 
@@ -123,7 +133,7 @@ fn prepare_workers(
     bbn_index: &Index,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     worker_count: usize,
-) -> Vec<WorkerParams<LeafNode>> {
+) -> Vec<WorkerParams<LeafNode<UnsafePageViewMut>>> {
     let mut remaining_workers = worker_count;
     let mut changeset_remaining = changeset;
 
@@ -212,9 +222,10 @@ fn prepare_workers(
 
 fn reset_leaf_base(
     bbn_index: &Index,
-    leaf_cache: &DashMap<PageNumber, LeafNode>,
+    leaf_cache: &DashMap<PageNumber, Page>,
     leaf_reader: &LeafStoreReader,
     leaves_tracker: &mut LeavesTracker,
+    deleted_pages: &mut Vec<Page>,
     leaf_updater: &mut LeafUpdater,
     has_extended_range: bool,
     mut key: Key,
@@ -225,6 +236,7 @@ fn reset_leaf_base(
             leaf_cache,
             leaf_reader,
             leaves_tracker,
+            deleted_pages,
             leaf_updater,
             key,
         );
@@ -232,8 +244,13 @@ fn reset_leaf_base(
     }
 
     if let Some((separator, node, next_separator)) = leaves_tracker.pending_base.take() {
+        // We are reusing a leaf created by another worker. we need to schedule clean-up
+        // of that leaf to avoid a memory leak.
+        let page = node.into_inner().into_shared();
+        deleted_pages.push(page.clone().into_inner());
+
         let base = BaseLeaf {
-            node,
+            node: LeafNode::new(page),
             iter_pos: 0,
             separator,
         };
@@ -252,6 +269,7 @@ fn reset_leaf_base(
                 leaf_cache,
                 leaf_reader,
                 leaves_tracker,
+                deleted_pages,
                 leaf_updater,
                 key,
             )
@@ -266,9 +284,10 @@ fn reset_leaf_base(
 
 fn reset_leaf_base_fresh(
     bbn_index: &Index,
-    leaf_cache: &DashMap<PageNumber, LeafNode>,
+    leaf_cache: &DashMap<PageNumber, Page>,
     leaf_reader: &LeafStoreReader,
     leaves_tracker: &mut LeavesTracker,
+    deleted_pages: &mut Vec<Page>,
     leaf_updater: &mut LeafUpdater,
     key: Key,
 ) {
@@ -280,13 +299,27 @@ fn reset_leaf_base_fresh(
     // any new leaves produced by the updater will replace it.
     leaves_tracker.delete(separator, leaf_pn, cutoff);
 
+    let page = match leaf_cache.get(&leaf_pn) {
+        Some(page) => page.clone(),
+        None => {
+            let page = leaf_reader.page_pool().alloc();
+
+            // SAFETY: page pool is live, page is unique and unaliased
+            let mut view = unsafe { UnsafePageViewMut::new(page) };
+
+            leaf_reader.query_into(&mut *view, leaf_pn);
+            view.into_inner()
+        }
+    };
+
+    deleted_pages.push(page.clone());
+
+    // SAFETY: all preloaded and just-fetched pages are live, and the page pool is live.
+    // no mutable references exist.
+    let view = unsafe { UnsafePageView::new(page) };
+
     let base = BaseLeaf {
-        node: leaf_cache
-            .remove(&leaf_pn)
-            .map(|(_, l)| l)
-            .unwrap_or_else(|| LeafNode {
-                inner: leaf_reader.query(leaf_pn),
-            }),
+        node: LeafNode::new(view),
         iter_pos: 0,
         separator,
     };
@@ -294,16 +327,19 @@ fn reset_leaf_base_fresh(
     leaf_updater.reset_base(Some(base), cutoff);
 }
 
+// This returns all changed leaf entries, the contents of deleted overflow cells, and
+// a vector of pages from the leaf cache which were used as bases.
 fn run_worker(
     bbn_index: Index,
-    leaf_cache: &DashMap<PageNumber, LeafNode>,
+    leaf_cache: &DashMap<PageNumber, Page>,
     leaf_reader: LeafStoreReader,
     page_pool: PagePool,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
-    mut worker_params: WorkerParams<LeafNode>,
-) -> (BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>) {
+    mut worker_params: WorkerParams<LeafNode<UnsafePageViewMut>>,
+) -> (BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>, Vec<Page>) {
     let mut leaves_tracker = LeavesTracker::new();
     let mut leaf_updater = LeafUpdater::new(page_pool, None, None);
+    let mut deleted_pages = Vec::new();
     let mut overflow_deleted = Vec::new();
     let mut pending_left_request = None;
     let mut has_extended_range = false;
@@ -315,6 +351,7 @@ fn run_worker(
         &leaf_cache,
         &leaf_reader,
         &mut leaves_tracker,
+        &mut deleted_pages,
         &mut leaf_updater,
         has_extended_range,
         changeset[worker_params.op_range.start].0,
@@ -353,6 +390,7 @@ fn run_worker(
                 leaf_cache,
                 &leaf_reader,
                 &mut leaves_tracker,
+                &mut deleted_pages,
                 &mut leaf_updater,
                 has_extended_range,
                 k,
@@ -391,6 +429,7 @@ fn run_worker(
             leaf_cache,
             &leaf_reader,
             &mut leaves_tracker,
+            &mut deleted_pages,
             &mut leaf_updater,
             has_extended_range,
             cutoff,
@@ -425,5 +464,5 @@ fn run_worker(
         }
     }
 
-    (leaves_tracker.inner, overflow_deleted)
+    (leaves_tracker.inner, overflow_deleted, deleted_pages)
 }

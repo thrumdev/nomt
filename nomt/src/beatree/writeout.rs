@@ -60,7 +60,7 @@ pub fn write_bbn(
 pub fn write_ln(
     io_handle: IoHandle,
     ln_fd: &File,
-    ln: Vec<(PageNumber, FatPage)>,
+    ln: &[(PageNumber, UnsafePageView)],
     ln_free_list_pages: Vec<(PageNumber, FatPage)>,
     ln_extend_file_sz: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -72,7 +72,12 @@ pub fn write_ln(
     for (pn, page) in ln {
         io_handle
             .send(crate::io::IoCommand {
-                kind: crate::io::IoKind::Write(ln_fd.as_raw_fd(), pn.0 as u64, page),
+                kind: crate::io::IoKind::WriteRaw(
+                    ln_fd.as_raw_fd(),
+                    pn.0 as u64,
+                    page.as_ptr(),
+                    page.len(),
+                ),
                 user_data: 0,
             })
             .unwrap();

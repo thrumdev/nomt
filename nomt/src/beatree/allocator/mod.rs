@@ -1,4 +1,8 @@
-use crate::io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE};
+use crate::io::{
+    self,
+    page_pool::{FatPage, Page},
+    IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE,
+};
 
 use std::{
     fs::File,
@@ -71,16 +75,32 @@ impl AllocatorReader {
         io::read_page(self.io_handle.page_pool(), &self.store_file, pn.0 as u64).unwrap()
     }
 
+    /// Reads the page into the given buffer. Blocks the current thread.
+    pub fn query_into(&self, buf: &mut [u8], pn: PageNumber) {
+        io::read_page_into(buf, &self.store_file, pn.0 as u64).unwrap()
+    }
+
     /// Get a reference to the I/O handle.
     pub fn io_handle(&self) -> &IoHandle {
         &self.io_handle
     }
 
+    /// Get a reference to the page pool.
+    pub fn page_pool(&self) -> &PagePool {
+        self.io_handle.page_pool()
+    }
+
     /// Create an I/O command for querying a page by number.
-    pub fn io_command(&self, pn: PageNumber, user_data: u64) -> IoCommand {
-        let page = self.io_handle.page_pool().alloc_fat_page();
+    ///
+    /// Safety: the page must be live and unaliased until the command is dropped or completed.
+    pub unsafe fn io_command(&self, pn: PageNumber, user_data: u64, page: &Page) -> IoCommand {
         IoCommand {
-            kind: IoKind::Read(self.store_file.as_raw_fd(), pn.0 as u64, page),
+            kind: IoKind::ReadRaw(
+                self.store_file.as_raw_fd(),
+                pn.0 as u64,
+                page.as_mut_ptr(),
+                PAGE_SIZE,
+            ),
             user_data,
         }
     }

@@ -40,6 +40,14 @@ fn execute(mut command: IoCommand) -> CompleteIo {
                     (page_index * PAGE_SIZE as u64) as libc::off_t,
                 )
             },
+            IoKind::ReadRaw(fd, page_index, ptr, size) => unsafe {
+                libc::pread(
+                    fd,
+                    ptr as *mut libc::c_void,
+                    PAGE_SIZE as libc::size_t,
+                    (page_index * PAGE_SIZE as u64) as libc::off_t,
+                )
+            },
             IoKind::Write(fd, page_index, ref page) => unsafe {
                 libc::pwrite(
                     fd,

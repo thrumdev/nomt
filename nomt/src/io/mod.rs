@@ -21,6 +21,7 @@ pub use page_pool::{FatPage, PagePool};
 pub enum IoKind {
     Read(RawFd, u64, FatPage),
     Write(RawFd, u64, FatPage),
+    ReadRaw(RawFd, u64, *mut u8, usize),
     WriteRaw(RawFd, u64, *const u8, usize),
 }
 
@@ -31,13 +32,6 @@ pub enum IoKindResult {
 }
 
 impl IoKind {
-    pub fn unwrap_buf(self) -> FatPage {
-        match self {
-            IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
-            IoKind::WriteRaw(_, _, _, _) => panic!("attempted to extract buf from write_raw"),
-        }
-    }
-
     pub fn get_result(&self, res: isize) -> IoKindResult {
         match self {
             // pread returns 0 if the file has been read till the end of file
@@ -46,7 +40,7 @@ impl IoKind {
             // However, as each read operation follows a write operation,
             // there should be no unexpected end-of-file that is not aligned with PAGE_SIZE
             // when all previous writes have succeeded.
-            IoKind::Read(_, _, _) if res == 0 => IoKindResult::Ok,
+            IoKind::Read(_, _, _) | IoKind::ReadRaw(_, _, _, _) if res == 0 => IoKindResult::Ok,
             // pread and pwrite return the number of bytes read or written
             _ if res == PAGE_SIZE as isize => IoKindResult::Ok,
             _ if res == -1 => IoKindResult::Err,
@@ -170,8 +164,14 @@ impl IoHandle {
 
 /// Read a page from the file at the given page number.
 pub fn read_page(page_pool: &PagePool, fd: &File, pn: u64) -> std::io::Result<FatPage> {
-    use std::os::unix::fs::FileExt as _;
     let mut page = page_pool.alloc_fat_page();
-    fd.read_exact_at(&mut page[..], pn * PAGE_SIZE as u64)?;
+    read_page_into(&mut *page, fd, pn)?;
     Ok(page)
+}
+
+/// Read a page from the file into the provided buffer. The buffer must have size `PAGE_SIZE`.
+pub fn read_page_into(buf: &mut [u8], fd: &File, pn: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt as _;
+    fd.read_exact_at(&mut buf[..], pn * PAGE_SIZE as u64)?;
+    Ok(())
 }

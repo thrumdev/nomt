@@ -11,7 +11,10 @@
 /// ```
 use crate::{
     beatree::PageNumber,
-    io::{page_pool::FatPage, PAGE_SIZE},
+    io::{
+        page_pool::{FatPage, UnsafePageViewMut},
+        PAGE_SIZE,
+    },
 };
 
 use super::{
@@ -46,7 +49,10 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         assert!(!value.is_empty());
 
         // allocate a page.
-        let mut page = leaf_writer.page_pool().alloc_fat_page();
+        let page = leaf_writer.page_pool().alloc();
+
+        // SAFETY: page pool is live and page is unaliased.
+        let mut page = unsafe { UnsafePageViewMut::new(page.clone()) };
         let mut pns_written = 0;
 
         // write as many page numbers as possible.
@@ -71,7 +77,7 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         value = &value[bytes..];
 
         // write the page.
-        leaf_writer.write_preallocated(pn, page);
+        leaf_writer.write_preallocated(pn, page.into_shared());
     }
     assert!(value.is_empty());
 

@@ -68,8 +68,8 @@ impl Sync {
         );
         let bitbox_writeout_done = spawn_wal_writeout(&self.tp, &shared.wal_fd, bitbox_wal_wd);
 
+        let ln_written_pages = ln_writeout_done.recv().unwrap();
         bbn_writeout_done.recv().unwrap();
-        ln_writeout_done.recv().unwrap();
         bitbox_writeout_done.recv().unwrap();
 
         let rollback_writeout_wd = rollback_writeout_wd_rx
@@ -127,9 +127,13 @@ impl Sync {
         bitbox::writeout::write_ht(shared.io_pool.make_handle(), &shared.ht_fd, ht_pages)?;
         bitbox::writeout::truncate_wal(&shared.wal_fd)?;
 
-        beatree.finish_sync(
-            beatree_meta_wd.bbn_index,
-            beatree_meta_wd.bbn_outdated_pages,
+        beatree.finish_sync(beatree_meta_wd.bbn_index);
+
+        spawn_post_sync_page_cleanup(
+            &self.tp,
+            shared.io_pool.page_pool().clone(),
+            beatree_meta_wd.beatree_outdated_pages,
+            ln_written_pages,
         );
 
         rollback_writeout_end_rx.recv().unwrap();
@@ -174,7 +178,7 @@ struct BbnWriteoutData {
 }
 
 struct LnWriteoutData {
-    ln: Vec<(PageNumber, FatPage)>,
+    ln: Vec<(PageNumber, UnsafePageView)>,
     ln_freelist_pages: Vec<(PageNumber, FatPage)>,
     ln_extend_file_sz: Option<u64>,
 }
@@ -185,7 +189,7 @@ struct BeatreePostWriteout {
     bbn_freelist_pn: u32,
     bbn_bump: u32,
     bbn_index: beatree::Index,
-    bbn_outdated_pages: Vec<Vec<Page>>,
+    beatree_outdated_pages: Vec<Vec<Page>>,
 }
 
 fn spawn_prepare_sync_beatree(
@@ -208,7 +212,7 @@ fn spawn_prepare_sync_beatree(
             bbn,
             bbn_freelist_pages,
             bbn_extend_file_sz,
-            bbn_outdated_pages,
+            beatree_outdated_pages,
             ln,
             ln_freelist_pages,
             ln_extend_file_sz,
@@ -235,7 +239,7 @@ fn spawn_prepare_sync_beatree(
             bbn_freelist_pn,
             bbn_bump,
             bbn_index,
-            bbn_outdated_pages,
+            beatree_outdated_pages,
         });
     });
     (bbn_result_rx, ln_result_rx, meta_result_rx)
@@ -248,7 +252,7 @@ fn spawn_bbn_ln_writeout(
     ln_fd: &File,
     beatree_bbn_wd: Receiver<BbnWriteoutData>,
     beatree_ln_wd: Receiver<LnWriteoutData>,
-) -> (Receiver<()>, Receiver<()>) {
+) -> (Receiver<()>, Receiver<Vec<(PageNumber, UnsafePageView)>>) {
     let (bbn_result_tx, bbn_result_rx) = channel::bounded(1);
     tp.execute({
         let io_handle = io_pool.make_handle();
@@ -284,12 +288,12 @@ fn spawn_bbn_ln_writeout(
             beatree::writeout::write_ln(
                 io_handle,
                 &ln_fd,
-                ln,
+                &ln,
                 ln_freelist_pages,
                 ln_extend_file_sz,
             )
             .unwrap();
-            let _ = ln_result_tx.send(());
+            let _ = ln_result_tx.send(ln);
         }
     });
     (bbn_result_rx, ln_result_rx)
@@ -345,4 +349,24 @@ fn spawn_rollback_writeout_end(
         let _ = result_tx.send(());
     });
     result_rx
+}
+fn spawn_post_sync_page_cleanup(
+    tp: &ThreadPool,
+    page_pool: PagePool,
+    beatree_outdated_pages: Vec<Vec<Page>>,
+    ln_written_pages: Vec<(PageNumber, UnsafePageView)>,
+) {
+    tp.execute(move || {
+        let mut deallocator = page_pool.deallocator();
+        for page in beatree_outdated_pages.into_iter().flatten() {
+            // SAFETY: page pool is live, and this is called after `finish_sync`, so these
+            // pages are unique.
+            unsafe { deallocator.dealloc(page) }
+        }
+
+        for (_, page) in ln_written_pages {
+            // SAFETY: page pool is live, and this is called after writeout has concluded.
+            unsafe { deallocator.dealloc(page.into_inner()) }
+        }
+    });
 }

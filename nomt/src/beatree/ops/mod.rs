@@ -12,7 +12,7 @@ use super::{
     leaf::{self, node::LeafNode},
     Key,
 };
-use crate::io::page_pool::UnsafePageView;
+use crate::io::{page_pool::UnsafePageView, PAGE_SIZE};
 
 pub(crate) mod bit_ops;
 mod reconstruction;
@@ -43,9 +43,11 @@ pub fn lookup(
         Some((_, leaf_pn)) => leaf_pn,
     };
 
-    let leaf = LeafNode {
-        inner: leaf_store.query(leaf_pn),
-    };
+    // read the leaf onto the stack.
+    let mut leaf_data = [0u8; PAGE_SIZE];
+    leaf_store.query_into(&mut leaf_data[..], leaf_pn);
+
+    let leaf = LeafNode::new(&leaf_data[..]);
 
     let maybe_value = leaf.get(&key).map(|(v, is_overflow)| {
         if is_overflow {

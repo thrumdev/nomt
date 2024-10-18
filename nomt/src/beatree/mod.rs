@@ -188,7 +188,7 @@ impl Tree {
             bbn_index = shared.bbn_index.clone();
         }
 
-        let bbn_outdated_pages = {
+        let beatree_outdated_pages = {
             let sync = sync.deref_mut();
 
             // Update will modify the index in a CoW manner.
@@ -259,7 +259,7 @@ impl Tree {
             bbn,
             bbn_freelist_pages,
             bbn_extend_file_sz,
-            bbn_outdated_pages,
+            beatree_outdated_pages,
             ln,
             ln_freelist_pages,
             ln_extend_file_sz,
@@ -271,24 +271,11 @@ impl Tree {
         }
     }
 
-    pub fn finish_sync(&self, bbn_index: Index, bbn_outdated_pages: Vec<Vec<Page>>) {
+    pub fn finish_sync(&self, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
-        {
-            let mut inner = self.shared.write();
-            inner.secondary_staging = None;
-            inner.bbn_index = bbn_index;
-        }
-
-        // clean up all the pages outside of the critical section.
-        let mut deallocator = self.page_pool.deallocator();
-        for page in bbn_outdated_pages.into_iter().flatten() {
-            // SAFETY: all pages should originate from this page pool.
-            // they only appear here when the index is swapped, and this is called only after
-            // writeout is complete.
-            unsafe {
-                deallocator.dealloc(page);
-            }
-        }
+        let mut inner = self.shared.write();
+        inner.secondary_staging = None;
+        inner.bbn_index = bbn_index;
     }
 }
 
@@ -296,8 +283,8 @@ pub struct WriteoutData {
     pub bbn: Vec<BranchNode<UnsafePageView>>,
     pub bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub bbn_extend_file_sz: Option<u64>,
-    pub bbn_outdated_pages: Vec<Vec<Page>>,
-    pub ln: Vec<(PageNumber, FatPage)>,
+    pub beatree_outdated_pages: Vec<Vec<Page>>,
+    pub ln: Vec<(PageNumber, UnsafePageView)>,
     pub ln_freelist_pages: Vec<(PageNumber, FatPage)>,
     pub ln_extend_file_sz: Option<u64>,
     pub ln_freelist_pn: u32,
