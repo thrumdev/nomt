@@ -10,7 +10,7 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
-use commit::{CommitPool, Committer};
+use merkle::{UpdatePool, Updater};
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
@@ -35,7 +35,7 @@ pub mod beatree;
 mod beatree;
 
 mod bitbox;
-mod commit;
+mod merkle;
 mod metrics;
 mod options;
 mod page_cache;
@@ -163,13 +163,13 @@ impl KeyReadWrite {
         }
     }
 
-    fn to_compact(&self) -> crate::commit::KeyReadWrite {
+    fn to_compact(&self) -> crate::merkle::KeyReadWrite {
         let hash = |v: &Value| *blake3::hash(v).as_bytes();
         match self {
-            KeyReadWrite::Read(_) => crate::commit::KeyReadWrite::Read,
-            KeyReadWrite::Write(val) => crate::commit::KeyReadWrite::Write(val.as_ref().map(hash)),
+            KeyReadWrite::Read(_) => crate::merkle::KeyReadWrite::Read,
+            KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
             KeyReadWrite::ReadThenWrite(_, val) => {
-                crate::commit::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
+                crate::merkle::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
             }
         }
     }
@@ -186,7 +186,7 @@ impl NodeHasher for Blake3Hasher {
 
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt {
-    commit_pool: CommitPool,
+    merkle_update_pool: UpdatePool,
     /// The handle to the page cache.
     page_cache: PageCache,
     page_pool: PagePool,
@@ -216,7 +216,7 @@ impl Nomt {
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
         let root = compute_root_node::<Blake3Hasher>(&page_cache);
         Ok(Self {
-            commit_pool: CommitPool::new(o.commit_concurrency, o.warm_up),
+            merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
             page_cache,
             page_pool,
             store,
@@ -269,7 +269,7 @@ impl Nomt {
         };
         Session {
             store,
-            committer: Some(self.commit_pool.begin(
+            merkle_updater: Some(self.merkle_update_pool.begin(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
                 self.store.clone(),
@@ -345,12 +345,12 @@ impl Nomt {
             compact_actuals.push((path.clone(), read_write.to_compact()));
         }
 
-        // UNWRAP: committer always `Some` during lifecycle.
-        let commit_handle = session
-            .committer
+        // UNWRAP: merkle_updater always `Some` during lifecycle.
+        let merkle_update_handle = session
+            .merkle_updater
             .take()
             .unwrap()
-            .commit::<Blake3Hasher>(compact_actuals, witness);
+            .update_and_prove::<Blake3Hasher>(compact_actuals, witness);
 
         let mut tx = self.store.new_tx();
         for (path, read_write) in actuals {
@@ -359,15 +359,19 @@ impl Nomt {
             }
         }
 
-        let commit = commit_handle.join();
+        let merkle_update = merkle_update_handle.join();
 
-        let new_root = commit.root;
+        let new_root = merkle_update.root;
         self.page_cache
-            .commit(commit.page_diffs.into_iter().flatten(), &mut tx);
+            .commit(merkle_update.page_diffs.into_iter().flatten(), &mut tx);
         self.shared.lock().root = new_root;
         self.store.commit(tx)?;
 
-        Ok((new_root, commit.witness, commit.witnessed_operations))
+        Ok((
+            new_root,
+            merkle_update.witness,
+            merkle_update.witnessed_operations,
+        ))
     }
 
     /// Perform a rollback of the last `n` commits.
@@ -417,7 +421,7 @@ impl Nomt {
 /// operations.
 pub struct Session {
     store: Store,
-    committer: Option<Committer>, // always `Some` during lifecycle.
+    merkle_updater: Option<Updater>, // always `Some` during lifecycle.
     session_cnt: Arc<AtomicUsize>,
     metrics: Metrics,
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
@@ -436,8 +440,8 @@ impl Session {
     /// session to maximize throughput.
     /// There is no correctness issue with doing too many warm-ups, but there is a cost for I/O.
     pub fn warm_up(&self, path: KeyPath) {
-        // UNWRAP: committer always `Some` during lifecycle.
-        self.committer.as_ref().unwrap().warm_up(path);
+        // UNWRAP: merkle_updater always `Some` during lifecycle.
+        self.merkle_updater.as_ref().unwrap().warm_up(path);
     }
 
     /// Synchronously read the value stored under the given key.

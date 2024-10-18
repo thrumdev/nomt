@@ -1,4 +1,4 @@
-//! Parallel, pipelined merkle trie commits.
+//! Parallel, pipelined merkle trie updates.
 //!
 //! This splits the work of warming-up and performing the trie update across worker threads.
 
@@ -62,20 +62,20 @@ impl KeyReadWrite {
     }
 }
 
-/// The commit worker pool.
-pub struct CommitPool {
+/// The update worker pool.
+pub struct UpdatePool {
     worker_tp: ThreadPool,
     do_warm_up: bool,
 }
 
-impl CommitPool {
-    /// Create a new `CommitPool`.
+impl UpdatePool {
+    /// Create a new `UpdatePool`.
     ///
     /// # Panics
     ///
     /// Panics if `num_workers` is zero.
     pub fn new(num_workers: usize, do_warm_up: bool) -> Self {
-        CommitPool {
+        UpdatePool {
             worker_tp: threadpool::Builder::new()
                 .num_threads(num_workers)
                 .thread_name("nomt-commit".to_string())
@@ -84,20 +84,20 @@ impl CommitPool {
         }
     }
 
-    /// Create a `Committer` that uses the underlying pool.
+    /// Create a `Updater` that uses the underlying pool.
     ///
     /// # Deadlocks
     ///
-    /// The Committer expects to have exclusive access to the page cache, so if there
+    /// The Updater expects to have exclusive access to the page cache, so if there
     /// are outstanding read passes, write passes, or threads waiting on write passes,
-    /// deadlocks are practically guaranteed at some point during the lifecycle of the Committer.
+    /// deadlocks are practically guaranteed at some point during the lifecycle of the Updater.
     pub fn begin(
         &self,
         page_cache: PageCache,
         page_pool: PagePool,
         store: Store,
         root: Node,
-    ) -> Committer {
+    ) -> Updater {
         let params = worker::WarmUpParams {
             page_cache: page_cache.clone(),
             store: store.clone(),
@@ -110,7 +110,7 @@ impl CommitPool {
             None
         };
 
-        Committer {
+        Updater {
             worker_tp: self.worker_tp.clone(),
             warm_up,
             page_cache,
@@ -124,7 +124,7 @@ impl CommitPool {
 /// Parallel commit handler.
 ///
 /// The expected usage is to call `warm_up` repeatedly and conclude with `commit`.
-pub struct Committer {
+pub struct Updater {
     worker_tp: ThreadPool,
     page_cache: PageCache,
     warm_up: Option<WarmUpHandle>,
@@ -133,7 +133,7 @@ pub struct Committer {
     page_pool: PagePool,
 }
 
-impl Committer {
+impl Updater {
     /// Warm up the given key-path by pre-fetching the relevant pages.
     pub fn warm_up(&self, key_path: KeyPath) {
         if let Some(ref warm_up) = self.warm_up {
@@ -141,18 +141,19 @@ impl Committer {
         }
     }
 
-    /// Commit the given key-value read/write operations. Key-paths should be in sorted order
-    /// and should appear at most once within the vector. Witness specify whether or not
-    /// collecting the witness of the commit operation.
-    pub fn commit<H: NodeHasher>(
+    /// Update the trie with the given key-value read/write operations.
+    /// Key-paths should be in sorted order
+    /// and should appear at most once within the vector. Witness specifies whether or not
+    /// to collect the witness of the operation.
+    pub fn update_and_prove<H: NodeHasher>(
         self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
-    ) -> CommitHandle {
+    ) -> UpdateHandle {
         if let Some(ref warm_up) = self.warm_up {
             let _ = warm_up.finish_tx.send(());
         }
-        let shared = Arc::new(CommitShared {
+        let shared = Arc::new(UpdateShared {
             witness,
             read_write,
             root_page_pending: Mutex::new(Vec::with_capacity(64)),
@@ -175,12 +176,12 @@ impl Committer {
         let worker_passes = write_pass.split_n(shard_regions);
 
         for write_pass in worker_passes {
-            let command = CommitCommand {
+            let command = UpdateCommand {
                 shared: shared.clone(),
                 write_pass: write_pass.into_envelope(),
             };
 
-            let params = worker::CommitParams {
+            let params = worker::UpdateParams {
                 page_cache: self.page_cache.clone(),
                 page_pool: self.page_pool.clone(),
                 store: self.store.clone(),
@@ -188,21 +189,21 @@ impl Committer {
                 warm_ups: warm_ups.clone(),
                 command,
             };
-            let worker_handle = spawn_committer::<H>(&self.worker_tp, params);
+            let worker_handle = spawn_updater::<H>(&self.worker_tp, params);
             workers.push(worker_handle);
         }
 
-        CommitHandle { shared, workers }
+        UpdateHandle { shared, workers }
     }
 }
 
 /// A handle for waiting on the results of a commit operation.
-pub struct CommitHandle {
-    shared: Arc<CommitShared>,
+pub struct UpdateHandle {
+    shared: Arc<UpdateShared>,
     workers: Vec<WorkerHandle>,
 }
 
-impl CommitHandle {
+impl UpdateHandle {
     /// Wait on the results of the commit operation.
     pub fn join(self) -> Output {
         let mut new_root = None;
@@ -236,7 +237,7 @@ impl CommitHandle {
             // if the Commit worker collected the witnessed paths
             // then we need to aggregate them
             if let Some(witnessed_paths) = output.witnessed_paths {
-                // UNWRAP: the same `CommitShared` object is used to decide whether
+                // UNWRAP: the same `UpdateShared` object is used to decide whether
                 // to collect witnesses or not. If the commit worker did so,
                 // `maybe_witness` and `maybe_witnessed_ops` must be initialized to contain
                 // all witnesses from all workers.
@@ -303,8 +304,8 @@ pub struct Output {
     pub witnessed_operations: Option<WitnessedOperations>,
 }
 
-struct CommitCommand {
-    shared: Arc<CommitShared>,
+struct UpdateCommand {
+    shared: Arc<UpdateShared>,
     write_pass: WritePassEnvelope<ShardIndex>,
 }
 
@@ -338,14 +339,14 @@ impl WorkerOutput {
 }
 
 // Shared data used in committing.
-struct CommitShared {
+struct UpdateShared {
     read_write: Vec<(KeyPath, KeyReadWrite)>,
     // nodes needing to be written to pages above a shard.
     root_page_pending: Mutex<Vec<(TriePosition, RootPagePending)>>,
     witness: bool,
 }
 
-impl CommitShared {
+impl UpdateShared {
     fn push_pending_root_nodes(&self, nodes: Vec<(TriePosition, Node)>) {
         let mut pending = self.root_page_pending.lock();
         for (trie_pos, node) in nodes {
@@ -403,13 +404,13 @@ fn spawn_warm_up(worker_tp: &ThreadPool, params: worker::WarmUpParams) -> WarmUp
     }
 }
 
-fn spawn_committer<H: NodeHasher>(
+fn spawn_updater<H: NodeHasher>(
     worker_tp: &ThreadPool,
-    params: worker::CommitParams,
+    params: worker::UpdateParams,
 ) -> WorkerHandle {
     let (output_tx, output_rx) = channel::bounded(1);
 
-    worker_tp.execute(move || worker::run_commit::<H>(params, output_tx));
+    worker_tp.execute(move || worker::run_update::<H>(params, output_tx));
 
     WorkerHandle { output_rx }
 }
