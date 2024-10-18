@@ -415,3 +415,46 @@ fn test_rollback_change_history() {
     // Verify that the new key is gone
     assert_eq!(nomt.read(new_key).unwrap(), None);
 }
+
+#[test]
+fn test_rollback_read_then_write() {
+    // This test ensures that we correctly handle the case where the prior value is obtained from
+    // the actual ReadThenWrite operations passed to Nomt::commit.
+
+    let nomt = setup_nomt(
+        "rollback_read_then_write",
+        /* rollback_enabled */ true,
+        /* commit_concurrency */ 10,
+        /* should_clean_up */ true,
+    );
+
+    // Create a new key and write a value to it
+    let session = nomt.begin_session();
+    let key = KeyPath::from([0xAA; 32]);
+    let original_value = vec![0xBB; 32];
+    nomt.commit(
+        session,
+        vec![(key, KeyReadWrite::Write(Some(original_value.clone())))],
+    )
+    .unwrap();
+
+    // Then, create a new commit with a read-then-write actual specifying the **wrong** prior value.
+    //
+    // The expected behavior is that the value from the ReadThenWrite operation takes precedence
+    // over the original value.
+    let session = nomt.begin_session();
+    assert_eq!(session.read(key).unwrap(), Some(original_value.clone()));
+    let new_value = vec![0xCC; 32];
+    nomt.commit(
+        session,
+        vec![(
+            key,
+            KeyReadWrite::ReadThenWrite(None, Some(new_value.clone())),
+        )],
+    )
+    .unwrap();
+
+    // Rollback and expect the value from the ReadThenWrite operation to be restored.
+    nomt.rollback(1).unwrap();
+    assert_eq!(nomt.read(key).unwrap(), None);
+}

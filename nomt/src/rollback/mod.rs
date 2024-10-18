@@ -302,6 +302,8 @@ impl ReverseDeltaBuilder {
     }
 
     /// Finalize the delta.
+    ///
+    /// This function is expected to be called before the store is modified.
     fn finalize(self, store: impl LoadValue, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
         // Wait for all tentative writes issued so far to complete.
         //
@@ -313,20 +315,31 @@ impl ReverseDeltaBuilder {
         let final_priors = Arc::new(DashMap::with_capacity(tentative_priors.len() * 2));
 
         for (path, read_write) in actuals {
-            if read_write.is_write() {
-                if let Some((path, value)) = tentative_priors.remove(path) {
-                    // Tentative speculation was a hit. Keep the entry.
-                    final_priors.insert(path, value);
-                } else {
-                    // The delta builder was not aware of this write. Initiate a fetch from the store
-                    // and record the result as a prior.
-                    let store = store.clone();
-                    let path = path.clone();
-                    let final_priors = final_priors.clone();
-                    self.tp.execute(move || {
-                        let value = store.load_value(path).unwrap();
+            match read_write {
+                KeyReadWrite::Read(_) => {
+                    // The path was read. We don't need to preserve anything.
+                }
+                KeyReadWrite::Write(_) => {
+                    // The path was written. If we have a tentative value, keep it. Otherwise, fetch
+                    // the current value from the store.
+                    if let Some((path, value)) = tentative_priors.remove(path) {
+                        // Tentative speculation was a hit. Keep the entry.
                         final_priors.insert(path, value);
-                    });
+                    } else {
+                        // The delta builder was not aware of this write. Initiate a fetch from the store
+                        // and record the result as a prior.
+                        let store = store.clone();
+                        let path = path.clone();
+                        let final_priors = final_priors.clone();
+                        self.tp.execute(move || {
+                            let value = store.load_value(path).unwrap();
+                            final_priors.insert(path, value);
+                        });
+                    }
+                }
+                KeyReadWrite::ReadThenWrite(prior, _) => {
+                    // The path was read and then written. We could just keep the prior value.
+                    final_priors.insert(*path, prior.clone());
                 }
             }
         }
