@@ -24,6 +24,7 @@ use crate::{
 };
 use threadpool::ThreadPool;
 
+mod page_walker;
 mod worker;
 
 /// Whether a key was read or written.
