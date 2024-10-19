@@ -89,6 +89,7 @@ pub struct Rollback {
 impl Rollback {
     pub fn read(
         max_rollback_log_len: u32,
+        rollback_tp_size: usize,
         db_dir_path: PathBuf,
         db_dir_fd: File,
         rollback_start_active: u64,
@@ -110,7 +111,7 @@ impl Rollback {
             },
         )?;
         let shared = Arc::new(Shared {
-            worker_tp: ThreadPool::new(4),
+            worker_tp: ThreadPool::new(rollback_tp_size),
             in_memory: Mutex::new(in_memory),
             seglog: Mutex::new(seglog),
             max_rollback_log_len: max_rollback_log_len as usize,
