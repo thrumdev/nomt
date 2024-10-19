@@ -4,6 +4,7 @@ use super::{BTreeMap, KeyPath, KeyReadWrite, LoadValue, Rollback};
 use hex_literal::hex;
 
 const MAX_ROLLBACK_LOG_LEN: u32 = 100;
+const ROLLBACK_TP_SIZE: usize = 4;
 
 /// A mock implementation of `LoadValue` for testing. Describes the "current" state of the
 /// database.
@@ -78,7 +79,15 @@ fn truncate_works() {
         Some(b"old_value3".to_vec()),
     );
 
-    let rollback = Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, db_dir_fd, 0, 0).unwrap();
+    let rollback = Rollback::read(
+        MAX_ROLLBACK_LOG_LEN,
+        ROLLBACK_TP_SIZE,
+        db_dir_path,
+        db_dir_fd,
+        0,
+        0,
+    )
+    .unwrap();
     let builder = rollback.delta_builder();
     builder.tentative_preserve_prior(store.clone(), [1; 32]);
     builder.tentative_preserve_prior(store.clone(), [2; 32]);
@@ -149,7 +158,15 @@ fn without_tentative_preserve_prior() {
         Some(b"old_value3".to_vec()),
     );
 
-    let rollback = Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, db_dir_fd, 0, 0).unwrap();
+    let rollback = Rollback::read(
+        MAX_ROLLBACK_LOG_LEN,
+        ROLLBACK_TP_SIZE,
+        db_dir_path,
+        db_dir_fd,
+        0,
+        0,
+    )
+    .unwrap();
     let builder = rollback.delta_builder();
     rollback
         .commit(
@@ -209,7 +226,15 @@ fn delta_builder_doesnt_load_read_then_write_priors() {
     let mut store = MockStore::new();
     store.trap(key_1);
 
-    let rollback = Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, db_dir_fd, 0, 0).unwrap();
+    let rollback = Rollback::read(
+        MAX_ROLLBACK_LOG_LEN,
+        ROLLBACK_TP_SIZE,
+        db_dir_path,
+        db_dir_fd,
+        0,
+        0,
+    )
+    .unwrap();
     let builder = rollback.delta_builder();
     rollback
         .commit(

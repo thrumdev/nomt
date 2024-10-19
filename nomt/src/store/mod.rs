@@ -149,6 +149,7 @@ impl Store {
                 let db_dir_fd = db_dir_fd.try_clone().unwrap();
                 Rollback::read(
                     o.max_rollback_log_len,
+                    o.rollback_tp_size,
                     o.path.clone(),
                     db_dir_fd,
                     meta.rollback_start_live,
