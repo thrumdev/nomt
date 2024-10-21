@@ -23,6 +23,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 pub use self::page_loader::{PageLoad, PageLoadAdvance, PageLoadCompletion, PageLoader};
 pub use bitbox::BucketIndex;
 
+mod flock;
 mod meta;
 mod page_loader;
 mod sync;
@@ -48,6 +49,8 @@ struct Shared {
     #[allow(unused)]
     wal_fd: File,
     #[allow(unused)]
+    flock: flock::Flock,
+    #[allow(unused)]
     db_dir_fd: File,
 }
 
@@ -58,19 +61,12 @@ impl Store {
             create(o)?;
         }
 
-        // TODO: fix TOCTOU race and lock the directory.
-        //
-        // We want to perform the opening of the directory in an atomic way, so it won't happen that
-        // between the check and the opening of the directory, another instance of the program
-        // creates the directory.
-        //
-        // At the moment of writing, we assume the exclusive access to the directory and it would be
-        // good to put some safeguards around it.
         let db_dir_fd = {
             let mut options = OpenOptions::new();
             options.read(true);
             options.open(&o.path)?
         };
+        let flock = flock::Flock::lock(&o.path, ".lock")?;
 
         let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
 
@@ -170,6 +166,7 @@ impl Store {
                 bbn_fd,
                 ht_fd,
                 wal_fd,
+                flock,
             }),
             sync: Arc::new(Mutex::new(sync::Sync::new(
                 meta.sync_seqn,
