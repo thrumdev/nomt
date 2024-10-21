@@ -18,6 +18,12 @@ jobs:
       - run: rustup update stable && rustup default stable
       - run: cargo build --verbose --workspace
       - run: cargo test --verbose --workspace
+  loom_rw_pass_cell:
+    name: NOMT - loom rw_pass_cell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
       - run: RUSTFLAGS="--cfg loom" cargo test rw_pass_cell --release --workspace
   doc:
     name: NOMT - doc
@@ -26,4 +32,3 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
       - run: cargo doc --verbose --workspace --document-private-items
-
