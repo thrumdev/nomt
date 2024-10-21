@@ -63,8 +63,8 @@ pub fn write_ln(
         ln_fd.set_len(new_len)?;
     }
 
-    ln.sort_unstable_by_key(|item| item.0.0);
-    ln_free_list_pages.sort_unstable_by_key(|item| item.0.0);
+    ln.sort_unstable_by_key(|item| item.0 .0);
+    ln_free_list_pages.sort_unstable_by_key(|item| item.0 .0);
 
     let mut sent = 0;
     for (pn, page) in ln {

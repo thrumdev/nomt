@@ -95,7 +95,12 @@ fn zero_file(file: &File, len: usize) -> std::io::Result<()> {
     let res = unsafe {
         use std::os::fd::AsRawFd;
 
-        libc::fallocate(file.as_raw_fd(), libc::FALLOC_FL_ZERO_RANGE, 0 as _, len as _)
+        libc::fallocate(
+            file.as_raw_fd(),
+            libc::FALLOC_FL_ZERO_RANGE,
+            0 as _,
+            len as _,
+        )
     };
 
     if res == -1 {
