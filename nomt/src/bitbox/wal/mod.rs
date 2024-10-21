@@ -283,8 +283,10 @@ impl WalBlobReader {
 #[cfg(test)]
 mod tests {
     use super::{PageDiff, PagePool, WalBlobBuilder, WalBlobReader, WalEntry};
-    use std::{fs::OpenOptions, io::Write as _, os::unix::fs::OpenOptionsExt as _};
+    use std::{fs::OpenOptions, io::Write as _};
 
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::OpenOptionsExt as _;
     #[test]
     fn test_write_read() {
         let tempdir = tempfile::tempdir().unwrap();
