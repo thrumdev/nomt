@@ -364,6 +364,8 @@ fn test_rollback_reopen() {
     plan.apply_forward(&mut nomt);
     nomt.rollback(2).unwrap();
     plan.verify_restored_state(&mut nomt, 8);
+    // Drop the NOMT to release the lock.
+    drop(nomt);
 
     // Reopen the NOMT and rollback again.
     let mut nomt = setup_nomt(
