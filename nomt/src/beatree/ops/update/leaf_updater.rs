@@ -329,6 +329,8 @@ impl LeafUpdater {
             // has not been reached by the sum of all left and right operations. Now the right
             // leaf is too big, and another split is required to be executed
             self.ops.drain(..split_point);
+            self.separator_override = Some(right_separator);
+            self.gauge = right_gauge;
             self.split(leaves_tracker)
         } else if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
