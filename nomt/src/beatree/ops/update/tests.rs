@@ -54,6 +54,7 @@ struct TreeData {
     bbn_freelist_pn: u32,
     ln_bump: u32,
     bbn_bump: u32,
+    init_items: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
 // Initialize the beatree utilizing the keys present in ITEMS and creating random value sizes.
@@ -83,9 +84,10 @@ fn init_beatree() -> TreeData {
         bbn_freelist_pn: 0,
         ln_bump: 1,
         bbn_bump: 1,
+        init_items: BTreeMap::new(),
     };
 
-    let actuals = ITEMS
+    let actuals: Vec<_> = ITEMS
         .iter()
         .cloned()
         .into_iter()
@@ -96,6 +98,9 @@ fn init_beatree() -> TreeData {
             )
         })
         .collect();
+    tree_data
+        .init_items
+        .extend(actuals.iter().map(|(k, v)| (*k, v.clone().unwrap())));
 
     beatree.commit(actuals);
     let crate::beatree::WriteoutData {
@@ -198,10 +203,17 @@ fn exec_leaf_stage(
 fn is_valid_leaf_stage_output(
     output: (Vec<([u8; 32], ChangedNodeEntry<LeafNode>)>, Vec<Vec<u8>>),
     mut used_page_numbers: BTreeSet<PageNumber>,
+    deletions: BTreeSet<[u8; 32]>,
+    insertions: BTreeMap<[u8; 32], Vec<u8>>,
 ) -> bool {
     if output.0.is_empty() {
         return true;
     }
+
+    let mut expected_values = TREE_DATA.init_items.clone();
+    expected_values.extend(insertions.clone());
+    expected_values.retain(|k, _| !deletions.contains(k));
+
     let mut found_underfull_leaf = false;
     for (_key, changed_leaf) in output.0.into_iter() {
         if let Some(pn) = changed_leaf.deleted {
@@ -210,7 +222,36 @@ fn is_valid_leaf_stage_output(
 
         if let Some(leaf_node) = changed_leaf.inserted {
             let n = leaf_node.n();
-            let value_size_sum = (0..n).map(|j| leaf_node.value(j).0.len()).sum();
+
+            let mut value_size_sum = 0;
+
+            // each leaf must contain all the keys that are expected in the range
+            // between its first and last key
+            let first = leaf_node.key(0);
+            let last = leaf_node.key(n - 1);
+            let mut expected = expected_values.range(first..=last);
+
+            for i in 0..n {
+                let key = leaf_node.key(i);
+                if deletions.contains(&key) {
+                    return false;
+                }
+
+                let value = leaf_node.value(i).0;
+                value_size_sum += value.len();
+
+                let Some((expected_key, expected_value)) = expected.next() else {
+                    return false;
+                };
+
+                if key != *expected_key || value != expected_value {
+                    return false;
+                }
+            }
+
+            if expected.next().is_some() {
+                return false;
+            }
 
             // all new leaves must respect the half-full requirement except for the last one
             if body_size(n, value_size_sum) < LEAF_MERGE_THRESHOLD {
@@ -227,8 +268,9 @@ fn is_valid_leaf_stage_output(
 }
 
 // given an u16 value rescale it proportionally to the new upper bound provided
-fn rescale(init: u16, new_bound: usize) -> usize {
-    ((init as f64 / u16::MAX as f64) * ((new_bound - 1) as f64)).round() as usize
+fn rescale(init: u16, lower_bound: usize, upper_bound: usize) -> usize {
+    ((init as f64 / u16::MAX as f64) * ((upper_bound - 1 - lower_bound) as f64)).round() as usize
+        + lower_bound
 }
 
 // insertions is a map of arbitrary keys associated with value sizes, while deletions
@@ -237,25 +279,30 @@ fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> Test
     let deletions: BTreeMap<_, _> = deletions
         .into_iter()
         // rescale deletions to contain indexes over only alredy present items in the db
-        .map(|d| rescale(d, ITEMS.len()))
+        .map(|d| rescale(d, 0, ITEMS.len()))
         .map(|index| (ITEMS[index], None))
         .collect();
 
     let insertions: BTreeMap<_, _> = insertions
         .into_iter()
         // rescale raw_size to be between 0 and MAX_LEAF_VALUE_SIZE
-        .map(|(k, raw_size)| (k, rescale(raw_size, MAX_LEAF_VALUE_SIZE)))
+        .map(|(k, raw_size)| (k, rescale(raw_size, 1, MAX_LEAF_VALUE_SIZE)))
         .map(|(k, size)| (k.inner, Some((vec![170; size], false))))
         .collect();
 
-    let mut changeset: BTreeMap<[u8; 32], Option<(Vec<u8>, bool)>> = insertions;
-    changeset.extend(deletions);
+    let mut changeset: BTreeMap<[u8; 32], Option<(Vec<u8>, bool)>> = insertions.clone();
+    changeset.extend(deletions.clone());
 
     let (leaf_stage_output, leaf_page_numbers) = exec_leaf_stage(64, changeset);
 
     TestResult::from_bool(is_valid_leaf_stage_output(
         leaf_stage_output,
         leaf_page_numbers,
+        deletions.into_iter().map(|(k, _)| k).collect(),
+        insertions
+            .into_iter()
+            .map(|(k, v)| (k, v.unwrap().0))
+            .collect(),
     ))
 }
 
