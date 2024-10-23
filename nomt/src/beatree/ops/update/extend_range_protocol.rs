@@ -76,7 +76,7 @@ pub fn try_answer_left_neighbor<Node>(
     // of a changed item the the key associated to the next item
     let mut found_unchanged_range = false;
     let mut new_high_range = None;
-    let mut separator = None;
+    let mut separator = worker_params.range.low;
 
     let mut take = nodes_tracker
         .inner
