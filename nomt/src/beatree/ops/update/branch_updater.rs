@@ -283,7 +283,14 @@ impl BranchUpdater {
             right_gauge.ingest(key, separator_len);
         }
 
-        if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
+        if right_gauge.body_size() > BRANCH_NODE_BODY_SIZE {
+            // This is a rare case left uncovered by the bulk split, the threshold to activate it
+            // has not been reached by the sum of all left and right operations. Now the right
+            // node is too big, and another split is required to be executed
+            self.ops.drain(..split_point);
+            self.gauge = right_gauge;
+            self.split(branches_tracker)
+        } else if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_node = self.build_branch(right_ops, &right_gauge);
 
             branches_tracker.insert(right_separator, right_node, self.cutoff);
