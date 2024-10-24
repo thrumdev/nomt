@@ -84,6 +84,14 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator)
 
     // chunk is an 8-byte slice of the separator which will be cast to a u64 to simplify shifting
     let n_chunks = separator_bytes.len() / 8;
+
+    let last_chunk_mask = || -> u64 {
+        let unused_last_bits = separator_bit_init + separator_bit_len - ((n_chunks - 1) * 64);
+        1u64.checked_shl(64 - unused_last_bits as u32)
+            .map(|m| !(m - 1))
+            .unwrap_or(0)
+    };
+
     for chunk_index in 0..n_chunks {
         let chunk_start = chunk_index * 8;
 
@@ -113,13 +121,7 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator)
 
         if chunk_index == n_chunks - 1 {
             // last chunk will probably have garbage at end
-            let unused_last_bits = separator_bit_init + separator_bit_len - ((n_chunks - 1) * 64);
-            let mask = 1u64
-                .checked_shl(64 - unused_last_bits as u32)
-                .map(|m| !(m - 1))
-                .unwrap_or(0);
-
-            chunk &= mask;
+            chunk &= last_chunk_mask();
         }
 
         match &mut shift {
@@ -133,7 +135,15 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator)
         // move bits remainder between chunk boundaries
         match &mut shift {
             Some(Shift::Left(amount)) if chunk_index < n_chunks - 1 => {
-                let remainder_bits = (separator_bytes[(chunk_index + 1) * 8]) >> (8 - *amount);
+                // this mask removes possible garbage from the last remainder
+                let mut mask = 255;
+                if n_chunks > 1 && chunk_index == n_chunks - 2 {
+                    mask = last_chunk_mask().to_be_bytes()[0];
+                }
+
+                let remainder_bits =
+                    (separator_bytes[(chunk_index + 1) * 8] & mask) >> (8 - *amount);
+
                 chunk_shifted[7] |= remainder_bits;
             }
             Some(Shift::Right(_, prev_remainder, curr_remainder)) => {
@@ -149,6 +159,11 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator)
         let n_byte = std::cmp::min(8, 32 - key_offset);
         key[key_offset..key_offset + n_byte].copy_from_slice(&chunk_shifted[..n_byte]);
         key_offset += n_byte;
+
+        // break if the separtor is already entirely being written
+        if key_offset == 32 {
+            break;
+        }
     }
 
     if prefix_byte_len != 0 {
@@ -348,6 +363,31 @@ mod tests {
             let key = super::reconstruct_key(None, separator);
 
             assert_eq!(expected_key, key);
+        }
+    }
+
+    #[test]
+    fn reconstruct_key_garbage_in_last_remainder() {
+        // If the prefix is smaller than 8 bits and the separator is almost full,
+        // there could be possibilities where there is garbage in the last remainder
+        // and the last chunk will not even be used
+        for prefix_bit_len in 0..8 {
+            let prefix = [255];
+            for separator_bit_init in prefix_bit_len..8 {
+                for separator_bit_len in prefix_bit_len..=256 - prefix_bit_len {
+                    let separator_byte_len =
+                        ((separator_bit_init + separator_bit_len + 7 as usize) / 8)
+                            .next_multiple_of(8);
+                    let separator_bytes = vec![170; separator_byte_len];
+
+                    let separator = (&separator_bytes[..], separator_bit_init, separator_bit_len);
+                    let prefix = (&prefix[..], prefix_bit_len);
+                    let expected_key = reference_reconstruct_key(Some(prefix), separator);
+                    let key = super::reconstruct_key(Some(prefix), separator);
+
+                    assert_eq!(expected_key, key);
+                }
+            }
         }
     }
 
