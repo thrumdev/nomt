@@ -468,7 +468,7 @@ impl BranchBulkSplitter {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::{
         get_key, prefix_len, Arc, BaseBranch, BranchGauge, BranchNode, BranchNodeBuilder,
         BranchUpdater, BranchesTracker, DigestResult, Key, PageNumber, PagePool,
@@ -527,7 +527,7 @@ mod tests {
         k
     }
 
-    fn make_branch(vs: Vec<(Key, usize)>) -> Arc<BranchNode> {
+    fn make_raw_branch(vs: Vec<(Key, usize)>) -> BranchNode {
         let n = vs.len();
         let prefix_len = if vs.len() == 1 {
             separator_len(&vs[0].0)
@@ -541,7 +541,11 @@ mod tests {
             builder.push(k, separator_len(&k), pn as u32);
         }
 
-        Arc::new(builder.finish())
+        builder.finish()
+    }
+
+    fn make_branch(vs: Vec<(Key, usize)>) -> Arc<BranchNode> {
+        Arc::new(make_raw_branch(vs))
     }
 
     fn make_branch_with_body_size_target(
@@ -563,6 +567,37 @@ mod tests {
         }
 
         make_branch(items)
+    }
+
+    // Make a branch node with the specified bbn_pn.
+    // Use keys until they are present in the iterator
+    // or stop if the body size target is reached.
+    pub fn make_branch_until(
+        keys: &mut impl Iterator<Item = Key>,
+        body_size_target: usize,
+        bbn_pn: u32,
+    ) -> Arc<BranchNode> {
+        let mut gauge = BranchGauge::new();
+        let mut items = Vec::new();
+        loop {
+            let Some(next_key) = keys.next() else {
+                break;
+            };
+
+            let s_len = separator_len(&next_key);
+
+            let size = gauge.body_size_after(next_key, s_len);
+            if size >= body_size_target {
+                break;
+            }
+
+            items.push((next_key, items.len()));
+            gauge.ingest(next_key, s_len);
+        }
+
+        let mut branch_node = make_raw_branch(items);
+        branch_node.set_bbn_pn(bbn_pn);
+        Arc::new(branch_node)
     }
 
     #[test]
