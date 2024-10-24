@@ -44,6 +44,13 @@ impl Index {
     pub fn insert(&mut self, separator: Key, branch: Arc<BranchNode>) -> Option<Arc<BranchNode>> {
         self.first_key_map.insert(separator, branch)
     }
+
+    #[cfg(test)]
+    pub fn new() -> Self {
+        Self {
+            first_key_map: OrdMap::new(),
+        }
+    }
 }
 
 struct RangeFromExclusive {

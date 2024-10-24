@@ -1,25 +1,37 @@
+use crate::{
+    beatree::{
+        allocator::PageNumber,
+        branch::{self, BranchNode, BRANCH_NODE_BODY_SIZE, BRANCH_NODE_SIZE},
+        leaf::{
+            self,
+            node::{LeafNode, MAX_LEAF_VALUE_SIZE},
+        },
+        ops::{
+            bit_ops::separate,
+            update::{
+                branch_updater::tests::make_branch_until, get_key, preload_leaves,
+                ChangedNodeEntry, LEAF_MERGE_THRESHOLD,
+            },
+        },
+        writeout, Index, Tree,
+    },
+    io::{start_test_io_pool, IoPool, PagePool},
+};
 use lazy_static::lazy_static;
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 use rand::{Rng, SeedableRng};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs::File;
+use threadpool::ThreadPool;
 
-use crate::io::{start_test_io_pool, IoPool};
-use crate::{
-    beatree::{
-        allocator::PageNumber,
-        branch::BRANCH_NODE_SIZE,
-        leaf::node::{body_size, LeafNode, MAX_LEAF_VALUE_SIZE},
-        ops::update::{preload_leaves, ChangedNodeEntry, LEAF_MERGE_THRESHOLD},
-        writeout, Tree,
-    },
-    io::PagePool,
-};
+use super::BRANCH_MERGE_THRESHOLD;
 
-const DB_INITIAL_CAPACITY: usize = 700;
-const CHANGESET_AVG_SIZE: usize = 300;
-const MAX_TESTS: u64 = 100;
+const LEAF_STAGE_INITIAL_CAPACITY: usize = 700;
+const BRANCH_STAGE_INITIAL_CAPACITY: usize = 50_000;
+const LEAF_STAGE_CHANGESET_AVG_SIZE: usize = 300;
+const BRANCH_STAGE_CHANGESET_AVG_SIZE: usize = 100;
+const MAX_TESTS: u64 = 50;
 
 // Required to increase reproducibility
 lazy_static! {
@@ -32,19 +44,31 @@ lazy_static! {
             .try_into()
             .unwrap()
     };
-    static ref ITEMS: Vec<[u8; 32]> = {
-        let mut rng = rand_pcg::Lcg64Xsh32::from_seed(*SEED);
-        let mut items = BTreeSet::new();
-        while items.len() < DB_INITIAL_CAPACITY {
-            let mut key = [0; 32];
-            rng.fill(&mut key);
-            items.insert(key);
-        }
-        items.into_iter().collect()
+    static ref KEYS: Vec<[u8; 32]> = rand_keys(LEAF_STAGE_INITIAL_CAPACITY);
+    static ref SEPARATORS: Vec<[u8; 32]> = {
+        let mut separators = vec![[0; 32]];
+        separators.extend(
+            rand_keys(BRANCH_STAGE_INITIAL_CAPACITY)
+                .windows(2)
+                .map(|w| separate(&w[0], &w[1])),
+        );
+        separators
     };
     static ref PAGE_POOL: PagePool = PagePool::new();
     static ref IO_POOL: IoPool = start_test_io_pool(3, PAGE_POOL.clone());
     static ref TREE_DATA: TreeData = init_beatree();
+    static ref BBN_INDEX: Index = init_bbn_index();
+}
+
+fn rand_keys(n: usize) -> Vec<[u8; 32]> {
+    let mut rng = rand_pcg::Lcg64Xsh32::from_seed(*SEED);
+    let mut items = BTreeSet::new();
+    while items.len() < n {
+        let mut key = [0; 32];
+        rng.fill(&mut key);
+        items.insert(key);
+    }
+    items.into_iter().collect()
 }
 
 struct TreeData {
@@ -57,7 +81,7 @@ struct TreeData {
     init_items: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
-// Initialize the beatree utilizing the keys present in ITEMS and creating random value sizes.
+// Initialize the beatree utilizing the keys present in KEYS and creating random value sizes.
 //
 // This initialization is required for three main reasons:
 // + to make quickcheck tests faster, because otherwise, each iteration the db should have been filled up
@@ -87,7 +111,7 @@ fn init_beatree() -> TreeData {
         init_items: BTreeMap::new(),
     };
 
-    let actuals: Vec<_> = ITEMS
+    let actuals: Vec<_> = KEYS
         .iter()
         .cloned()
         .into_iter()
@@ -254,7 +278,7 @@ fn is_valid_leaf_stage_output(
             }
 
             // all new leaves must respect the half-full requirement except for the last one
-            if body_size(n, value_size_sum) < LEAF_MERGE_THRESHOLD {
+            if leaf::node::body_size(n, value_size_sum) < LEAF_MERGE_THRESHOLD {
                 if found_underfull_leaf == true {
                     return false;
                 }
@@ -279,8 +303,8 @@ fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> Test
     let deletions: BTreeMap<_, _> = deletions
         .into_iter()
         // rescale deletions to contain indexes over only alredy present items in the db
-        .map(|d| rescale(d, 0, ITEMS.len()))
-        .map(|index| (ITEMS[index], None))
+        .map(|d| rescale(d, 0, KEYS.len()))
+        .map(|index| (KEYS[index], None))
         .collect();
 
     let insertions: BTreeMap<_, _> = insertions
@@ -309,7 +333,148 @@ fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> Test
 #[test]
 fn leaf_stage() {
     QuickCheck::new()
-        .gen(Gen::new(CHANGESET_AVG_SIZE))
+        .gen(Gen::new(LEAF_STAGE_CHANGESET_AVG_SIZE))
         .max_tests(MAX_TESTS)
         .quickcheck(leaf_stage_inner as fn(_, _) -> TestResult)
+}
+
+// Initialize a bbn_index using the separators present in SEPARATORS.
+// The reasons why this initialization is required are the same as those for `init_beatree`
+fn init_bbn_index() -> Index {
+    let mut rng = rand_pcg::Lcg64Xsh32::from_seed(*SEED);
+    println!("Seed used to initialize bbn_index: {:?}", *SEED);
+
+    let mut bbn_index = Index::new();
+    let mut used_separators = 0;
+    let mut bbn_pn = 0;
+
+    while used_separators < SEPARATORS.len() {
+        let body_size_target = rng.gen_range(BRANCH_MERGE_THRESHOLD..BRANCH_NODE_BODY_SIZE);
+
+        let branch_node = make_branch_until(
+            &mut SEPARATORS[used_separators..].iter().cloned(),
+            body_size_target,
+            bbn_pn,
+        );
+
+        let separator = get_key(&branch_node, 0);
+        used_separators += branch_node.n() as usize;
+        bbn_index.insert(separator, branch_node);
+        bbn_pn += 1;
+    }
+
+    bbn_index
+}
+
+fn is_valid_branch_stage_output(
+    output: BTreeMap<[u8; 32], ChangedNodeEntry<BranchNode>>,
+    mut bbn_page_numbers: BTreeSet<u32>,
+    insertions: BTreeSet<[u8; 32]>,
+    deletions: BTreeSet<[u8; 32]>,
+) -> bool {
+    if output.is_empty() {
+        return true;
+    }
+
+    let mut expected_values: BTreeSet<[u8; 32]> = SEPARATORS.iter().cloned().collect();
+    expected_values.extend(insertions.clone());
+    expected_values.retain(|k| !deletions.contains(k));
+
+    let mut found_underfull_leaf = false;
+    for (_key, changed_branch) in output {
+        if let Some(pn) = changed_branch.deleted {
+            bbn_page_numbers.remove(&pn.0);
+        }
+
+        if let Some(branch_node) = changed_branch.inserted {
+            let n = branch_node.n() as usize;
+
+            let prefix_bit_len = branch_node.raw_prefix().1;
+            let total_separator_lengths = branch_node.view().cell(n - 1);
+
+            // all new bbns must respect the half-full requirement except for the last one
+            if branch::node::body_size(prefix_bit_len, total_separator_lengths, n)
+                < BRANCH_MERGE_THRESHOLD
+            {
+                if found_underfull_leaf == true {
+                    return false;
+                }
+                found_underfull_leaf = true;
+            }
+
+            let first = get_key(&branch_node, 0);
+            let last = get_key(&branch_node, n - 1);
+            let mut expected = expected_values.range(first..=last);
+
+            for i in 0..n {
+                let key = get_key(&branch_node, i);
+                if deletions.contains(&key) {
+                    return false;
+                }
+
+                let Some(expected_key) = expected.next() else {
+                    return false;
+                };
+
+                if key != *expected_key {
+                    return false;
+                }
+            }
+
+            if expected.next().is_some() {
+                return false;
+            }
+        }
+    }
+
+    bbn_page_numbers.is_empty()
+}
+
+// insertions is a map of arbitrary keys associated with a PageNumber, while deletions
+// is a vector of numbers that will be used to index the vector of already present SEPARATORS
+fn branch_stage_inner(insertions: BTreeMap<Key, u32>, deletions: Vec<u16>) -> TestResult {
+    let bbn_index = BBN_INDEX.clone();
+
+    let deletions: BTreeMap<_, _> = deletions
+        .into_iter()
+        // rescale deletions to contain indexes over only alredy present items in the db
+        .map(|d| rescale(d, 0, SEPARATORS.len()))
+        .map(|index| (SEPARATORS[index], None))
+        .collect();
+
+    let insertions: BTreeMap<_, _> = insertions
+        .into_iter()
+        .map(|(k, raw_pn)| (k.inner, Some(PageNumber(raw_pn))))
+        .collect();
+
+    let mut changeset: BTreeMap<[u8; 32], Option<PageNumber>> = insertions.clone();
+    changeset.extend(deletions.clone());
+
+    let bbn_page_numbers: BTreeSet<_> = changeset
+        .iter()
+        .map(|(key, _)| bbn_index.lookup(*key).unwrap().1.bbn_pn())
+        .collect();
+
+    let branch_stage_output = super::branch_stage::run(
+        &bbn_index,
+        PAGE_POOL.clone(),
+        changeset.into_iter().collect(),
+        ThreadPool::with_name("branch-stage-test".into(), 64),
+        64,
+    );
+
+    TestResult::from_bool(is_valid_branch_stage_output(
+        branch_stage_output,
+        bbn_page_numbers,
+        insertions.keys().cloned().collect(),
+        deletions.keys().cloned().collect(),
+    ))
+}
+
+#[test]
+fn branch_stage() {
+    QuickCheck::new()
+        .gen(Gen::new(BRANCH_STAGE_CHANGESET_AVG_SIZE))
+        .max_tests(MAX_TESTS)
+        .quickcheck(branch_stage_inner as fn(_, _) -> TestResult)
 }
