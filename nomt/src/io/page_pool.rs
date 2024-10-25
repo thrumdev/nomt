@@ -171,7 +171,17 @@ impl PagePool {
 
     /// Deallocates a [`Page`].
     pub fn dealloc(&self, page: Page) {
-        self.inner.freelist.write().push(page);
+        // fast path: try to place page in thread-local freelist.
+        let mut tls_freelist = self.tls_freelist();
+        tls_freelist.push(page);
+
+        if tls_freelist.len() < TLS_FREELIST_CAPACITY * 2 {
+            return;
+        }
+
+        // slow path: drain TLS free-list to global free-list.
+        let mut freelist = self.inner.freelist.write();
+        freelist.extend(tls_freelist.drain(TLS_FREELIST_CAPACITY..));
     }
 
     fn tls_freelist<'a>(&'a self) -> std::cell::RefMut<'a, Vec<Page>> {
