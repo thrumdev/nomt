@@ -528,8 +528,6 @@ impl PageCache {
                 panic!("dirty page {:?} is missing", page_id);
             }
         }
-
-
     }
 
     /// Evict stale pages for the cache. This should only be used after all dirty pages have been
