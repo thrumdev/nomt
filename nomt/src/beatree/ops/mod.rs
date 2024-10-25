@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 
 use super::{
     allocator::PageNumber,
-    branch,
+    branch::BranchNode,
     index::Index,
     leaf::{self, node::LeafNode},
     Key,
@@ -53,7 +53,7 @@ pub fn lookup(
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
 /// node pointer whose separator is less than or equal to the given key.
-fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNumber)> {
+fn search_branch(branch: &BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     let prefix = branch.prefix();
     let n = branch.n() as usize;
     let prefix_compressed = branch.prefix_compressed() as usize;
@@ -67,24 +67,13 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
         Ordering::Equal | Ordering::Greater => {}
     }
 
-    let full_key = &key.view_bits::<Msb0>();
-    let post_key = &full_key[prefix.len()..];
-
     let mut low = 0;
     let mut high = branch.n() as usize;
 
     while low < high {
         let mid = low + (high - low) / 2;
 
-        // if mid exceeds the number of prefix_compressed separators,
-        // the full key needs to be used
-        let k = if mid < prefix_compressed {
-            post_key
-        } else {
-            full_key
-        };
-
-        if k < branch.separator(mid) {
+        if key < get_key(branch, mid) {
             high = mid;
         } else {
             low = mid + 1;
@@ -97,6 +86,16 @@ fn search_branch(branch: &branch::BranchNode, key: Key) -> Option<(usize, PageNu
     }
     let node_pointer = branch.node_pointer(high - 1);
     Some((high - 1, node_pointer.into()))
+}
+
+// Extract the key at a given index from a BranchNode, taking into account prefix compression.
+fn get_key(node: &BranchNode, index: usize) -> Key {
+    let prefix = if index < node.prefix_compressed() as usize {
+        Some(node.raw_prefix())
+    } else {
+        None
+    };
+    bit_ops::reconstruct_key(prefix, node.raw_separator(index))
 }
 
 #[cfg(feature = "benchmarks")]

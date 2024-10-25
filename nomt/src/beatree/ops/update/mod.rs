@@ -7,14 +7,14 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::beatree::{
     allocator::PageNumber,
     bbn,
-    branch::{node::BranchNode, BRANCH_NODE_BODY_SIZE},
+    branch::BRANCH_NODE_BODY_SIZE,
     index::Index,
     leaf::{
         node::{LeafNode, LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
         overflow,
         store::{LeafStoreReader, LeafStoreWriter},
     },
-    ops::bit_ops::reconstruct_key,
+    ops::get_key,
     Key,
 };
 
@@ -122,16 +122,6 @@ pub fn update(
     }
 
     Ok(())
-}
-
-/// Extract the key at a given index from a BranchNode
-pub fn get_key(node: &BranchNode, index: usize) -> Key {
-    let prefix = if index < node.prefix_compressed() as usize {
-        Some(node.raw_prefix())
-    } else {
-        None
-    };
-    reconstruct_key(prefix, node.raw_separator(index))
 }
 
 // TODO: this should not be necessary with proper warm-ups.
