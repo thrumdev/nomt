@@ -6,6 +6,8 @@
 use crate::{
     beatree, bitbox,
     io::{self, page_pool::FatPage, IoPool, PagePool},
+    merkle,
+    page_cache::PageCache,
     page_diff::PageDiff,
     rollback::Rollback,
 };
@@ -218,13 +220,10 @@ impl Store {
         &self.shared.io_pool
     }
 
-    /// Create a new transaction to be applied against this database.
-    pub fn new_tx(&self) -> Transaction {
-        Transaction {
-            page_pool: self.shared.page_pool.clone(),
+    /// Create a new raw value transaction to be applied against this database.
+    pub fn new_value_tx(&self) -> ValueTransaction {
+        ValueTransaction {
             batch: Vec::new(),
-            new_pages: vec![],
-            bucket_allocator: self.shared.pages.bucket_allocator(),
         }
     }
 
@@ -232,34 +231,50 @@ impl Store {
     ///
     /// After this function returns, accessor methods such as [`Self::load_page`] will return the
     /// updated values.
-    pub fn commit(&self, tx: Transaction) -> anyhow::Result<()> {
+    pub fn commit(
+        &self,
+        value_tx: ValueTransaction,
+        page_cache: PageCache,
+        page_diffs: merkle::PageDiffs,
+    ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
+
         sync.sync(
             &self.shared,
-            tx,
+            value_tx,
             self.shared.pages.clone(),
             self.shared.values.clone(),
             self.shared.rollback.clone(),
+            page_cache,
+            page_diffs,
         )
         .unwrap();
         Ok(())
     }
 }
 
-/// An atomic transaction to be applied against th estore with [`Store::commit`].
-pub struct Transaction {
-    page_pool: PagePool,
+/// An atomic transaction on raw key/value pairs to be applied against the store
+/// with [`Store::commit`].
+pub struct ValueTransaction {
     batch: Vec<(KeyPath, Option<Vec<u8>>)>,
-    bucket_allocator: bitbox::BucketAllocator,
-    new_pages: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
 }
 
-impl Transaction {
+impl ValueTransaction {
     /// Write a value to flat storage.
     pub fn write_value(&mut self, path: KeyPath, value: Option<Vec<u8>>) {
         self.batch.push((path, value))
     }
+}
 
+/// An atomic transaction on merkle tree pages to be applied against the store
+/// with [`Store::commit`].
+pub struct MerkleTransaction {
+    page_pool: PagePool,
+    bucket_allocator: bitbox::BucketAllocator,
+    new_pages: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
+}
+
+impl MerkleTransaction {
     /// Write a page to storage in its entirety.
     pub fn write_page(
         &mut self,
@@ -281,6 +296,7 @@ impl Transaction {
             .push((page_id, bucket_index, Some((new_page, page_diff))));
         bucket_index
     }
+
     /// Delete a page from storage.
     pub fn delete_page(&mut self, page_id: PageId, bucket: BucketIndex) {
         self.bucket_allocator.free(bucket);

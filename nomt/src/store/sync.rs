@@ -1,8 +1,10 @@
-use super::{meta::Meta, Shared, Transaction};
+use super::{meta::Meta, Shared, MerkleTransaction, ValueTransaction};
 use crate::{
     beatree::{self, allocator::PageNumber, branch::BranchNode},
     bitbox,
     io::{FatPage, IoPool, PagePool},
+    merkle,
+    page_cache::PageCache,
     rollback,
 };
 
@@ -37,23 +39,27 @@ impl Sync {
     pub fn sync(
         &mut self,
         shared: &Shared,
-        mut tx: Transaction,
+        mut value_tx: ValueTransaction,
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
         rollback: Option<rollback::Rollback>,
+        page_cache: PageCache,
+        page_diffs: merkle::PageDiffs,
     ) -> anyhow::Result<()> {
         self.sync_seqn += 1;
         let sync_seqn = self.sync_seqn;
 
         let rollback_writeout_wd_rx = spawn_rollback_writeout_start(&self.tp, &rollback);
+
         let (bitbox_ht_wd, bitbox_wal_wd) = spawn_prepare_sync_bitbox(
             &self.tp,
-            shared.io_pool.page_pool().clone(),
-            &mut tx,
+            shared.page_pool.clone(),
             bitbox,
+            page_cache,
+            page_diffs,
         );
         let (beatree_bbn_wd, beatree_ln_wd, meta_wd) =
-            spawn_prepare_sync_beatree(&self.tp, &mut tx, beatree.clone());
+            spawn_prepare_sync_beatree(&self.tp, &mut value_tx, beatree.clone());
 
         let (bbn_writeout_done, ln_writeout_done) = spawn_bbn_ln_writeout(
             &self.tp,
@@ -144,19 +150,30 @@ struct HtWriteoutData {
 fn spawn_prepare_sync_bitbox(
     tp: &ThreadPool,
     page_pool: PagePool,
-    tx: &mut Transaction,
     bitbox: bitbox::DB,
+    page_cache: PageCache,
+    page_diffs: merkle::PageDiffs,
 ) -> (Receiver<HtWriteoutData>, Receiver<WalWriteoutData>) {
     let (ht_result_tx, ht_result_rx) = channel::bounded(1);
     let (wal_result_tx, wal_result_rx) = channel::bounded(1);
-    let new_pages = mem::take(&mut tx.new_pages);
     tp.execute(move || {
+        let mut merkle_tx = MerkleTransaction {
+            page_pool: page_pool.clone(),
+            bucket_allocator: bitbox.bucket_allocator(),
+            new_pages: Vec::new(),
+        };
+
+        page_cache.prepare_transaction(page_diffs.into_iter(), &mut merkle_tx);
+
         let bitbox::WriteoutData { ht_pages, wal_blob } = bitbox
-            .prepare_sync(&page_pool, new_pages)
+            .prepare_sync(&page_pool, merkle_tx.new_pages)
             // TODO: handle error.
             .unwrap();
         let _ = ht_result_tx.send(HtWriteoutData { ht_pages });
         let _ = wal_result_tx.send(WalWriteoutData { wal_blob });
+
+        // evict outside of the critical path.
+        page_cache.evict();
     });
     (ht_result_rx, wal_result_rx)
 }
@@ -183,7 +200,7 @@ struct BeatreePostWriteout {
 
 fn spawn_prepare_sync_beatree(
     tp: &ThreadPool,
-    tx: &mut Transaction,
+    tx: &mut ValueTransaction,
     beatree: beatree::Tree,
 ) -> (
     Receiver<BbnWriteoutData>,

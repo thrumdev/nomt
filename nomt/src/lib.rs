@@ -344,7 +344,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             .unwrap()
             .update_and_prove::<T>(compact_actuals, witness);
 
-        let mut tx = self.store.new_tx();
+        let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
             if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
                 tx.write_value(path, value);
@@ -354,10 +354,8 @@ impl<T: HashAlgorithm> Nomt<T> {
         let merkle_update = merkle_update_handle.join();
 
         let new_root = merkle_update.root;
-        self.page_cache
-            .commit(merkle_update.page_diffs.into_iter().flatten(), &mut tx);
         self.shared.lock().root = new_root;
-        self.store.commit(tx)?;
+        self.store.commit(tx, self.page_cache.clone(), merkle_update.page_diffs)?;
 
         Ok((
             new_root,
