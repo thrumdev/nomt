@@ -1,5 +1,5 @@
 use hex_literal::hex;
-use nomt::{KeyPath, KeyReadWrite, Nomt, Options, Value};
+use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -13,7 +13,7 @@ fn setup_nomt(
     rollback_enabled: bool,
     commit_concurrency: usize,
     should_clean_up: bool,
-) -> Nomt {
+) -> Nomt<Blake3Hasher> {
     let path = {
         let mut p = PathBuf::from("test");
         p.push(path);
@@ -194,7 +194,7 @@ impl TestPlan {
         }
     }
 
-    fn apply_forward(&self, nomt: &mut Nomt) {
+    fn apply_forward(&self, nomt: &mut Nomt<Blake3Hasher>) {
         for commit_no in 0..self.to_insert.len() {
             let session = nomt.begin_session();
             let mut operations = Vec::new();
@@ -209,7 +209,7 @@ impl TestPlan {
         }
     }
 
-    fn verify_restored_state(&self, nomt: &mut Nomt, commit_ix: usize) {
+    fn verify_restored_state(&self, nomt: &mut Nomt<Blake3Hasher>, commit_ix: usize) {
         let mut errors: Vec<String> = vec![];
 
         let expected: BTreeMap<KeyPath, Value> = self.expected_values[commit_ix].clone();

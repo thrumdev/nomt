@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nomt::{KeyReadWrite, Node, Nomt, Options, Witness, WitnessedOperations};
+use nomt::{Blake3Hasher, KeyReadWrite, Node, Nomt, Options, Witness, WitnessedOperations};
 use sha2::Digest;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
@@ -14,7 +14,7 @@ impl NomtDB {
         opts.commit_concurrency(1);
 
         // Open NOMT database, it will create the folder if it does not exist
-        let nomt = Nomt::open(opts)?;
+        let nomt = Nomt::<Blake3Hasher>::open(opts)?;
 
         // Create a new Session object
         //

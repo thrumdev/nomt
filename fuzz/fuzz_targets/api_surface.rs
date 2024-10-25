@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use nomt::{KeyPath, KeyReadWrite, Nomt, Options, Value};
+use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, Value};
 
 fuzz_target!(|run: Run| {
     let db = open_db(run.commit_concurrency);
@@ -238,7 +238,7 @@ impl<'a> Arbitrary<'a> for NomtCalls {
     }
 }
 
-fn open_db(commit_concurrency: usize) -> Nomt {
+fn open_db(commit_concurrency: usize) -> Nomt<Blake3Hasher> {
     let tempfile = tempfile::tempdir().unwrap();
     let db_path = tempfile.path().join("db");
     let mut options = Options::new();

@@ -24,7 +24,7 @@ use store::Store;
 // CARGO HACK: silence lint; this is used in integration tests
 
 pub use nomt_core::proof;
-pub use nomt_core::trie::{KeyPath, LeafData, Node};
+pub use nomt_core::trie::{KeyPath, LeafData, Node, NodePreimage};
 pub use options::Options;
 
 // beatree module needs to be exposed to be benchmarked
@@ -162,8 +162,8 @@ impl KeyReadWrite {
         }
     }
 
-    fn to_compact(&self) -> crate::merkle::KeyReadWrite {
-        let hash = |v: &Value| *blake3::hash(v).as_bytes();
+    fn to_compact<T: HashAlgorithm>(&self) -> crate::merkle::KeyReadWrite {
+        let hash = |v: &Value| T::hash_value(v);
         match self {
             KeyReadWrite::Read(_) => crate::merkle::KeyReadWrite::Read,
             KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
@@ -174,17 +174,8 @@ impl KeyReadWrite {
     }
 }
 
-/// Hash nodes with blake3.
-pub struct Blake3Hasher;
-
-impl NodeHasher for Blake3Hasher {
-    fn hash_node(data: &nomt_core::trie::NodePreimage) -> [u8; 32] {
-        blake3::hash(data).into()
-    }
-}
-
 /// An instance of the Nearly-Optimal Merkle Trie Database.
-pub struct Nomt {
+pub struct Nomt<T: HashAlgorithm> {
     merkle_update_pool: UpdatePool,
     /// The handle to the page cache.
     page_cache: PageCache,
@@ -194,9 +185,10 @@ pub struct Nomt {
     /// The number of active sessions. Expected to be either 0 or 1.
     session_cnt: Arc<AtomicUsize>,
     metrics: Metrics,
+    _marker: std::marker::PhantomData<T>,
 }
 
-impl Nomt {
+impl<T: HashAlgorithm> Nomt<T> {
     /// Open the database with the given options.
     pub fn open(mut o: Options) -> anyhow::Result<Self> {
         if o.commit_concurrency == 0 {
@@ -213,7 +205,7 @@ impl Nomt {
         let store = Store::open(&o, page_pool.clone())?;
         let root_page = store.load_page(ROOT_PAGE_ID)?;
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
-        let root = compute_root_node::<Blake3Hasher>(&page_cache);
+        let root = compute_root_node::<T>(&page_cache);
         Ok(Self {
             merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
             page_cache,
@@ -222,6 +214,7 @@ impl Nomt {
             shared: Arc::new(Mutex::new(Shared { root })),
             session_cnt: Arc::new(AtomicUsize::new(0)),
             metrics,
+            _marker: std::marker::PhantomData,
         })
     }
 
@@ -341,7 +334,7 @@ impl Nomt {
 
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact()));
+            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
         }
 
         // UNWRAP: merkle_updater always `Some` during lifecycle.
@@ -349,7 +342,7 @@ impl Nomt {
             .merkle_updater
             .take()
             .unwrap()
-            .update_and_prove::<Blake3Hasher>(compact_actuals, witness);
+            .update_and_prove::<T>(compact_actuals, witness);
 
         let mut tx = self.store.new_tx();
         for (path, read_write) in actuals {
@@ -486,6 +479,33 @@ impl Drop for Session {
         assert_eq!(prev, 1, "expected one active session at commit time");
     }
 }
+
+/// A hasher for arbitrary-length values.
+pub trait ValueHasher {
+    /// Hash an arbitrary-length value.
+    fn hash_value(value: &[u8]) -> [u8; 32];
+}
+
+/// A hash algorithm that uses Blake3 for both nodes and values.
+pub struct Blake3Hasher;
+
+impl NodeHasher for Blake3Hasher {
+    fn hash_node(data: &NodePreimage) -> [u8; 32] {
+        blake3::hash(data).into()
+    }
+}
+
+impl ValueHasher for Blake3Hasher {
+    fn hash_value(data: &[u8]) -> [u8; 32] {
+        blake3::hash(data).into()
+    }
+}
+
+/// A marker trait for hash functions usable with NOMT. The type must support both hashing nodes as
+/// well as values.
+pub trait HashAlgorithm: ValueHasher + NodeHasher {}
+
+impl<T: ValueHasher + NodeHasher> HashAlgorithm for T {}
 
 fn compute_root_node<H: NodeHasher>(page_cache: &PageCache) -> Node {
     let Some(root_page) = page_cache.get(ROOT_PAGE_ID) else {
