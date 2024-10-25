@@ -189,14 +189,24 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator)
 /// We tend to compare keys in order to binary search, and in those cases having an early exit
 /// as soon as a difference is encountered leads to improved performance.
 pub fn key_memcmp(a: &[u8], b: &[u8]) -> Ordering {
-    for (a_byte, b_byte) in a.iter().zip(b.iter()) {
-        match a_byte.cmp(b_byte) {
+    let len = std::cmp::min(a.len(), b.len());
+    let chunks = len / 8;
+
+    for chunk in 0..chunks {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&a[chunk * 8..][..8]);
+        let a_word = u64::from_be_bytes(buf);
+        buf.copy_from_slice(&b[chunk * 8..][..8]);
+        let b_word = u64::from_be_bytes(buf);
+
+        match a_word.cmp(&b_word) {
             Ordering::Equal => continue,
             other => return other,
         }
     }
 
-    Ordering::Equal
+    let remaining_start = chunks * 8;
+    a[remaining_start..].cmp(&b[remaining_start..])
 }
 
 #[cfg(feature = "benchmarks")]

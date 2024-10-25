@@ -1,4 +1,4 @@
-use super::{meta::Meta, Shared, MerkleTransaction, ValueTransaction};
+use super::{meta::Meta, MerkleTransaction, Shared, ValueTransaction};
 use crate::{
     beatree::{self, allocator::PageNumber, branch::BranchNode},
     bitbox,

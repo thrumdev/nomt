@@ -222,9 +222,7 @@ impl Store {
 
     /// Create a new raw value transaction to be applied against this database.
     pub fn new_value_tx(&self) -> ValueTransaction {
-        ValueTransaction {
-            batch: Vec::new(),
-        }
+        ValueTransaction { batch: Vec::new() }
     }
 
     /// Atomically apply the given transaction.
