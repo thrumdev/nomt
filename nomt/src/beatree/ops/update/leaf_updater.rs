@@ -394,10 +394,34 @@ impl LeafUpdater {
             .sum();
 
         let mut leaf_builder = LeafBuilder::new(&self.page_pool, ops.len(), total_value_size);
-        for op in ops {
-            let (k, v, o) = self.op_cell(op);
 
-            leaf_builder.push_cell(k, v, o);
+        let mut pending_chunk = None;
+        for i in 0..ops.len() {
+            match (&ops[i], &mut pending_chunk) {
+                // start a chunk
+                (LeafOp::Keep(pos, _), None) => pending_chunk = Some((*pos, pos + 1)),
+                // chunk grows
+                (LeafOp::Keep(pos, _), Some((_from, to))) if *pos == *to => *to += 1,
+                // chunk ends, apply pending one and start new one
+                (LeafOp::Keep(pos, _), Some((from, to))) => {
+                    leaf_builder.push_chunk(&self.base.as_ref().unwrap().node, *from, *to);
+                    pending_chunk = Some((*pos, pos + 1));
+                }
+                // chunk ends, and insert new leaf
+                (LeafOp::Insert(k, v, o), Some((from, to))) => {
+                    // UNWRAP: LeafOp::Keep operations were present, thus base must exist
+                    leaf_builder.push_chunk(&self.base.as_ref().unwrap().node, *from, *to);
+                    pending_chunk = None;
+                    leaf_builder.push_cell(*k, v, *o);
+                }
+                (LeafOp::Insert(k, v, o), None) => {
+                    leaf_builder.push_cell(*k, v, *o);
+                }
+            }
+        }
+
+        if let Some((from, to)) = pending_chunk {
+            leaf_builder.push_chunk(&self.base.as_ref().unwrap().node, from, to);
         }
         leaf_builder.finish()
     }
