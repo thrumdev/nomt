@@ -5,7 +5,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     os::{fd::RawFd, unix::fs::FileExt},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use crate::{
@@ -37,6 +40,7 @@ pub struct Shared {
     seed: [u8; 16],
     meta_map: Arc<RwLock<MetaMap>>,
     wal_blob_builder: Arc<Mutex<WalBlobBuilder>>,
+    occupied_buckets: AtomicUsize,
 }
 
 impl DB {
@@ -59,6 +63,8 @@ impl DB {
             recover(ht_fd, wal_fd, page_pool, &store, &mut meta_map, seed)?;
         }
 
+        let occupied_buckets = meta_map.full_count();
+
         let wal_blob_builder = WalBlobBuilder::new();
         Ok(Self {
             shared: Arc::new(Shared {
@@ -66,6 +72,7 @@ impl DB {
                 seed,
                 meta_map: Arc::new(RwLock::new(meta_map)),
                 wal_blob_builder: Arc::new(Mutex::new(wal_blob_builder)),
+                occupied_buckets: AtomicUsize::new(occupied_buckets),
             }),
         })
     }
@@ -90,6 +97,7 @@ impl DB {
         let mut changed_meta_pages = HashSet::new();
         let mut ht_pages = Vec::new();
 
+        let mut occupied_buckets_delta = 0isize;
         for (page_id, BucketIndex(bucket), page_info) in changes {
             // let's extract its bucket
             match page_info {
@@ -100,6 +108,7 @@ impl DB {
                     let hash = hash_page_id(&page_id, &self.shared.seed);
                     let meta_map_changed = meta_map.hint_not_match(bucket as usize, hash);
                     if meta_map_changed {
+                        occupied_buckets_delta += 1;
                         meta_map.set_full(bucket as usize, hash);
                         changed_meta_pages.insert(meta_map.page_index(bucket as usize));
                     }
@@ -115,6 +124,7 @@ impl DB {
                     ht_pages.push((pn, page));
                 }
                 None => {
+                    occupied_buckets_delta -= 1;
                     meta_map.set_tombstone(bucket as usize);
                     changed_meta_pages.insert(meta_map.page_index(bucket as usize));
                     wal_blob_builder.write_clear(bucket);
@@ -135,6 +145,16 @@ impl DB {
             ht_pages.sort_unstable_by_key(|(pn, _)| *pn);
             ht_pages.dedup_by_key(|(pn, _)| *pn);
             assert_eq!(orig_len, ht_pages.len());
+        }
+
+        if occupied_buckets_delta < 0 {
+            self.shared
+                .occupied_buckets
+                .fetch_sub(occupied_buckets_delta.abs() as usize, Ordering::Relaxed);
+        } else if occupied_buckets_delta > 0 {
+            self.shared
+                .occupied_buckets
+                .fetch_add(occupied_buckets_delta as usize, Ordering::Relaxed);
         }
 
         let wal_blob = wal_blob_builder.finalize();

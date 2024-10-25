@@ -23,7 +23,6 @@ impl MetaMap {
         }
     }
 
-    #[allow(unused)]
     pub fn full_count(&self) -> usize {
         self.bitvec
             .iter()
