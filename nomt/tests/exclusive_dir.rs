@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use nomt::{Nomt, Options};
+use nomt::{Blake3Hasher, Nomt, Options};
 
-fn setup_nomt(path: &str, should_clean_up: bool) -> anyhow::Result<Nomt> {
+fn setup_nomt(path: &str, should_clean_up: bool) -> anyhow::Result<Nomt<Blake3Hasher>> {
     let path = {
         let mut p = PathBuf::from("test");
         p.push(path);

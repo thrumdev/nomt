@@ -37,7 +37,7 @@ fn opts(path: PathBuf) -> Options {
 }
 
 pub struct Test {
-    nomt: Nomt,
+    nomt: Nomt<nomt::Blake3Hasher>,
     session: Option<Session>,
     access: HashMap<KeyPath, KeyReadWrite>,
 }
