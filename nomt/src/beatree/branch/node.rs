@@ -107,10 +107,6 @@ impl BranchNode {
         self.as_mut_slice()[start..].view_bits_mut()[..prefix_len].copy_from_bitslice(prefix);
     }
 
-    pub fn separator(&self, i: usize) -> &BitSlice<u8, Msb0> {
-        self.view().separator(i)
-    }
-
     pub fn raw_separator(&self, i: usize) -> RawSeparator {
         self.view().raw_separator(i)
     }
