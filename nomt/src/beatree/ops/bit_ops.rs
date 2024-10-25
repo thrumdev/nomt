@@ -2,6 +2,7 @@ use crate::beatree::{
     branch::node::{RawPrefix, RawSeparator},
     Key,
 };
+use std::cmp::Ordering;
 
 // separate two keys a and b where b > a
 pub fn separate(a: &Key, b: &Key) -> Key {
@@ -180,6 +181,22 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator)
     }
 
     key
+}
+
+/// A special memcmp function for high-entropy keys.
+///
+/// The motivation for this function is that memcmp always compares the entire range of bytes.
+/// We tend to compare keys in order to binary search, and in those cases having an early exit
+/// as soon as a difference is encountered leads to improved performance.
+pub fn key_memcmp(a: &[u8], b: &[u8]) -> Ordering {
+    for (a_byte, b_byte) in a.iter().zip(b.iter()) {
+        match a_byte.cmp(b_byte) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+
+    Ordering::Equal
 }
 
 #[cfg(feature = "benchmarks")]
