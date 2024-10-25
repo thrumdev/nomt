@@ -139,6 +139,50 @@ impl LeafBuilder {
         self.remaining_value_size -= value.len();
     }
 
+    pub fn push_chunk(&mut self, base_node: &LeafNode, from: usize, to: usize) {
+        assert!(self.index < self.leaf.n());
+
+        // copy cells, update offsets
+        let n_items = to - from;
+        let base_node_cell_pointers = base_node.cell_pointers();
+        self.leaf.cell_pointers_mut()[self.index..self.index + n_items]
+            .copy_from_slice(&base_node_cell_pointers[from..to]);
+
+        let offset = PAGE_SIZE - self.remaining_value_size;
+
+        let value_range_start = base_node.value_range(base_node_cell_pointers, from).0.start;
+        let value_range_end = base_node.value_range(base_node_cell_pointers, to - 1).0.end;
+
+        // if difference is positive it needs to be added otherwise subtracted
+        let difference = offset as isize - value_range_start as isize;
+
+        if difference != 0 {
+            let positive_difference = difference.is_positive();
+            let difference = u16::try_from(difference.abs()).unwrap();
+
+            for cell in &mut self.leaf.cell_pointers_mut()[self.index..self.index + n_items] {
+                let mut buf = [0; 2];
+                buf.copy_from_slice(&cell[32..34]);
+                let mut cell_pointer_offset = u16::from_le_bytes(buf);
+
+                if positive_difference {
+                    cell_pointer_offset += difference;
+                } else {
+                    cell_pointer_offset -= difference;
+                }
+
+                cell[32..34].copy_from_slice(&cell_pointer_offset.to_le_bytes());
+            }
+        }
+
+        // copy values
+        let values = &base_node.inner[value_range_start..value_range_end];
+        self.leaf.inner[offset..][..values.len()].copy_from_slice(values);
+
+        self.index += n_items;
+        self.remaining_value_size -= values.len();
+    }
+
     pub fn finish(self) -> LeafNode {
         assert!(self.remaining_value_size == 0);
         self.leaf
