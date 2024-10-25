@@ -5,7 +5,7 @@ use crate::{
     page_diff::PageDiff,
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, Region, RegionContains, RwPassCell, RwPassDomain, WritePass},
-    store::Transaction,
+    store::MerkleTransaction,
     Options,
 };
 use fxhash::FxBuildHasher;
@@ -464,14 +464,12 @@ impl PageCache {
         }
     }
 
-    /// Flushes all the dirty pages into the underlying store.
+    /// Prepares a transaction of altered pages, according to the provided page diffs.
     /// This takes a read pass.
-    ///
-    /// After the commit, all the dirty pages are cleared.
-    pub fn commit(
+    pub fn prepare_transaction(
         &self,
         page_diffs: impl IntoIterator<Item = (PageId, PageDiff)>,
-        tx: &mut Transaction,
+        tx: &mut MerkleTransaction,
     ) {
         let read_pass = self.new_read_pass();
         let mut apply_page = |page_id,
@@ -531,7 +529,19 @@ impl PageCache {
             }
         }
 
-        // purge stale pages.
+
+    }
+
+    /// Evict stale pages for the cache. This should only be used after all dirty pages have been
+    /// prepared for writeout with `prepare_transaction`.
+    pub fn evict(&self) {
+        let shard_guards = self
+            .shared
+            .shards
+            .iter()
+            .map(|s| s.locked.lock())
+            .collect::<Vec<_>>();
+
         for (shard, mut guard) in self.shared.shards.iter().zip(shard_guards) {
             guard.evict(shard.page_limit);
         }

@@ -27,6 +27,18 @@ use threadpool::ThreadPool;
 mod page_walker;
 mod worker;
 
+/// Page diffs produced by update workers.
+pub struct PageDiffs(Vec<Vec<(PageId, PageDiff)>>);
+
+impl IntoIterator for PageDiffs {
+    type Item = (PageId, PageDiff);
+    type IntoIter = std::iter::Flatten<<Vec<Vec<Self::Item>> as IntoIterator>::IntoIter>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter().flatten()
+    }
+}
+
 /// Whether a key was read or written.
 #[derive(Debug, Clone)]
 pub enum KeyReadWrite {
@@ -286,7 +298,7 @@ impl UpdateHandle {
         // UNWRAP: one thread always produces the root.
         Output {
             root: new_root.unwrap(),
-            page_diffs,
+            page_diffs: PageDiffs(page_diffs),
             witness: maybe_witness,
             witnessed_operations: maybe_witnessed_ops,
         }
@@ -298,7 +310,7 @@ pub struct Output {
     /// The new root.
     pub root: Node,
     /// All page-diffs from all worker threads. The covered sets of pages are disjoint.
-    pub page_diffs: Vec<Vec<(PageId, PageDiff)>>,
+    pub page_diffs: PageDiffs,
     /// Optional witness
     pub witness: Option<Witness>,
     /// Optional list of all witnessed operations.
