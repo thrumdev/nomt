@@ -73,10 +73,13 @@ fn search_branch(branch: &BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     while low < high {
         let mid = low + (high - low) / 2;
 
-        if key < get_key(branch, mid) {
-            high = mid;
-        } else {
-            low = mid + 1;
+        match bit_ops::key_memcmp(&key, &get_key(branch, mid)) {
+            Ordering::Less => {
+                high = mid;
+            }
+            _ => {
+                low = mid + 1;
+            }
         }
     }
 
