@@ -20,6 +20,9 @@ pub struct FreeList {
     portions: Vec<(PageNumber, Vec<PageNumber>)>,
     // Becomes true if something is being popped, false otherwise
     pop: bool,
+    len: usize,
+    // The comment on `fn commit` explains what fragmentation is in detail.
+    fragmented: bool,
     released_portions: Vec<PageNumber>,
 }
 
@@ -34,6 +37,8 @@ impl FreeList {
                 portions: vec![],
                 pop: false,
                 released_portions: vec![],
+                fragmented: false,
+                len: 0,
             };
         };
 
@@ -53,10 +58,14 @@ impl FreeList {
 
         free_list_portions.reverse();
 
+        let (len, fragmented) = len_and_fragmented(&free_list_portions);
+
         FreeList {
             pop: false,
             portions: free_list_portions,
             released_portions: vec![],
+            fragmented,
+            len,
         }
     }
 
@@ -98,6 +107,13 @@ impl FreeList {
         }
 
         Some(pn)
+    }
+
+    /// Get a reference to this free list asserted to be clean. This panics if the free list isn't
+    /// clean: if any `pop`s have occurred since the last call to `commit`.
+    pub fn as_clean(&self) -> CleanFreeList {
+        assert!(!self.pop);
+        CleanFreeList(self)
     }
 
     /// Apply the changes resulting from calls to `pop()` and pushing all the `to_push` page numbers
@@ -150,7 +166,13 @@ impl FreeList {
         self.pop = false;
 
         let new_pages = self.preallocate(&mut to_push, bump);
-        self.push_and_encode(page_pool, &to_push, new_pages)
+        let pages = self.push_and_encode(page_pool, &to_push, new_pages);
+
+        let (len, fragmented) = len_and_fragmented(&self.portions);
+        self.len = len;
+        self.fragmented = fragmented;
+
+        pages
     }
 
     // determines the exact number of pops and bumps which are needed in order to fulfill the
@@ -330,6 +352,20 @@ impl FreeList {
     }
 }
 
+fn len_and_fragmented(portions: &[(PageNumber, Vec<PageNumber>)]) -> (usize, bool) {
+    match portions.last() {
+        None => (0, false),
+        Some((_, p)) if portions.len() > 1 && p.len() == 1 => {
+            // account for fragmentation.
+            let penultimate_len = portions[portions.len() - 2].1.len();
+            let len = (portions.len() - 2) * MAX_PNS_PER_PAGE + penultimate_len + 1;
+
+            (len, penultimate_len != MAX_PNS_PER_PAGE)
+        }
+        Some((_, p)) => ((portions.len() - 1) * MAX_PNS_PER_PAGE + p.len(), false),
+    }
+}
+
 // returns the previous PageNumber and all the PageNumbers stored in the free list page
 fn decode_free_list_page(page: FatPage) -> (PageNumber, Vec<PageNumber>) {
     let free_list_page_view = FreeListPageRef(&page[..]);
@@ -358,6 +394,45 @@ fn encode_free_list_page(page_pool: &PagePool, prev: PageNumber, pns: &[PageNumb
     }
 
     page
+}
+
+/// A wrapper type which denotes a clean free-list.
+pub struct CleanFreeList<'a>(&'a FreeList);
+
+impl<'a> CleanFreeList<'a> {
+    /// Get the length of the free-list.
+    pub fn len(&self) -> usize {
+        self.0.len
+    }
+
+    /// Get the result of the nth pop on this free-list. Panics if n >= len. Runtime: O(1).
+    pub fn get_nth_pop(&self, mut n: usize) -> PageNumber {
+        let portions = &self.0.portions;
+        let n_portions = portions.len();
+        if self.0.fragmented {
+            if n == 0 {
+                portions[n_portions - 1].1[0]
+            } else if n < MAX_PNS_PER_PAGE {
+                portions[n_portions - 2].1[MAX_PNS_PER_PAGE - n - 1]
+            } else {
+                let portion_offset = 2 + (n / MAX_PNS_PER_PAGE);
+                n = n % MAX_PNS_PER_PAGE;
+
+                portions[n_portions - portion_offset].1[MAX_PNS_PER_PAGE - n - 1]
+            }
+        } else {
+            let head_len = portions[n_portions - 1].1.len();
+            if n < head_len {
+                portions[n_portions - 1].1[head_len - n - 1]
+            } else {
+                n -= head_len;
+                let portion_offset = 2 + (n / MAX_PNS_PER_PAGE);
+                n = n % MAX_PNS_PER_PAGE;
+
+                portions[n_portions - portion_offset].1[MAX_PNS_PER_PAGE - n - 1]
+            }
+        }
+    }
 }
 
 // A free page is laid out in the following form:
@@ -409,6 +484,8 @@ mod tests {
             portions: vec![(PageNumber(1), vec![PageNumber(2)])],
             pop: false,
             released_portions: Vec::new(),
+            len: 1,
+            fragmented: false,
         };
 
         // expected order of events:
@@ -427,6 +504,7 @@ mod tests {
         assert_eq!(free_list.portions.len(), 1);
         assert_eq!(free_list.portions[0].0, PageNumber(2));
         assert_eq!(free_list.portions[0].1, vec![PageNumber(3), PageNumber(1)]);
+        assert_eq!(free_list.len, 2);
     }
 
     #[test]
@@ -435,6 +513,8 @@ mod tests {
             portions: vec![(PageNumber(1), vec![PageNumber(2), PageNumber(3)])],
             pop: false,
             released_portions: Vec::new(),
+            len: 2,
+            fragmented: false,
         };
 
         // expected order of events:
@@ -464,6 +544,8 @@ mod tests {
         assert_eq!(free_list.portions[1].0, PageNumber(3));
         assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE - 1);
         assert_eq!(free_list.portions[1].1.len(), 1);
+        assert_eq!(free_list.len, MAX_PNS_PER_PAGE);
+        assert!(free_list.fragmented);
     }
 
     #[test]
@@ -472,6 +554,8 @@ mod tests {
             portions: vec![(PageNumber(1), vec![PageNumber(2), PageNumber(3)])],
             pop: false,
             released_portions: Vec::new(),
+            len: 2,
+            fragmented: false,
         };
 
         // expected order of events:
@@ -499,6 +583,7 @@ mod tests {
         assert_eq!(free_list.portions[1].0, PageNumber(3));
         assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE);
         assert_eq!(free_list.portions[1].1.len(), 1);
+        assert_eq!(free_list.len, MAX_PNS_PER_PAGE + 1);
     }
 
     #[test]
@@ -516,6 +601,8 @@ mod tests {
             ],
             pop: false,
             released_portions: Vec::new(),
+            len: MAX_PNS_PER_PAGE + 1,
+            fragmented: false,
         };
 
         // expected order of events:
@@ -554,6 +641,9 @@ mod tests {
         assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE);
         assert_eq!(free_list.portions[1].1.len(), MAX_PNS_PER_PAGE - 1);
         assert_eq!(free_list.portions[2].1.len(), 1);
+
+        assert_eq!(free_list.len, MAX_PNS_PER_PAGE * 2);
+        assert!(free_list.fragmented);
     }
 
     #[test]
@@ -572,6 +662,8 @@ mod tests {
             ],
             pop: false,
             released_portions: Vec::new(),
+            len: MAX_PNS_PER_PAGE,
+            fragmented: true,
         };
 
         // expected order of operations:
@@ -594,6 +686,9 @@ mod tests {
 
         assert_eq!(free_list.portions[0].1.len(), MAX_PNS_PER_PAGE);
         assert_eq!(free_list.portions[1].1.len(), 1);
+
+        assert_eq!(free_list.len, MAX_PNS_PER_PAGE + 1);
+        assert!(!free_list.fragmented);
     }
 
     #[test]
@@ -602,11 +697,100 @@ mod tests {
             portions: vec![(PageNumber(1), vec![PageNumber(2)])],
             pop: true,
             released_portions: Vec::new(),
+            len: 1,
+            fragmented: false,
         };
 
         let page_pool = PagePool::new();
         let result = free_list.commit(&page_pool, Vec::new(), &mut PageNumber(10000));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, PageNumber(1));
+    }
+
+    #[test]
+    fn clean_nth_pop() {
+        let full_portion_1 = (1000..)
+            .take(MAX_PNS_PER_PAGE)
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+
+        let full_portion_2 = (5000..)
+            .take(MAX_PNS_PER_PAGE)
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+
+        let last_portion = (10000..)
+            .take(MAX_PNS_PER_PAGE / 2)
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+
+        let mut free_list = FreeList {
+            portions: vec![
+                (PageNumber(1), full_portion_1),
+                (PageNumber(2), full_portion_2),
+                (PageNumber(3), last_portion),
+            ],
+            pop: false,
+            released_portions: Vec::new(),
+            len: MAX_PNS_PER_PAGE * 2 + MAX_PNS_PER_PAGE / 2,
+            fragmented: false,
+        };
+
+        let predicted_pops = {
+            let clean = free_list.as_clean();
+            (0..clean.len())
+                .map(|i| clean.get_nth_pop(i))
+                .collect::<Vec<_>>()
+        };
+        let actual_pops = (0..free_list.len)
+            .map(|_| free_list.pop().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(predicted_pops, actual_pops);
+    }
+
+    #[test]
+    fn clean_nth_pop_fragmented() {
+        let full_portion_1 = (1000..)
+            .take(MAX_PNS_PER_PAGE)
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+
+        let full_portion_2 = (5000..)
+            .take(MAX_PNS_PER_PAGE)
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+
+        let fragmented_portion = (10000..)
+            .take(MAX_PNS_PER_PAGE - 3)
+            .chain(Some(2))
+            .chain(Some(3))
+            .map(PageNumber)
+            .collect::<Vec<_>>();
+
+        let mut free_list = FreeList {
+            portions: vec![
+                (PageNumber(1), full_portion_1),
+                (PageNumber(4), full_portion_2),
+                (PageNumber(5), fragmented_portion),
+                (PageNumber(6), vec![PageNumber(7)]),
+            ],
+            pop: false,
+            released_portions: Vec::new(),
+            len: MAX_PNS_PER_PAGE * 3,
+            fragmented: true,
+        };
+
+        let predicted_pops = {
+            let clean = free_list.as_clean();
+            (0..clean.len())
+                .map(|i| clean.get_nth_pop(i))
+                .collect::<Vec<_>>()
+        };
+        let actual_pops = (0..free_list.len)
+            .map(|_| free_list.pop().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(predicted_pops, actual_pops);
     }
 }
