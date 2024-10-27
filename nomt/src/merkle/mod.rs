@@ -161,7 +161,6 @@ impl Updater {
         });
 
         let num_workers = self.page_cache.shard_count();
-        let mut workers = Vec::with_capacity(num_workers);
         let shard_regions = (0..num_workers).map(ShardIndex::Shard).collect::<Vec<_>>();
 
         // receive warm-ups from worker.
@@ -175,6 +174,8 @@ impl Updater {
 
         let write_pass = self.page_cache.new_write_pass();
         let worker_passes = write_pass.split_n(shard_regions);
+
+        let (worker_tx, worker_rx) = crossbeam_channel::bounded(num_workers);
 
         for write_pass in worker_passes {
             let command = UpdateCommand {
@@ -190,18 +191,22 @@ impl Updater {
                 warm_ups: warm_ups.clone(),
                 command,
             };
-            let worker_handle = spawn_updater::<H>(&self.worker_tp, params);
-            workers.push(worker_handle);
+            spawn_updater::<H>(&self.worker_tp, params, worker_tx.clone());
         }
 
-        UpdateHandle { shared, workers }
+        UpdateHandle {
+            shared,
+            worker_rx,
+            num_workers,
+        }
     }
 }
 
 /// A handle for waiting on the results of a commit operation.
 pub struct UpdateHandle {
     shared: Arc<UpdateShared>,
-    workers: Vec<WorkerHandle>,
+    worker_rx: Receiver<WorkerOutput>,
+    num_workers: usize,
 }
 
 impl UpdateHandle {
@@ -223,11 +228,9 @@ impl UpdateHandle {
         let mut path_proof_offset = 0;
         let mut witnessed_start = 0;
 
-        for output in self.workers.into_iter().map(|w| {
-            w.output_rx
-                .recv()
-                .expect("couldn't await output from worker thread. panicked?")
-        }) {
+        let mut received_outputs = 0;
+        for output in self.worker_rx.into_iter() {
+            received_outputs += 1;
             if let Some(root) = output.root {
                 assert!(new_root.is_none());
                 new_root = Some(root);
@@ -282,6 +285,9 @@ impl UpdateHandle {
                 path_proof_offset += path_proof_count;
             }
         }
+
+        // TODO: handle error when a worker dies unexpectedly.
+        assert_eq!(self.num_workers, received_outputs);
 
         // UNWRAP: one thread always produces the root.
         Output {
@@ -387,10 +393,6 @@ struct WarmUpHandle {
     output_rx: Receiver<HashMap<KeyPath, Seek>>,
 }
 
-struct WorkerHandle {
-    output_rx: Receiver<WorkerOutput>,
-}
-
 fn spawn_warm_up(worker_tp: &ThreadPool, params: worker::WarmUpParams) -> WarmUpHandle {
     let (warmup_tx, warmup_rx) = channel::unbounded();
     let (output_tx, output_rx) = channel::bounded(1);
@@ -408,10 +410,7 @@ fn spawn_warm_up(worker_tp: &ThreadPool, params: worker::WarmUpParams) -> WarmUp
 fn spawn_updater<H: NodeHasher>(
     worker_tp: &ThreadPool,
     params: worker::UpdateParams,
-) -> WorkerHandle {
-    let (output_tx, output_rx) = channel::bounded(1);
-
+    output_tx: Sender<WorkerOutput>,
+) {
     worker_tp.execute(move || worker::run_update::<H>(params, output_tx));
-
-    WorkerHandle { output_rx }
 }
