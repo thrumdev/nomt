@@ -10,14 +10,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build_and_test:
-    name: NOMT  - latest
+  nomt_test:
+    name: NOMT - test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
       - run: cargo build --verbose --workspace
       - run: cargo test --verbose --workspace
+  benchtop_check:
+    name: NOMT - check benchtop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - run: cargo check --verbose --manifest-path=benchtop/Cargo.toml
   loom_rw_pass_cell:
     name: NOMT - loom rw_pass_cell
     runs-on: ubuntu-latest
