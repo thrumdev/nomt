@@ -355,7 +355,8 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         let new_root = merkle_update.root;
         self.shared.lock().root = new_root;
-        self.store.commit(tx, self.page_cache.clone(), merkle_update.page_diffs)?;
+        self.store
+            .commit(tx, self.page_cache.clone(), merkle_update.page_diffs)?;
 
         Ok((
             new_root,
