@@ -31,15 +31,15 @@ impl FreeList {
         page_pool: &PagePool,
         store_file: &File,
         free_list_head: Option<PageNumber>,
-    ) -> FreeList {
+    ) -> anyhow::Result<FreeList> {
         let Some(mut free_list_pn) = free_list_head else {
-            return FreeList {
+            return Ok(FreeList {
                 portions: vec![],
                 pop: false,
                 released_portions: vec![],
                 fragmented: false,
                 len: 0,
-            };
+            });
         };
 
         // restore free list from file
@@ -49,7 +49,7 @@ impl FreeList {
                 break;
             }
 
-            let page = io::read_page(page_pool, store_file, free_list_pn.0 as u64).unwrap();
+            let page = io::read_page(page_pool, store_file, free_list_pn.0 as u64)?;
 
             let (prev, free_list) = decode_free_list_page(page);
             free_list_portions.push((free_list_pn, free_list));
@@ -60,13 +60,13 @@ impl FreeList {
 
         let (len, fragmented) = len_and_fragmented(&free_list_portions);
 
-        FreeList {
+        Ok(FreeList {
             pop: false,
             portions: free_list_portions,
             released_portions: vec![],
             fragmented,
             len,
-        }
+        })
     }
 
     /// Get a set of all pages tracked in the free-list. This is all free pages plus all the
