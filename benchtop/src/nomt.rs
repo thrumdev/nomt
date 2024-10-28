@@ -1,13 +1,13 @@
 use crate::{backend::Transaction, timer::Timer, workload::Workload};
 use fxhash::FxHashMap;
-use nomt::{KeyPath, KeyReadWrite, Nomt, Options, Session};
+use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, Session};
 use sha2::Digest;
 use std::collections::hash_map::Entry;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
 
 pub struct NomtDB {
-    nomt: Nomt,
+    nomt: Nomt<Blake3Hasher>,
 }
 
 impl NomtDB {
