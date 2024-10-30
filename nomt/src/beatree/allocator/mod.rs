@@ -261,8 +261,8 @@ struct StoreSync {
 
 type StoreSyncGuard = ArcMutexGuard<parking_lot::RawMutex, StoreSync>;
 
-// Grow the store by 1MB at a time.
-const GROW_STORE_BY_PAGES: u32 = 256;
+// Grow the store by 32MB at a time.
+const GROW_STORE_BY_PAGES: u32 = 8192;
 
 /// The sync allocator can be used by multiple threads to prospectively allocate pages in the store.
 ///
