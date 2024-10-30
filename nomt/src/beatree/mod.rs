@@ -209,7 +209,7 @@ impl Tree {
             //   so things will be allocated and released following what is being performed
             //   on the branch_node_pool and committed later on onto disk
             ops::update(
-                &staged_changeset,
+                staged_changeset.clone(),
                 &mut bbn_index,
                 &sync.leaf_store_rd,
                 &mut sync.leaf_store_wr,

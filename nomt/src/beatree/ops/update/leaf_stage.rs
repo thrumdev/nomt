@@ -8,7 +8,11 @@ use threadpool::ThreadPool;
 use crate::beatree::{
     allocator::PageNumber,
     index::Index,
-    leaf::{node::LeafNode, store::LeafStoreReader},
+    leaf::{
+        node::{LeafNode, MAX_LEAF_VALUE_SIZE},
+        overflow,
+        store::{LeafStoreReader, LeafStoreWriter},
+    },
     ops::{
         search_branch,
         update::{
@@ -52,14 +56,27 @@ pub fn run(
     bbn_index: &Index,
     leaf_cache: DashMap<PageNumber, LeafNode>,
     leaf_reader: &LeafStoreReader,
-    page_pool: PagePool,
-    changeset: Vec<(Key, Option<(Vec<u8>, bool)>)>,
+    leaf_writer: &mut LeafStoreWriter,
+    changeset: Arc<BTreeMap<Key, Option<Vec<u8>>>>,
     thread_pool: ThreadPool,
     num_workers: usize,
-) -> (Vec<(Key, ChangedLeafEntry)>, Vec<Vec<u8>>) {
+) -> Vec<(Key, Option<PageNumber>)> {
     if changeset.is_empty() {
-        return (vec![], vec![]);
+        return Vec::new();
     }
+
+    let changeset = changeset
+        .iter()
+        .map(|(k, v)| match v {
+            Some(v) if v.len() <= MAX_LEAF_VALUE_SIZE => (*k, Some((v.clone(), false))),
+            Some(large_value) => {
+                let pages = overflow::chunk(&large_value, leaf_writer);
+                let cell = overflow::encode_cell(large_value.len(), &pages);
+                (*k, Some((cell, true)))
+            }
+            None => (*k, None),
+        })
+        .collect::<Vec<_>>();
 
     assert!(num_workers >= 1);
     let workers = prepare_workers(bbn_index, &changeset, num_workers);
@@ -75,7 +92,7 @@ pub fn run(
         let bbn_index = bbn_index.clone();
         let leaf_cache = leaf_cache.clone();
         let leaf_reader = leaf_reader.clone();
-        let page_pool = page_pool.clone();
+        let page_pool = leaf_writer.page_pool().clone();
         let changeset = changeset.clone();
 
         let worker_result_tx = worker_result_tx.clone();
@@ -100,18 +117,42 @@ pub fn run(
     drop(leaf_cache);
 
     let mut changes = Vec::new();
-    let mut deleted_overflow = Vec::new();
 
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
         let (worker_changes, worker_deleted_overflow) = worker_result_rx.recv().unwrap();
-        changes.extend(worker_changes);
-        deleted_overflow.extend(worker_deleted_overflow);
+        apply_leaf_changes(
+            leaf_reader,
+            leaf_writer,
+            &mut changes,
+            worker_changes,
+            worker_deleted_overflow,
+        );
     }
 
     changes.sort_by_key(|(k, _)| *k);
+    changes
+}
 
-    (changes, deleted_overflow)
+fn apply_leaf_changes(
+    leaf_reader: &LeafStoreReader,
+    leaf_writer: &mut LeafStoreWriter,
+    total_changes: &mut Vec<(Key, Option<PageNumber>)>,
+    changes: BTreeMap<Key, ChangedLeafEntry>,
+    deleted_overflow: Vec<Vec<u8>>,
+) {
+    for deleted_overflow_cell in deleted_overflow {
+        overflow::delete(&deleted_overflow_cell, leaf_reader, leaf_writer);
+    }
+
+    for (key, leaf_entry) in changes {
+        let leaf_pn = leaf_entry.inserted.map(|leaf| leaf_writer.write(leaf));
+        if let Some(prev_pn) = leaf_entry.deleted {
+            leaf_writer.release(prev_pn);
+        }
+
+        total_changes.push((key, leaf_pn));
+    }
 }
 
 fn prepare_workers(
