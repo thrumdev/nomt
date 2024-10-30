@@ -92,6 +92,16 @@ impl AllocatorReader {
 }
 
 impl AllocatorWriter {
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        AllocatorWriter {
+            bump: PageNumber(u32::MAX / 2),
+            file_max_bump: PageNumber(u32::MAX),
+            free_list: FreeList::new_test(),
+            released: Vec::new(),
+        }
+    }
+
     /// creates an AllocatorWriter over an already existing File.
     pub fn open(
         page_pool: &PagePool,

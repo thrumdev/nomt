@@ -121,6 +121,11 @@ impl LeafStoreWriter {
             freelist_head,
         }
     }
+
+    #[cfg(test)]
+    pub fn free_pages(&self) -> std::collections::BTreeSet<PageNumber> {
+        self.allocator_writer.free_list().all_tracked_pages()
+    }
 }
 
 pub struct LeafStoreCommitOutput {
