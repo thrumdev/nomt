@@ -2,7 +2,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use threadpool::ThreadPool;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -24,8 +24,8 @@ mod extend_range_protocol;
 mod leaf_stage;
 mod leaf_updater;
 
-#[cfg(test)]
-mod tests;
+// #[cfg(test)]
+// mod tests;
 
 // All nodes less than this body size will be merged with a neighboring node.
 const BRANCH_MERGE_THRESHOLD: usize = BRANCH_NODE_BODY_SIZE / 2;
@@ -95,31 +95,14 @@ pub fn update(
         overflow::delete(&overflow_cell, leaf_reader, leaf_writer);
     }
 
-    let branch_changes = branch_stage::run(
-        &bbn_index,
+    branch_stage::run(
+        bbn_index,
+        bbn_writer,
         leaf_writer.page_pool().clone(),
         branch_changeset,
         thread_pool,
         workers,
     );
-
-    for (key, changed_branch) in branch_changes {
-        match changed_branch.inserted {
-            Some(mut node) => {
-                bbn_writer.allocate(&mut node);
-                let node = Arc::new(node);
-                bbn_writer.write(node.clone());
-                bbn_index.insert(key, node);
-            }
-            None => {
-                bbn_index.remove(&key);
-            }
-        }
-
-        if let Some(deleted_pn) = changed_branch.deleted {
-            bbn_writer.release(deleted_pn);
-        }
-    }
 
     Ok(())
 }

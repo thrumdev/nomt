@@ -3,7 +3,9 @@ use std::ops::Range;
 use std::sync::Arc;
 use threadpool::ThreadPool;
 
-use crate::beatree::{allocator::PageNumber, branch::node::BranchNode, index::Index, Key};
+use crate::beatree::{
+    allocator::PageNumber, bbn::BbnStoreWriter, branch::node::BranchNode, index::Index, Key,
+};
 
 use crate::io::PagePool;
 
@@ -17,20 +19,21 @@ use super::extend_range_protocol::{
 pub type BranchesTracker = super::NodesTracker<BranchNode>;
 type ChangedBranchEntry = super::ChangedNodeEntry<BranchNode>;
 
-/// Change the btree's branch nodes in the specified way
+/// Change the btree's branch nodes in the specified way.
 pub fn run(
-    bbn_index: &Index,
+    bbn_index: &mut Index,
+    bbn_writer: &mut BbnStoreWriter,
     page_pool: PagePool,
     changeset: Vec<(Key, Option<PageNumber>)>,
     thread_pool: ThreadPool,
     num_workers: usize,
-) -> BTreeMap<Key, ChangedBranchEntry> {
+) {
     if changeset.is_empty() {
-        return BTreeMap::new();
+        return;
     }
 
     assert!(num_workers >= 1);
-    let workers = prepare_workers(bbn_index, &changeset, num_workers);
+    let workers = prepare_workers(&*bbn_index, &changeset, num_workers);
     assert!(!workers.is_empty());
 
     let changeset = Arc::new(changeset);
@@ -55,15 +58,35 @@ pub fn run(
     // we don't want to block other sync steps on deallocating these memory regions.
     drop(changeset);
 
-    let mut changes = BTreeMap::new();
-
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
         let worker_changes = worker_result_rx.recv().unwrap();
-        changes.extend(worker_changes);
+        apply_bbn_changes(bbn_index, bbn_writer, worker_changes);
     }
+}
 
-    changes
+fn apply_bbn_changes(
+    bbn_index: &mut Index,
+    bbn_writer: &mut BbnStoreWriter,
+    changes: BTreeMap<Key, ChangedBranchEntry>,
+) {
+    for (key, changed_branch) in changes {
+        match changed_branch.inserted {
+            Some(mut node) => {
+                bbn_writer.allocate(&mut node);
+                let node = Arc::new(node);
+                bbn_writer.write(node.clone());
+                bbn_index.insert(key, node);
+            }
+            None => {
+                bbn_index.remove(&key);
+            }
+        }
+
+        if let Some(deleted_pn) = changed_branch.deleted {
+            bbn_writer.release(deleted_pn);
+        }
+    }
 }
 
 fn prepare_workers(
