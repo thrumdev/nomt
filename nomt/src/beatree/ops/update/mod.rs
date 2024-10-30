@@ -2,7 +2,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use threadpool::ThreadPool;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -10,8 +10,7 @@ use crate::beatree::{
     branch::BRANCH_NODE_BODY_SIZE,
     index::Index,
     leaf::{
-        node::{LeafNode, LEAF_NODE_BODY_SIZE, MAX_LEAF_VALUE_SIZE},
-        overflow,
+        node::{LeafNode, LEAF_NODE_BODY_SIZE},
         store::{LeafStoreReader, LeafStoreWriter},
     },
     ops::get_key,
@@ -46,7 +45,7 @@ const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
-    changeset: &BTreeMap<Key, Option<Vec<u8>>>,
+    changeset: Arc<BTreeMap<Key, Option<Vec<u8>>>>,
     bbn_index: &mut Index,
     leaf_reader: &LeafStoreReader,
     leaf_writer: &mut LeafStoreWriter,
@@ -56,44 +55,15 @@ pub fn update(
 ) -> Result<()> {
     let leaf_cache = preload_leaves(leaf_reader, &bbn_index, changeset.keys().cloned())?;
 
-    let changeset = changeset
-        .iter()
-        .map(|(k, v)| match v {
-            Some(v) if v.len() <= MAX_LEAF_VALUE_SIZE => (*k, Some((v.clone(), false))),
-            Some(large_value) => {
-                let pages = overflow::chunk(&large_value, leaf_writer);
-                let cell = overflow::encode_cell(large_value.len(), &pages);
-                (*k, Some((cell, true)))
-            }
-            None => (*k, None),
-        })
-        .collect::<_>();
-
-    let (leaf_changes, overflow_deleted) = leaf_stage::run(
+    let branch_changeset = leaf_stage::run(
         &bbn_index,
         leaf_cache,
         leaf_reader,
-        leaf_writer.page_pool().clone(),
+        leaf_writer,
         changeset,
         thread_pool.clone(),
         workers,
     );
-
-    let branch_changeset = leaf_changes
-        .into_iter()
-        .map(|(key, leaf_entry)| {
-            let leaf_pn = leaf_entry.inserted.map(|leaf| leaf_writer.write(leaf));
-            if let Some(prev_pn) = leaf_entry.deleted {
-                leaf_writer.release(prev_pn);
-            }
-
-            (key, leaf_pn)
-        })
-        .collect::<Vec<_>>();
-
-    for overflow_cell in overflow_deleted {
-        overflow::delete(&overflow_cell, leaf_reader, leaf_writer);
-    }
 
     branch_stage::run(
         bbn_index,
