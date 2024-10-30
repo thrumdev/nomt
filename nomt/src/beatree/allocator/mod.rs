@@ -376,7 +376,7 @@ impl SyncFinisher {
     ///
     /// This returns an error only if the file could not be extended.
     pub fn finish(
-        mut self,
+        self,
         page_pool: &PagePool,
         freed: Vec<PageNumber>,
     ) -> anyhow::Result<Vec<(PageNumber, FatPage)>> {
@@ -384,20 +384,14 @@ impl SyncFinisher {
         // UNWRAP: `SyncAllocator` sends the guard when dropped. We assume it is not leaked.
         let Finish {
             mut sync,
-            allocations: mut n_allocations,
+            allocations,
             mut max_bump,
         } = self.sync_finish.recv().unwrap();
 
-        while n_allocations > 0 {
-            if sync.free_list.pop().is_some() {
-                n_allocations -= 1;
-            } else {
-                break;
-            }
-        }
+        let bumps = allocations - sync.free_list.discard(allocations);
 
         // remaining allocations all logically incremented bump.
-        let mut next_bump = PageNumber(sync.bump.0 + n_allocations as u32);
+        let mut next_bump = PageNumber(sync.bump.0 + bumps as u32);
         let freelist_pages = sync.free_list.commit(page_pool, freed, &mut next_bump);
 
         // writing the free-list pages might require more bumps, which may require growing the file

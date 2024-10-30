@@ -109,6 +109,33 @@ impl FreeList {
         Some(pn)
     }
 
+    /// Discards the first `n` items from the free-list.
+    ///
+    /// This returns the number of items discarded. Runtime is O(n) in the number of free-list
+    /// segments modified.
+    pub fn discard(&mut self, n: usize) -> usize {
+        let mut discarded = 0;
+        while discarded < n {
+            let Some((head_pn, mut head)) = self.portions.pop() else {
+                return discarded;
+            };
+            self.pop = true;
+
+            let to_discard = std::cmp::min(head.len(), n - discarded);
+            head.truncate(head.len() - to_discard);
+
+            if !head.is_empty() {
+                self.portions.push((head_pn, head));
+            } else {
+                self.released_portions.push(head_pn);
+            }
+
+            discarded += to_discard;
+        }
+
+        n
+    }
+
     /// Get a reference to this free list asserted to be clean. This panics if the free list isn't
     /// clean: if any `pop`s have occurred since the last call to `commit`.
     pub fn as_clean(&self) -> CleanFreeList {
