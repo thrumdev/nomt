@@ -1,19 +1,21 @@
 use crate::{
     beatree::{
         allocator::PageNumber,
-        branch::{self, BranchNode, BRANCH_NODE_BODY_SIZE, BRANCH_NODE_SIZE},
+        bbn::BbnStoreWriter,
+        branch::{self, BRANCH_NODE_BODY_SIZE, BRANCH_NODE_SIZE},
         leaf::{
             self,
             node::{LeafNode, MAX_LEAF_VALUE_SIZE},
+            store::{LeafStoreReader, LeafStoreWriter},
         },
         ops::{
             bit_ops::separate,
             update::{
                 branch_updater::tests::make_branch_until, get_key, preload_leaves,
-                ChangedNodeEntry, LEAF_MERGE_THRESHOLD,
+                LEAF_MERGE_THRESHOLD,
             },
         },
-        writeout, Index, Tree,
+        writeout, Index,
     },
     io::{start_test_io_pool, IoPool, PagePool},
 };
@@ -23,6 +25,7 @@ use rand::{Rng, SeedableRng};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs::File;
+use std::sync::Arc;
 use threadpool::ThreadPool;
 
 use super::BRANCH_MERGE_THRESHOLD;
@@ -58,6 +61,8 @@ lazy_static! {
     static ref IO_POOL: IoPool = start_test_io_pool(3, PAGE_POOL.clone());
     static ref TREE_DATA: TreeData = init_beatree();
     static ref BBN_INDEX: Index = init_bbn_index();
+    static ref THREAD_POOL: ThreadPool =
+        ThreadPool::with_name("beatree-update-test".to_string(), 64);
 }
 
 fn rand_keys(n: usize) -> Vec<[u8; 32]> {
@@ -73,12 +78,24 @@ fn rand_keys(n: usize) -> Vec<[u8; 32]> {
 
 struct TreeData {
     ln_fd: File,
-    bbn_fd: File,
     ln_freelist_pn: u32,
-    bbn_freelist_pn: u32,
     ln_bump: u32,
-    bbn_bump: u32,
     init_items: BTreeMap<[u8; 32], Vec<u8>>,
+    bbn_index: Index,
+}
+
+impl TreeData {
+    fn leaf_reader_writer(&self) -> (LeafStoreReader, LeafStoreWriter) {
+        let (leaf_reader, _, leaf_writer) = leaf::store::open(
+            PAGE_POOL.clone(),
+            self.ln_fd.try_clone().unwrap(),
+            Some(PageNumber(self.ln_freelist_pn)),
+            PageNumber(self.ln_bump),
+            &IO_POOL,
+        );
+
+        (leaf_reader, leaf_writer)
+    }
 }
 
 // Initialize the beatree utilizing the keys present in KEYS and creating random value sizes.
@@ -99,72 +116,67 @@ fn init_beatree() -> TreeData {
     ln_fd.set_len(BRANCH_NODE_SIZE as u64).unwrap();
     bbn_fd.set_len(BRANCH_NODE_SIZE as u64).unwrap();
 
-    let beatree = Tree::open(PAGE_POOL.clone(), &IO_POOL, 0, 0, 1, 1, &ln_fd, &bbn_fd, 1).unwrap();
-
-    let mut tree_data = TreeData {
-        ln_fd: ln_fd.try_clone().unwrap(),
-        bbn_fd: bbn_fd.try_clone().unwrap(),
-        ln_freelist_pn: 0,
-        bbn_freelist_pn: 0,
-        ln_bump: 1,
-        bbn_bump: 1,
-        init_items: BTreeMap::new(),
-    };
-
-    let actuals: Vec<_> = KEYS
+    let initial_items: BTreeMap<[u8; 32], Vec<u8>> = KEYS
         .iter()
         .cloned()
-        .into_iter()
-        .map(|key| {
-            (
-                key,
-                Some(vec![170; rng.gen_range(500..MAX_LEAF_VALUE_SIZE)]),
-            )
-        })
+        .map(|key| (key, vec![170u8; rng.gen_range(500..MAX_LEAF_VALUE_SIZE)]))
         .collect();
-    tree_data
-        .init_items
-        .extend(actuals.iter().map(|(k, v)| (*k, v.clone().unwrap())));
 
-    beatree.commit(actuals);
-    let crate::beatree::WriteoutData {
-        bbn,
-        bbn_freelist_pages,
-        bbn_extend_file_sz,
-        ln,
-        ln_freelist_pages,
-        ln_extend_file_sz,
-        ln_freelist_pn,
-        ln_bump,
-        bbn_freelist_pn,
-        bbn_bump,
-        bbn_index: _bbn_index,
-    } = beatree.prepare_sync();
+    let mut bbn_index = Index::default();
 
-    writeout::write_bbn(
-        IO_POOL.make_handle(),
-        &bbn_fd,
-        bbn,
-        bbn_freelist_pages,
-        bbn_extend_file_sz,
-    )
-    .unwrap();
+    let (leaf_reader, _, mut leaf_writer) = leaf::store::open(
+        PAGE_POOL.clone(),
+        ln_fd.try_clone().unwrap(),
+        None,
+        PageNumber(1),
+        &IO_POOL,
+    );
+
+    let mut bbn_writer = BbnStoreWriter::new_test();
+
+    let branch_changeset = super::leaf_stage::run(
+        &bbn_index,
+        dashmap::DashMap::default(),
+        &leaf_reader,
+        &mut leaf_writer,
+        Arc::new(
+            initial_items
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
+                .collect(),
+        ),
+        THREAD_POOL.clone(),
+        1,
+    );
+
+    super::branch_stage::run(
+        &mut bbn_index,
+        &mut bbn_writer,
+        PAGE_POOL.clone(),
+        branch_changeset,
+        THREAD_POOL.clone(),
+        1,
+    );
+
+    let leaf_commit = leaf_writer.commit(&PAGE_POOL);
 
     writeout::write_ln(
         IO_POOL.make_handle(),
         &ln_fd,
-        ln,
-        ln_freelist_pages,
-        ln_extend_file_sz,
+        leaf_commit.pending,
+        leaf_commit.free_list_pages,
+        leaf_commit.extend_file_sz,
     )
     .unwrap();
 
-    tree_data.ln_freelist_pn = ln_freelist_pn;
-    tree_data.ln_bump = ln_bump;
-    tree_data.bbn_freelist_pn = bbn_freelist_pn;
-    tree_data.bbn_bump = bbn_bump;
-
-    tree_data
+    TreeData {
+        ln_fd,
+        ln_freelist_pn: leaf_commit.freelist_head.0,
+        ln_bump: leaf_commit.bump.0,
+        init_items: initial_items,
+        bbn_index,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -183,107 +195,98 @@ impl Arbitrary for Key {
     }
 }
 
-// given a changeset execute the leaf stage on top of a pre-initialize nomt-db
+// given a changeset execute the leaf stage on top of a pre-initialized nomt-db
 fn exec_leaf_stage(
     commit_concurrency: usize,
-    changeset: BTreeMap<[u8; 32], Option<(Vec<u8>, bool)>>,
+    changeset: BTreeMap<[u8; 32], Option<Vec<u8>>>,
 ) -> (
-    (Vec<([u8; 32], ChangedNodeEntry<LeafNode>)>, Vec<Vec<u8>>),
+    Vec<([u8; 32], Option<PageNumber>)>,
+    LeafStoreWriter,
     BTreeSet<PageNumber>,
 ) {
-    let beatree = crate::beatree::Tree::open(
-        PAGE_POOL.clone(),
-        &IO_POOL,
-        TREE_DATA.ln_freelist_pn,
-        TREE_DATA.bbn_freelist_pn,
-        TREE_DATA.ln_bump,
-        TREE_DATA.bbn_bump,
-        &TREE_DATA.bbn_fd,
-        &TREE_DATA.ln_fd,
-        commit_concurrency,
-    )
-    .unwrap();
+    let (leaf_reader, mut leaf_writer) = TREE_DATA.leaf_reader_writer();
 
-    let shared = beatree.shared.read();
-    let sync = beatree.sync.lock();
-    let leaf_reader = &shared.leaf_store_rd;
-    let bbn_index = &shared.bbn_index;
-
-    let leaf_cache = preload_leaves(leaf_reader, bbn_index, changeset.keys().cloned()).unwrap();
+    let bbn_index = &TREE_DATA.bbn_index;
+    let leaf_cache = preload_leaves(&leaf_reader, bbn_index, changeset.keys().cloned()).unwrap();
     let leaf_page_numbers: BTreeSet<PageNumber> = leaf_cache.iter().map(|v| *v.pair().0).collect();
 
     let leaf_stage_output = super::leaf_stage::run(
         bbn_index,
         leaf_cache,
-        leaf_reader,
-        PAGE_POOL.clone(),
-        changeset.into_iter().collect(),
-        sync.tp.clone(),
+        &leaf_reader,
+        &mut leaf_writer,
+        Arc::new(changeset.into_iter().collect()),
+        THREAD_POOL.clone(),
         commit_concurrency,
     );
-    (leaf_stage_output, leaf_page_numbers)
+
+    (leaf_stage_output, leaf_writer, leaf_page_numbers)
 }
 
 fn is_valid_leaf_stage_output(
-    output: (Vec<([u8; 32], ChangedNodeEntry<LeafNode>)>, Vec<Vec<u8>>),
+    output: Vec<([u8; 32], Option<PageNumber>)>,
+    mut leaf_writer: LeafStoreWriter,
     mut used_page_numbers: BTreeSet<PageNumber>,
     deletions: BTreeSet<[u8; 32]>,
     insertions: BTreeMap<[u8; 32], Vec<u8>>,
 ) -> bool {
-    if output.0.is_empty() {
+    if output.is_empty() {
         return true;
     }
+
+    let mut written_pages: BTreeMap<_, _> =
+        leaf_writer.commit(&PAGE_POOL).pending.into_iter().collect();
+    let free_pages = leaf_writer.free_pages();
+
+    used_page_numbers.retain(|p| !free_pages.contains(p));
 
     let mut expected_values = TREE_DATA.init_items.clone();
     expected_values.extend(insertions.clone());
     expected_values.retain(|k, _| !deletions.contains(k));
 
     let mut found_underfull_leaf = false;
-    for (_key, changed_leaf) in output.0.into_iter() {
-        if let Some(pn) = changed_leaf.deleted {
-            used_page_numbers.remove(&pn);
-        }
+    for (_, new_pn) in output.into_iter() {
+        let Some(new_pn) = new_pn else { continue };
+        let page = written_pages.remove(&new_pn).unwrap();
+        let leaf_node = LeafNode { inner: page };
+        let n = leaf_node.n();
 
-        if let Some(leaf_node) = changed_leaf.inserted {
-            let n = leaf_node.n();
+        let mut value_size_sum = 0;
 
-            let mut value_size_sum = 0;
+        // each leaf must contain all the keys that are expected in the range
+        // between its first and last key
+        let first = leaf_node.key(0);
+        let last = leaf_node.key(n - 1);
+        let mut expected = expected_values.range(first..=last);
 
-            // each leaf must contain all the keys that are expected in the range
-            // between its first and last key
-            let first = leaf_node.key(0);
-            let last = leaf_node.key(n - 1);
-            let mut expected = expected_values.range(first..=last);
-
-            for i in 0..n {
-                let key = leaf_node.key(i);
-                if deletions.contains(&key) {
-                    return false;
-                }
-
-                let value = leaf_node.value(i).0;
-                value_size_sum += value.len();
-
-                let Some((expected_key, expected_value)) = expected.next() else {
-                    return false;
-                };
-
-                if key != *expected_key || value != expected_value {
-                    return false;
-                }
-            }
-
-            if expected.next().is_some() {
+        for i in 0..n {
+            let key = leaf_node.key(i);
+            if deletions.contains(&key) {
                 return false;
             }
 
-            // all new leaves must respect the half-full requirement except for the last one
-            if leaf::node::body_size(n, value_size_sum) < LEAF_MERGE_THRESHOLD {
-                if found_underfull_leaf == true {
-                    return false;
-                }
-                found_underfull_leaf = true;
+            let value = leaf_node.value(i).0;
+            value_size_sum += value.len();
+
+            let Some((expected_key, expected_value)) = expected.next() else {
+                return false;
+            };
+
+            if key != *expected_key || value != expected_value {
+                return false;
             }
+        }
+
+        if expected.next().is_some() {
+            return false;
+        }
+
+        // all new leaves must respect the half-full requirement except for the last one
+        if leaf::node::body_size(n, value_size_sum) < LEAF_MERGE_THRESHOLD {
+            if found_underfull_leaf == true {
+                return false;
+            }
+            found_underfull_leaf = true;
         }
     }
 
@@ -311,21 +314,22 @@ fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> Test
         .into_iter()
         // rescale raw_size to be between 0 and MAX_LEAF_VALUE_SIZE
         .map(|(k, raw_size)| (k, rescale(raw_size, 1, MAX_LEAF_VALUE_SIZE)))
-        .map(|(k, size)| (k.inner, Some((vec![170; size], false))))
+        .map(|(k, size)| (k.inner, Some(vec![170; size])))
         .collect();
 
-    let mut changeset: BTreeMap<[u8; 32], Option<(Vec<u8>, bool)>> = insertions.clone();
+    let mut changeset: BTreeMap<[u8; 32], Option<Vec<u8>>> = insertions.clone();
     changeset.extend(deletions.clone());
 
-    let (leaf_stage_output, leaf_page_numbers) = exec_leaf_stage(64, changeset);
+    let (leaf_stage_output, leaf_writer, prior_leaf_page_numbers) = exec_leaf_stage(64, changeset);
 
     TestResult::from_bool(is_valid_leaf_stage_output(
         leaf_stage_output,
-        leaf_page_numbers,
+        leaf_writer,
+        prior_leaf_page_numbers,
         deletions.into_iter().map(|(k, _)| k).collect(),
         insertions
             .into_iter()
-            .map(|(k, v)| (k, v.unwrap().0))
+            .map(|(k, v)| (k, v.unwrap()))
             .collect(),
     ))
 }
@@ -367,11 +371,14 @@ fn init_bbn_index() -> Index {
 }
 
 fn is_valid_branch_stage_output(
-    output: BTreeMap<[u8; 32], ChangedNodeEntry<BranchNode>>,
+    mut bbn_writer: BbnStoreWriter,
     mut bbn_page_numbers: BTreeSet<u32>,
     insertions: BTreeSet<[u8; 32]>,
     deletions: BTreeSet<[u8; 32]>,
 ) -> bool {
+    let output = bbn_writer.commit(&PAGE_POOL).bbn;
+    let free_pages = bbn_writer.free_pages();
+
     if output.is_empty() {
         return true;
     }
@@ -380,50 +387,46 @@ fn is_valid_branch_stage_output(
     expected_values.extend(insertions.clone());
     expected_values.retain(|k| !deletions.contains(k));
 
-    let mut found_underfull_leaf = false;
-    for (_key, changed_branch) in output {
-        if let Some(pn) = changed_branch.deleted {
-            bbn_page_numbers.remove(&pn.0);
-        }
+    bbn_page_numbers.retain(|pn| !free_pages.contains(&PageNumber(*pn)));
 
-        if let Some(branch_node) = changed_branch.inserted {
-            let n = branch_node.n() as usize;
+    let mut found_underfull_branch = false;
+    for branch_node in output {
+        let n = branch_node.n() as usize;
 
-            let prefix_bit_len = branch_node.raw_prefix().1;
-            let total_separator_lengths = branch_node.view().cell(n - 1);
+        let prefix_bit_len = branch_node.raw_prefix().1;
+        let total_separator_lengths = branch_node.view().cell(n - 1);
 
-            // all new bbns must respect the half-full requirement except for the last one
-            if branch::node::body_size(prefix_bit_len, total_separator_lengths, n)
-                < BRANCH_MERGE_THRESHOLD
-            {
-                if found_underfull_leaf == true {
-                    return false;
-                }
-                found_underfull_leaf = true;
-            }
-
-            let first = get_key(&branch_node, 0);
-            let last = get_key(&branch_node, n - 1);
-            let mut expected = expected_values.range(first..=last);
-
-            for i in 0..n {
-                let key = get_key(&branch_node, i);
-                if deletions.contains(&key) {
-                    return false;
-                }
-
-                let Some(expected_key) = expected.next() else {
-                    return false;
-                };
-
-                if key != *expected_key {
-                    return false;
-                }
-            }
-
-            if expected.next().is_some() {
+        // all new bbns must respect the half-full requirement except for the last one
+        if branch::node::body_size(prefix_bit_len, total_separator_lengths, n)
+            < BRANCH_MERGE_THRESHOLD
+        {
+            if found_underfull_branch == true {
                 return false;
             }
+            found_underfull_branch = true;
+        }
+
+        let first = get_key(&branch_node, 0);
+        let last = get_key(&branch_node, n - 1);
+        let mut expected = expected_values.range(first..=last);
+
+        for i in 0..n {
+            let key = get_key(&branch_node, i);
+            if deletions.contains(&key) {
+                return false;
+            }
+
+            let Some(expected_key) = expected.next() else {
+                return false;
+            };
+
+            if key != *expected_key {
+                return false;
+            }
+        }
+
+        if expected.next().is_some() {
+            return false;
         }
     }
 
@@ -455,16 +458,19 @@ fn branch_stage_inner(insertions: BTreeMap<Key, u32>, deletions: Vec<u16>) -> Te
         .map(|(key, _)| bbn_index.lookup(*key).unwrap().1.bbn_pn())
         .collect();
 
-    let branch_stage_output = super::branch_stage::run(
-        &bbn_index,
+    let mut new_bbn_index = bbn_index.clone();
+    let mut bbn_writer = BbnStoreWriter::new_test();
+    super::branch_stage::run(
+        &mut new_bbn_index,
+        &mut bbn_writer,
         PAGE_POOL.clone(),
         changeset.into_iter().collect(),
-        ThreadPool::with_name("branch-stage-test".into(), 64),
+        THREAD_POOL.clone(),
         64,
     );
 
     TestResult::from_bool(is_valid_branch_stage_output(
-        branch_stage_output,
+        bbn_writer,
         bbn_page_numbers,
         insertions.keys().cloned().collect(),
         deletions.keys().cloned().collect(),

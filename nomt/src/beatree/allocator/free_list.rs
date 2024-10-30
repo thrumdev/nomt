@@ -27,6 +27,17 @@ pub struct FreeList {
 }
 
 impl FreeList {
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        FreeList {
+            portions: Vec::new(),
+            pop: false,
+            len: 0,
+            fragmented: false,
+            released_portions: Vec::new(),
+        }
+    }
+
     pub fn read(
         page_pool: &PagePool,
         store_file: &File,

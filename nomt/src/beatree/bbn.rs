@@ -36,6 +36,19 @@ pub fn open(
 }
 
 impl BbnStoreWriter {
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        BbnStoreWriter {
+            allocator_writer: AllocatorWriter::new_test(),
+            pending: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn free_pages(&self) -> std::collections::BTreeSet<PageNumber> {
+        self.allocator_writer.free_list().all_tracked_pages()
+    }
+
     /// Allocate a PN for the given branch.
     pub fn allocate(&mut self, branch_node: &mut BranchNode) -> PageNumber {
         let pn = self.allocator_writer.allocate();
