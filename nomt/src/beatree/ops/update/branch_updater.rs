@@ -51,6 +51,17 @@ pub enum DigestResult {
     NeedsMerge(Key),
 }
 
+/// A callback which takes ownership of newly created leaves.
+pub trait HandleNewBranch {
+    fn handle_new_branch(&mut self, separator: Key, node: BranchNode, cutoff: Option<Key>);
+}
+
+impl HandleNewBranch for BranchesTracker {
+    fn handle_new_branch(&mut self, separator: Key, node: BranchNode, cutoff: Option<Key>) {
+        self.insert(separator, node, cutoff)
+    }
+}
+
 pub struct BranchUpdater {
     // the 'base' node we are working from. does not exist if DB is empty.
     base: Option<BaseBranch>,
@@ -87,13 +98,13 @@ impl BranchUpdater {
         }
     }
 
-    pub fn digest(&mut self, branches_tracker: &mut BranchesTracker) -> DigestResult {
+    pub fn digest(&mut self, new_branches: &mut impl HandleNewBranch) -> DigestResult {
         self.keep_up_to(None);
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // branch of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_branches(branches_tracker);
+        let last_ops_start = self.build_bulk_splitter_branches(new_branches);
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
@@ -104,11 +115,11 @@ impl BranchUpdater {
                 last_ops_start, 0,
                 "normal split can only occur when not bulk splitting"
             );
-            self.split(branches_tracker)
+            self.split(new_branches)
         } else if self.gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_branch(&self.ops[last_ops_start..], &self.gauge);
             let separator = self.op_key(&self.ops[last_ops_start]);
-            branches_tracker.insert(separator, node, self.cutoff);
+            new_branches.handle_new_branch(separator, node, self.cutoff);
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
@@ -210,7 +221,7 @@ impl BranchUpdater {
         }
     }
 
-    fn build_bulk_splitter_branches(&mut self, branches_tracker: &mut BranchesTracker) -> usize {
+    fn build_bulk_splitter_branches(&mut self, new_branches: &mut impl HandleNewBranch) -> usize {
         let Some(splitter) = self.bulk_split.take() else {
             return 0;
         };
@@ -221,7 +232,7 @@ impl BranchUpdater {
             let separator = self.op_key(&self.ops[start]);
             let new_node = self.build_branch(branch_ops, &gauge);
 
-            branches_tracker.insert(separator, new_node, self.cutoff);
+            new_branches.handle_new_branch(separator, new_node, self.cutoff);
 
             start += item_count;
         }
@@ -229,7 +240,7 @@ impl BranchUpdater {
         start
     }
 
-    fn split(&mut self, branches_tracker: &mut BranchesTracker) -> DigestResult {
+    fn split(&mut self, new_branches: &mut impl HandleNewBranch) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -267,7 +278,7 @@ impl BranchUpdater {
 
         let left_node = self.build_branch(left_ops, &left_gauge);
 
-        branches_tracker.insert(left_separator, left_node, Some(right_separator));
+        new_branches.handle_new_branch(left_separator, left_node, Some(right_separator));
 
         let mut right_gauge = BranchGauge::new();
         for op in &self.ops[split_point..] {
@@ -289,11 +300,11 @@ impl BranchUpdater {
             // node is too big, and another split is required to be executed
             self.ops.drain(..split_point);
             self.gauge = right_gauge;
-            self.split(branches_tracker)
+            self.split(new_branches)
         } else if right_gauge.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_node = self.build_branch(right_ops, &right_gauge);
 
-            branches_tracker.insert(right_separator, right_node, self.cutoff);
+            new_branches.handle_new_branch(right_separator, right_node, self.cutoff);
 
             self.ops.clear();
             self.gauge = BranchGauge::new();
@@ -471,13 +482,25 @@ impl BranchBulkSplitter {
 pub mod tests {
     use super::{
         get_key, prefix_len, Arc, BaseBranch, BranchGauge, BranchNode, BranchNodeBuilder,
-        BranchUpdater, BranchesTracker, DigestResult, Key, PageNumber, PagePool,
+        BranchUpdater, DigestResult, HandleNewBranch, Key, PageNumber, PagePool,
         BRANCH_MERGE_THRESHOLD, BRANCH_NODE_BODY_SIZE,
     };
     use crate::beatree::ops::bit_ops::separator_len;
+    use std::collections::HashMap;
 
     lazy_static::lazy_static! {
         static ref PAGE_POOL: PagePool = PagePool::new();
+    }
+
+    #[derive(Default)]
+    struct TestHandleNewBranch {
+        inner: HashMap<Key, (BranchNode, Option<Key>)>,
+    }
+
+    impl HandleNewBranch for TestHandleNewBranch {
+        fn handle_new_branch(&mut self, separator: Key, node: BranchNode, cutoff: Option<Key>) {
+            self.inner.insert(separator, (node, cutoff));
+        }
     }
 
     #[test]
@@ -625,16 +648,16 @@ pub mod tests {
             }),
             None,
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(250), Some(9999.into()));
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+        let new_branch_entry = new_branches.inner.get(&key(0)).unwrap();
 
-        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        let new_branch = &new_branch_entry.0;
         assert_eq!(new_branch.n(), 500);
         assert_eq!(new_branch.node_pointer(0), 0);
         assert_eq!(new_branch.node_pointer(499), 499);
@@ -654,16 +677,16 @@ pub mod tests {
             }),
             None,
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(251), Some(9999.into()));
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+        let new_branch_entry = new_branches.inner.get(&key(0)).unwrap();
 
-        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        let new_branch = &new_branch_entry.0;
         assert_eq!(new_branch.n(), 501);
         assert_eq!(new_branch.node_pointer(0), 0);
         assert_eq!(new_branch.node_pointer(500), 499);
@@ -684,18 +707,21 @@ pub mod tests {
             }),
             None,
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(n), Some(PageNumber(n as u32)));
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        let new_branch_entry_1 = branch_tracker.get(key(0)).unwrap();
-        let new_branch_1 = new_branch_entry_1.inserted.as_ref().unwrap();
+        let new_branch_entry_1 = new_branches.inner.get(&key(0)).unwrap();
+        let new_branch_1 = &new_branch_entry_1.0;
 
-        let new_branch_entry_2 = branch_tracker.get(key(new_branch_1.n() as usize)).unwrap();
-        let new_branch_2 = new_branch_entry_2.inserted.as_ref().unwrap();
+        let new_branch_entry_2 = new_branches
+            .inner
+            .get(&key(new_branch_1.n() as usize))
+            .unwrap();
+        let new_branch_2 = &new_branch_entry_2.0;
 
         assert_eq!(new_branch_1.node_pointer(0), 0);
         assert_eq!(
@@ -717,16 +743,16 @@ pub mod tests {
             }),
             None,
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(250), None);
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+        let new_branch_entry = new_branches.inner.get(&key(0)).unwrap();
 
-        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        let new_branch = &new_branch_entry.0;
         assert_eq!(new_branch.n(), 499);
         assert_eq!(new_branch.node_pointer(0), 0);
         assert_eq!(new_branch.node_pointer(498), 499);
@@ -761,13 +787,13 @@ pub mod tests {
             }),
             Some(key2(0)),
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         // delete all except the first
         for i in 1..n {
             updater.ingest(key(i), None);
         }
-        let DigestResult::NeedsMerge(_) = updater.digest(&mut branch_tracker) else {
+        let DigestResult::NeedsMerge(_) = updater.digest(&mut new_branches) else {
             panic!()
         };
 
@@ -778,13 +804,13 @@ pub mod tests {
             }),
             None,
         );
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        let new_branch_entry = branch_tracker.get(key(0)).unwrap();
+        let new_branch_entry = new_branches.inner.get(&key(0)).unwrap();
 
-        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        let new_branch = &new_branch_entry.0;
         assert_eq!(new_branch.n() as usize, n2 + 1);
         assert_eq!(new_branch.node_pointer(0), 0);
         assert_eq!(new_branch.node_pointer(n2), (n2 - 1) as u32);
@@ -803,16 +829,16 @@ pub mod tests {
             }),
             None,
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         for i in 0..500 {
             updater.ingest(key(i), None);
         }
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        assert!(branch_tracker.get(key(0)).is_none());
+        assert!(new_branches.inner.get(&key(0)).is_none());
     }
 
     #[test]
@@ -828,18 +854,18 @@ pub mod tests {
             }),
             None,
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         for i in 0..499 {
             updater.ingest(key(i), None);
         }
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        let new_branch_entry = branch_tracker.get(key(499)).unwrap();
+        let new_branch_entry = new_branches.inner.get(&key(499)).unwrap();
 
-        let new_branch = new_branch_entry.inserted.as_ref().unwrap();
+        let new_branch = &new_branch_entry.0;
         assert_eq!(new_branch.n(), 1);
     }
 
@@ -872,12 +898,12 @@ pub mod tests {
             }),
             Some(key2(0)),
         );
-        let mut branch_tracker = BranchesTracker::new();
+        let mut new_branches = TestHandleNewBranch::default();
 
         // delete the last item, causing a situation where prefix compression needs to be
         // disabled.
         updater.ingest(key(n - 1), None);
-        let DigestResult::NeedsMerge(_) = updater.digest(&mut branch_tracker) else {
+        let DigestResult::NeedsMerge(_) = updater.digest(&mut new_branches) else {
             panic!()
         };
 
@@ -888,12 +914,12 @@ pub mod tests {
             }),
             None,
         );
-        let DigestResult::Finished = updater.digest(&mut branch_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
             panic!()
         };
 
-        let new_branch_entry_1 = branch_tracker.get(key(0)).unwrap();
-        let new_branch_1 = new_branch_entry_1.inserted.as_ref().unwrap();
+        let new_branch_entry_1 = new_branches.inner.get(&key(0)).unwrap();
+        let new_branch_1 = &new_branch_entry_1.0;
 
         // first item has no shared prefix with any other key, causing the size to balloon.
         assert!(new_branch_1.prefix_compressed() != new_branch_1.n());
@@ -913,8 +939,8 @@ pub mod tests {
         };
         assert!(branch_1_body_size >= BRANCH_MERGE_THRESHOLD);
 
-        let new_branch_entry_2 = branch_tracker.get(key2(1)).unwrap();
-        let new_branch_2 = new_branch_entry_2.inserted.as_ref().unwrap();
+        let new_branch_entry_2 = new_branches.inner.get(&key2(1)).unwrap();
+        let new_branch_2 = &new_branch_entry_2.0;
 
         assert_eq!(new_branch_2.n() + new_branch_1.n(), (n + n2 - 1) as u16);
         assert_eq!(
