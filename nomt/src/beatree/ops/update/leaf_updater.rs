@@ -98,6 +98,17 @@ pub enum DigestResult {
     Finished,
 }
 
+/// A callback which takes ownership of newly created leaves.
+pub trait HandleNewLeaf {
+    fn handle_new_leaf(&mut self, separator: Key, node: LeafNode, cutoff: Option<Key>);
+}
+
+impl HandleNewLeaf for LeavesTracker {
+    fn handle_new_leaf(&mut self, separator: Key, node: LeafNode, cutoff: Option<Key>) {
+        self.insert(separator, node, cutoff)
+    }
+}
+
 pub struct LeafUpdater {
     // the 'base' node we are working from. does not exist if DB is empty.
     base: Option<BaseLeaf>,
@@ -162,14 +173,14 @@ impl LeafUpdater {
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
     // separator_override is set.
     // If `Finished` is returned, `ops` is guaranteed empty and separator_override is empty.
-    pub fn digest(&mut self, leaves_tracker: &mut LeavesTracker) -> DigestResult {
+    pub fn digest(&mut self, new_leaves: &mut impl HandleNewLeaf) -> DigestResult {
         // no cells are going to be deleted from this point onwards - this keeps everything.
         self.keep_up_to(None, |_| {});
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
-        let last_ops_start = self.build_bulk_splitter_leaves(leaves_tracker);
+        let last_ops_start = self.build_bulk_splitter_leaves(new_leaves);
 
         if self.gauge.body_size() == 0 {
             self.ops.clear();
@@ -181,12 +192,12 @@ impl LeafUpdater {
                 last_ops_start, 0,
                 "normal split can only occur when not bulk splitting"
             );
-            self.split(leaves_tracker)
+            self.split(new_leaves)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_leaf(&self.ops[last_ops_start..]);
             let separator = self.separator();
 
-            leaves_tracker.insert(separator, node, self.cutoff);
+            new_leaves.handle_new_leaf(separator, node, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -338,7 +349,7 @@ impl LeafUpdater {
         }
     }
 
-    fn build_bulk_splitter_leaves(&mut self, leaves_tracker: &mut LeavesTracker) -> usize {
+    fn build_bulk_splitter_leaves(&mut self, new_leaves: &mut impl HandleNewLeaf) -> usize {
         let Some(splitter) = self.bulk_split.take() else {
             return 0;
         };
@@ -363,7 +374,11 @@ impl LeafUpdater {
                 self.separator_override = Some(separate(&last, &next));
             }
 
-            leaves_tracker.insert(separator, new_node, self.separator_override.or(self.cutoff));
+            new_leaves.handle_new_leaf(
+                separator,
+                new_node,
+                self.separator_override.or(self.cutoff),
+            );
             start += item_count;
         }
 
@@ -378,7 +393,7 @@ impl LeafUpdater {
             .unwrap_or([0u8; 32])
     }
 
-    fn split(&mut self, leaves_tracker: &mut LeavesTracker) -> DigestResult {
+    fn split(&mut self, new_leaves: &mut impl HandleNewLeaf) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
         let mut split_point = 0;
 
@@ -431,7 +446,7 @@ impl LeafUpdater {
         let right_separator = separate(&left_key, &right_key);
 
         let left_leaf = self.build_leaf(left_ops);
-        leaves_tracker.insert(left_separator, left_leaf, Some(right_separator));
+        new_leaves.handle_new_leaf(left_separator, left_leaf, Some(right_separator));
 
         let mut right_gauge = LeafGauge::default();
         for op in &self.ops[split_point..] {
@@ -450,10 +465,10 @@ impl LeafUpdater {
             self.ops.drain(..split_point);
             self.separator_override = Some(right_separator);
             self.gauge = right_gauge;
-            self.split(leaves_tracker)
+            self.split(new_leaves)
         } else if right_gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let right_leaf = self.build_leaf(right_ops);
-            leaves_tracker.insert(right_separator, right_leaf, self.cutoff);
+            new_leaves.handle_new_leaf(right_separator, right_leaf, self.cutoff);
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
@@ -636,12 +651,24 @@ impl LeafGauge {
 #[cfg(test)]
 mod tests {
     use super::{
-        separate, BaseLeaf, DigestResult, Key, LeafBuilder, LeafNode, LeafOp, LeafUpdater,
-        LeavesTracker, PagePool,
+        separate, BaseLeaf, DigestResult, HandleNewLeaf, Key, LeafBuilder, LeafNode, LeafOp,
+        LeafUpdater, PagePool,
     };
+    use std::collections::HashMap;
 
     lazy_static::lazy_static! {
         static ref PAGE_POOL: PagePool = PagePool::new();
+    }
+
+    #[derive(Default)]
+    struct TestHandleNewLeaf {
+        inner: HashMap<Key, (LeafNode, Option<Key>)>,
+    }
+
+    impl HandleNewLeaf for TestHandleNewLeaf {
+        fn handle_new_leaf(&mut self, separator: Key, node: LeafNode, cutoff: Option<Key>) {
+            self.inner.insert(separator, (node, cutoff));
+        }
     }
 
     fn key(x: u8) -> Key {
@@ -718,16 +745,16 @@ mod tests {
             }),
             None,
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(2), Some(vec![2u8; 1000]), false, |_| {});
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
 
-        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+        let new_leaf_entry = new_leaves.inner.get(&key(1)).unwrap();
 
-        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        let new_leaf = &new_leaf_entry.0;
         assert_eq!(new_leaf.n(), 3);
         assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 1000]);
         assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[2u8; 1000]);
@@ -751,16 +778,16 @@ mod tests {
             }),
             None,
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(4), Some(vec![1u8; 900]), false, |_| {});
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
 
-        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+        let new_leaf_entry = new_leaves.inner.get(&key(1)).unwrap();
 
-        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        let new_leaf = &new_leaf_entry.0;
         assert_eq!(new_leaf.n(), 4);
         assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 900]);
         assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[1u8; 900]);
@@ -785,18 +812,18 @@ mod tests {
             }),
             None,
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(4), Some(vec![1u8; 1200]), false, |_| {});
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
 
-        let new_leaf_entry_1 = leaves_tracker.get(key(1)).unwrap();
-        let new_leaf_entry_2 = leaves_tracker.get(separate(&key(2), &key(3))).unwrap();
+        let new_leaf_entry_1 = new_leaves.inner.get(&key(1)).unwrap();
+        let new_leaf_entry_2 = new_leaves.inner.get(&separate(&key(2), &key(3))).unwrap();
 
-        let new_leaf_1 = new_leaf_entry_1.inserted.as_ref().unwrap();
-        let new_leaf_2 = new_leaf_entry_2.inserted.as_ref().unwrap();
+        let new_leaf_1 = &new_leaf_entry_1.0;
+        let new_leaf_2 = &new_leaf_entry_2.0;
 
         assert_eq!(new_leaf_1.n(), 2);
         assert_eq!(new_leaf_2.n(), 2);
@@ -824,16 +851,16 @@ mod tests {
             }),
             None,
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(2), None, false, |_| {});
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
 
-        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+        let new_leaf_entry = new_leaves.inner.get(&key(1)).unwrap();
 
-        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        let new_leaf = &new_leaf_entry.0;
         assert_eq!(new_leaf.n(), 2);
         assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 1200]);
         assert_eq!(new_leaf.get(&key(3)).unwrap().0, &[1u8; 1200]);
@@ -861,15 +888,15 @@ mod tests {
             }),
             Some(key(4)),
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(2), None, false, |_| {});
-        let DigestResult::NeedsMerge(merge_key) = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::NeedsMerge(merge_key) = updater.digest(&mut new_leaves) else {
             panic!()
         };
         assert_eq!(merge_key, key(4));
 
-        assert!(leaves_tracker.get(key(1)).is_none());
+        assert!(new_leaves.inner.get(&key(1)).is_none());
 
         updater.reset_base(
             Some(BaseLeaf {
@@ -880,12 +907,12 @@ mod tests {
             None,
         );
 
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
-        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
+        let new_leaf_entry = new_leaves.inner.get(&key(1)).unwrap();
 
-        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        let new_leaf = &new_leaf_entry.0;
         assert_eq!(new_leaf.n(), 4);
         assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 800]);
         assert_eq!(new_leaf.get(&key(3)).unwrap().0, &[1u8; 800]);
@@ -910,12 +937,12 @@ mod tests {
             }),
             None,
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         let mut called = false;
         updater.ingest(key(2), None, false, |_| called = true);
         assert!(called);
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
     }
@@ -936,15 +963,15 @@ mod tests {
             }),
             None,
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(1), None, false, |_| {});
         updater.ingest(key(2), None, false, |_| {});
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
 
-        assert!(leaves_tracker.get(key(1)).is_none());
+        assert!(new_leaves.inner.get(&key(1)).is_none());
     }
 
     #[test]
@@ -963,15 +990,15 @@ mod tests {
             }),
             None,
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(1), None, false, |_| {});
-        let DigestResult::Finished = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::Finished = updater.digest(&mut new_leaves) else {
             panic!()
         };
 
-        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
-        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        let new_leaf_entry = new_leaves.inner.get(&key(1)).unwrap();
+        let new_leaf = &new_leaf_entry.0;
         assert_eq!(new_leaf.n(), 1);
         assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[1u8; 1200]);
     }
@@ -993,16 +1020,16 @@ mod tests {
             }),
             Some(key(5)),
         );
-        let mut leaves_tracker = LeavesTracker::new();
+        let mut new_leaves = TestHandleNewLeaf::default();
 
         updater.ingest(key(4), Some(vec![1; 300]), false, |_| {});
-        let DigestResult::NeedsMerge(merge_key) = updater.digest(&mut leaves_tracker) else {
+        let DigestResult::NeedsMerge(merge_key) = updater.digest(&mut new_leaves) else {
             panic!()
         };
         assert_eq!(merge_key, key(5));
 
-        let new_leaf_entry = leaves_tracker.get(key(1)).unwrap();
-        let new_leaf = new_leaf_entry.inserted.as_ref().unwrap();
+        let new_leaf_entry = new_leaves.inner.get(&key(1)).unwrap();
+        let new_leaf = &new_leaf_entry.0;
         assert_eq!(new_leaf.n(), 2);
         assert_eq!(new_leaf.get(&key(1)).unwrap().0, &[1u8; 1800]);
         assert_eq!(new_leaf.get(&key(2)).unwrap().0, &[1u8; 1800]);
