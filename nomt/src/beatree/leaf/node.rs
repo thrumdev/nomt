@@ -79,6 +79,13 @@ impl LeafNode {
             .map(|(range, overflow)| (&self.inner[range], overflow))
     }
 
+    pub fn values_size(&self, from: usize, to: usize) -> usize {
+        let cell_pointers = self.cell_pointers();
+        let value_range_start = self.value_range(cell_pointers, from).0.start;
+        let value_range_end = self.value_range(cell_pointers, to - 1).0.end;
+        value_range_end - value_range_start
+    }
+
     // returns the range at which the value of a cell is stored
     fn value_range(&self, cell_pointers: &[[u8; 34]], index: usize) -> (Range<usize>, bool) {
         let (start, overflow) = cell_offset(cell_pointers, index);

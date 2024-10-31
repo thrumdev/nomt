@@ -227,11 +227,7 @@ fn reset_leaf_base(
     }
 
     if let Some((separator, node, next_separator)) = leaves_tracker.pending_base.take() {
-        let base = BaseLeaf {
-            node,
-            iter_pos: 0,
-            separator,
-        };
+        let base = BaseLeaf::new(node, separator);
         leaf_updater.reset_base(Some(base), next_separator);
     } else {
         if let Some(separator) = leaves_tracker
@@ -275,16 +271,15 @@ fn reset_leaf_base_fresh(
     // any new leaves produced by the updater will replace it.
     leaves_tracker.delete(separator, leaf_pn, cutoff);
 
-    let base = BaseLeaf {
-        node: leaf_cache
+    let base = BaseLeaf::new(
+        leaf_cache
             .remove(&leaf_pn)
             .map(|(_, l)| l)
             .unwrap_or_else(|| LeafNode {
                 inner: leaf_reader.query(leaf_pn),
             }),
-        iter_pos: 0,
         separator,
-    };
+    );
 
     leaf_updater.reset_base(Some(base), cutoff);
 }
