@@ -8,7 +8,6 @@ use threadpool::ThreadPool;
 use crate::io::{IoHandle, IoPool, PagePool};
 
 pub(crate) mod allocator;
-mod bbn;
 pub(crate) mod branch;
 mod index;
 mod leaf;

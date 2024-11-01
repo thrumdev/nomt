@@ -11,4 +11,3 @@
 
 pub mod node;
 pub mod overflow;
-pub mod store;
