@@ -6,12 +6,11 @@ use dashmap::DashMap;
 use threadpool::ThreadPool;
 
 use crate::beatree::{
-    allocator::PageNumber,
+    allocator::{PageNumber, StoreReader, SyncAllocator},
     index::Index,
     leaf::{
         node::{LeafNode, MAX_LEAF_VALUE_SIZE},
         overflow,
-        store::{LeafStoreReader, LeafStoreWriter},
     },
     ops::{
         search_branch,
@@ -26,11 +25,10 @@ use crate::beatree::{
     },
     Key,
 };
-use crate::io::PagePool;
+use crate::io::{IoCommand, IoHandle, IoKind, PAGE_SIZE};
 
 /// Tracker of all changes that happen to leaves during an update
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
-type ChangedLeafEntry = super::ChangedNodeEntry<LeafNode>;
 
 fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNumber)> {
     let Some((_, branch)) = bbn_index.lookup(key) else {
@@ -51,32 +49,58 @@ fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNu
     Some((separator, cutoff, leaf_pn))
 }
 
+/// Data, including buffers, which may be dropped only once I/O has certainly concluded.
+#[derive(Default)]
+pub struct PostIoDrop {
+    worker_changes: Vec<LeafWorkerOutput>,
+}
+
+/// Outputs of the leaf stage.
+#[derive(Default)]
+pub struct LeafStageOutput {
+    /// The changed leaves.
+    pub leaf_changeset: Vec<(Key, Option<PageNumber>)>,
+    /// The page numbers of all freed pages.
+    pub freed_pages: Vec<PageNumber>,
+    /// The number of submitted I/Os.
+    pub submitted_io: usize,
+    /// Data which should be dropped after all submitted I/Os have concluded.
+    pub post_io_drop: PostIoDrop,
+}
+
 /// Change the btree's leaves in the specified way
 pub fn run(
     bbn_index: &Index,
-    leaf_cache: DashMap<PageNumber, LeafNode>,
-    leaf_reader: &LeafStoreReader,
-    leaf_writer: &mut LeafStoreWriter,
+    leaf_cache: DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_reader: StoreReader,
+    leaf_writer: SyncAllocator,
+    io_handle: IoHandle,
     changeset: Arc<BTreeMap<Key, Option<Vec<u8>>>>,
     thread_pool: ThreadPool,
     num_workers: usize,
-) -> Vec<(Key, Option<PageNumber>)> {
+) -> anyhow::Result<LeafStageOutput> {
     if changeset.is_empty() {
-        return Vec::new();
+        return Ok(LeafStageOutput::default());
     }
+
+    let mut overflow_io = 0;
+    let page_pool = leaf_reader.page_pool().clone();
 
     let changeset = changeset
         .iter()
         .map(|(k, v)| match v {
-            Some(v) if v.len() <= MAX_LEAF_VALUE_SIZE => (*k, Some((v.clone(), false))),
+            Some(v) if v.len() <= MAX_LEAF_VALUE_SIZE => Ok((*k, Some((v.clone(), false)))),
             Some(large_value) => {
-                let pages = overflow::chunk(&large_value, leaf_writer);
+                let (pages, num_writes) =
+                    overflow::chunk(&large_value, &leaf_writer, &page_pool, &io_handle)?;
+                overflow_io += num_writes;
+
                 let cell = overflow::encode_cell(large_value.len(), &pages);
-                (*k, Some((cell, true)))
+                Ok((*k, Some((cell, true))))
             }
-            None => (*k, None),
+            None => Ok((*k, None)),
         })
-        .collect::<Vec<_>>();
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     assert!(num_workers >= 1);
     let workers = prepare_workers(bbn_index, &changeset, num_workers);
@@ -92,7 +116,8 @@ pub fn run(
         let bbn_index = bbn_index.clone();
         let leaf_cache = leaf_cache.clone();
         let leaf_reader = leaf_reader.clone();
-        let page_pool = leaf_writer.page_pool().clone();
+        let leaf_writer = leaf_writer.clone();
+        let io_handle = io_handle.clone();
         let changeset = changeset.clone();
 
         let worker_result_tx = worker_result_tx.clone();
@@ -103,7 +128,8 @@ pub fn run(
                 bbn_index,
                 &*leaf_cache,
                 leaf_reader,
-                page_pool,
+                leaf_writer,
+                io_handle,
                 &*changeset,
                 worker_params,
             );
@@ -116,43 +142,47 @@ pub fn run(
     drop(changeset);
     drop(leaf_cache);
 
-    let mut changes = Vec::new();
+    let mut output = LeafStageOutput::default();
+    output.submitted_io += overflow_io;
 
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
-        let (worker_changes, worker_deleted_overflow) = worker_result_rx.recv().unwrap();
-        apply_leaf_changes(
-            leaf_reader,
-            leaf_writer,
-            &mut changes,
-            worker_changes,
-            worker_deleted_overflow,
-        );
+        let worker_output = worker_result_rx.recv().unwrap();
+        apply_worker_changes(&leaf_reader, &mut output, worker_output);
     }
 
-    changes.sort_by_key(|(k, _)| *k);
-    changes
+    output.leaf_changeset.sort_by_key(|(k, _)| *k);
+    Ok(output)
 }
 
-fn apply_leaf_changes(
-    leaf_reader: &LeafStoreReader,
-    leaf_writer: &mut LeafStoreWriter,
-    total_changes: &mut Vec<(Key, Option<PageNumber>)>,
-    changes: BTreeMap<Key, ChangedLeafEntry>,
-    deleted_overflow: Vec<Vec<u8>>,
+fn apply_worker_changes(
+    leaf_reader: &StoreReader,
+    output: &mut LeafStageOutput,
+    mut worker_output: LeafWorkerOutput,
 ) {
-    for deleted_overflow_cell in deleted_overflow {
-        overflow::delete(&deleted_overflow_cell, leaf_reader, leaf_writer);
+    for deleted_overflow_cell in worker_output.overflow_deleted.drain(..) {
+        overflow::delete(&deleted_overflow_cell, leaf_reader, &mut output.freed_pages);
     }
 
-    for (key, leaf_entry) in changes {
-        let leaf_pn = leaf_entry.inserted.map(|leaf| leaf_writer.write(leaf));
-        if let Some(prev_pn) = leaf_entry.deleted {
-            leaf_writer.release(prev_pn);
+    for (key, leaf_entry) in &worker_output.leaves_tracker.inner {
+        let leaf_pn = leaf_entry.inserted.as_ref().map(|(_leaf, pn)| pn.clone());
+        if leaf_pn.is_some() {
+            output.submitted_io += 1;
         }
 
-        total_changes.push((key, leaf_pn));
+        if let Some(prev_pn) = leaf_entry.deleted {
+            output.freed_pages.push(prev_pn);
+        }
+
+        output.leaf_changeset.push((*key, leaf_pn));
     }
+
+    output.submitted_io += worker_output.leaves_tracker.extra_freed.len();
+    output
+        .freed_pages
+        .extend(worker_output.leaves_tracker.extra_freed.drain(..));
+
+    output.post_io_drop.worker_changes.push(worker_output);
 }
 
 fn prepare_workers(
@@ -248,8 +278,8 @@ fn prepare_workers(
 
 fn reset_leaf_base(
     bbn_index: &Index,
-    leaf_cache: &DashMap<PageNumber, LeafNode>,
-    leaf_reader: &LeafStoreReader,
+    leaf_cache: &DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_reader: &StoreReader,
     leaves_tracker: &mut LeavesTracker,
     leaf_updater: &mut LeafUpdater,
     has_extended_range: bool,
@@ -298,8 +328,8 @@ fn reset_leaf_base(
 
 fn reset_leaf_base_fresh(
     bbn_index: &Index,
-    leaf_cache: &DashMap<PageNumber, LeafNode>,
-    leaf_reader: &LeafStoreReader,
+    leaf_cache: &DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_reader: &StoreReader,
     leaves_tracker: &mut LeavesTracker,
     leaf_updater: &mut LeafUpdater,
     key: Key,
@@ -316,8 +346,10 @@ fn reset_leaf_base_fresh(
         leaf_cache
             .remove(&leaf_pn)
             .map(|(_, l)| l)
-            .unwrap_or_else(|| LeafNode {
-                inner: leaf_reader.query(leaf_pn),
+            .unwrap_or_else(|| {
+                Arc::new(LeafNode {
+                    inner: leaf_reader.query(leaf_pn),
+                })
             }),
         separator,
     );
@@ -325,27 +357,38 @@ fn reset_leaf_base_fresh(
     leaf_updater.reset_base(Some(base), cutoff);
 }
 
+struct LeafWorkerOutput {
+    leaves_tracker: LeavesTracker,
+    overflow_deleted: Vec<Vec<u8>>,
+}
+
 fn run_worker(
     bbn_index: Index,
-    leaf_cache: &DashMap<PageNumber, LeafNode>,
-    leaf_reader: LeafStoreReader,
-    page_pool: PagePool,
+    leaf_cache: &DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_reader: StoreReader,
+    leaf_writer: SyncAllocator,
+    io_handle: IoHandle,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     mut worker_params: WorkerParams<LeafNode>,
-) -> (BTreeMap<Key, ChangedLeafEntry>, Vec<Vec<u8>>) {
-    let mut leaves_tracker = LeavesTracker::new();
-    let mut leaf_updater = LeafUpdater::new(page_pool, None, None);
+) -> LeafWorkerOutput {
+    let mut leaf_updater = LeafUpdater::new(leaf_reader.page_pool().clone(), None, None);
     let mut overflow_deleted = Vec::new();
     let mut pending_left_request = None;
     let mut has_extended_range = false;
     let mut has_finished_workload = false;
+
+    let mut new_leaf_state = NewLeafHandler {
+        leaf_writer,
+        leaves_tracker: LeavesTracker::new(),
+        io_handle,
+    };
 
     // point leaf updater at first leaf.
     reset_leaf_base(
         &bbn_index,
         &leaf_cache,
         &leaf_reader,
-        &mut leaves_tracker,
+        &mut new_leaf_state.leaves_tracker,
         &mut leaf_updater,
         has_extended_range,
         changeset[worker_params.op_range.start].0,
@@ -356,7 +399,7 @@ fn run_worker(
         //    done _or_ key is in scope.
         while !leaf_updater.is_in_scope(&key) {
             let k = if let LeafDigestResult::NeedsMerge(cutoff) =
-                leaf_updater.digest(&mut leaves_tracker)
+                leaf_updater.digest(&mut new_leaf_state)
             {
                 cutoff
             } else {
@@ -366,7 +409,7 @@ fn run_worker(
             try_answer_left_neighbor(
                 &mut pending_left_request,
                 &mut worker_params,
-                &mut leaves_tracker,
+                &mut new_leaf_state.leaves_tracker,
                 has_finished_workload,
             );
 
@@ -375,7 +418,7 @@ fn run_worker(
                 has_extended_range = true;
                 super::extend_range_protocol::request_range_extension(
                     &mut worker_params,
-                    &mut leaves_tracker,
+                    &mut new_leaf_state.leaves_tracker,
                 );
             }
 
@@ -383,7 +426,7 @@ fn run_worker(
                 &bbn_index,
                 leaf_cache,
                 &leaf_reader,
-                &mut leaves_tracker,
+                &mut new_leaf_state.leaves_tracker,
                 &mut leaf_updater,
                 has_extended_range,
                 k,
@@ -399,11 +442,11 @@ fn run_worker(
         leaf_updater.ingest(*key, value_change, overflow, delete_overflow);
     }
 
-    while let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut leaves_tracker) {
+    while let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut new_leaf_state) {
         try_answer_left_neighbor(
             &mut pending_left_request,
             &mut worker_params,
-            &mut leaves_tracker,
+            &mut new_leaf_state.leaves_tracker,
             has_finished_workload,
         );
 
@@ -414,14 +457,14 @@ fn run_worker(
             .map_or(false, |high| cutoff >= high)
         {
             has_extended_range = true;
-            request_range_extension(&mut worker_params, &mut leaves_tracker);
+            request_range_extension(&mut worker_params, &mut new_leaf_state.leaves_tracker);
         }
 
         reset_leaf_base(
             &bbn_index,
             leaf_cache,
             &leaf_reader,
-            &mut leaves_tracker,
+            &mut new_leaf_state.leaves_tracker,
             &mut leaf_updater,
             has_extended_range,
             cutoff,
@@ -438,7 +481,7 @@ fn run_worker(
         try_answer_left_neighbor(
             &mut pending_left_request,
             &mut worker_params,
-            &mut leaves_tracker,
+            &mut new_leaf_state.leaves_tracker,
             has_finished_workload,
         );
         // we're done with the right worker so we're sure
@@ -456,5 +499,35 @@ fn run_worker(
         }
     }
 
-    (leaves_tracker.inner, overflow_deleted)
+    LeafWorkerOutput {
+        leaves_tracker: new_leaf_state.leaves_tracker,
+        overflow_deleted,
+    }
+}
+
+struct NewLeafHandler {
+    leaf_writer: SyncAllocator,
+    leaves_tracker: LeavesTracker,
+    io_handle: IoHandle,
+}
+
+impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
+    fn handle_new_leaf(&mut self, key: Key, leaf: LeafNode, cutoff: Option<Key>) {
+        let leaf = Arc::new(leaf);
+        let fd = self.leaf_writer.store_fd();
+
+        // TODO: handle error
+        let page_number = self.leaf_writer.allocate().unwrap();
+
+        // TODO: handle error
+        let ptr = leaf.inner.as_ptr();
+        self.io_handle
+            .send(IoCommand {
+                kind: IoKind::WriteRaw(fd, page_number.0 as u64, ptr, PAGE_SIZE),
+                user_data: 0,
+            })
+            .expect("I/O Pool Down");
+
+        self.leaves_tracker.insert(key, leaf, cutoff, page_number);
+    }
 }

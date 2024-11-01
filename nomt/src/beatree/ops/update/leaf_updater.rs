@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 
 use crate::beatree::{
     leaf::node::{self as leaf_node, LeafBuilder, LeafNode, LEAF_NODE_BODY_SIZE},
@@ -7,19 +7,16 @@ use crate::beatree::{
 };
 use crate::io::PagePool;
 
-use super::{
-    leaf_stage::LeavesTracker, LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD,
-    LEAF_MERGE_THRESHOLD,
-};
+use super::{LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD};
 
 pub struct BaseLeaf {
-    pub node: LeafNode,
+    pub node: Arc<LeafNode>,
     pub separator: Key,
     low: usize,
 }
 
 impl BaseLeaf {
-    pub fn new(node: LeafNode, separator: Key) -> Self {
+    pub fn new(node: Arc<LeafNode>, separator: Key) -> Self {
         BaseLeaf {
             node,
             separator,
@@ -101,12 +98,6 @@ pub enum DigestResult {
 /// A callback which takes ownership of newly created leaves.
 pub trait HandleNewLeaf {
     fn handle_new_leaf(&mut self, separator: Key, node: LeafNode, cutoff: Option<Key>);
-}
-
-impl HandleNewLeaf for LeavesTracker {
-    fn handle_new_leaf(&mut self, separator: Key, node: LeafNode, cutoff: Option<Key>) {
-        self.insert(separator, node, cutoff)
-    }
 }
 
 pub struct LeafUpdater {
@@ -654,7 +645,7 @@ mod tests {
         separate, BaseLeaf, DigestResult, HandleNewLeaf, Key, LeafBuilder, LeafNode, LeafOp,
         LeafUpdater, PagePool,
     };
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
     lazy_static::lazy_static! {
         static ref PAGE_POOL: PagePool = PagePool::new();
@@ -675,7 +666,7 @@ mod tests {
         [x; 32]
     }
 
-    fn make_leaf(vs: Vec<(Key, Vec<u8>, bool)>) -> LeafNode {
+    fn make_leaf(vs: Vec<(Key, Vec<u8>, bool)>) -> Arc<LeafNode> {
         let n = vs.len();
         let total_value_size = vs.iter().map(|(_, v, _)| v.len()).sum();
 
@@ -684,7 +675,7 @@ mod tests {
             builder.push_cell(k, &v, overflow);
         }
 
-        builder.finish()
+        Arc::new(builder.finish())
     }
 
     #[test]

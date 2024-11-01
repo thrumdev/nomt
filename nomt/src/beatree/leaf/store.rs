@@ -1,3 +1,5 @@
+#![allow(unused)] // TODO: delete in follow-up.
+
 use crate::{
     beatree::{
         allocator::{AllocatorCommitOutput, AllocatorReader, AllocatorWriter, PageNumber},

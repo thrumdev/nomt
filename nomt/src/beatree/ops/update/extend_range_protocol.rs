@@ -185,11 +185,9 @@ pub fn request_range_extension<Node>(
     if let Some((last_key, last_changed_entry)) = response.changed.last_mut() {
         if last_changed_entry.inserted.is_some() {
             // UNWRAP: the entry has just been checked to have an inserted node
-            nodes_tracker.pending_base = Some((
-                *last_key,
-                last_changed_entry.inserted.take().unwrap(),
-                last_changed_entry.next_separator,
-            ));
+            let (node, pn) = last_changed_entry.inserted.take().unwrap();
+
+            nodes_tracker.set_pending_base(*last_key, node, last_changed_entry.next_separator, pn);
         }
     }
 

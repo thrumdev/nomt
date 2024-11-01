@@ -10,8 +10,7 @@ use crate::beatree::{
 use crate::io::PagePool;
 
 use super::{
-    branch_stage::BranchesTracker, get_key, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
-    BRANCH_MERGE_THRESHOLD,
+    get_key, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD, BRANCH_MERGE_THRESHOLD,
 };
 
 pub struct BaseBranch {
@@ -54,12 +53,6 @@ pub enum DigestResult {
 /// A callback which takes ownership of newly created leaves.
 pub trait HandleNewBranch {
     fn handle_new_branch(&mut self, separator: Key, node: BranchNode, cutoff: Option<Key>);
-}
-
-impl HandleNewBranch for BranchesTracker {
-    fn handle_new_branch(&mut self, separator: Key, node: BranchNode, cutoff: Option<Key>) {
-        self.insert(separator, node, cutoff)
-    }
 }
 
 pub struct BranchUpdater {

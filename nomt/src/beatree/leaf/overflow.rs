@@ -10,32 +10,38 @@
 /// bytes: [u8; n_bytes]
 /// ```
 use crate::{
-    beatree::PageNumber,
-    io::{page_pool::FatPage, PAGE_SIZE},
+    beatree::{
+        allocator::{StoreReader, SyncAllocator},
+        PageNumber,
+    },
+    io::{page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
 };
 
-use super::{
-    node::MAX_OVERFLOW_CELL_NODE_POINTERS,
-    store::{LeafStoreReader, LeafStoreWriter},
-};
+use super::node::MAX_OVERFLOW_CELL_NODE_POINTERS;
 
 const BODY_SIZE: usize = PAGE_SIZE - 4;
 const MAX_PNS: usize = BODY_SIZE / 4;
 const HEADER_SIZE: usize = 4;
 
-/// Encode a large value into freshly allocated overflow pages. Returns a vector of page pointers.
-pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber> {
+/// Encode a large value into freshly allocated overflow pages. Returns a vector of page pointers
+/// and the total number of page writes submitted.
+pub fn chunk(
+    value: &[u8],
+    leaf_writer: &SyncAllocator,
+    page_pool: &PagePool,
+    io_handle: &IoHandle,
+) -> anyhow::Result<(Vec<PageNumber>, usize)> {
     assert!(!value.is_empty());
 
     let total_pages = total_needed_pages(value.len());
     let cell_pages = std::cmp::min(total_pages, MAX_OVERFLOW_CELL_NODE_POINTERS);
     let cell = (0..cell_pages)
-        .map(|_| leaf_writer.preallocate())
-        .collect::<Vec<_>>();
+        .map(|_| leaf_writer.allocate())
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let other_pages = (0..total_pages)
         .skip(cell_pages)
-        .map(|_| leaf_writer.preallocate())
-        .collect::<Vec<_>>();
+        .map(|_| leaf_writer.allocate())
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let all_pages = cell.iter().cloned().chain(other_pages.iter().cloned());
     let mut to_write = other_pages.iter().cloned();
@@ -46,7 +52,7 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         assert!(!value.is_empty());
 
         // allocate a page.
-        let mut page = leaf_writer.page_pool().alloc_fat_page();
+        let mut page = page_pool.alloc_fat_page();
         let mut pns_written = 0;
 
         // write as many page numbers as possible.
@@ -71,11 +77,15 @@ pub fn chunk(value: &[u8], leaf_writer: &mut LeafStoreWriter) -> Vec<PageNumber>
         value = &value[bytes..];
 
         // write the page.
-        leaf_writer.write_preallocated(pn, page);
+        let command = IoCommand {
+            kind: IoKind::Write(leaf_writer.store_fd(), pn.0 as u64, page),
+            user_data: 0,
+        };
+        io_handle.send(command).expect("I/O Pool Down");
     }
     assert!(value.is_empty());
 
-    cell
+    Ok((cell, total_pages))
 }
 
 /// Decode an overflow cell, returning the size of the value plus the pages numbers within the cell.
@@ -158,7 +168,8 @@ fn needed_pages(size: usize) -> usize {
     (size + BODY_SIZE - 1) / BODY_SIZE
 }
 
-pub fn read(cell: &[u8], leaf_reader: &LeafStoreReader) -> Vec<u8> {
+/// Read a large value from pages referenced by an overflow cell.
+pub fn read(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
     let (value_size, cell_pages) = decode_cell(cell);
     let total_pages = total_needed_pages(value_size);
 
@@ -180,17 +191,18 @@ pub fn read(cell: &[u8], leaf_reader: &LeafStoreReader) -> Vec<u8> {
     value
 }
 
-pub fn delete(cell: &[u8], leaf_reader: &LeafStoreReader, leaf_writer: &mut LeafStoreWriter) {
+/// Iterate all pages related to an overflow cell and push onto a free-list.
+pub fn delete(cell: &[u8], leaf_reader: &StoreReader, freed: &mut Vec<PageNumber>) {
     let (value_size, cell_pages) = decode_cell(cell);
     let total_pages = total_needed_pages(value_size);
 
-    let mut page_numbers = Vec::with_capacity(total_pages);
-    page_numbers.extend(cell_pages);
+    let start = freed.len();
+    freed.extend(cell_pages);
 
     for i in 0..total_pages {
-        let page = leaf_reader.query(page_numbers[i]);
+        let page = leaf_reader.query(freed[start + i]);
         let (page_pns, bytes) = read_page(&page);
-        page_numbers.extend(page_pns);
+        freed.extend(page_pns);
 
         // stop at the first page containing value data. no more pages will have more
         // page numbers to release.
@@ -199,11 +211,7 @@ pub fn delete(cell: &[u8], leaf_reader: &LeafStoreReader, leaf_writer: &mut Leaf
         }
     }
 
-    assert_eq!(page_numbers.len(), total_pages);
-
-    for pn in page_numbers {
-        leaf_writer.release(pn);
-    }
+    assert_eq!(freed.len() - start, total_pages);
 }
 
 fn read_page<'a>(page: &'a FatPage) -> (impl Iterator<Item = PageNumber> + 'a, &'a [u8]) {
