@@ -44,11 +44,6 @@ impl Index {
     pub fn insert(&mut self, separator: Key, branch: Arc<BranchNode>) -> Option<Arc<BranchNode>> {
         self.first_key_map.insert(separator, branch)
     }
-
-    #[cfg(test)]
-    pub fn into_iter(self) -> impl Iterator<Item = (Key, Arc<BranchNode>)> {
-        self.first_key_map.into_iter()
-    }
 }
 
 struct RangeFromExclusive {
