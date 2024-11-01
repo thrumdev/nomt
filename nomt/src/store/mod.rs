@@ -22,7 +22,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt as _;
 
-pub use self::page_loader::{PageLoad, PageLoadAdvance, PageLoadCompletion, PageLoader};
+pub use self::page_loader::{PageLoad, PageLoadCompletion, PageLoader};
 pub use bitbox::BucketIndex;
 
 mod flock;

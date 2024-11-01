@@ -5,7 +5,7 @@ use crossbeam_channel::{Receiver, Sender};
 const MAX_IN_FLIGHT: usize = 64;
 
 pub fn start_io_worker(io_workers: usize, _iopoll: bool) -> Sender<IoPacket> {
-    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT);
+    let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
     for _ in 0..io_workers {
         spawn_worker_thread(command_rx.clone());

@@ -1,7 +1,7 @@
 #[cfg(not(target_family = "unix"))]
 std::compile_error!("NOMT only supports Unix-based OSs");
 
-use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError, TrySendError};
+use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError};
 use std::{fs::File, os::fd::RawFd};
 
 #[cfg(target_os = "linux")]
@@ -129,7 +129,7 @@ pub struct IoHandle {
 }
 
 impl IoHandle {
-    /// Block the current thread to send an I/O command. This fails if the channel has hung up.
+    /// Send an I/O command. This fails if the channel has hung up, but does not block the thread.
     pub fn send(&self, command: IoCommand) -> Result<(), SendError<IoCommand>> {
         self.sender
             .send(IoPacket {
@@ -137,20 +137,6 @@ impl IoHandle {
                 completion_sender: self.completion_sender.clone(),
             })
             .map_err(|SendError(packet)| SendError(packet.command))
-    }
-
-    /// Try to send an I/O command without blocking. This fails if the channel is full or has
-    /// disconnected.
-    pub fn try_send(&self, command: IoCommand) -> Result<(), TrySendError<IoCommand>> {
-        self.sender
-            .try_send(IoPacket {
-                command,
-                completion_sender: self.completion_sender.clone(),
-            })
-            .map_err(|err| match err {
-                TrySendError::Full(packet) => TrySendError::Full(packet.command),
-                TrySendError::Disconnected(packet) => TrySendError::Disconnected(packet.command),
-            })
     }
 
     /// Block the current thread on receiving an I/O completion.
