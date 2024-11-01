@@ -58,11 +58,15 @@ impl Sync {
             page_diffs,
         );
 
-        let (beatree_writeout_wd, meta_wd) =
+        let (beatree_trigger_fsync_rx, meta_wd) =
             spawn_prepare_sync_beatree(&self.tp, &mut value_tx, beatree.clone());
 
-        let (bbn_writeout_done, ln_writeout_done) =
-            spawn_fsync_beatree(&self.tp, &shared.bbn_fd, &shared.ln_fd, beatree_writeout_wd);
+        let (bbn_writeout_done, ln_writeout_done) = spawn_fsync_beatree(
+            &self.tp,
+            &shared.bbn_fd,
+            &shared.ln_fd,
+            beatree_trigger_fsync_rx,
+        );
         let bitbox_writeout_done = spawn_wal_writeout(&self.tp, &shared.wal_fd, bitbox_wal_wd);
 
         bbn_writeout_done.recv().unwrap();
@@ -178,23 +182,23 @@ fn spawn_prepare_sync_beatree(
     beatree: beatree::Tree,
 ) -> (Receiver<()>, Receiver<beatree::SyncData>) {
     let batch = mem::take(&mut tx.batch);
-    let (sync_result_tx, sync_result_rx) = channel::bounded(1);
+    let (trigger_fsync_tx, trigger_fsync_rx) = channel::bounded(1);
     let (meta_result_tx, meta_result_rx) = channel::bounded(1);
     let tp = tp.clone();
     tp.execute(move || {
         beatree.commit(batch);
         let meta = beatree.prepare_sync();
-        let _ = sync_result_tx.send(());
+        let _ = trigger_fsync_tx.send(());
         let _ = meta_result_tx.send(meta);
     });
-    (sync_result_rx, meta_result_rx)
+    (trigger_fsync_rx, meta_result_rx)
 }
 
 fn spawn_fsync_beatree(
     tp: &ThreadPool,
     bbn_fd: &File,
     ln_fd: &File,
-    beatree_writeout_rx: Receiver<()>,
+    beatree_trigger_fsync_rx: Receiver<()>,
 ) -> (Receiver<()>, Receiver<()>) {
     let (bbn_result_tx, bbn_result_rx) = channel::bounded(1);
     let (ln_result_tx, ln_result_rx) = channel::bounded(1);
@@ -203,7 +207,7 @@ fn spawn_fsync_beatree(
         let ln_fd = ln_fd.try_clone().unwrap();
         let tp = tp.clone();
         move || {
-            let () = beatree_writeout_rx.recv().unwrap();
+            let () = beatree_trigger_fsync_rx.recv().unwrap();
             tp.execute(move || {
                 bbn_fd.sync_all().unwrap();
                 let _ = bbn_result_tx.send(());
