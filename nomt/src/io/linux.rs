@@ -16,7 +16,7 @@ struct PendingIo {
 
 pub fn start_io_worker(io_workers: usize, iopoll: bool) -> Sender<IoPacket> {
     // main bound is from the pending slab.
-    let (command_tx, command_rx) = crossbeam_channel::unbounded();
+    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * io_workers);
 
     start_workers(command_rx, io_workers, iopoll);
 

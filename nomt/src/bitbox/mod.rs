@@ -1,4 +1,4 @@
-use crossbeam::channel::TryRecvError;
+use crossbeam::channel::{TryRecvError, TrySendError};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use std::{
@@ -289,6 +289,51 @@ impl PageLoader {
         }
     }
 
+    /// Try to advance the state of the given page load. Fails if the I/O pool is down.
+    ///
+    /// Panics if the page load needs a completion.
+    ///
+    /// This returns a value indicating the state of the page load.
+    /// The user_data is only relevant if `Submitted` is returned, in which case a completion will
+    /// arrive with the same user data at some point.
+    pub fn try_advance(
+        &self,
+        ht_fd: RawFd,
+        load: &mut PageLoad,
+        user_data: u64,
+    ) -> anyhow::Result<PageLoadAdvance> {
+        let bucket = match load.take_blocked() {
+            Some(bucket) => bucket,
+            None => loop {
+                match load.probe_sequence.next(&self.meta_map) {
+                    ProbeResult::Tombstone(_) => continue,
+                    ProbeResult::Empty(_) => return Ok(PageLoadAdvance::GuaranteedFresh),
+                    ProbeResult::PossibleHit(bucket) => break BucketIndex(bucket),
+                }
+            },
+        };
+
+        let data_page_index = self.shared.store.data_page_index(bucket.0);
+
+        let page = self.io_handle.page_pool().alloc_fat_page();
+        let command = IoCommand {
+            kind: IoKind::Read(ht_fd, data_page_index, page),
+            user_data,
+        };
+
+        match self.io_handle.try_send(command) {
+            Ok(()) => {
+                load.state = PageLoadState::Submitted;
+                Ok(PageLoadAdvance::Submitted)
+            }
+            Err(TrySendError::Full(_)) => {
+                load.state = PageLoadState::Blocked;
+                Ok(PageLoadAdvance::Blocked)
+            }
+            Err(TrySendError::Disconnected(_)) => anyhow::bail!("I/O pool hangup"),
+        }
+    }
+
     /// Advance the state of the given page load, blocking the current thread.
     /// Fails if the I/O pool is down.
     ///
@@ -302,12 +347,15 @@ impl PageLoader {
         load: &mut PageLoad,
         user_data: u64,
     ) -> anyhow::Result<bool> {
-        let bucket = loop {
-            match load.probe_sequence.next(&self.meta_map) {
-                ProbeResult::Tombstone(_) => continue,
-                ProbeResult::Empty(_) => return Ok(false),
-                ProbeResult::PossibleHit(bucket) => break BucketIndex(bucket),
-            }
+        let bucket = match load.take_blocked() {
+            Some(bucket) => bucket,
+            None => loop {
+                match load.probe_sequence.next(&self.meta_map) {
+                    ProbeResult::Tombstone(_) => continue,
+                    ProbeResult::Empty(_) => return Ok(false),
+                    ProbeResult::PossibleHit(bucket) => break BucketIndex(bucket),
+                }
+            },
         };
 
         let data_page_index = self.shared.store.data_page_index(bucket.0);
@@ -394,6 +442,16 @@ impl PageLoadCompletion {
     }
 }
 
+/// The result of advancing a page load.
+pub enum PageLoadAdvance {
+    /// The page load is blocked by I/O backpressure.
+    Blocked,
+    /// The page load was submitted and a completion will follow.
+    Submitted,
+    /// The page is guaranteed not to exist.
+    GuaranteedFresh,
+}
+
 pub struct PageLoad {
     page_id: PageId,
     probe_sequence: ProbeSequence,
@@ -408,11 +466,20 @@ impl PageLoad {
     pub fn page_id(&self) -> &PageId {
         &self.page_id
     }
+
+    fn take_blocked(&mut self) -> Option<BucketIndex> {
+        match std::mem::replace(&mut self.state, PageLoadState::Pending) {
+            PageLoadState::Pending => None,
+            PageLoadState::Blocked => Some(BucketIndex(self.probe_sequence.bucket())),
+            PageLoadState::Submitted => panic!("attempted to re-submit page load"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum PageLoadState {
     Pending,
+    Blocked,
     Submitted,
 }
 
