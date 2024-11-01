@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 use threadpool::ThreadPool;
 
 use crate::beatree::{
-    allocator::PageNumber, bbn::BbnStoreWriter, branch::node::BranchNode, index::Index, Key,
+    allocator::{PageNumber, SyncAllocator},
+    branch::node::BranchNode,
+    index::Index,
+    Key,
 };
 
-use crate::io::PagePool;
+use crate::io::{IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE};
 
 use super::branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
 use super::extend_range_protocol::{
@@ -17,19 +19,36 @@ use super::extend_range_protocol::{
 
 /// Tracker of all changes that happen to branch nodes during an update
 pub type BranchesTracker = super::NodesTracker<BranchNode>;
-type ChangedBranchEntry = super::ChangedNodeEntry<BranchNode>;
+
+/// Data, including buffers, which may be dropped only once I/O has certainly concluded.
+#[derive(Default)]
+pub struct PostIoDrop {
+    deferred_drop_pages: Vec<Vec<Arc<BranchNode>>>,
+}
+
+/// Outputs of the branch stage.
+#[derive(Default)]
+pub struct BranchStageOutput {
+    /// The page numbers of all freed pages.
+    pub freed_pages: Vec<PageNumber>,
+    /// The number of submitted I/Os.
+    pub submitted_io: usize,
+    /// Data which should be dropped after all submitted I/Os have concluded.
+    pub post_io_drop: PostIoDrop,
+}
 
 /// Change the btree's branch nodes in the specified way.
 pub fn run(
     bbn_index: &mut Index,
-    bbn_writer: &mut BbnStoreWriter,
+    bbn_writer: SyncAllocator,
     page_pool: PagePool,
+    io_handle: IoHandle,
     changeset: Vec<(Key, Option<PageNumber>)>,
     thread_pool: ThreadPool,
     num_workers: usize,
-) {
+) -> anyhow::Result<BranchStageOutput> {
     if changeset.is_empty() {
-        return;
+        return Ok(BranchStageOutput::default());
     }
 
     assert!(num_workers >= 1);
@@ -43,14 +62,23 @@ pub fn run(
 
     for worker_params in workers {
         let bbn_index = bbn_index.clone();
+        let bbn_writer = bbn_writer.clone();
         let page_pool = page_pool.clone();
+        let io_handle = io_handle.clone();
         let changeset = changeset.clone();
 
         let worker_result_tx = worker_result_tx.clone();
         thread_pool.execute(move || {
             // passing the large `Arc` values by reference ensures that they are dropped at the
             // end of this scope, not the end of `run_worker`.
-            let res = run_worker(bbn_index, page_pool, &*changeset, worker_params);
+            let res = run_worker(
+                bbn_index,
+                bbn_writer,
+                page_pool,
+                io_handle,
+                &*changeset,
+                worker_params,
+            );
             let _ = worker_result_tx.send(res);
         });
     }
@@ -58,25 +86,27 @@ pub fn run(
     // we don't want to block other sync steps on deallocating these memory regions.
     drop(changeset);
 
+    let mut output = BranchStageOutput::default();
+
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
-        let worker_changes = worker_result_rx.recv().unwrap();
-        apply_bbn_changes(bbn_index, bbn_writer, worker_changes);
+        let worker_output = worker_result_rx.recv().unwrap();
+        apply_bbn_changes(bbn_index, &mut output, worker_output);
     }
+
+    Ok(output)
 }
 
 fn apply_bbn_changes(
     bbn_index: &mut Index,
-    bbn_writer: &mut BbnStoreWriter,
-    changes: BTreeMap<Key, ChangedBranchEntry>,
+    output: &mut BranchStageOutput,
+    mut worker_output: BranchWorkerOutput,
 ) {
-    for (key, changed_branch) in changes {
+    for (key, changed_branch) in worker_output.branches_tracker.inner {
         match changed_branch.inserted {
-            Some(mut node) => {
-                bbn_writer.allocate(&mut node);
-                let node = Arc::new(node);
-                bbn_writer.write(node.clone());
+            Some((node, _pn)) => {
                 bbn_index.insert(key, node);
+                output.submitted_io += 1;
             }
             None => {
                 bbn_index.remove(&key);
@@ -84,9 +114,17 @@ fn apply_bbn_changes(
         }
 
         if let Some(deleted_pn) = changed_branch.deleted {
-            bbn_writer.release(deleted_pn);
+            output.freed_pages.push(deleted_pn);
         }
     }
+
+    output.submitted_io += worker_output.branches_tracker.extra_freed.len();
+    output
+        .freed_pages
+        .extend(worker_output.branches_tracker.extra_freed.drain(..));
+    output.post_io_drop.deferred_drop_pages.push(std::mem::take(
+        &mut worker_output.branches_tracker.deferred_drop_pages,
+    ));
 }
 
 fn prepare_workers(
@@ -193,10 +231,7 @@ fn reset_branch_base(
     }
 
     if let Some((_, node, next_separator)) = branches_tracker.pending_base.take() {
-        let base = BaseBranch {
-            node: Arc::new(node),
-            iter_pos: 0,
-        };
+        let base = BaseBranch { node, iter_pos: 0 };
         branch_updater.reset_base(Some(base), next_separator);
     } else {
         if let Some(separator) = branches_tracker
@@ -238,22 +273,33 @@ fn reset_branch_base_fresh(
     branch_updater.reset_base(Some(base), cutoff);
 }
 
+struct BranchWorkerOutput {
+    branches_tracker: BranchesTracker,
+}
+
 fn run_worker(
     bbn_index: Index,
+    bbn_writer: SyncAllocator,
     page_pool: PagePool,
+    io_handle: IoHandle,
     changeset: &[(Key, Option<PageNumber>)],
     mut worker_params: WorkerParams<BranchNode>,
-) -> BTreeMap<Key, ChangedBranchEntry> {
-    let mut branches_tracker = BranchesTracker::new();
+) -> BranchWorkerOutput {
     let mut branch_updater = BranchUpdater::new(page_pool, None, None);
     let mut pending_left_request = None;
     let mut has_extended_range = false;
     let mut has_finished_workload = false;
 
+    let mut new_branch_state = NewBranchHandler {
+        bbn_writer,
+        branches_tracker: BranchesTracker::new(),
+        io_handle,
+    };
+
     // point branch updater at first branch.
     reset_branch_base(
         &bbn_index,
-        &mut branches_tracker,
+        &mut new_branch_state.branches_tracker,
         &mut branch_updater,
         has_extended_range,
         changeset[worker_params.op_range.start].0,
@@ -264,7 +310,7 @@ fn run_worker(
         //    done _or_ key is in scope.
         while !branch_updater.is_in_scope(&key) {
             let k = if let BranchDigestResult::NeedsMerge(cutoff) =
-                branch_updater.digest(&mut branches_tracker)
+                branch_updater.digest(&mut new_branch_state)
             {
                 cutoff
             } else {
@@ -274,19 +320,19 @@ fn run_worker(
             try_answer_left_neighbor(
                 &mut pending_left_request,
                 &mut worker_params,
-                &mut branches_tracker,
+                &mut new_branch_state.branches_tracker,
                 has_finished_workload,
             );
 
             has_extended_range = false;
             if worker_params.range.high.map_or(false, |high| k >= high) {
                 has_extended_range = true;
-                request_range_extension(&mut worker_params, &mut branches_tracker);
+                request_range_extension(&mut worker_params, &mut new_branch_state.branches_tracker);
             }
 
             reset_branch_base(
                 &bbn_index,
-                &mut branches_tracker,
+                &mut new_branch_state.branches_tracker,
                 &mut branch_updater,
                 has_extended_range,
                 k,
@@ -296,12 +342,12 @@ fn run_worker(
         branch_updater.ingest(*key, *op);
     }
 
-    while let BranchDigestResult::NeedsMerge(cutoff) = branch_updater.digest(&mut branches_tracker)
+    while let BranchDigestResult::NeedsMerge(cutoff) = branch_updater.digest(&mut new_branch_state)
     {
         try_answer_left_neighbor(
             &mut pending_left_request,
             &mut worker_params,
-            &mut branches_tracker,
+            &mut new_branch_state.branches_tracker,
             has_finished_workload,
         );
 
@@ -312,12 +358,12 @@ fn run_worker(
             .map_or(false, |high| cutoff >= high)
         {
             has_extended_range = true;
-            request_range_extension(&mut worker_params, &mut branches_tracker);
+            request_range_extension(&mut worker_params, &mut new_branch_state.branches_tracker);
         }
 
         reset_branch_base(
             &bbn_index,
-            &mut branches_tracker,
+            &mut new_branch_state.branches_tracker,
             &mut branch_updater,
             has_extended_range,
             cutoff,
@@ -334,7 +380,7 @@ fn run_worker(
         try_answer_left_neighbor(
             &mut pending_left_request,
             &mut worker_params,
-            &mut branches_tracker,
+            &mut new_branch_state.branches_tracker,
             has_finished_workload,
         );
         // we're done with the right worker so we're sure
@@ -352,5 +398,36 @@ fn run_worker(
         }
     }
 
-    branches_tracker.inner
+    BranchWorkerOutput {
+        branches_tracker: new_branch_state.branches_tracker,
+    }
+}
+
+struct NewBranchHandler {
+    bbn_writer: SyncAllocator,
+    branches_tracker: BranchesTracker,
+    io_handle: IoHandle,
+}
+
+impl super::branch_updater::HandleNewBranch for NewBranchHandler {
+    fn handle_new_branch(&mut self, key: Key, mut bbn: BranchNode, cutoff: Option<Key>) {
+        let fd = self.bbn_writer.store_fd();
+
+        // TODO: handle error
+        let page_number = self.bbn_writer.allocate().unwrap();
+
+        bbn.set_bbn_pn(page_number.0);
+        let bbn = Arc::new(bbn);
+
+        // TODO: handle error
+        let ptr = bbn.as_slice().as_ptr();
+        self.io_handle
+            .send(IoCommand {
+                kind: IoKind::WriteRaw(fd, page_number.0 as u64, ptr, PAGE_SIZE),
+                user_data: 0,
+            })
+            .expect("I/O Pool Down");
+
+        self.branches_tracker.insert(key, bbn, cutoff, page_number);
+    }
 }

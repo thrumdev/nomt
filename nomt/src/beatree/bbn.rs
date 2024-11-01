@@ -1,3 +1,5 @@
+#![allow(unused)] // TODO: delete in follow-up
+
 use crate::io::{page_pool::FatPage, PagePool};
 
 use std::{collections::BTreeSet, fs::File, sync::Arc};

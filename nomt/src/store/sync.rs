@@ -1,15 +1,14 @@
 use super::{meta::Meta, MerkleTransaction, Shared, ValueTransaction};
 use crate::{
-    beatree::{self, allocator::PageNumber, branch::BranchNode},
-    bitbox,
-    io::{FatPage, IoPool, PagePool},
+    beatree, bitbox,
+    io::{FatPage, PagePool},
     merkle,
     page_cache::PageCache,
     rollback,
 };
 
 use crossbeam::channel::{self, Receiver};
-use std::{fs::File, mem, sync::Arc};
+use std::{fs::File, mem};
 use threadpool::ThreadPool;
 
 pub struct Sync {
@@ -58,17 +57,12 @@ impl Sync {
             page_cache,
             page_diffs,
         );
-        let (beatree_bbn_wd, beatree_ln_wd, meta_wd) =
+
+        let (beatree_writeout_wd, meta_wd) =
             spawn_prepare_sync_beatree(&self.tp, &mut value_tx, beatree.clone());
 
-        let (bbn_writeout_done, ln_writeout_done) = spawn_bbn_ln_writeout(
-            &self.tp,
-            &shared.io_pool,
-            &shared.bbn_fd,
-            &shared.ln_fd,
-            beatree_bbn_wd,
-            beatree_ln_wd,
-        );
+        let (bbn_writeout_done, ln_writeout_done) =
+            spawn_fsync_beatree(&self.tp, &shared.bbn_fd, &shared.ln_fd, beatree_writeout_wd);
         let bitbox_writeout_done = spawn_wal_writeout(&self.tp, &shared.wal_fd, bitbox_wal_wd);
 
         bbn_writeout_done.recv().unwrap();
@@ -178,126 +172,46 @@ fn spawn_prepare_sync_bitbox(
     (ht_result_rx, wal_result_rx)
 }
 
-struct BbnWriteoutData {
-    bbn: Vec<Arc<BranchNode>>,
-    bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
-    bbn_extend_file_sz: Option<u64>,
-}
-
-struct LnWriteoutData {
-    ln: Vec<(PageNumber, FatPage)>,
-    ln_freelist_pages: Vec<(PageNumber, FatPage)>,
-    ln_extend_file_sz: Option<u64>,
-}
-
-struct BeatreePostWriteout {
-    ln_freelist_pn: u32,
-    ln_bump: u32,
-    bbn_freelist_pn: u32,
-    bbn_bump: u32,
-    bbn_index: beatree::Index,
-}
-
 fn spawn_prepare_sync_beatree(
     tp: &ThreadPool,
     tx: &mut ValueTransaction,
     beatree: beatree::Tree,
-) -> (
-    Receiver<BbnWriteoutData>,
-    Receiver<LnWriteoutData>,
-    Receiver<BeatreePostWriteout>,
-) {
+) -> (Receiver<()>, Receiver<beatree::SyncData>) {
     let batch = mem::take(&mut tx.batch);
-    let (bbn_result_tx, bbn_result_rx) = channel::bounded(1);
-    let (ln_result_tx, ln_result_rx) = channel::bounded(1);
+    let (sync_result_tx, sync_result_rx) = channel::bounded(1);
     let (meta_result_tx, meta_result_rx) = channel::bounded(1);
     let tp = tp.clone();
     tp.execute(move || {
         beatree.commit(batch);
-        let beatree::WriteoutData {
-            bbn,
-            bbn_freelist_pages,
-            bbn_extend_file_sz,
-            ln,
-            ln_freelist_pages,
-            ln_extend_file_sz,
-            ln_freelist_pn,
-            ln_bump,
-            bbn_freelist_pn,
-            bbn_bump,
-            bbn_index,
-        } = beatree.prepare_sync();
-
-        let _ = bbn_result_tx.send(BbnWriteoutData {
-            bbn,
-            bbn_freelist_pages,
-            bbn_extend_file_sz,
-        });
-        let _ = ln_result_tx.send(LnWriteoutData {
-            ln,
-            ln_freelist_pages,
-            ln_extend_file_sz,
-        });
-        let _ = meta_result_tx.send(BeatreePostWriteout {
-            ln_freelist_pn,
-            ln_bump,
-            bbn_freelist_pn,
-            bbn_bump,
-            bbn_index,
-        });
+        let meta = beatree.prepare_sync();
+        let _ = sync_result_tx.send(());
+        let _ = meta_result_tx.send(meta);
     });
-    (bbn_result_rx, ln_result_rx, meta_result_rx)
+    (sync_result_rx, meta_result_rx)
 }
 
-fn spawn_bbn_ln_writeout(
+fn spawn_fsync_beatree(
     tp: &ThreadPool,
-    io_pool: &IoPool,
     bbn_fd: &File,
     ln_fd: &File,
-    beatree_bbn_wd: Receiver<BbnWriteoutData>,
-    beatree_ln_wd: Receiver<LnWriteoutData>,
+    beatree_writeout_rx: Receiver<()>,
 ) -> (Receiver<()>, Receiver<()>) {
     let (bbn_result_tx, bbn_result_rx) = channel::bounded(1);
-    tp.execute({
-        let io_handle = io_pool.make_handle();
-        let bbn_fd = bbn_fd.try_clone().unwrap();
-        move || {
-            let BbnWriteoutData {
-                bbn,
-                bbn_freelist_pages,
-                bbn_extend_file_sz,
-            } = beatree_bbn_wd.recv().unwrap();
-            beatree::writeout::write_bbn(
-                io_handle,
-                &bbn_fd,
-                bbn,
-                bbn_freelist_pages,
-                bbn_extend_file_sz,
-            )
-            .unwrap();
-            let _ = bbn_result_tx.send(());
-        }
-    });
-
     let (ln_result_tx, ln_result_rx) = channel::bounded(1);
     tp.execute({
-        let io_handle = io_pool.make_handle();
+        let bbn_fd = bbn_fd.try_clone().unwrap();
         let ln_fd = ln_fd.try_clone().unwrap();
+        let tp = tp.clone();
         move || {
-            let LnWriteoutData {
-                ln,
-                ln_freelist_pages,
-                ln_extend_file_sz,
-            } = beatree_ln_wd.recv().unwrap();
-            beatree::writeout::write_ln(
-                io_handle,
-                &ln_fd,
-                ln,
-                ln_freelist_pages,
-                ln_extend_file_sz,
-            )
-            .unwrap();
-            let _ = ln_result_tx.send(());
+            let () = beatree_writeout_rx.recv().unwrap();
+            tp.execute(move || {
+                bbn_fd.sync_all().unwrap();
+                let _ = bbn_result_tx.send(());
+            });
+            tp.execute(move || {
+                ln_fd.sync_all().unwrap();
+                let _ = ln_result_tx.send(());
+            });
         }
     });
     (bbn_result_rx, ln_result_rx)

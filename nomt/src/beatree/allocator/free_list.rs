@@ -210,6 +210,8 @@ impl FreeList {
         self.len = len;
         self.fragmented = fragmented;
 
+        // preallocate pops, therefore, we must set it back.
+        self.pop = false;
         pages
     }
 

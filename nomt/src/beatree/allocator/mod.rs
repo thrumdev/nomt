@@ -3,8 +3,12 @@ use crate::io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool,
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{ArcMutexGuard, Mutex};
 use std::{
+    collections::BTreeSet,
     fs::File,
-    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::fs::MetadataExt,
+    },
     sync::{
         atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc,
@@ -228,6 +232,13 @@ impl Store {
         }
     }
 
+    /// Get all pages tracked by the free-list, including the pages storing the free-list.
+    ///
+    /// Deadlocks if sync is ongoing.
+    pub fn all_tracked_freelist_pages(&self) -> BTreeSet<PageNumber> {
+        self.sync.lock().free_list.all_tracked_pages()
+    }
+
     /// Start synchronization. This produces two handles,
     /// a [`SyncAllocator`] and a [`SyncFinisher`].
     ///
@@ -256,6 +267,41 @@ impl Store {
         };
 
         (allocator, finisher)
+    }
+
+    /// Get the raw FD of the store.
+    pub fn store_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
+/// A convenience wrapper around a [`Store`]. This wraps the page pool, along with
+/// the store.
+#[derive(Clone)]
+pub struct StoreReader {
+    store: Store,
+    page_pool: PagePool,
+}
+
+impl StoreReader {
+    /// Create a new [`StoreReader`].
+    pub fn new(store: Store, page_pool: PagePool) -> Self {
+        StoreReader { store, page_pool }
+    }
+
+    /// Get a reference to the page pool.
+    pub fn page_pool(&self) -> &PagePool {
+        &self.page_pool
+    }
+
+    /// Reads the page with the specified page number. Blocks the current thread.
+    pub fn query(&self, pn: PageNumber) -> FatPage {
+        self.store.query(&self.page_pool, pn)
+    }
+
+    /// Create an I/O command for querying a page by number.
+    pub fn io_command(&self, pn: PageNumber, user_data: u64) -> IoCommand {
+        self.store.io_command(&self.page_pool, pn, user_data)
     }
 }
 
@@ -294,7 +340,7 @@ impl SyncAllocator {
     /// allocated.
     ///
     /// This returns an error when setting the length of the file fails.
-    pub fn allocate(&mut self) -> anyhow::Result<PageNumber> {
+    pub fn allocate(&self) -> anyhow::Result<PageNumber> {
         let allocation_index = self.inner.allocations.fetch_add(1, Ordering::Relaxed);
         let sync = self.inner.sync();
 
@@ -325,6 +371,11 @@ impl SyncAllocator {
         } else {
             Ok(free_list.get_nth_pop(allocation_index))
         }
+    }
+
+    /// Get the raw FD of the store.
+    pub fn store_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
 }
 
@@ -389,7 +440,7 @@ impl SyncFinisher {
         self,
         page_pool: &PagePool,
         freed: Vec<PageNumber>,
-    ) -> anyhow::Result<Vec<(PageNumber, FatPage)>> {
+    ) -> anyhow::Result<(Vec<(PageNumber, FatPage)>, StoreMeta)> {
         // Block on `sync_finish`.
         // UNWRAP: `SyncAllocator` sends the guard when dropped. We assume it is not leaked.
         let Finish {
@@ -413,6 +464,18 @@ impl SyncFinisher {
         sync.bump = next_bump;
         sync.max_bump = max_bump;
 
-        Ok(freelist_pages)
+        let meta = StoreMeta {
+            freelist_pn: sync.free_list.head_pn().unwrap_or(FREELIST_EMPTY).0,
+            bump: next_bump.0,
+        };
+        Ok((freelist_pages, meta))
     }
+}
+
+/// New store metadata following a sync.
+pub struct StoreMeta {
+    /// The page-number indicating the head of the free-list.
+    pub freelist_pn: u32,
+    /// The next free page number.
+    pub bump: u32,
 }

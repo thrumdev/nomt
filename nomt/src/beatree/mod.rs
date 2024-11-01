@@ -1,18 +1,11 @@
-use allocator::{PageNumber, FREELIST_EMPTY};
+use allocator::{PageNumber, Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
-use branch::{BranchNode, BRANCH_NODE_SIZE};
+use branch::BRANCH_NODE_SIZE;
 use parking_lot::{Mutex, RwLock};
 use std::{collections::BTreeMap, fs::File, mem, ops::DerefMut, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
-use crate::io::{page_pool::FatPage, IoPool, PagePool};
-
-use leaf::store::{LeafStoreReader, LeafStoreWriter};
-
-use self::{
-    bbn::{BbnStoreCommitOutput, BbnStoreWriter},
-    leaf::store::LeafStoreCommitOutput,
-};
+use crate::io::{IoHandle, IoPool, PagePool};
 
 pub(crate) mod allocator;
 mod bbn;
@@ -36,8 +29,11 @@ pub struct Tree {
 
 struct Shared {
     page_pool: PagePool,
+    io_handle: IoHandle,
     bbn_index: index::Index,
-    leaf_store_rd: LeafStoreReader,
+    leaf_store: Store,
+    bbn_store: Store,
+    leaf_store_rd: StoreReader,
     /// Primary staging collects changes that are committed but not synced yet. Upon sync, changes
     /// from here are moved to secondary staging.
     primary_staging: BTreeMap<Key, Option<Vec<u8>>>,
@@ -47,9 +43,6 @@ struct Shared {
 }
 
 struct Sync {
-    leaf_store_wr: LeafStoreWriter,
-    leaf_store_rd: LeafStoreReader,
-    bbn_store_wr: BbnStoreWriter,
     tp: ThreadPool,
     commit_concurrency: usize,
 }
@@ -85,22 +78,21 @@ impl Tree {
         let ln_bump = PageNumber(ln_bump);
         let bbn_bump = PageNumber(bbn_bump);
 
-        let (leaf_store_rd_shared, leaf_store_rd_sync, leaf_store_wr) = {
-            let ln_file = ln_file.try_clone().unwrap();
+        let leaf_store = Store::open(
+            &page_pool,
+            ln_file.try_clone().unwrap(),
+            ln_bump,
+            ln_freelist_pn,
+        )?;
 
-            leaf::store::open(
-                page_pool.clone(),
-                ln_file,
-                ln_freelist_pn,
-                ln_bump,
-                &io_pool,
-            )
-        };
+        let bbn_store = Store::open(
+            &page_pool,
+            bbn_file.try_clone().unwrap(),
+            bbn_bump,
+            bbn_freelist_pn,
+        )?;
 
-        let (bbn_store_wr, bbn_freelist_tracked) = {
-            let bbn_fd = bbn_file.try_clone().unwrap();
-            bbn::open(&page_pool, bbn_fd, bbn_freelist_pn, bbn_bump)
-        };
+        let bbn_freelist_tracked = bbn_store.all_tracked_freelist_pages();
         let index = ops::reconstruct(
             bbn_file.try_clone().unwrap(),
             &page_pool,
@@ -109,17 +101,17 @@ impl Tree {
         )
         .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
         let shared = Shared {
+            io_handle: io_pool.make_handle(),
             page_pool: io_pool.page_pool().clone(),
             bbn_index: index,
-            leaf_store_rd: leaf_store_rd_shared,
+            leaf_store_rd: StoreReader::new(leaf_store.clone(), io_pool.page_pool().clone()),
+            leaf_store,
+            bbn_store,
             primary_staging: BTreeMap::new(),
             secondary_staging: None,
         };
 
         let sync = Sync {
-            leaf_store_wr,
-            leaf_store_rd: leaf_store_rd_sync,
-            bbn_store_wr,
             tp: ThreadPool::with_name("beatree-sync".into(), commit_concurrency),
             commit_concurrency,
         };
@@ -165,10 +157,10 @@ impl Tree {
         }
     }
 
-    /// Asynchronously dump all changes performed by commits to the underlying storage medium.
+    /// Dump all changes performed by commits to the underlying storage medium.
     ///
     /// Either blocks or panics if another sync is inflight.
-    pub fn prepare_sync(&self) -> WriteoutData {
+    pub fn prepare_sync(&self) -> SyncData {
         // Take the sync lock.
         //
         // That will exclude any other syncs from happening. This is a long running operation.
@@ -178,13 +170,19 @@ impl Tree {
 
         // Take the shared lock. Briefly.
         let staged_changeset;
-        let mut bbn_index;
+        let bbn_index;
         let page_pool;
+        let leaf_store;
+        let bbn_store;
+        let io_handle;
         {
             let mut shared = self.shared.write();
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
+            leaf_store = shared.leaf_store.clone();
+            bbn_store = shared.bbn_store.clone();
+            io_handle = shared.io_handle.clone();
         }
 
         {
@@ -205,67 +203,19 @@ impl Tree {
             //   revision of the index is dropped.
             //   This makes it possible to keep the previous state of the tree (before this sync)
             //   available and reachable from the old index
-            // + The bbn_store_wr follows the same reasoning as leaf_store_wr,
-            //   so things will be allocated and released following what is being performed
-            //   on the branch_node_pool and committed later on onto disk
+            // + All necessary page writes will be issued to the store and their completion waited
+            //   upon. However, these changes are not reflected until `finish_sync`.
             ops::update(
                 staged_changeset.clone(),
-                &mut bbn_index,
-                &sync.leaf_store_rd,
-                &mut sync.leaf_store_wr,
-                &mut sync.bbn_store_wr,
+                bbn_index,
+                leaf_store,
+                bbn_store,
+                page_pool,
+                io_handle,
                 sync.tp.clone(),
                 sync.commit_concurrency,
             )
             .unwrap()
-        }
-
-        let (ln, ln_freelist_pages, ln_freelist_pn, ln_bump, ln_extend_file_sz) = {
-            let LeafStoreCommitOutput {
-                pending,
-                free_list_pages,
-                extend_file_sz,
-                freelist_head,
-                bump,
-            } = sync.leaf_store_wr.commit(&page_pool);
-            (
-                pending,
-                free_list_pages,
-                freelist_head.0,
-                bump.0,
-                extend_file_sz,
-            )
-        };
-
-        let (bbn, bbn_freelist_pages, bbn_freelist_pn, bbn_bump, bbn_extend_file_sz) = {
-            let BbnStoreCommitOutput {
-                bbn,
-                free_list_pages,
-                extend_file_sz,
-                freelist_head,
-                bump,
-            } = sync.bbn_store_wr.commit(&page_pool);
-            (
-                bbn,
-                free_list_pages,
-                freelist_head.0,
-                bump.0,
-                extend_file_sz,
-            )
-        };
-
-        WriteoutData {
-            bbn,
-            bbn_freelist_pages,
-            bbn_extend_file_sz,
-            ln,
-            ln_freelist_pages,
-            ln_extend_file_sz,
-            ln_freelist_pn,
-            ln_bump,
-            bbn_freelist_pn,
-            bbn_bump,
-            bbn_index,
         }
     }
 
@@ -277,18 +227,13 @@ impl Tree {
     }
 }
 
-pub struct WriteoutData {
-    pub bbn: Vec<Arc<BranchNode>>,
-    pub bbn_freelist_pages: Vec<(PageNumber, FatPage)>,
-    pub bbn_extend_file_sz: Option<u64>,
-    pub ln: Vec<(PageNumber, FatPage)>,
-    pub ln_freelist_pages: Vec<(PageNumber, FatPage)>,
-    pub ln_extend_file_sz: Option<u64>,
+/// Data generated during update
+pub struct SyncData {
+    pub bbn_index: Index,
     pub ln_freelist_pn: u32,
     pub ln_bump: u32,
     pub bbn_freelist_pn: u32,
     pub bbn_bump: u32,
-    pub bbn_index: Index,
 }
 
 /// Creates the required files for the beatree.

@@ -6,7 +6,7 @@ use bitvec::prelude::*;
 use std::cmp::Ordering;
 
 use super::{
-    allocator::PageNumber,
+    allocator::{PageNumber, StoreReader},
     branch::BranchNode,
     index::Index,
     leaf::{self, node::LeafNode},
@@ -21,11 +21,7 @@ pub use reconstruction::reconstruct;
 pub use update::update;
 
 /// Lookup a key in the btree.
-pub fn lookup(
-    key: Key,
-    bbn_index: &Index,
-    leaf_store: &leaf::store::LeafStoreReader,
-) -> Result<Option<Vec<u8>>> {
+pub fn lookup(key: Key, bbn_index: &Index, leaf_store: &StoreReader) -> Result<Option<Vec<u8>>> {
     let branch = match bbn_index.lookup(key) {
         None => return Ok(None),
         Some((_, branch)) => branch,
