@@ -240,9 +240,4 @@ impl<Node> NodesTracker<Node> {
         self.deferred_drop_pages.push(node.clone());
         self.pending_base = Some((separator, node, cutoff));
     }
-
-    #[cfg(test)]
-    pub fn get(&self, key: Key) -> Option<&ChangedNodeEntry<Node>> {
-        self.inner.get(&key)
-    }
 }
