@@ -18,7 +18,7 @@ fn test_write_read() {
         options.open(&wal_filename).unwrap()
     };
 
-    let mut builder = WalBlobBuilder::new();
+    let mut builder = WalBlobBuilder::new().unwrap();
     builder.write_clear(0);
     builder.write_update(
         [0; 32],

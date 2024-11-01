@@ -65,7 +65,7 @@ impl DB {
 
         let occupied_buckets = meta_map.full_count();
 
-        let wal_blob_builder = WalBlobBuilder::new();
+        let wal_blob_builder = WalBlobBuilder::new()?;
         Ok(Self {
             shared: Arc::new(Shared {
                 store,

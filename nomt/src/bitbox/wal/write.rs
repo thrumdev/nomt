@@ -3,7 +3,7 @@
 use super::{WAL_ENTRY_TAG_CLEAR, WAL_ENTRY_TAG_END, WAL_ENTRY_TAG_UPDATE};
 use crate::{io::PAGE_SIZE, page_diff::PageDiff};
 
-use std::sync::Arc;
+const MAX_SIZE: usize = 1 << 37; // 128 GiB
 
 struct Mmap {
     ptr: *mut u8,
@@ -11,7 +11,7 @@ struct Mmap {
 }
 
 impl Mmap {
-    fn new(size: usize) -> Self {
+    fn new(size: usize) -> anyhow::Result<Self> {
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -23,9 +23,42 @@ impl Mmap {
             )
         } as *mut u8;
         if ptr == libc::MAP_FAILED as *mut u8 {
-            panic!("mmap failed");
+            let err = std::io::Error::last_os_error();
+            anyhow::bail!("mmap failed: {err:?}");
         }
-        Self { ptr, size }
+        Ok(Self { ptr, size })
+    }
+
+    /// Try to resize this mapping.
+    ///
+    /// The `new_size` should be a multiple of the page size.
+    ///
+    /// Upon success, returns true and the existing mapping is shrunk or grown to `new_size`
+    /// updating `self.size` to the new size and potentially `self.ptr` to point to the new
+    /// mapping, if the kernel decided to move it.
+    fn resize(&mut self, new_size: usize) -> bool {
+        assert!(new_size % PAGE_SIZE == 0);
+
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let new_ptr = libc::mremap(
+                self.ptr as *mut libc::c_void,
+                self.size,
+                new_size,
+                libc::MREMAP_MAYMOVE,
+            );
+            if new_ptr == libc::MAP_FAILED {
+                false
+            } else {
+                self.ptr = new_ptr as *mut u8;
+                self.size = new_size;
+                true
+            }
+        }
+
+        // Non-linux platforms don't support mremap, so we don't support resizing WAL mmaping.
+        #[cfg(not(target_os = "linux"))]
+        false
     }
 }
 
@@ -39,25 +72,19 @@ impl Drop for Mmap {
 
 /// A builder for a WAL blob.
 pub struct WalBlobBuilder {
-    mmap: Arc<Mmap>,
+    mmap: Mmap,
     /// The position at which the next byte will be written. Never reaches `mmap.size`.
     cur: usize,
 }
 
 impl WalBlobBuilder {
-    pub fn new() -> Self {
-        // 128 GiB = 17179869184 bytes.
-        //
-        // 128 GiB is the maximum size of a single commit in WAL after which we panic. This seems
-        // to be enough for now. We should explore making this elastic in the future.
-        //
-        // Note that here we allocate virtual memory unbacked by physical pages. Those pages will
-        // become backed by physical pages on first write to each page.
-        let mmap = Mmap::new(17179869184);
-        Self {
-            mmap: Arc::new(mmap),
-            cur: 0,
-        }
+    pub fn new() -> anyhow::Result<Self> {
+        Self::with_initial_size(1 << 30)
+    }
+
+    fn with_initial_size(size: usize) -> anyhow::Result<Self> {
+        let mmap = Mmap::new(size)?;
+        Ok(Self { mmap, cur: 0 })
     }
 
     pub fn write_clear(&mut self, bucket_index: u64) {
@@ -100,12 +127,49 @@ impl WalBlobBuilder {
         let pos = self.cur;
         let new_cur = self.cur.checked_add(bytes.len()).unwrap();
         if new_cur >= self.mmap.size {
-            panic!("WAL blob too large");
+            // Grow once to the required size
+            if let Err(e) = self.grow(new_cur) {
+                panic!("WAL blob too large: {e}");
+            }
         }
+        // NB: `self.mmap` could have changed after the grow.
         self.cur = new_cur;
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.mmap.ptr.add(pos), bytes.len());
         }
+    }
+
+    /// Grow the mmap to at least `min_new_size` bytes.
+    ///
+    /// Since this grows by at least doubling the current size, the resulting size might be
+    /// larger than `min_new_size`.
+    ///
+    /// Returns `Ok(())` if the mmap was successfully resized.
+    #[cold]
+    fn grow(&mut self, min_new_size: usize) -> anyhow::Result<()> {
+        if self.mmap.size >= MAX_SIZE {
+            anyhow::bail!("WAL blob too large (exceeded 128 GiB limit)");
+        }
+
+        // Start with current size and double until we cover min_new_size
+        let mut new_size = self.mmap.size;
+        while new_size < min_new_size && new_size < MAX_SIZE {
+            new_size = new_size.saturating_mul(2);
+        }
+        new_size = new_size.min(MAX_SIZE);
+
+        if self.mmap.resize(new_size) {
+            return Ok(());
+        }
+
+        // Resizing in place did not succeed. We could try to create a new mapping and copy
+        // the data over.
+        let new_mmap = Mmap::new(new_size)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.mmap.ptr, new_mmap.ptr, self.mmap.size);
+        }
+        self.mmap = new_mmap;
+        Ok(())
     }
 
     /// Finalizes the builder and returns the pointer to the start of the blob and its length.
@@ -153,3 +217,52 @@ impl WalBlobBuilder {
 }
 
 unsafe impl Send for WalBlobBuilder {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blob_builder_smoke() {
+        let _builder = WalBlobBuilder::with_initial_size(4096).unwrap();
+    }
+
+    #[test]
+    fn test_blob_builder_grows() {
+        let mut builder = WalBlobBuilder::with_initial_size(4096).unwrap();
+
+        // Fill up most of the initial capacity
+        let data = vec![42u8; 4000];
+        unsafe { builder.write(&data) };
+        assert_eq!(builder.cur, 4000);
+        assert_eq!(builder.mmap.size, 4096);
+
+        // Write more data that forces a grow
+        let more_data = vec![43u8; 2000];
+        unsafe { builder.write(&more_data) };
+
+        // Should have grown to accommodate the additional data
+        assert!(builder.mmap.size > 4096);
+        assert_eq!(builder.cur, 6000);
+
+        // Verify we can still write after growing
+        builder.write_byte(44);
+        assert_eq!(builder.cur, 6001);
+    }
+
+    #[test]
+    fn test_blob_builder_multiple_grows() {
+        let mut builder = WalBlobBuilder::with_initial_size(1024).unwrap();
+
+        // Trigger multiple grows by writing increasingly large chunks
+        for i in 0..5 {
+            let size = 1000 * (i + 1);
+            let data = vec![i as u8; size];
+            unsafe { builder.write(&data) };
+        }
+
+        // Should have grown multiple times to fit all data
+        assert!(builder.mmap.size >= 15000);
+        assert_eq!(builder.cur, 15000);
+    }
+}
