@@ -20,9 +20,8 @@ mod extend_range_protocol;
 mod leaf_stage;
 mod leaf_updater;
 
-// TODO: reinstate
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;
 
 // All nodes less than this body size will be merged with a neighboring node.
 const BRANCH_MERGE_THRESHOLD: usize = BRANCH_NODE_BODY_SIZE / 2;
