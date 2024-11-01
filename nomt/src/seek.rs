@@ -4,7 +4,7 @@ use crate::{
     io::page_pool::FatPage,
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::ReadPass,
-    store::{BucketIndex, PageLoad, PageLoadAdvance, PageLoadCompletion, PageLoader},
+    store::{BucketIndex, PageLoad, PageLoadCompletion, PageLoader},
 };
 
 use nomt_core::{
@@ -228,6 +228,9 @@ impl Seeker {
 
     /// Try to submit as many requests as possible. Returns `true` if blocked.
     pub fn submit_all(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<bool> {
+        if !self.has_room() {
+            return Ok(true)
+        }
         let blocked = self.submit_idle_page_loads(read_pass)?
             || self.submit_single_page_request(read_pass)?
             || self.submit_idle_key_path_requests(read_pass)?;
@@ -335,25 +338,24 @@ impl Seeker {
         slab_index: usize,
         front: bool,
     ) -> anyhow::Result<bool> {
-        let page_load = &mut self.page_load_slab[slab_index];
-        assert!(!page_load.needs_completion());
-        match self.page_loader.try_advance(page_load, slab_index as u64)? {
-            PageLoadAdvance::Blocked => {
-                assert!(!page_load.needs_completion());
+        if !self.has_room() {
+            assert!(!self.page_load_slab[slab_index].needs_completion());
 
-                if front {
-                    self.idle_page_loads.push_front(slab_index);
-                } else {
-                    self.idle_page_loads.push_back(slab_index)
-                }
-                Ok(true)
+            if front {
+                self.idle_page_loads.push_front(slab_index);
+            } else {
+                self.idle_page_loads.push_back(slab_index)
             }
-            PageLoadAdvance::Submitted => Ok(false),
-            PageLoadAdvance::GuaranteedFresh => {
-                self.remove_and_continue_seeks(read_pass, slab_index, None);
-                Ok(false)
-            }
+            return Ok(true)
         }
+
+        let page_load = &mut self.page_load_slab[slab_index];
+        if !self.page_loader.advance(page_load, slab_index as u64)? {
+            // guaranteed fresh page
+            self.remove_and_continue_seeks(read_pass, slab_index, None);
+        }
+
+        Ok(false)
     }
 
     // submit a single page request, if any exists. returns true if blocked.
