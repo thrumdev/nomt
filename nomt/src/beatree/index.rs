@@ -23,12 +23,12 @@ impl Index {
         self.first_key_map.get_prev(&key).map(|(sep, b)| (sep.clone(), b.clone()))
     }
 
-    /// Get the first branch with separator greater than the given key.
-    pub fn next_after(&self, key: Key) -> Option<(Key, Arc<BranchNode>)> {
+    /// Get the first separator greater than the given key.
+    pub fn next_key(&self, key: Key) -> Option<Key> {
         self.first_key_map
             .range(RangeFromExclusive { start: key })
             .next()
-            .map(|(k, b)| (*k, b.clone()))
+            .map(|(k, _)| *k)
     }
 
     /// Remove the branch with the given separator key.
