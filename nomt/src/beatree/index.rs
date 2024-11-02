@@ -5,7 +5,7 @@ use std::iter::DoubleEndedIterator;
 use std::ops::{Bound, RangeBounds, RangeToInclusive};
 use std::sync::Arc;
 
-use im::OrdMap;
+use imbl::OrdMap;
 
 use super::Key;
 use crate::beatree::branch::BranchNode;

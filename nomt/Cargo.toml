@@ -24,7 +24,7 @@ crossbeam-channel = "0.5.13"
 slab = "0.4.9"
 rand = "0.8.5"
 ahash = "0.8.11"
-im = "15.1.0"
+imbl = "3.0.0"
 lru = "0.12.3"
 libc = "0.2.155"
 criterion = { version = "0.3", optional = true }
