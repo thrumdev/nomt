@@ -43,7 +43,7 @@ fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNu
     let cutoff = if i + 1 < branch.n() as usize {
         Some(get_key(&branch, i + 1))
     } else {
-        bbn_index.next_after(key).map(|(cutoff, _)| cutoff)
+        bbn_index.next_key(key)
     };
 
     Some((separator, cutoff, leaf_pn))

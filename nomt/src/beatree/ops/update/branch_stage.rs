@@ -262,7 +262,7 @@ fn reset_branch_base_fresh(
         return;
     };
 
-    let cutoff = bbn_index.next_after(key).map(|(k, _)| k);
+    let cutoff = bbn_index.next_key(key);
 
     branches_tracker.delete(separator, branch.bbn_pn().into(), cutoff);
 
