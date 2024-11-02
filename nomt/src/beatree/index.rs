@@ -1,8 +1,7 @@
 //! In-memory index tracking bottom level branch nodes. This is an immutable data structure,
 //! which is cheaply cloneable in O(1) and performs COW operations.
 
-use std::iter::DoubleEndedIterator;
-use std::ops::{Bound, RangeBounds, RangeToInclusive};
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use imbl::OrdMap;
@@ -21,10 +20,7 @@ impl Index {
     /// This is either a branch whose separator is exactly equal to this key or the branch with the
     /// highest separator less than the key.
     pub fn lookup(&self, key: Key) -> Option<(Key, Arc<BranchNode>)> {
-        self.first_key_map
-            .range(RangeToInclusive { end: key })
-            .next_back()
-            .map(|(sep, b)| (sep.clone(), b.clone()))
+        self.first_key_map.get_prev(&key).map(|(sep, b)| (sep.clone(), b.clone()))
     }
 
     /// Get the first branch with separator greater than the given key.
