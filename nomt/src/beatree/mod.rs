@@ -11,6 +11,7 @@ mod allocator;
 mod branch;
 mod index;
 mod leaf;
+mod leaf_cache;
 mod ops;
 
 mod writeout;
@@ -40,6 +41,7 @@ struct Shared {
     /// Secondary staging collects committed changes that are currently being synced. This is None
     /// if there is no sync in progress.
     secondary_staging: Option<Arc<BTreeMap<Key, Option<Vec<u8>>>>>,
+    leaf_cache: leaf_cache::LeafCache,
 }
 
 struct Sync {
@@ -111,6 +113,7 @@ impl Tree {
             bbn_store,
             primary_staging: BTreeMap::new(),
             secondary_staging: None,
+            leaf_cache: leaf_cache::LeafCache::new(32, 1 << 16),
         };
 
         let sync = Sync {
@@ -142,7 +145,13 @@ impl Tree {
         }
 
         // Finally, look up in the btree.
-        ops::lookup(key, &shared.bbn_index, &shared.leaf_store_rd).unwrap()
+        ops::lookup(
+            key,
+            &shared.bbn_index,
+            &shared.leaf_cache,
+            &shared.leaf_store_rd,
+        )
+        .unwrap()
     }
 
     /// Returns a controller for the sync process.
@@ -186,6 +195,7 @@ impl Tree {
         let staged_changeset;
         let bbn_index;
         let page_pool;
+        let leaf_cache;
         let leaf_store;
         let bbn_store;
         let io_handle;
@@ -194,6 +204,7 @@ impl Tree {
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
+            leaf_cache = shared.leaf_cache.clone();
             leaf_store = shared.leaf_store.clone();
             bbn_store = shared.bbn_store.clone();
             io_handle = shared.io_handle.clone();
@@ -220,6 +231,7 @@ impl Tree {
             ops::update(
                 staged_changeset.clone(),
                 bbn_index,
+                leaf_cache,
                 leaf_store,
                 bbn_store,
                 page_pool,

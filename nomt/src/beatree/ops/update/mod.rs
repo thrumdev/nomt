@@ -1,5 +1,4 @@
 use anyhow::Result;
-use dashmap::DashMap;
 use threadpool::ThreadPool;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -9,6 +8,7 @@ use crate::beatree::{
     branch::BRANCH_NODE_BODY_SIZE,
     index::Index,
     leaf::node::{LeafNode, LEAF_NODE_BODY_SIZE},
+    leaf_cache::LeafCache,
     ops::get_key,
     Key, SyncData,
 };
@@ -44,6 +44,7 @@ const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 pub fn update(
     changeset: Arc<BTreeMap<Key, Option<Vec<u8>>>>,
     mut bbn_index: Index,
+    leaf_cache: LeafCache,
     leaf_store: Store,
     bbn_store: Store,
     page_pool: PagePool,
@@ -55,7 +56,8 @@ pub fn update(
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
 
-    let leaf_cache = preload_leaves(
+    preload_leaves(
+        &leaf_cache,
         &leaf_reader,
         &bbn_index,
         &io_handle,
@@ -64,7 +66,7 @@ pub fn update(
 
     let leaf_stage_outputs = leaf_stage::run(
         &bbn_index,
-        leaf_cache,
+        leaf_cache.clone(),
         leaf_reader,
         leaf_writer,
         io_handle.clone(),
@@ -96,6 +98,7 @@ pub fn update(
     crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages)?;
     crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages)?;
 
+    leaf_cache.evict();
     for _ in 0..total_io {
         io_handle.recv()?;
     }
@@ -116,14 +119,13 @@ pub fn update(
     ))
 }
 
-// TODO: this should not be necessary with proper warm-ups.
 fn preload_leaves(
+    leaf_cache: &LeafCache,
     leaf_reader: &StoreReader,
     bbn_index: &Index,
     io_handle: &IoHandle,
     keys: impl IntoIterator<Item = Key>,
-) -> Result<DashMap<PageNumber, Arc<LeafNode>>> {
-    let leaf_pages = DashMap::new();
+) -> Result<()> {
     let mut last_pn = None;
 
     let mut submissions = 0;
@@ -138,6 +140,11 @@ fn preload_leaves(
             continue;
         }
         last_pn = Some(leaf_pn);
+
+        if leaf_cache.contains_key(leaf_pn) {
+            continue;
+        }
+
         io_handle
             .send(leaf_reader.io_command(leaf_pn, leaf_pn.0 as u64))
             .expect("I/O Pool Disconnected");
@@ -150,10 +157,10 @@ fn preload_leaves(
         completion.result?;
         let pn = PageNumber(completion.command.user_data as u32);
         let page = completion.command.kind.unwrap_buf();
-        leaf_pages.insert(pn, Arc::new(LeafNode { inner: page }));
+        leaf_cache.insert(pn, Arc::new(LeafNode { inner: page }));
     }
 
-    Ok(leaf_pages)
+    Ok(())
 }
 
 /// Container of possible changes made to a node

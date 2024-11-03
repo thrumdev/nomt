@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use threadpool::ThreadPool;
 
 use crate::beatree::{
@@ -12,6 +11,7 @@ use crate::beatree::{
         node::{LeafNode, MAX_LEAF_VALUE_SIZE},
         overflow,
     },
+    leaf_cache::LeafCache,
     ops::{
         search_branch,
         update::{
@@ -71,7 +71,7 @@ pub struct LeafStageOutput {
 /// Change the btree's leaves in the specified way
 pub fn run(
     bbn_index: &Index,
-    leaf_cache: DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_cache: LeafCache,
     leaf_reader: StoreReader,
     leaf_writer: SyncAllocator,
     io_handle: IoHandle,
@@ -140,7 +140,6 @@ pub fn run(
 
     // we don't want to block other sync steps on deallocating these memory regions.
     drop(changeset);
-    drop(leaf_cache);
 
     let mut output = LeafStageOutput::default();
     output.submitted_io += overflow_io;
@@ -148,7 +147,7 @@ pub fn run(
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
         let worker_output = worker_result_rx.recv().unwrap();
-        apply_worker_changes(&leaf_reader, &mut output, worker_output);
+        apply_worker_changes(&leaf_cache, &leaf_reader, &mut output, worker_output);
     }
 
     output.leaf_changeset.sort_by_key(|(k, _)| *k);
@@ -156,6 +155,7 @@ pub fn run(
 }
 
 fn apply_worker_changes(
+    leaf_cache: &LeafCache,
     leaf_reader: &StoreReader,
     output: &mut LeafStageOutput,
     mut worker_output: LeafWorkerOutput,
@@ -165,16 +165,18 @@ fn apply_worker_changes(
     }
 
     for (key, leaf_entry) in &worker_output.leaves_tracker.inner {
-        let leaf_pn = leaf_entry.inserted.as_ref().map(|(_leaf, pn)| pn.clone());
-        if leaf_pn.is_some() {
+        if let Some((ref leaf, ref pn)) = leaf_entry.inserted.as_ref() {
             output.submitted_io += 1;
+            leaf_cache.insert(*pn, leaf.clone());
         }
 
         if let Some(prev_pn) = leaf_entry.deleted {
             output.freed_pages.push(prev_pn);
         }
 
-        output.leaf_changeset.push((*key, leaf_pn));
+        output
+            .leaf_changeset
+            .push((*key, leaf_entry.inserted.as_ref().map(|(_, pn)| *pn)));
     }
 
     output.submitted_io += worker_output.leaves_tracker.extra_freed.len();
@@ -278,7 +280,7 @@ fn prepare_workers(
 
 fn reset_leaf_base(
     bbn_index: &Index,
-    leaf_cache: &DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_cache: &LeafCache,
     leaf_reader: &StoreReader,
     leaves_tracker: &mut LeavesTracker,
     leaf_updater: &mut LeafUpdater,
@@ -328,7 +330,7 @@ fn reset_leaf_base(
 
 fn reset_leaf_base_fresh(
     bbn_index: &Index,
-    leaf_cache: &DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_cache: &LeafCache,
     leaf_reader: &StoreReader,
     leaves_tracker: &mut LeavesTracker,
     leaf_updater: &mut LeafUpdater,
@@ -343,14 +345,11 @@ fn reset_leaf_base_fresh(
     leaves_tracker.delete(separator, leaf_pn, cutoff);
 
     let base = BaseLeaf::new(
-        leaf_cache
-            .remove(&leaf_pn)
-            .map(|(_, l)| l)
-            .unwrap_or_else(|| {
-                Arc::new(LeafNode {
-                    inner: leaf_reader.query(leaf_pn),
-                })
-            }),
+        leaf_cache.get(leaf_pn).unwrap_or_else(|| {
+            Arc::new(LeafNode {
+                inner: leaf_reader.query(leaf_pn),
+            })
+        }),
         separator,
     );
 
@@ -364,7 +363,7 @@ struct LeafWorkerOutput {
 
 fn run_worker(
     bbn_index: Index,
-    leaf_cache: &DashMap<PageNumber, Arc<LeafNode>>,
+    leaf_cache: &LeafCache,
     leaf_reader: StoreReader,
     leaf_writer: SyncAllocator,
     io_handle: IoHandle,
