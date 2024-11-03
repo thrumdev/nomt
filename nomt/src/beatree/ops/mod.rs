@@ -3,13 +3,14 @@
 use anyhow::Result;
 use bitvec::prelude::*;
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 
 use super::{
     allocator::{PageNumber, StoreReader},
     branch::BranchNode,
     index::Index,
     leaf::{self, node::LeafNode},
+    leaf_cache::LeafCache,
     Key,
 };
 
@@ -21,7 +22,12 @@ pub use reconstruction::reconstruct;
 pub use update::update;
 
 /// Lookup a key in the btree.
-pub fn lookup(key: Key, bbn_index: &Index, leaf_store: &StoreReader) -> Result<Option<Vec<u8>>> {
+pub fn lookup(
+    key: Key,
+    bbn_index: &Index,
+    leaf_cache: &LeafCache,
+    leaf_store: &StoreReader,
+) -> Result<Option<Vec<u8>>> {
     let branch = match bbn_index.lookup(key) {
         None => return Ok(None),
         Some((_, branch)) => branch,
@@ -32,8 +38,15 @@ pub fn lookup(key: Key, bbn_index: &Index, leaf_store: &StoreReader) -> Result<O
         Some((_, leaf_pn)) => leaf_pn,
     };
 
-    let leaf = LeafNode {
-        inner: leaf_store.query(leaf_pn),
+    let leaf = match leaf_cache.get(leaf_pn) {
+        Some(leaf) => leaf,
+        None => {
+            let leaf = Arc::new(LeafNode {
+                inner: leaf_store.query(leaf_pn),
+            });
+            leaf_cache.insert(leaf_pn, leaf.clone());
+            leaf
+        }
     };
 
     let maybe_value = leaf.get(&key).map(|(v, is_overflow)| {

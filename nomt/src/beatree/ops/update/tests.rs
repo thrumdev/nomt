@@ -6,6 +6,7 @@ use crate::{
             self,
             node::{LeafNode, MAX_LEAF_VALUE_SIZE},
         },
+        leaf_cache::LeafCache,
         ops::{
             bit_ops::separate,
             update::{
@@ -132,6 +133,7 @@ fn init_beatree() -> TreeData {
                 .collect(),
         ),
         Index::default(),
+        LeafCache::new(1, 1024),
         leaf_store,
         bbn_store,
         PAGE_POOL.clone(),
@@ -179,14 +181,16 @@ fn exec_leaf_stage(
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
 
     let bbn_index = &TREE_DATA.bbn_index;
-    let leaf_cache = preload_leaves(
+    let leaf_cache = LeafCache::new(commit_concurrency, 1024);
+    preload_leaves(
+        &leaf_cache,
         &leaf_reader,
         bbn_index,
         &IO_POOL.make_handle(),
         changeset.keys().cloned(),
     )
     .unwrap();
-    let leaf_page_numbers: BTreeSet<PageNumber> = leaf_cache.iter().map(|v| *v.pair().0).collect();
+    let leaf_page_numbers: BTreeSet<PageNumber> = leaf_cache.all_page_numbers();
 
     let io_handle = IO_POOL.make_handle();
     let leaf_stage_output = super::leaf_stage::run(
