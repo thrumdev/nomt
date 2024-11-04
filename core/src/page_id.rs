@@ -128,13 +128,27 @@ impl PageId {
 
     /// Encode this page ID to its disambiguated (fixed-width) representation.
     pub fn encode(&self) -> [u8; 32] {
-        let mut uint = Uint::<256, 4>::from(0);
-        for limb in &self.path {
-            uint += Uint::from(limb + 1);
-            uint <<= 6;
-        }
+        if self.path.len() < 10 {
+            // 7 + 6*9 = 61 - max bit-width of a page with depth 9.
+            let mut word: u64 = 0;
+            for limb in &self.path {
+                word += (limb + 1) as u64;
+                word <<= 6;
+            }
 
-        uint.to_be_bytes::<32>()
+            let mut buf = [0u8; 32];
+            let word_bytes = word.to_be_bytes();
+            buf[24..32].copy_from_slice(&word_bytes);
+            buf
+        } else {
+            let mut uint = Uint::<256, 4>::from(0);
+            for limb in &self.path {
+                uint += Uint::from(limb + 1);
+                uint <<= 6;
+            }
+
+            uint.to_be_bytes::<32>()
+        }
     }
 
     /// Get a length-dependent representation of the page id.
