@@ -1,6 +1,7 @@
 use allocator::{PageNumber, Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
+use crossbeam_channel::Receiver;
 use parking_lot::{ArcMutexGuard, Mutex, RwLock};
 use std::{collections::BTreeMap, fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
@@ -156,6 +157,7 @@ impl Tree {
                 shared: self.shared.clone(),
                 sync_data: Mutex::new(None),
                 bbn_index: Mutex::new(None),
+                pre_swap_rx: Mutex::new(None),
             }),
         }
     }
@@ -178,9 +180,11 @@ impl Tree {
     }
 
     /// Dump all changes performed by commits to the underlying storage medium.
+    /// The returned received indicates that all eviction has completed and it is safe to swap the
+    /// index. This receiver must be blocked on before finishing sync.
     ///
     /// Either blocks or panics if another sync is inflight.
-    fn prepare_sync(sync: &Sync, shared: &Arc<RwLock<Shared>>) -> (SyncData, Index) {
+    fn prepare_sync(sync: &Sync, shared: &Arc<RwLock<Shared>>) -> (SyncData, Index, Receiver<()>) {
         // Take the shared lock. Briefly.
         let staged_changeset;
         let bbn_index;
@@ -294,6 +298,7 @@ struct SharedSyncController {
     shared: Arc<RwLock<Shared>>,
     sync_data: Mutex<Option<SyncData>>,
     bbn_index: Mutex<Option<Index>>,
+    pre_swap_rx: Mutex<Option<Receiver<()>>>,
 }
 
 impl SyncController {
@@ -306,7 +311,8 @@ impl SyncController {
         let inner = self.inner.clone();
         self.inner.sync.tp.execute(move || {
             Tree::commit(&inner.shared, changeset);
-            let (out_meta, out_bbn_index) = Tree::prepare_sync(&inner.sync, &inner.shared);
+            let (out_meta, out_bbn_index, out_pre_swap_rx) =
+                Tree::prepare_sync(&inner.sync, &inner.shared);
 
             let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
@@ -315,6 +321,10 @@ impl SyncController {
             let mut bbn_index = inner.bbn_index.lock();
             *bbn_index = Some(out_bbn_index);
             drop(bbn_index);
+
+            let mut pre_swap_rx = inner.pre_swap_rx.lock();
+            *pre_swap_rx = Some(out_pre_swap_rx);
+            drop(pre_swap_rx);
 
             inner.sync.bbn_fsync.fsync();
             inner.sync.ln_fsync.fsync();
@@ -339,6 +349,12 @@ impl SyncController {
     /// Has to be called after the manifest is updated. Must be invoked by the sync
     /// thread. Blocking.
     pub fn post_meta(&mut self) {
+        let pre_swap_rx = self.inner.pre_swap_rx.lock().take().unwrap();
+
+        // UNWRAP: the offloaded non-critical sync work is infallible and may fail only if it
+        // panics.
+        let () = pre_swap_rx.recv().unwrap();
+
         let bbn_index = self.inner.bbn_index.lock().take().unwrap();
         Tree::finish_sync(&self.inner.shared, bbn_index);
     }

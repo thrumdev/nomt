@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crossbeam_channel::Receiver;
 use threadpool::ThreadPool;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -51,7 +52,7 @@ pub fn update(
     io_handle: IoHandle,
     thread_pool: ThreadPool,
     workers: usize,
-) -> Result<(SyncData, Index)> {
+) -> Result<(SyncData, Index, Receiver<()>)> {
     let leaf_reader = StoreReader::new(leaf_store.clone(), page_pool.clone());
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
@@ -81,7 +82,7 @@ pub fn update(
         page_pool.clone(),
         io_handle.clone(),
         leaf_stage_outputs.leaf_changeset,
-        thread_pool,
+        thread_pool.clone(),
         workers,
     )?;
 
@@ -98,15 +99,17 @@ pub fn update(
     crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages)?;
     crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages)?;
 
-    leaf_cache.evict();
     for _ in 0..total_io {
         io_handle.recv()?;
     }
 
-    drop((
-        leaf_stage_outputs.post_io_drop,
-        branch_stage_outputs.post_io_drop,
-    ));
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    thread_pool.execute(move || {
+        leaf_stage_outputs.post_io_work.run(&leaf_cache);
+        drop(branch_stage_outputs.post_io_drop);
+        leaf_cache.evict();
+        let _ = tx.send(());
+    });
 
     Ok((
         SyncData {
@@ -116,6 +119,7 @@ pub fn update(
             bbn_bump: bbn_meta.bump,
         },
         bbn_index,
+        rx,
     ))
 }
 
