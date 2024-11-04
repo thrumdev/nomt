@@ -25,7 +25,7 @@ use crate::beatree::{
     },
     Key,
 };
-use crate::io::{IoCommand, IoHandle, IoKind, PAGE_SIZE};
+use crate::io::{IoCommand, IoHandle, IoKind, IoPool, PAGE_SIZE};
 
 /// Tracker of all changes that happen to leaves during an update
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
@@ -134,6 +134,20 @@ pub fn run(
 
         let worker_result_tx = worker_result_tx.clone();
         thread_pool.execute(move || {
+            // TODO: handle error.
+            let prepared_leaves = preload_and_prepare(
+                &leaf_cache,
+                &leaf_reader,
+                &bbn_index,
+                io_handle.io_pool(),
+                changeset[worker_params.op_range.clone()]
+                    .iter()
+                    .map(|(k, _)| *k),
+            )
+            .unwrap();
+
+            let mut prepared_leaves_iter = prepared_leaves.into_iter().peekable();
+
             // passing the large `Arc` values by reference ensures that they are dropped at the
             // end of this scope, not the end of `run_worker`.
             let res = run_worker(
@@ -142,6 +156,7 @@ pub fn run(
                 leaf_reader,
                 leaf_writer,
                 io_handle,
+                &mut prepared_leaves_iter,
                 &*changeset,
                 worker_params,
             );
@@ -294,6 +309,7 @@ fn reset_leaf_base(
     leaves_tracker: &mut LeavesTracker,
     leaf_updater: &mut LeafUpdater,
     has_extended_range: bool,
+    prepared_leaves: &mut PreparedLeafIter,
     mut key: Key,
 ) {
     if !has_extended_range {
@@ -303,10 +319,15 @@ fn reset_leaf_base(
             leaf_reader,
             leaves_tracker,
             leaf_updater,
+            prepared_leaves,
             key,
         );
         return;
     }
+
+    // by the time we extend our range, we should've consumed all relevant leaves to our initial
+    // changeset.
+    assert!(prepared_leaves.peek().is_none());
 
     if let Some((separator, node, next_separator)) = leaves_tracker.pending_base.take() {
         let base = BaseLeaf::new(node, separator);
@@ -326,6 +347,7 @@ fn reset_leaf_base(
                 leaf_reader,
                 leaves_tracker,
                 leaf_updater,
+                prepared_leaves,
                 key,
             )
         } else {
@@ -343,8 +365,34 @@ fn reset_leaf_base_fresh(
     leaf_reader: &StoreReader,
     leaves_tracker: &mut LeavesTracker,
     leaf_updater: &mut LeafUpdater,
+    prepared_leaves: &mut PreparedLeafIter,
     key: Key,
 ) {
+    // fast path: this leaf was expected to be used and prepared. avoid heavy index lookup.
+    if prepared_leaves
+        .peek()
+        .map_or(false, |prepared| prepared.separator <= key)
+    {
+        // UNWRAP: we just checked.
+        // note that the separator < key condition above only fails if we need to merge with an
+        // unprepared leaf.
+        let prepared_leaf = prepared_leaves.next().unwrap();
+
+        // we intend to work on this leaf, therefore, we delete it.
+        // any new leaves produced by the updater will replace it.
+        leaves_tracker.delete(
+            prepared_leaf.separator,
+            prepared_leaf.page_number,
+            prepared_leaf.cutoff,
+        );
+
+        // UNWRAP: prepared leaves always have a `Some` node.
+        let base = BaseLeaf::new(prepared_leaf.node.unwrap(), prepared_leaf.separator);
+        leaf_updater.reset_base(Some(base), prepared_leaf.cutoff);
+        return;
+    }
+
+    // slow path: unexpected leaf.
     let Some((separator, cutoff, leaf_pn)) = indexed_leaf(bbn_index, key) else {
         return;
     };
@@ -376,6 +424,7 @@ fn run_worker(
     leaf_reader: StoreReader,
     leaf_writer: SyncAllocator,
     io_handle: IoHandle,
+    prepared_leaves: &mut PreparedLeafIter,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     mut worker_params: WorkerParams<LeafNode>,
 ) -> LeafWorkerOutput {
@@ -399,6 +448,7 @@ fn run_worker(
         &mut new_leaf_state.leaves_tracker,
         &mut leaf_updater,
         has_extended_range,
+        prepared_leaves,
         changeset[worker_params.op_range.start].0,
     );
 
@@ -437,6 +487,7 @@ fn run_worker(
                 &mut new_leaf_state.leaves_tracker,
                 &mut leaf_updater,
                 has_extended_range,
+                prepared_leaves,
                 k,
             );
         }
@@ -475,6 +526,7 @@ fn run_worker(
             &mut new_leaf_state.leaves_tracker,
             &mut leaf_updater,
             has_extended_range,
+            prepared_leaves,
             cutoff,
         );
     }
@@ -538,4 +590,77 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
 
         self.leaves_tracker.insert(key, leaf, cutoff, page_number);
     }
+}
+
+type PreparedLeafIter = std::iter::Peekable<std::vec::IntoIter<PreparedLeaf>>;
+
+struct PreparedLeaf {
+    separator: Key,
+    // this is always `Some`.
+    node: Option<Arc<LeafNode>>,
+    cutoff: Option<Key>,
+    page_number: PageNumber,
+}
+
+fn preload_and_prepare(
+    leaf_cache: &LeafCache,
+    leaf_reader: &StoreReader,
+    bbn_index: &Index,
+    io_pool: &IoPool,
+    changeset: impl IntoIterator<Item = Key>,
+) -> anyhow::Result<Vec<PreparedLeaf>> {
+    let io_handle = io_pool.make_handle();
+
+    let mut changeset_leaves: Vec<PreparedLeaf> = Vec::new();
+    let mut submissions = 0;
+    for key in changeset {
+        if let Some(ref last) = changeset_leaves.last() {
+            if last.cutoff.map_or(true, |c| key < c) {
+                continue;
+            }
+        }
+
+        match indexed_leaf(bbn_index, key) {
+            None => {
+                // this case only occurs when the DB is empty.
+                assert!(changeset_leaves.is_empty());
+                break;
+            }
+            Some((separator, cutoff, pn)) => {
+                if let Some(leaf) = leaf_cache.get(pn) {
+                    changeset_leaves.push(PreparedLeaf {
+                        separator,
+                        node: Some(leaf),
+                        cutoff,
+                        page_number: pn,
+                    });
+                } else {
+                    // dispatch an I/O for the leaf and schedule the slot to be filled.
+
+                    io_handle
+                        .send(leaf_reader.io_command(pn, changeset_leaves.len() as u64))
+                        .expect("I/O pool disconnected");
+
+                    submissions += 1;
+
+                    changeset_leaves.push(PreparedLeaf {
+                        separator,
+                        node: None,
+                        cutoff,
+                        page_number: pn,
+                    });
+                }
+            }
+        }
+    }
+
+    for _ in 0..submissions {
+        let completion = io_handle.recv().expect("I/O Pool Disconnected");
+        completion.result?;
+        let page = completion.command.kind.unwrap_buf();
+        let node = Arc::new(LeafNode { inner: page });
+        changeset_leaves[completion.command.user_data as usize].node = Some(node);
+    }
+
+    Ok(changeset_leaves)
 }

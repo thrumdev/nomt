@@ -8,10 +8,11 @@ use crate::{
         },
         leaf_cache::LeafCache,
         ops::{
+            self,
             bit_ops::separate,
             update::{
                 branch_stage::BranchStageOutput, branch_updater::tests::make_branch_until, get_key,
-                leaf_stage::LeafStageOutput, preload_leaves, LEAF_MERGE_THRESHOLD,
+                leaf_stage::LeafStageOutput, LEAF_MERGE_THRESHOLD,
             },
         },
         Index,
@@ -171,6 +172,25 @@ impl Arbitrary for Key {
     }
 }
 
+fn leaf_page_numbers(
+    bbn_index: &Index,
+    keys: impl IntoIterator<Item = [u8; 32]>,
+) -> BTreeSet<PageNumber> {
+    let mut page_numbers = BTreeSet::new();
+    for key in keys {
+        let Some((_, branch)) = bbn_index.lookup(key) else {
+            continue;
+        };
+        let Some((_, leaf_pn)) = ops::search_branch(&branch, key) else {
+            continue;
+        };
+
+        page_numbers.insert(leaf_pn);
+    }
+
+    page_numbers
+}
+
 // given a changeset execute the leaf stage on top of a pre-initialized nomt-db
 fn exec_leaf_stage(
     commit_concurrency: usize,
@@ -182,15 +202,7 @@ fn exec_leaf_stage(
 
     let bbn_index = &TREE_DATA.bbn_index;
     let leaf_cache = LeafCache::new(commit_concurrency, 1024);
-    preload_leaves(
-        &leaf_cache,
-        &leaf_reader,
-        bbn_index,
-        &IO_POOL.make_handle(),
-        changeset.keys().cloned(),
-    )
-    .unwrap();
-    let leaf_page_numbers: BTreeSet<PageNumber> = leaf_cache.all_page_numbers();
+    let leaf_page_numbers = leaf_page_numbers(&bbn_index, changeset.keys().cloned());
 
     let io_handle = IO_POOL.make_handle();
     let leaf_stage_output = super::leaf_stage::run(

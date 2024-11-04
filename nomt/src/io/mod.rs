@@ -110,6 +110,7 @@ pub fn start_test_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
 /// A manager for the broader I/O pool. This can be used to create new I/O handles.
 ///
 /// Dropping this does not close any outstanding I/O handles or shut down I/O workers.
+#[derive(Clone)]
 pub struct IoPool {
     sender: Sender<IoPacket>,
     page_pool: PagePool,
@@ -120,8 +121,7 @@ impl IoPool {
     pub fn make_handle(&self) -> IoHandle {
         let (completion_sender, completion_receiver) = crossbeam_channel::unbounded();
         IoHandle {
-            page_pool: self.page_pool.clone(),
-            sender: self.sender.clone(),
+            io_pool: self.clone(),
             completion_sender,
             completion_receiver,
         }
@@ -143,8 +143,7 @@ impl IoPool {
 /// This is safe to use across multiple threads, but care must be taken by the user for correctness.
 #[derive(Clone)]
 pub struct IoHandle {
-    page_pool: PagePool,
-    sender: Sender<IoPacket>,
+    io_pool: IoPool,
     completion_sender: Sender<CompleteIo>,
     completion_receiver: Receiver<CompleteIo>,
 }
@@ -152,7 +151,8 @@ pub struct IoHandle {
 impl IoHandle {
     /// Send an I/O command. This fails if the channel has hung up, but does not block the thread.
     pub fn send(&self, command: IoCommand) -> Result<(), SendError<IoCommand>> {
-        self.sender
+        self.io_pool
+            .sender
             .send(IoPacket {
                 command,
                 completion_sender: self.completion_sender.clone(),
@@ -177,7 +177,11 @@ impl IoHandle {
     }
 
     pub fn page_pool(&self) -> &PagePool {
-        &self.page_pool
+        &self.io_pool.page_pool
+    }
+
+    pub fn io_pool(&self) -> &IoPool {
+        &self.io_pool
     }
 }
 
