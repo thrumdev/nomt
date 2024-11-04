@@ -495,7 +495,6 @@ impl PageCache {
 
         // helper for exploiting locality effects in the diffs to avoid searching through
         // shards constantly.
-        let mut last_shard_index = None;
         let mut shard_guards = self
             .shared
             .shards
@@ -514,11 +513,7 @@ impl PageCache {
             }
 
             // UNWRAP: all pages which are not the root page are in a shard.
-            let shard_index = match last_shard_index {
-                Some(i) if self.shard(i).region.contains(&page_id) => i,
-                _ => self.shard_index_for(&page_id).unwrap(),
-            };
-            last_shard_index = Some(shard_index);
+            let shard_index = self.shard_index_for(&page_id).unwrap();
 
             if let Some(ref mut entry) = shard_guards[shard_index].cached.peek_mut(&page_id) {
                 let page_data = entry.page_data.data.read(&read_pass);
