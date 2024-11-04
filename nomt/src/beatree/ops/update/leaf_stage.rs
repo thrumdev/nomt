@@ -51,8 +51,20 @@ fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNu
 
 /// Data, including buffers, which may be dropped only once I/O has certainly concluded.
 #[derive(Default)]
-pub struct PostIoDrop {
+pub struct PostIoWork {
     worker_changes: Vec<LeafWorkerOutput>,
+}
+
+impl PostIoWork {
+    pub(super) fn run(self, leaf_cache: &LeafCache) {
+        for worker_output in self.worker_changes.into_iter() {
+            for (_, leaf_entry) in worker_output.leaves_tracker.inner {
+                if let Some((leaf, pn)) = leaf_entry.inserted {
+                    leaf_cache.insert(pn, leaf);
+                }
+            }
+        }
+    }
 }
 
 /// Outputs of the leaf stage.
@@ -64,8 +76,8 @@ pub struct LeafStageOutput {
     pub freed_pages: Vec<PageNumber>,
     /// The number of submitted I/Os.
     pub submitted_io: usize,
-    /// Data which should be dropped after all submitted I/Os have concluded.
-    pub post_io_drop: PostIoDrop,
+    /// Work which should be done after I/O but before sync has finished.
+    pub post_io_work: PostIoWork,
 }
 
 /// Change the btree's leaves in the specified way
@@ -147,7 +159,7 @@ pub fn run(
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
         let worker_output = worker_result_rx.recv().unwrap();
-        apply_worker_changes(&leaf_cache, &leaf_reader, &mut output, worker_output);
+        apply_worker_changes(&leaf_reader, &mut output, worker_output);
     }
 
     output.leaf_changeset.sort_by_key(|(k, _)| *k);
@@ -155,7 +167,6 @@ pub fn run(
 }
 
 fn apply_worker_changes(
-    leaf_cache: &LeafCache,
     leaf_reader: &StoreReader,
     output: &mut LeafStageOutput,
     mut worker_output: LeafWorkerOutput,
@@ -165,18 +176,16 @@ fn apply_worker_changes(
     }
 
     for (key, leaf_entry) in &worker_output.leaves_tracker.inner {
-        if let Some((ref leaf, ref pn)) = leaf_entry.inserted.as_ref() {
+        let new_pn = leaf_entry.inserted.as_ref().map(|(_, pn)| *pn);
+        if new_pn.is_some() {
             output.submitted_io += 1;
-            leaf_cache.insert(*pn, leaf.clone());
         }
 
         if let Some(prev_pn) = leaf_entry.deleted {
             output.freed_pages.push(prev_pn);
         }
 
-        output
-            .leaf_changeset
-            .push((*key, leaf_entry.inserted.as_ref().map(|(_, pn)| *pn)));
+        output.leaf_changeset.push((*key, new_pn));
     }
 
     output.submitted_io += worker_output.leaves_tracker.extra_freed.len();
@@ -184,7 +193,7 @@ fn apply_worker_changes(
         .freed_pages
         .extend(worker_output.leaves_tracker.extra_freed.drain(..));
 
-    output.post_io_drop.worker_changes.push(worker_output);
+    output.post_io_work.worker_changes.push(worker_output);
 }
 
 fn prepare_workers(

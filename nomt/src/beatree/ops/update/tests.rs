@@ -124,7 +124,7 @@ fn init_beatree() -> TreeData {
 
     let bbn_store = Store::open(&PAGE_POOL, bbn_fd.clone(), PageNumber(1), None).unwrap();
 
-    let (sync_data, bbn_index) = super::update(
+    let (sync_data, bbn_index, _) = super::update(
         Arc::new(
             initial_items
                 .clone()
