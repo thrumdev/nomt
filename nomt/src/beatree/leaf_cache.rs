@@ -39,13 +39,6 @@ impl LeafCache {
         shard.cache.get(&page_number).map(|x| x.clone())
     }
 
-    /// Check whether the cache contains a key without updating the LRU state.
-    pub fn contains_key(&self, page_number: PageNumber) -> bool {
-        let shard = self.inner.shard_for(page_number);
-
-        shard.cache.contains(&page_number)
-    }
-
     /// Insert a cache entry. This does not evict anything.
     pub fn insert(&self, page_number: PageNumber, node: Arc<LeafNode>) {
         let mut shard = self.inner.shard_for(page_number);
@@ -61,16 +54,6 @@ impl LeafCache {
                 let _ = shard.cache.pop_lru();
             }
         }
-    }
-
-    #[cfg(test)]
-    pub fn all_page_numbers(&self) -> std::collections::BTreeSet<PageNumber> {
-        let mut set = std::collections::BTreeSet::new();
-        for shard in &self.inner.shards {
-            let shard = shard.lock();
-            set.extend(shard.cache.iter().map(|(pn, _)| *pn));
-        }
-        set
     }
 }
 

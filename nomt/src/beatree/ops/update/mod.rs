@@ -8,7 +8,7 @@ use crate::beatree::{
     allocator::{PageNumber, Store, StoreReader},
     branch::BRANCH_NODE_BODY_SIZE,
     index::Index,
-    leaf::node::{LeafNode, LEAF_NODE_BODY_SIZE},
+    leaf::node::LEAF_NODE_BODY_SIZE,
     leaf_cache::LeafCache,
     ops::get_key,
     Key, SyncData,
@@ -56,14 +56,6 @@ pub fn update(
     let leaf_reader = StoreReader::new(leaf_store.clone(), page_pool.clone());
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
-
-    preload_leaves(
-        &leaf_cache,
-        &leaf_reader,
-        &bbn_index,
-        &io_handle,
-        changeset.keys().cloned(),
-    )?;
 
     let leaf_stage_outputs = leaf_stage::run(
         &bbn_index,
@@ -121,50 +113,6 @@ pub fn update(
         bbn_index,
         rx,
     ))
-}
-
-fn preload_leaves(
-    leaf_cache: &LeafCache,
-    leaf_reader: &StoreReader,
-    bbn_index: &Index,
-    io_handle: &IoHandle,
-    keys: impl IntoIterator<Item = Key>,
-) -> Result<()> {
-    let mut last_pn = None;
-
-    let mut submissions = 0;
-    for key in keys {
-        let Some((_, branch)) = bbn_index.lookup(key) else {
-            continue;
-        };
-        let Some((_, leaf_pn)) = super::search_branch(&branch, key) else {
-            continue;
-        };
-        if last_pn == Some(leaf_pn) {
-            continue;
-        }
-        last_pn = Some(leaf_pn);
-
-        if leaf_cache.contains_key(leaf_pn) {
-            continue;
-        }
-
-        io_handle
-            .send(leaf_reader.io_command(leaf_pn, leaf_pn.0 as u64))
-            .expect("I/O Pool Disconnected");
-
-        submissions += 1;
-    }
-
-    for _ in 0..submissions {
-        let completion = io_handle.recv().expect("I/O Pool Disconnected");
-        completion.result?;
-        let pn = PageNumber(completion.command.user_data as u32);
-        let page = completion.command.kind.unwrap_buf();
-        leaf_cache.insert(pn, Arc::new(LeafNode { inner: page }));
-    }
-
-    Ok(())
 }
 
 /// Container of possible changes made to a node
