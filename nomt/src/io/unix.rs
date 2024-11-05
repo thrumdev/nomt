@@ -54,11 +54,10 @@ fn execute(mut command: IoCommand) -> CompleteIo {
                 )
             },
         };
-
         match command.kind.get_result(res) {
             IoKindResult::Ok => break Ok(()),
             IoKindResult::Err => break Err(std::io::Error::last_os_error()),
-            _ => (),
+            IoKindResult::Retry => (),
         }
     };
 
