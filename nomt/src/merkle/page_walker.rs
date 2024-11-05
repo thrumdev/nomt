@@ -46,7 +46,7 @@ use bitvec::prelude::*;
 use nomt_core::{
     page::DEPTH,
     page_id::{PageId, ROOT_PAGE_ID},
-    trie::{self, KeyPath, Node, NodeHasher, NodeHasherExt, NodeKind, ValueHash},
+    trie::{self, KeyPath, Node, NodeHasher, NodeHasherExt, NodeKind, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
     update::WriteNode,
 };
@@ -603,6 +603,12 @@ impl<H: NodeHasher> PageWalker<H> {
         node: Node,
     ) {
         let node_index = self.position.node_index();
+        if self.position.is_first_layer_in_page() {
+            let cleared =
+                node == TERMINATOR && self.sibling_node(write_pass.downgrade()) == TERMINATOR;
+            self.stack.last_mut().unwrap().diff.set_cleared(cleared);
+        }
+
         let stack_top = self.stack.last_mut().unwrap();
         stack_top
             .page
@@ -656,7 +662,7 @@ impl<H: NodeHasher> PageWalker<H> {
         leaf_data: Option<trie::LeafData>,
         hint_fresh: bool,
     ) {
-        let (page_id, children) = {
+        let (page_id, children, cleared) = {
             let cur_page = self
                 .stack
                 .last()
@@ -676,26 +682,35 @@ impl<H: NodeHasher> PageWalker<H> {
                 })
                 .unwrap();
 
-            match leaf_data {
-                None => page.clear_leaf_data(&self.page_pool, write_pass, children),
-                Some(leaf) => page.set_leaf_data(&self.page_pool, write_pass, children, leaf),
-            }
+            let cleared = match leaf_data {
+                None => {
+                    page.clear_leaf_data(&self.page_pool, write_pass, children);
+                    children.in_next_page()
+                }
+                Some(leaf) => {
+                    page.set_leaf_data(&self.page_pool, write_pass, children, leaf);
+                    false
+                }
+            };
 
-            (page_id, children)
+            (page_id, children, cleared)
         };
 
         if let Some(stack_item) = self.stack.last_mut().filter(|item| item.page_id == page_id) {
             stack_item.diff.set_changed(children.left());
             stack_item.diff.set_changed(children.right());
+            stack_item.diff.set_cleared(cleared);
         } else if let Some((_, diff)) = self.diffs.last_mut().filter(|item| item.0 == page_id) {
             // it's possible for us to revisit a page which was just popped off the stack, for
             // example, when compacting up.
             diff.set_changed(children.left());
             diff.set_changed(children.right());
+            diff.set_cleared(cleared);
         } else {
             let mut diff = PageDiff::default();
             diff.set_changed(children.left());
             diff.set_changed(children.right());
+            diff.set_cleared(cleared);
             self.diffs.push((page_id, diff));
         }
     }

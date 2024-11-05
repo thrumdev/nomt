@@ -43,11 +43,28 @@ impl PageDiff {
         self.changed_nodes[word] & mask == mask
     }
 
+    /// Mark the page as having been cleared.
+    pub fn set_cleared(&mut self, cleared: bool) {
+        let mask = 1 << 63;
+        if cleared {
+            self.changed_nodes[1] |= mask;
+        } else {
+            self.changed_nodes[1] &= !mask;
+        }
+    }
+
+    /// Whether the page was completely cleared.
+    pub fn cleared(&self) -> bool {
+        self.changed_nodes[1] >> 63 == 1
+    }
+
     /// Given the page data, collect the nodes that have changed according to this diff.
+    /// Panics if this is a cleared page-diff.
     pub fn pack_changed_nodes<'a, 'b: 'a>(
         &'b self,
         page: &'a [u8],
     ) -> impl Iterator<Item = [u8; 32]> + 'a {
+        self.assert_not_cleared();
         self.iter_ones().map(|node_index| {
             let start = node_index * 32;
             let end = start + 32;
@@ -74,6 +91,7 @@ impl PageDiff {
     }
 
     /// Get raw bytes representing the PageDiff
+    /// Panics if this is a cleared page-diff.
     pub fn as_bytes(&self) -> [u8; 16] {
         let mut bytes = [0u8; 16];
         bytes[0..8].copy_from_slice(&self.changed_nodes[0].to_le_bytes());
@@ -81,7 +99,12 @@ impl PageDiff {
         bytes
     }
 
+    fn assert_not_cleared(&self) {
+        assert_eq!(self.changed_nodes[1] & (1 << 63), 0);
+    }
+
     fn iter_ones(&self) -> impl Iterator<Item = usize> {
+        self.assert_not_cleared();
         FastIterOnes(self.changed_nodes[0])
             .chain(FastIterOnes(self.changed_nodes[1]).map(|i| i + 64))
     }
