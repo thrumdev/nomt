@@ -62,8 +62,8 @@ pub fn open(
 
 /// Creates the store file. Fails if store file already exists.
 ///
-/// Lays out the meta page, and fills the file with zeroes.
-pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
+/// Lays out the meta page. If `preallocate` is true, preallocates the blocks for the file.
+pub fn create(path: PathBuf, num_pages: u32, preallocate: bool) -> std::io::Result<()> {
     let start = std::time::Instant::now();
     let ht_path = path.join("ht");
     let ht_file = OpenOptions::new().write(true).create(true).open(ht_path)?;
@@ -71,9 +71,9 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     // number of pages + pages required for meta bits.
     let page_count = num_pages + num_meta_byte_pages(num_pages);
     let len = page_count as usize * PAGE_SIZE;
-    ht_file.set_len(len as u64)?;
 
-    zero_file(&ht_file, len)?;
+    resize_and_prealloc(&ht_file, len as u64, preallocate)?;
+
     ht_file.sync_all()?;
     drop(ht_file);
 
@@ -90,30 +90,50 @@ pub fn create(path: PathBuf, num_pages: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn zero_file(file: &File, len: usize) -> std::io::Result<()> {
-    let res = unsafe {
-        use std::os::fd::AsRawFd;
+/// Sets the file size and attempts to preallocate the file if `preallocate` is true.
+///
+/// Returns an error if setting the file size fails. File preallocation is done on a best-effort basis
+/// and may silently fall back to regular allocation.
+///
+/// After this call, if successful, the file size is set to `len` bytes.
+fn resize_and_prealloc(ht_file: &File, len: u64, preallocate: bool) -> std::io::Result<()> {
+    if !preallocate {
+        // If not preallocating, just set the file size and return.
+        ht_file.set_len(len)?;
+        return Ok(());
+    }
 
-        libc::fallocate(
-            file.as_raw_fd(),
-            libc::FALLOC_FL_ZERO_RANGE,
-            0 as _,
-            len as _,
-        )
-    };
-
-    if res == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            // To preallocate on Linux systems, try using fallocate with ZERO_RANGE first as it's more
+            // efficient. fallocate sets the file size as well, so ftruncate (aka file.set_len()) is
+            // not needed.
+            if crate::sys::linux::tmpfs_check(ht_file) {
+                // Skip preallocation for tmpfs. It doesn't support fallocate and it's
+                // memory-backed anyway. ftruncate and bail.
+                ht_file.set_len(len)?;
+                return Ok(());
+            }
+            if let Err(_) = crate::sys::linux::falloc_zero_file(ht_file, len) {
+                // If fallocate fails, fall back to zeroing the file with write.
+                resize_and_zero_file(ht_file, len)?;
+            }
+            return Ok(());
+        } else {
+            resize_and_zero_file(ht_file, len)?;
+        }
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn zero_file(mut file: &File, len: usize) -> std::io::Result<()> {
+// Fallback method for allocating extents for the file: just incrementally write zeroes to the file.
+fn resize_and_zero_file(mut file: &File, len: u64) -> std::io::Result<()> {
     use std::io::Write;
 
+    // Set the file size first.
+    file.set_len(len)?;
+
+    // Zero the file.
+    let len = len as usize;
     let buf = [0u8; PAGE_SIZE * 4];
     let mut remaining = len;
     while remaining > 0 {
@@ -121,6 +141,5 @@ fn zero_file(mut file: &File, len: usize) -> std::io::Result<()> {
         file.write_all(&buf[..len])?;
         remaining -= len;
     }
-
     Ok(())
 }

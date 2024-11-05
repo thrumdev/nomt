@@ -326,7 +326,7 @@ fn create(o: &crate::Options) -> anyhow::Result<()> {
     meta_fd.sync_all()?;
     drop(meta_fd);
 
-    bitbox::create(o.path.clone(), o.bitbox_num_pages)?;
+    bitbox::create(o.path.clone(), o.bitbox_num_pages, o.preallocate_ht)?;
     beatree::create(&o.path)?;
 
     // As the last step, sync the directory.
