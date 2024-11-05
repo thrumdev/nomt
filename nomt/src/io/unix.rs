@@ -1,9 +1,6 @@
 use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender};
 
-// max number of inflight requests is bounded by the threadpool.
-const MAX_IN_FLIGHT: usize = 64;
-
 pub fn start_io_worker(io_workers: usize, _iopoll: bool) -> Sender<IoPacket> {
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
