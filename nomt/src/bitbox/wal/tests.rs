@@ -2,9 +2,6 @@ use super::{WalBlobBuilder, WalBlobReader, WalEntry};
 use crate::{io::page_pool::PagePool, page_diff::PageDiff};
 use std::{fs::OpenOptions, io::Write as _};
 
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::OpenOptionsExt as _;
-
 #[test]
 fn test_write_read() {
     let tempdir = tempfile::tempdir().unwrap();
@@ -13,8 +10,6 @@ fn test_write_read() {
     let mut wal_fd = {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
-        #[cfg(target_os = "linux")]
-        options.custom_flags(libc::O_DIRECT);
         options.open(&wal_filename).unwrap()
     };
 
