@@ -239,6 +239,11 @@ impl TriePosition {
         }
     }
 
+    /// Fast path for checking whether this is in the first layer in the page.
+    pub fn is_first_layer_in_page(&self) -> bool {
+        self.node_index & 1 == 0
+    }
+
     /// Get the number of shared bits between this position and `other`.
     ///
     /// This is essentially the depth of a hypothetical internal node which both positions would
@@ -323,6 +328,11 @@ impl ChildNodeIndices {
     /// Child node indices for the top two nodes of a page.
     pub fn next_page() -> Self {
         Self::from_left(0)
+    }
+
+    /// Whether these are at the top of a page.
+    pub fn in_next_page(&self) -> bool {
+        self.0 == 0
     }
 
     /// Get the index of the left child.

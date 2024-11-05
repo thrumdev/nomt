@@ -114,15 +114,6 @@ impl PageData {
     }
 }
 
-/// Checks whether a page is empty.
-pub fn page_is_empty(page: &[u8]) -> bool {
-    // 1. we assume the top layer of nodes are kept at index 0 and 1, respectively, and this
-    //    is packed as the first two 32-byte slots.
-    // 2. if both are empty, then the whole page is empty. this is because internal nodes
-    //    with both children as terminals are not allowed to exist.
-    &page[..64] == [0u8; 64].as_slice()
-}
-
 /// A handle to the page.
 ///
 /// Can be cloned cheaply.
@@ -481,11 +472,11 @@ impl PageCache {
                     tx.delete_page(page_id, known_bucket);
                     *bucket = None;
                 }
-                (Some(page), Some(known_bucket)) if page_is_empty(&page[..]) => {
+                (Some(_), Some(known_bucket)) if page_diff.cleared() => {
                     tx.delete_page(page_id, known_bucket);
                     *bucket = None;
                 }
-                (Some(page), maybe_bucket) => {
+                (Some(page), maybe_bucket) if !page_diff.cleared() => {
                     let new_bucket = tx.write_page(page_id, maybe_bucket, page, page_diff);
                     *bucket = Some(new_bucket);
                 }
