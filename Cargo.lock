@@ -693,6 +693,7 @@ dependencies = [
  "anyhow",
  "bitvec",
  "blake3",
+ "cfg-if",
  "criterion",
  "crossbeam",
  "crossbeam-channel",
