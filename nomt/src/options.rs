@@ -19,6 +19,8 @@ pub struct Options {
     pub(crate) warm_up: bool,
     /// The number of threads to use for fetching prior values.
     pub(crate) rollback_tp_size: usize,
+    /// Whether to preallocate the hashtable file.
+    pub(crate) preallocate_ht: bool,
 }
 
 impl Options {
@@ -40,6 +42,7 @@ impl Options {
             max_rollback_log_len: 100,
             warm_up: false,
             rollback_tp_size: 4,
+            preallocate_ht: true,
         }
     }
 
@@ -120,5 +123,18 @@ impl Options {
     /// Default: 4.
     pub fn rollback_tp_size(&mut self, rollback_tp_size: usize) {
         self.rollback_tp_size = rollback_tp_size;
+    }
+
+    /// Sets whether to preallocate the hashtable file.
+    ///
+    /// Many filesystems don't handle sparse files well. If the `preallocate_ht` option is set to
+    /// `true`, NOMT will try to make sure that the file is fully allocated.
+    ///
+    /// If set to `false` this won't allocate the disk space for the hashtable file upfront, but can
+    /// lead to fragmentation later.
+    ///
+    /// Default: `true`.
+    pub fn preallocate_ht(&mut self, preallocate_ht: bool) {
+        self.preallocate_ht = preallocate_ht;
     }
 }
