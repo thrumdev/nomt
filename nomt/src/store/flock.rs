@@ -5,8 +5,6 @@ use std::{
     path::Path,
 };
 
-use fs2::FileExt as _;
-
 /// Represents a cross-platform advisory lock on a directory.
 pub struct Flock {
     lock_fd: File,
@@ -22,11 +20,10 @@ impl Flock {
             .create(true)
             .open(lock_path)?;
 
-        match lock_fd.try_lock_exclusive() {
+        match crate::sys::unix::try_lock_exclusive(&lock_fd) {
             Ok(_) => Ok(Self { lock_fd }),
-            Err(_) => {
-                let err = fs2::lock_contended_error();
-                anyhow::bail!("Failed to lock directory: {err}");
+            Err(e) => {
+                anyhow::bail!("Failed to lock directory: {e}");
             }
         }
     }
@@ -34,7 +31,7 @@ impl Flock {
 
 impl Drop for Flock {
     fn drop(&mut self) {
-        if let Err(e) = self.lock_fd.unlock() {
+        if let Err(e) = crate::sys::unix::unlock(&self.lock_fd) {
             eprintln!("Failed to unlock directory lock: {e}");
         }
     }
