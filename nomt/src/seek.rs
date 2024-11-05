@@ -229,7 +229,7 @@ impl Seeker {
     /// Try to submit as many requests as possible. Returns `true` if blocked.
     pub fn submit_all(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<bool> {
         if !self.has_room() {
-            return Ok(true)
+            return Ok(true);
         }
         let blocked = self.submit_idle_page_loads(read_pass)?
             || self.submit_single_page_request(read_pass)?
@@ -346,7 +346,7 @@ impl Seeker {
             } else {
                 self.idle_page_loads.push_back(slab_index)
             }
-            return Ok(true)
+            return Ok(true);
         }
 
         let page_load = &mut self.page_load_slab[slab_index];

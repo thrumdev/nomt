@@ -20,7 +20,9 @@ impl Index {
     /// This is either a branch whose separator is exactly equal to this key or the branch with the
     /// highest separator less than the key.
     pub fn lookup(&self, key: Key) -> Option<(Key, Arc<BranchNode>)> {
-        self.first_key_map.get_prev(&key).map(|(sep, b)| (sep.clone(), b.clone()))
+        self.first_key_map
+            .get_prev(&key)
+            .map(|(sep, b)| (sep.clone(), b.clone()))
     }
 
     /// Get the first separator greater than the given key.
