@@ -38,6 +38,7 @@ impl IoKind {
         }
     }
 
+    /// Expected to be called directly after a failing syscall. IOW, errno should not clobbered.
     pub fn get_result(&self, res: isize) -> IoKindResult {
         match self {
             // pread returns 0 if the file has been read till the end of file
@@ -49,7 +50,14 @@ impl IoKind {
             IoKind::Read(_, _, _) if res == 0 => IoKindResult::Ok,
             // pread and pwrite return the number of bytes read or written
             _ if res == PAGE_SIZE as isize => IoKindResult::Ok,
-            _ if res == -1 => IoKindResult::Err,
+            _ if res == -1 => {
+                let os_err = std::io::Error::last_os_error();
+                if matches!(os_err.kind(), std::io::ErrorKind::Interrupted) {
+                    IoKindResult::Retry
+                } else {
+                    IoKindResult::Err
+                }
+            }
             _ => IoKindResult::Retry,
         }
     }
