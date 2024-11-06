@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
-      - run: cargo build --verbose --workspace
+      - run: cargo build --verbose --workspace --locked
       - run: cargo test --verbose --workspace
   benchtop_check:
     name: NOMT - check benchtop
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
-      - run: cargo check --verbose --manifest-path=benchtop/Cargo.toml
+      - run: cargo check --verbose --manifest-path=benchtop/Cargo.toml --locked
   loom_rw_pass_cell:
     name: NOMT - loom rw_pass_cell
     runs-on: ubuntu-latest
