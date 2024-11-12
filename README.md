@@ -14,7 +14,7 @@ NOMT exposes a many-readers-one-writer API organized around batch transactions r
 
 Internally, NOMT consists of two parallel stores, Beatree and Bitbox. Beatree stores raw key-value pairs and is based around a B-Tree variant optimized for stable, fast random access patterns and high-entropy keys. Bitbox stores a custom sparse binary merkle tree in an on-disk hashtable in a format amenable to SSDs.
 
-For more information on NOMT, the thesis behind it, and performance targets, see [this Novemeber 2024 presentation](https://x.com/TheKusamarian/status/1855477208762261910) by @rphmeier or [view the slides here](https://hackmd.io/@Xo-wxO7bQkKidH1LrqACsw/rkG0lmjWyg#/).
+For more information on NOMT, the thesis behind it, and performance targets, see [this November 2024 presentation](https://x.com/TheKusamarian/status/1855477208762261910) by @rphmeier or [view the slides here](https://hackmd.io/@Xo-wxO7bQkKidH1LrqACsw/rkG0lmjWyg#/).
 
 We have built a benchmarking tool, `benchtop`, which is located in the `benchtop` directory as a separate subcrate.
 
