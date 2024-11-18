@@ -326,14 +326,33 @@ impl BranchUpdater {
             gauge.prefix_len,
         );
 
-        for op in ops {
-            match op {
-                BranchOp::Insert(k, pn) => builder.push(*k, separator_len(k), pn.0),
-                BranchOp::Keep(i, s) => {
-                    let (k, pn) = self.base.as_ref().unwrap().key_value(*i);
-                    builder.push(k, *s, pn.0);
+        let mut pending_chunk = None;
+        for i in 0..ops.len() {
+            match (&ops[i], &mut pending_chunk) {
+                // start a chunk
+                (BranchOp::Keep(pos, _), None) => pending_chunk = Some((*pos, pos + 1)),
+                // chunk grows
+                (BranchOp::Keep(pos, _), Some((_from, to))) if *pos == *to => *to += 1,
+                // chunk ends, apply pending one and start new one
+                (BranchOp::Keep(pos, _), Some((from, to))) => {
+                    // UNWRAP: if the operation is a Keep variant, then base must exist
+                    builder.push_chunk(&self.base.as_ref().unwrap().node, *from, *to);
+                    pending_chunk = Some((*pos, pos + 1));
                 }
+                // chunk ends, and insert new leaf
+                (BranchOp::Insert(k, pn), Some((from, to))) => {
+                    // UNWRAP: if pending_chunk is some, the base must exist
+                    builder.push_chunk(&self.base.as_ref().unwrap().node, *from, *to);
+                    pending_chunk = None;
+                    builder.push(*k, separator_len(k), pn.0);
+                }
+                (BranchOp::Insert(k, pn), None) => builder.push(*k, separator_len(k), pn.0),
             }
+        }
+
+        if let Some((from, to)) = pending_chunk {
+            // UNWRAP: if pending_chunk is some, the base must exist
+            builder.push_chunk(&self.base.as_ref().unwrap().node, from, to);
         }
 
         builder.finish()

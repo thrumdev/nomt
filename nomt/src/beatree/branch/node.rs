@@ -1,8 +1,15 @@
+use std::ops::Range;
+
 use bitvec::prelude::*;
 
 use super::BRANCH_NODE_SIZE;
-use crate::beatree::Key;
-use crate::io::{FatPage, PagePool};
+use crate::{
+    beatree::{
+        ops::{bit_ops::bitwise_memcpy, get_key},
+        Key,
+    },
+    io::{FatPage, PagePool},
+};
 
 // Here is the layout of a branch node:
 //
@@ -107,8 +114,29 @@ impl BranchNode {
         self.as_mut_slice()[start..].view_bits_mut()[..prefix_len].copy_from_bitslice(prefix);
     }
 
-    pub fn raw_separator(&self, i: usize) -> RawSeparator {
+    fn cells_mut(&self) -> &mut [[u8; 2]] {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.page[BRANCH_NODE_HEADER_SIZE..BRANCH_NODE_HEADER_SIZE + 2].as_ptr()
+                    as *mut [u8; 2],
+                self.n().into(),
+            )
+        }
+    }
+
+    pub fn raw_separator(&self, i: usize) -> RawSeparators {
         self.view().raw_separator(i)
+    }
+
+    pub fn raw_separators_mut(&mut self, from: usize, to: usize) -> RawSeparatorsMut {
+        let RawSeparatorsData {
+            start,
+            byte_len,
+            bit_init,
+            bit_len,
+        } = self.view().raw_separators_data(from, to);
+
+        (&mut self.page[start..start + byte_len], bit_init, bit_len)
     }
 
     fn set_separator(
@@ -132,6 +160,16 @@ impl BranchNode {
 
     pub fn node_pointer(&self, i: usize) -> u32 {
         self.view().node_pointer(i)
+    }
+
+    pub fn node_pointers_mut(&mut self) -> &mut [[u8; 4]] {
+        let node_pointers_init = BRANCH_NODE_SIZE - self.n() as usize * 4;
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.page[node_pointers_init..].as_mut_ptr() as *mut [u8; 4],
+                self.n() as usize,
+            )
+        }
     }
 
     fn set_node_pointer(&mut self, i: usize, node_pointer: u32) {
@@ -171,6 +209,16 @@ impl<'a> BranchNodeView<'a> {
         u16::from_le_bytes(self.inner[cell_offset..][..2].try_into().unwrap()) as usize
     }
 
+    fn cells(&self) -> &[[u8; 2]] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.inner[BRANCH_NODE_HEADER_SIZE..BRANCH_NODE_HEADER_SIZE + 2].as_ptr()
+                    as *const [u8; 2],
+                self.n().into(),
+            )
+        }
+    }
+
     pub fn separator(&self, i: usize) -> &'a BitSlice<u8, Msb0> {
         let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let mut bit_offset_start = self.prefix_len() as usize;
@@ -179,22 +227,42 @@ impl<'a> BranchNodeView<'a> {
         &self.inner[start_separators..].view_bits()[bit_offset_start..bit_offset_end]
     }
 
-    pub fn raw_separator(&self, i: usize) -> RawSeparator<'a> {
+    fn raw_separators_data(&self, from: usize, to: usize) -> RawSeparatorsData {
         let mut bit_offset_start = self.prefix_len() as usize;
-        bit_offset_start += if i != 0 { self.cell(i - 1) } else { 0 };
-        let bit_offset_end = self.prefix_len() as usize + self.cell(i);
+        bit_offset_start += if from != 0 { self.cell(from - 1) } else { 0 };
+        let bit_offset_end = self.prefix_len() as usize + self.cell(to - 1);
 
         let bit_len = bit_offset_end - bit_offset_start;
-
-        if bit_len == 0 {
-            return (&[], 0, bit_len);
-        }
 
         let bit_init = bit_offset_start % 8;
         let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let start = start_separators + (bit_offset_start / 8);
         // load only slices into RawSeparator that have a length multiple of 8 bytes
-        let byte_len = (((bit_init + bit_len) + 7) / 8).next_multiple_of(8);
+        let byte_len = if bit_len == 0 {
+            0
+        } else {
+            (((bit_init + bit_len) + 7) / 8).next_multiple_of(8)
+        };
+
+        RawSeparatorsData {
+            start,
+            byte_len,
+            bit_init,
+            bit_len,
+        }
+    }
+
+    pub fn raw_separator(&self, i: usize) -> RawSeparators<'a> {
+        self.raw_separators(i, i + 1)
+    }
+
+    pub fn raw_separators(&self, from: usize, to: usize) -> RawSeparators<'a> {
+        let RawSeparatorsData {
+            start,
+            byte_len,
+            bit_init,
+            bit_len,
+        } = self.raw_separators_data(from, to);
 
         (&self.inner[start..start + byte_len], bit_init, bit_len)
     }
@@ -217,18 +285,43 @@ impl<'a> BranchNodeView<'a> {
         let offset = BRANCH_NODE_SIZE - (self.n() as usize - i) * 4;
         u32::from_le_bytes(self.inner[offset..offset + 4].try_into().unwrap())
     }
+
+    pub fn node_pointers(&self) -> &[[u8; 4]] {
+        let node_pointers_init = BRANCH_NODE_SIZE - self.n() as usize * 4;
+        unsafe {
+            std::slice::from_raw_parts(
+                self.inner[node_pointers_init..].as_ptr() as *const [u8; 4],
+                self.n() as usize,
+            )
+        }
+    }
 }
 
 unsafe impl Send for BranchNode {}
 
 // A RawPrefix is made by a tuple of raw bytes and the relative bit length
 pub type RawPrefix<'a> = (&'a [u8], usize);
-// A RawSeparator is made by a triple, the raw bytes, the bit-offset
-// at which the separator starts to be encoded in the first byte
+
+// Data required to extract one or more separators from the branch node
+#[derive(Debug)]
+struct RawSeparatorsData {
+    // start of the separators within the branch node page
+    start: usize,
+    // length in bytes of the separators, it must be a multiple of 8
+    byte_len: usize,
+    // bit offset of the init of the separators within the first byte
+    bit_init: usize,
+    // bit length of the separators
+    bit_len: usize,
+}
+
+// A RawSeparators is made by a triple, the raw bytes, the bit-offset
+// at which the separators starts to be encoded in the first byte
 // and the relative bit length
 //
 // The raw bytes are always a multiple of 8 bytes in length
-pub type RawSeparator<'a> = (&'a [u8], usize, usize);
+pub type RawSeparators<'a> = (&'a [u8], usize, usize);
+pub type RawSeparatorsMut<'a> = (&'a mut [u8], usize, usize);
 
 pub fn body_size(prefix_len: usize, total_separator_lengths: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round
@@ -294,8 +387,302 @@ impl BranchNodeBuilder {
         self.index += 1;
     }
 
+    pub fn push_chunk(&mut self, base: &BranchNode, from: usize, to: usize) {
+        assert!(self.index < self.branch.n() as usize);
+
+        if self.index == 0 {
+            // extract the prefix if this is the first inserted item
+            let key = get_key(base, from);
+            self.branch
+                .set_prefix(&key.view_bits::<Msb0>()[..self.prefix_len]);
+        }
+
+        let n_items = to - from;
+        let n_items_compressed =
+            std::cmp::min(self.prefix_compressed.saturating_sub(self.index), n_items);
+
+        let bit_prefix_len_difference =
+            base.prefix_len() as isize - self.branch.prefix_len() as isize;
+        let is_prefix_extension = bit_prefix_len_difference.is_positive();
+        let bit_prefix_len_difference = bit_prefix_len_difference.abs() as usize;
+
+        // 1. copy and update cells
+
+        // self.separator_bit_offset is the end offset of the last inserted separator
+        let mut cell_pointer = self.separator_bit_offset;
+
+        let mut base_prev_cell_pointer = 0;
+        if from != 0 {
+            base_prev_cell_pointer = base.view().cell(from - 1)
+        }
+
+        for (i, (base_cell, cell)) in (&base.view().cells()[from..to])
+            .iter()
+            .zip(&mut self.branch.cells_mut()[self.index..self.index + n_items])
+            .enumerate()
+        {
+            let base_cell_pointer = u16::from_le_bytes(*base_cell) as usize;
+            let mut separator_len = base_cell_pointer - base_prev_cell_pointer;
+            base_prev_cell_pointer = base_cell_pointer;
+
+            if i < n_items_compressed {
+                if is_prefix_extension {
+                    separator_len += bit_prefix_len_difference;
+                } else {
+                    separator_len = separator_len.saturating_sub(bit_prefix_len_difference);
+                }
+            } else {
+                separator_len += base.prefix_len() as usize;
+            }
+
+            cell_pointer += separator_len as usize;
+            cell.copy_from_slice(&u16::try_from(cell_pointer).unwrap().to_le_bytes());
+        }
+
+        // 2. copy node pointers
+        let base_view = base.view();
+        let base_node_pointers = &base_view.node_pointers()[from..to];
+        self.branch.node_pointers_mut()[self.index..self.index + n_items]
+            .copy_from_slice(base_node_pointers);
+
+        // 3. copy and shift separators
+        let range_compressed = self.index..self.index + n_items_compressed;
+        let base_range_compressed = from..from + n_items_compressed;
+        let range_non_compressed = self.index + n_items_compressed..self.index + n_items;
+        let base_range_non_compressed = from + n_items_compressed..to;
+
+        if bit_prefix_len_difference == 0 && n_items_compressed > 0 {
+            // fast path, copy and shift all compressed separators at once
+            let (separators_bytes, separators_bit_init, _separators_bit_len) = self
+                .branch
+                .raw_separators_mut(range_compressed.start, range_compressed.end);
+
+            let (_, _, _) =
+                base_view.raw_separators(base_range_compressed.end - 1, base_range_compressed.end);
+
+            let (base_separators_bytes, base_separators_bit_init, base_separators_bit_len) =
+                base_view.raw_separators(base_range_compressed.start, base_range_compressed.end);
+
+            bitwise_memcpy(
+                separators_bytes,
+                separators_bit_init,
+                base_separators_bytes,
+                base_separators_bit_init,
+                base_separators_bit_len,
+            );
+        } else {
+            // slow path, copy and shift separators one by one
+            self.copy_and_shift_separators(
+                base,
+                range_compressed,
+                base_range_compressed,
+                is_prefix_extension,
+                bit_prefix_len_difference,
+            );
+        }
+
+        // non-compressed separators need to be copied one by one because
+        // their prefixes need to be extracted from the base to be copied into the new node
+        self.copy_and_shift_separators(
+            base,
+            range_non_compressed,
+            base_range_non_compressed,
+            true,
+            base.prefix_len() as usize,
+        );
+
+        self.index += n_items;
+        self.separator_bit_offset = cell_pointer;
+    }
+
+    fn copy_and_shift_separators(
+        &mut self,
+        base: &BranchNode,
+        range: Range<usize>,
+        base_range: Range<usize>,
+        is_prefix_extension: bool,
+        bit_prefix_len_difference: usize,
+    ) {
+        if range.is_empty() {
+            return;
+        }
+
+        let carry_prefix: Option<(usize, usize, usize)> = if is_prefix_extension {
+            // bit_prefix_len_difference is the amount of bits that need to be taken from
+            // the base prefix and added in front of every separator.
+            // The interested bits are the last bits of the prefix
+
+            let bits_to_skip = base.prefix_len() as usize - bit_prefix_len_difference as usize;
+            let bytes_to_skip = bits_to_skip / 8;
+            let prefix_bit_init = bits_to_skip % 8;
+
+            let base_prefix_start = BRANCH_NODE_HEADER_SIZE + base.n() as usize * 2;
+            let start = base_prefix_start + bytes_to_skip;
+            let byte_len = (((bit_prefix_len_difference as usize) + 7) / 8).next_multiple_of(8);
+
+            Some((start, start + byte_len, prefix_bit_init))
+        } else {
+            None
+        };
+
+        // iterate over all separators that need to be copied and shifted
+        for (index, base_index) in range.clone().into_iter().zip(base_range) {
+            let RawSeparatorsData {
+                start: mut separator_bytes_start,
+                byte_len: separator_bytes_len,
+                bit_init: mut separator_bit_init,
+                bit_len: separator_bit_len,
+            } = self.branch.view().raw_separators_data(index, index + 1);
+
+            let RawSeparatorsData {
+                start: mut base_separator_bytes_start,
+                byte_len: base_separator_bytes_len,
+                bit_init: mut base_separator_bit_init,
+                bit_len: base_separator_bit_len,
+            } = base.view().raw_separators_data(base_index, base_index + 1);
+
+            // copy the prefix in place if this is_prefix_extension
+            if let Some((base_prefix_start, base_prefix_end, base_prefix_bit_init)) = carry_prefix {
+                bitwise_memcpy(
+                    &mut self.branch.page
+                        [separator_bytes_start..separator_bytes_start + separator_bytes_len],
+                    separator_bit_init,
+                    &base.page[base_prefix_start..base_prefix_end],
+                    base_prefix_bit_init,
+                    bit_prefix_len_difference,
+                );
+            }
+
+            // shift and copy the separator from the base to the new node.
+            //
+            // If there is a prefix extension, `handle_prefix_offset` helps to understand
+            // how many bytes need to be skipped, given the amount of extended prefix. The same
+            // function, in the case of a non-prefix extension, is used to understand how many
+            // bits to skip from the base_separator.
+            let handle_prefix_offset = |bit_init: &mut usize, byte_init: &mut usize| {
+                if *bit_init > 7 {
+                    // skip some bytes because they are part of the prefix
+                    let bytes_to_skip = *bit_init / 8;
+                    *bit_init = *bit_init % 8;
+                    *byte_init += bytes_to_skip;
+                }
+            };
+
+            let bit_len;
+            if is_prefix_extension {
+                // carry_prefix is already being applied, so skip bits in the new node's separator
+                separator_bit_init += bit_prefix_len_difference;
+                handle_prefix_offset(&mut separator_bit_init, &mut separator_bytes_start);
+                bit_len = base_separator_bit_len;
+            } else {
+                // the prefix in the new node is bigger, so skip bits in the base's separator
+                base_separator_bit_init += bit_prefix_len_difference;
+                handle_prefix_offset(
+                    &mut base_separator_bit_init,
+                    &mut base_separator_bytes_start,
+                );
+                bit_len = separator_bit_len;
+            }
+
+            bitwise_memcpy(
+                &mut self.branch.page
+                    [separator_bytes_start..separator_bytes_start + separator_bytes_len],
+                separator_bit_init,
+                &base.page[base_separator_bytes_start
+                    ..base_separator_bytes_start + base_separator_bytes_len],
+                base_separator_bit_init,
+                bit_len,
+            );
+        }
+    }
+
     pub fn finish(self) -> BranchNode {
         self.branch
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        beatree::{
+            branch::BranchNodeBuilder,
+            ops::{bit_ops::separator_len, get_key},
+        },
+        io::PagePool,
+    };
+
+    lazy_static::lazy_static! {
+        static ref PAGE_POOL: PagePool = PagePool::new();
+    }
+
+    #[test]
+    fn push_chunk() {
+        let mut keys = vec![[0u8; 32]; 10];
+        for (i, key) in keys.iter_mut().enumerate() {
+            key[0] = 0x11;
+            if i != 0 {
+                key[1] = 128;
+                key[2] = i as u8;
+            }
+        }
+
+        // prefix: 00010001_
+        // key 0:           _000...            // cell_poiter: 0
+        // key 1:           _10000000_00000001 // cell_poiter: 16
+        // key 2:           _10000000_0000001X // cell_poiter: 31
+        // key 3:           _10000000_00000011 // cell_poiter: 47
+        // ...
+        // key 9:           _10000000_00001001
+        // prefix_len: 8
+        let mut builder = BranchNodeBuilder::new(BranchNode::new_in(&PAGE_POOL), 10, 10, 8);
+        for (i, k) in keys.iter().enumerate() {
+            builder.push(*k, separator_len(k), i as u32);
+        }
+        let base_branch = builder.finish();
+
+        use crate::beatree::branch::BranchNode;
+
+        let new_branch = BranchNode::new_in(&PAGE_POOL);
+        let mut builder = BranchNodeBuilder::new(
+            new_branch, 4, /*n*/
+            4, /*prefix_compressed*/
+            9, /*prefix_len*/
+        );
+        builder.push_chunk(&base_branch, 1, 4);
+        let mut key255 = [0; 32];
+        key255[0] = 0x11;
+        key255[1] = 255;
+        key255[2] = 255;
+        builder.push(key255, separator_len(&key255), 10);
+        // prefix: 00010001_1
+        // key p + 1:        0000000_00000001 // cell_poiter: 15
+        // key p + 2:        0000000_00000010 // cell_poiter: 29
+        // key p + 3:        0000000_00000011 // cell_poiter: 44
+        // key 65535:        1111111_11111111
+        let branch = builder.finish();
+        assert_eq!(get_key(&branch, 0), keys[1]);
+        assert_eq!(get_key(&branch, 1), keys[2]);
+        assert_eq!(get_key(&branch, 2), keys[3]);
+        assert_eq!(get_key(&branch, 3), key255);
+
+        let new_branch = BranchNode::new_in(&PAGE_POOL);
+        let mut builder = BranchNodeBuilder::new(
+            new_branch, 4, /*n*/
+            4, /*prefix_compressed*/
+            7, /*prefix_len*/
+        );
+        builder.push_chunk(&base_branch, 1, 4);
+        builder.push(key255, separator_len(&key255), 10);
+        // prefix: 0001000
+        // key 1:         1_10000000_00000001 // cell_poiter: 17
+        // key 2:         1_10000000_0000001X // cell_poiter: 33
+        // key 3:         1_10000000_00000011 // cell_poiter: 50
+        // key 255:       1_11111111_11111111
+        let branch = builder.finish();
+        assert_eq!(get_key(&branch, 0), keys[1]);
+        assert_eq!(get_key(&branch, 1), keys[2]);
+        assert_eq!(get_key(&branch, 2), keys[3]);
+        assert_eq!(get_key(&branch, 3), key255);
     }
 }
 
