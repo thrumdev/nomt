@@ -249,11 +249,16 @@ fn is_valid_leaf_stage_output(
         // between its first and last key
         let first = leaf_node.key(0);
         let last = leaf_node.key(n - 1);
+        if last < first {
+            println!("last key is smaller than the first key");
+            return false;
+        }
         let mut expected = expected_values.range(first..=last);
 
         for i in 0..n {
             let key = leaf_node.key(i);
             if deletions.contains(&key) {
+                println!("deleted still present");
                 return false;
             }
 
@@ -261,21 +266,25 @@ fn is_valid_leaf_stage_output(
             value_size_sum += value.len();
 
             let Some((expected_key, expected_value)) = expected.next() else {
+                println!("extra key");
                 return false;
             };
 
             if key != *expected_key || value != expected_value {
+                println!("unexpected key or value");
                 return false;
             }
         }
 
         if expected.next().is_some() {
+            println!("missing key");
             return false;
         }
 
         // all new leaves must respect the half-full requirement except for the last one
         if leaf::node::body_size(n, value_size_sum) < LEAF_MERGE_THRESHOLD {
             if found_underfull_leaf == true {
+                println!("underfull");
                 return false;
             }
             found_underfull_leaf = true;
@@ -368,7 +377,6 @@ fn is_valid_branch_stage_output(
     insertions: BTreeSet<[u8; 32]>,
     deletions: BTreeSet<[u8; 32]>,
 ) -> bool {
-    println!("checking validity");
     let mut expected_values: BTreeSet<[u8; 32]> = SEPARATORS.iter().cloned().collect();
     expected_values.extend(insertions.clone());
     expected_values.retain(|k| !deletions.contains(k));
@@ -397,6 +405,10 @@ fn is_valid_branch_stage_output(
 
         let first = get_key(&branch_node, 0);
         let last = get_key(&branch_node, n - 1);
+        if last < first {
+            println!("last key is smaller than the first key");
+            return false;
+        }
         let mut expected = expected_values.range(first..=last);
 
         for i in 0..n {
