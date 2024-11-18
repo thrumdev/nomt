@@ -10,8 +10,8 @@ use crate::io::PagePool;
 use super::{LEAF_BULK_SPLIT_TARGET, LEAF_BULK_SPLIT_THRESHOLD, LEAF_MERGE_THRESHOLD};
 
 pub struct BaseLeaf {
-    pub node: Arc<LeafNode>,
-    pub separator: Key,
+    node: Arc<LeafNode>,
+    separator: Key,
     low: usize,
 }
 
@@ -25,47 +25,38 @@ impl BaseLeaf {
     }
 
     // Try to find the given key starting from `self.low` up to the end.
-    // Returns whether the key is present or not and the index of the key
-    // or the index containing the first key bigger then the one specified.
+    // Returns None if `self.low` is already at the end of the node.
+    // If there are available keys in the node, then it returns the index
+    // of the specified key with the boolean set to true or the index containing
+    // the first key bigger than the one specified and the boolean set to false.
     fn find_key(&mut self, key: &Key) -> Option<(bool, usize)> {
-        let mut high = self.node.n();
-
-        if self.low == high {
+        if self.low == self.node.n() {
             return None;
         }
 
-        while self.low < high {
-            let mid = self.low + (high - self.low) / 2;
+        // apply binary search only on a subset of all cell_pointers
+        let interesed_cell_pointers = &self.node.cell_pointers()[self.low..];
+        let res = interesed_cell_pointers.binary_search_by(|cell_pointer| {
+            let k = LeafNode::extract_key(cell_pointer);
+            k.cmp(&key)
+        });
 
-            match key.cmp(&self.key(mid)) {
-                // If the key at `mid` is smaller than the one we are looking for,
-                // then we are sure to go to the right
-                Ordering::Greater => self.low = mid + 1,
-                // If the key is the same, then we return its position in the base leaf,
-                // updating `self.low` to be the item just after `mid`
-                Ordering::Equal => {
-                    self.low = mid + 1;
-                    return Some((true, mid));
-                }
-                Ordering::Less if mid == 0 => return Some((false, 0)),
-                // If the key at `mid` is bigger, we need to check if
-                // the previous one is smaller or equal
-                Ordering::Less => match key.cmp(&self.key(mid - 1)) {
-                    Ordering::Less => high = mid,
-                    Ordering::Equal => {
-                        self.low = mid;
-                        return Some((true, mid - 1));
-                    }
-                    Ordering::Greater => {
-                        self.low = mid;
-                        return Some((false, mid));
-                    }
-                },
+        // the returned position is relative to `cell_pointers[self.low..]`
+        match res {
+            // if the key is found, then we return its position in the base leaf,
+            // updating `self.low` to be the item just after the found key
+            Ok(pos) => {
+                let absolute_pos = self.low + pos;
+                self.low = absolute_pos + 1;
+                return Some((true, absolute_pos));
+            }
+            // If the key is not present, then `self.low` is updated to point to
+            // the first key bigger than the one we looked for
+            Err(pos) => {
+                self.low = self.low + pos;
+                return Some((false, self.low));
             }
         }
-
-        self.low = self.node.n();
-        Some((false, self.node.n()))
     }
 
     fn key(&self, i: usize) -> Key {
@@ -277,15 +268,7 @@ impl LeafUpdater {
                     // accept the previous one, and iterate recursively over the newly created one.
 
                     match self.ops[op_index] {
-                        LeafOp::Insert(..) => {
-                            if self.gauge.body_size() < LEAF_MERGE_THRESHOLD {
-                                // super degenerate split! node grew from underfull to overfull in one
-                                // item. only thing to do here is merge leftwards, unfortunately.
-                                // save this for later to do another pass with.
-                                todo!()
-                            }
-                            false
-                        }
+                        LeafOp::Insert(..) => false,
                         LeafOp::KeepChunk(..) => {
                             // UNWRAP: if the operation is a KeepChunk variant, then base must exist
                             let (left_n_items, left_values_size) = split_keep_chunk(
