@@ -1,5 +1,5 @@
 use crate::beatree::{
-    branch::node::{RawPrefix, RawSeparator},
+    branch::node::{RawPrefix, RawSeparators},
     Key,
 };
 
@@ -55,7 +55,7 @@ pub fn separator_len(key: &Key) -> usize {
 
 // Reconstruct a key starting from a prefix and a misaligned separator.
 // Note: bit offsets starts from 0 going to 7, and the most significant bit is the one with index 0
-pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator) -> Key {
+pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparators) -> Key {
     let mut key = [0u8; 32];
 
     let prefix_bit_len = maybe_prefix.as_ref().map(|p| p.1).unwrap_or(0);
@@ -369,12 +369,12 @@ pub mod benches {
 #[cfg(test)]
 mod tests {
     use crate::beatree::{
-        branch::node::{RawPrefix, RawSeparator},
+        branch::node::{RawPrefix, RawSeparators},
         Key,
     };
     use bitvec::{prelude::Msb0, view::BitView};
 
-    fn reference_reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparator) -> Key {
+    fn reference_reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparators) -> Key {
         let mut key = [0; 32];
 
         let mut key_start_separator = 0;

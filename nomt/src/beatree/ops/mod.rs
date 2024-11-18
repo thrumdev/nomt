@@ -85,7 +85,7 @@ fn search_branch(branch: &BranchNode, key: Key) -> Option<(usize, PageNumber)> {
 }
 
 // Extract the key at a given index from a BranchNode, taking into account prefix compression.
-fn get_key(node: &BranchNode, index: usize) -> Key {
+pub fn get_key(node: &BranchNode, index: usize) -> Key {
     let prefix = if index < node.prefix_compressed() as usize {
         Some(node.raw_prefix())
     } else {

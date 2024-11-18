@@ -326,16 +326,74 @@ impl BranchUpdater {
             gauge.prefix_len,
         );
 
-        for op in ops {
-            match op {
-                BranchOp::Insert(k, pn) => builder.push(*k, separator_len(k), pn.0),
-                BranchOp::Keep(i, s) => {
-                    let (k, pn) = self.base.as_ref().unwrap().key_value(*i);
-                    builder.push(k, *s, pn.0);
+        let Some(base) = self.base.as_ref() else {
+            // SAFETY: If no base is avaialble, then all ops are expected to be `BranchOp::Insert`
+            for op in ops {
+                match op {
+                    BranchOp::Insert(key, pn) => builder.push(*key, separator_len(key), pn.0),
+                    _ => panic!("Unextected BranchOp creating a BranchNode without BaseBranch"),
                 }
+            }
+            return builder.finish();
+        };
+
+        let base_prefix_compressed = base.node.prefix_compressed() as usize;
+        let mut pending_chunk = None;
+        for i in 0..gauge.prefix_compressed_items() {
+            match (&ops[i], &mut pending_chunk) {
+                // start a chunk
+                (BranchOp::Keep(pos, _), None) if *pos < base_prefix_compressed => {
+                    pending_chunk = Some((*pos, pos + 1))
+                }
+                // keep a non-compressed separator
+                (BranchOp::Keep(pos, separator_len), None) => {
+                    let (k, pn) = base.key_value(*pos);
+                    builder.push(k, *separator_len, pn.0);
+                }
+                // chunk grows
+                (BranchOp::Keep(pos, _), Some((_from, to)))
+                    if *pos == *to && *pos < base_prefix_compressed =>
+                {
+                    *to += 1
+                }
+                // chunk ends
+                (BranchOp::Keep(pos, separator_len), Some((from, to))) => {
+                    // apply pending chunk
+                    builder.push_chunk(&base.node, *from, *to);
+                    pending_chunk = if *pos < base_prefix_compressed {
+                        // start a new chunk
+                        Some((*pos, pos + 1))
+                    } else {
+                        // apply non-compressed
+                        let (k, pn) = base.key_value(*pos);
+                        builder.push(k, *separator_len, pn.0);
+                        None
+                    };
+                }
+                // chunk ends, and insert new leaf
+                (BranchOp::Insert(k, pn), Some((from, to))) => {
+                    builder.push_chunk(&base.node, *from, *to);
+                    pending_chunk = None;
+                    builder.push(*k, separator_len(k), pn.0);
+                }
+                (BranchOp::Insert(k, pn), None) => builder.push(*k, separator_len(k), pn.0),
             }
         }
 
+        // apply possible pending chunk
+        if let Some((from, to)) = pending_chunk {
+            builder.push_chunk(&base.node, from, to);
+        }
+
+        for i in gauge.prefix_compressed_items()..ops.len() {
+            match &ops[i] {
+                BranchOp::Insert(key, pn) => builder.push(*key, separator_len(key), pn.0),
+                BranchOp::Keep(pos, separator_len) => {
+                    let (k, pn) = base.key_value(*pos);
+                    builder.push(k, *separator_len, pn.0);
+                }
+            }
+        }
         builder.finish()
     }
 
