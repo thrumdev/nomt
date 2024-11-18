@@ -217,9 +217,12 @@ impl LeafUpdater {
         let from = base.low;
         let (found, to) = match up_to {
             // Nothing more to do, the end has already been reached
-            None if base.low == base.node.n() => return,
-            // Jump direcly to the end of the base node
-            None => (false, base.node.n()),
+            None if from == base.node.n() => return,
+            // Jump directly to the end of the base node and update `base.low` accordingly
+            None => {
+                base.low = base.node.n();
+                (false, base.node.n())
+            }
             Some(up_to) => match base.find_key(up_to) {
                 Some(res) => res,
                 // already at the end
