@@ -60,9 +60,7 @@ impl LeafNode {
     }
 
     pub fn key(&self, i: usize) -> Key {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&self.cell_pointers()[i][..32]);
-        key
+        extract_key(&self.cell_pointers()[i])
     }
 
     pub fn value(&self, i: usize) -> (&[u8], bool) {
@@ -98,7 +96,7 @@ impl LeafNode {
         (start..end, overflow)
     }
 
-    fn cell_pointers(&self) -> &[[u8; 34]] {
+    pub fn cell_pointers(&self) -> &[[u8; 34]] {
         unsafe {
             std::slice::from_raw_parts(self.inner[2..36].as_ptr() as *const [u8; 34], self.n())
         }
@@ -198,6 +196,13 @@ impl LeafBuilder {
 
 pub fn body_size(n: usize, value_size_sum: usize) -> usize {
     n * 34 + value_size_sum
+}
+
+// get the key from the given cell pointer
+pub fn extract_key(cell_pointer: &[u8; 34]) -> Key {
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&cell_pointer[..32]);
+    buf
 }
 
 // get the cell offset and whether the cell is an overflow cell.
