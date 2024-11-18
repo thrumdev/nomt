@@ -190,13 +190,13 @@ impl<'a> BranchNodeView<'a> {
             return (&[], 0, bit_len);
         }
 
-        let bit_init = bit_offset_start % 8;
+        let bit_start = bit_offset_start % 8;
         let start_separators = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let start = start_separators + (bit_offset_start / 8);
         // load only slices into RawSeparator that have a length multiple of 8 bytes
-        let byte_len = (((bit_init + bit_len) + 7) / 8).next_multiple_of(8);
+        let byte_len = (((bit_start + bit_len) + 7) / 8).next_multiple_of(8);
 
-        (&self.inner[start..start + byte_len], bit_init, bit_len)
+        (&self.inner[start..start + byte_len], bit_start, bit_len)
     }
 
     pub fn prefix(&self) -> &'a BitSlice<u8, Msb0> {
