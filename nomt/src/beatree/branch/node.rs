@@ -108,10 +108,12 @@ impl BranchNode {
         self.view().raw_prefix()
     }
 
-    fn set_prefix(&mut self, prefix: &BitSlice<u8, Msb0>) {
+    // Set the prefix extracting `self.prefix_len` bits from the provided key
+    fn set_prefix(&mut self, key: &[u8; 32]) {
         let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let prefix_len = self.prefix_len() as usize;
-        self.as_mut_slice()[start..].view_bits_mut()[..prefix_len].copy_from_bitslice(prefix);
+        let end = start + ((prefix_len + 7) / 8).next_multiple_of(8);
+        bitwise_memcpy(&mut self.as_mut_slice()[start..end], 0, key, 0, prefix_len);
     }
 
     fn cells_mut(&mut self) -> &mut [[u8; 2]] {
@@ -362,8 +364,7 @@ impl BranchNodeBuilder {
         assert!(self.index < self.branch.n() as usize);
 
         if self.index == 0 {
-            let prefix = &key.view_bits::<Msb0>()[..self.prefix_len];
-            self.branch.set_prefix(prefix);
+            self.branch.set_prefix(&key);
         }
 
         let separator = if self.index < self.prefix_compressed {
@@ -395,10 +396,9 @@ impl BranchNodeBuilder {
         assert!(self.index + n_items <= self.branch.prefix_compressed() as usize);
 
         if self.index == 0 {
-            // extract the prefix if this is the first inserted item
+            // set the prefix if this is the first inserted item
             let key = get_key(base, from);
-            self.branch
-                .set_prefix(&key.view_bits::<Msb0>()[..self.prefix_len]);
+            self.branch.set_prefix(&key);
         }
 
         let bit_prefix_len_difference =
