@@ -105,8 +105,6 @@ impl TreeData {
 fn init_beatree() -> TreeData {
     let mut rng = rand_pcg::Lcg64Xsh32::from_seed(*SEED);
 
-    println!("Seed used to initialize db: {:?}", *SEED);
-
     let ln_fd = tempfile::tempfile().unwrap();
     let bbn_fd = tempfile::tempfile().unwrap();
     ln_fd.set_len(BRANCH_NODE_SIZE as u64).unwrap();
@@ -327,17 +325,23 @@ fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> Test
 
 #[test]
 fn leaf_stage() {
-    QuickCheck::new()
-        .gen(Gen::new(LEAF_STAGE_CHANGESET_AVG_SIZE))
-        .max_tests(MAX_TESTS)
-        .quickcheck(leaf_stage_inner as fn(_, _) -> TestResult)
+    let test_result = std::panic::catch_unwind(|| {
+        QuickCheck::new()
+            .gen(Gen::new(LEAF_STAGE_CHANGESET_AVG_SIZE))
+            .max_tests(MAX_TESTS)
+            .quickcheck(leaf_stage_inner as fn(_, _) -> TestResult)
+    });
+
+    if let Err(cause) = test_result {
+        eprintln!("lead_stage failed with seed: {:?}", *SEED);
+        std::panic::resume_unwind(cause);
+    }
 }
 
 // Initialize a bbn_index using the separators present in SEPARATORS.
 // The reasons why this initialization is required are the same as those for `init_beatree`
 fn init_bbn_index() -> Index {
     let mut rng = rand_pcg::Lcg64Xsh32::from_seed(*SEED);
-    println!("Seed used to initialize bbn_index: {:?}", *SEED);
 
     let mut bbn_index = Index::default();
     let mut used_separators = 0;
@@ -368,7 +372,6 @@ fn is_valid_branch_stage_output(
     insertions: BTreeSet<[u8; 32]>,
     deletions: BTreeSet<[u8; 32]>,
 ) -> bool {
-    println!("checking validity");
     let mut expected_values: BTreeSet<[u8; 32]> = SEPARATORS.iter().cloned().collect();
     expected_values.extend(insertions.clone());
     expected_values.retain(|k| !deletions.contains(k));
@@ -389,7 +392,6 @@ fn is_valid_branch_stage_output(
             < BRANCH_MERGE_THRESHOLD
         {
             if found_underfull_branch {
-                println!("underfull");
                 return false;
             }
             found_underfull_branch = true;
@@ -402,23 +404,19 @@ fn is_valid_branch_stage_output(
         for i in 0..n {
             let key = get_key(&branch_node, i);
             if deletions.contains(&key) {
-                println!("deleted still present");
                 return false;
             }
 
             let Some(expected_key) = expected.next() else {
-                println!("extra key");
                 return false;
             };
 
             if key != *expected_key {
-                println!("unexpected key");
                 return false;
             }
         }
 
         if expected.next().is_some() {
-            println!("missing key");
             return false;
         }
     }
@@ -516,8 +514,15 @@ fn branch_stage_inner(insertions: BTreeMap<Key, u32>, deletions: Vec<u16>) -> Te
 
 #[test]
 fn branch_stage() {
-    QuickCheck::new()
-        .gen(Gen::new(BRANCH_STAGE_CHANGESET_AVG_SIZE))
-        .max_tests(MAX_TESTS)
-        .quickcheck(branch_stage_inner as fn(_, _) -> TestResult)
+    let test_result = std::panic::catch_unwind(|| {
+        QuickCheck::new()
+            .gen(Gen::new(BRANCH_STAGE_CHANGESET_AVG_SIZE))
+            .max_tests(MAX_TESTS)
+            .quickcheck(branch_stage_inner as fn(_, _) -> TestResult)
+    });
+
+    if let Err(cause) = test_result {
+        eprintln!("branch_stage failed with seed: {:?}", *SEED);
+        std::panic::resume_unwind(cause);
+    }
 }
