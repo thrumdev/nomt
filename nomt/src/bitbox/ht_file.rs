@@ -118,11 +118,12 @@ fn resize_and_prealloc(ht_file: &File, len: u64, preallocate: bool) -> std::io::
                 // If fallocate fails, fall back to zeroing the file with write.
                 resize_and_zero_file(ht_file, len)?;
             }
-            return Ok(());
         } else {
             resize_and_zero_file(ht_file, len)?;
         }
     }
+
+    Ok(())
 }
 
 // Fallback method for allocating extents for the file: just incrementally write zeroes to the file.
