@@ -247,6 +247,9 @@ fn is_valid_leaf_stage_output(
         // between its first and last key
         let first = leaf_node.key(0);
         let last = leaf_node.key(n - 1);
+        if first > last {
+            return false;
+        }
         let mut expected = expected_values.range(first..=last);
 
         for i in 0..n {
@@ -399,6 +402,9 @@ fn is_valid_branch_stage_output(
 
         let first = get_key(&branch_node, 0);
         let last = get_key(&branch_node, n - 1);
+        if first > last {
+            return false;
+        }
         let mut expected = expected_values.range(first..=last);
 
         for i in 0..n {
