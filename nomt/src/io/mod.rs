@@ -12,6 +12,7 @@ mod platform;
 #[path = "unix.rs"]
 mod platform;
 
+pub mod fsyncer;
 pub mod page_pool;
 
 pub const PAGE_SIZE: usize = 4096;

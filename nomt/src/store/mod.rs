@@ -44,7 +44,9 @@ struct Shared {
     page_pool: PagePool,
     io_pool: IoPool,
     meta_fd: File,
+    #[allow(unused)]
     ln_fd: File,
+    #[allow(unused)]
     bbn_fd: File,
     ht_fd: File,
     // keep alive.
@@ -156,6 +158,14 @@ impl Store {
             })
             .transpose()?;
         Ok(Self {
+            sync: Arc::new(Mutex::new(sync::Sync::new(
+                meta.sync_seqn,
+                meta.bitbox_num_pages,
+                meta.bitbox_seed,
+                o.panic_on_sync,
+                &bbn_fd,
+                &ln_fd,
+            ))),
             shared: Arc::new(Shared {
                 rollback,
                 page_pool,
@@ -170,12 +180,6 @@ impl Store {
                 wal_fd,
                 flock,
             }),
-            sync: Arc::new(Mutex::new(sync::Sync::new(
-                meta.sync_seqn,
-                meta.bitbox_num_pages,
-                meta.bitbox_seed,
-                o.panic_on_sync,
-            ))),
         })
     }
 
