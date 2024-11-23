@@ -7,13 +7,14 @@ use threadpool::ThreadPool;
 
 use crate::io::{fsyncer::Fsyncer, IoHandle, IoPool, PagePool};
 
-pub(crate) mod allocator;
-pub(crate) mod branch;
+mod allocator;
+mod branch;
 mod index;
 mod leaf;
-pub(crate) mod ops;
-pub(crate) mod writeout;
-pub(crate) use index::Index;
+mod ops;
+
+mod writeout;
+use index::Index;
 
 #[cfg(feature = "benchmarks")]
 pub mod benches;
