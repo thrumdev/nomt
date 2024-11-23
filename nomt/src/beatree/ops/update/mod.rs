@@ -50,7 +50,7 @@ pub fn update(
     io_handle: IoHandle,
     thread_pool: ThreadPool,
     workers: usize,
-) -> Result<SyncData> {
+) -> Result<(SyncData, Index)> {
     let leaf_reader = StoreReader::new(leaf_store.clone(), page_pool.clone());
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
@@ -105,13 +105,15 @@ pub fn update(
         branch_stage_outputs.post_io_drop,
     ));
 
-    Ok(SyncData {
+    Ok((
+        SyncData {
+            ln_freelist_pn: ln_meta.freelist_pn,
+            ln_bump: ln_meta.bump,
+            bbn_freelist_pn: bbn_meta.freelist_pn,
+            bbn_bump: bbn_meta.bump,
+        },
         bbn_index,
-        ln_freelist_pn: ln_meta.freelist_pn,
-        ln_bump: ln_meta.bump,
-        bbn_freelist_pn: bbn_meta.freelist_pn,
-        bbn_bump: bbn_meta.bump,
-    })
+    ))
 }
 
 // TODO: this should not be necessary with proper warm-ups.

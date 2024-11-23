@@ -5,7 +5,7 @@ use parking_lot::{Mutex, RwLock};
 use std::{collections::BTreeMap, fs::File, mem, ops::DerefMut, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
-use crate::io::{IoHandle, IoPool, PagePool};
+use crate::io::{fsyncer::Fsyncer, IoHandle, IoPool, PagePool};
 
 pub(crate) mod allocator;
 pub(crate) mod branch;
@@ -24,6 +24,9 @@ pub type Key = [u8; 32];
 pub struct Tree {
     shared: Arc<RwLock<Shared>>,
     sync: Arc<Mutex<Sync>>,
+    bbn_fsync: Arc<Fsyncer>,
+    ln_fsync: Arc<Fsyncer>,
+    sync_tp: ThreadPool,
 }
 
 struct Shared {
@@ -116,8 +119,11 @@ impl Tree {
         };
 
         Ok(Tree {
+            sync_tp: ThreadPool::with_name("beatree-sync".into(), 1),
             shared: Arc::new(RwLock::new(shared)),
             sync: Arc::new(Mutex::new(sync)),
+            bbn_fsync: Arc::new(Fsyncer::new("bbn", bbn_file)),
+            ln_fsync: Arc::new(Fsyncer::new("ln", ln_file)),
         })
     }
 
@@ -139,13 +145,23 @@ impl Tree {
         ops::lookup(key, &shared.bbn_index, &shared.leaf_store_rd).unwrap()
     }
 
+    /// Returns a controller for the sync process.
+    pub fn sync(&self) -> SyncController {
+        SyncController {
+            tree: self.clone(),
+            tp: self.sync_tp.clone(),
+            sync_data: Arc::new(Mutex::new(None)),
+            bbn_index: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// Commit a set of changes to the btree.
     ///
     /// The changeset is a list of key value pairs to be added or removed from the btree.
     /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
     // There might be some temptation to unify this with prepare_sync, but this should not be done
     // because in the future sync and commit will be called on different threads at different times.
-    pub fn commit(&self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
+    fn commit(&self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
         if changeset.is_empty() {
             return;
         }
@@ -159,7 +175,7 @@ impl Tree {
     /// Dump all changes performed by commits to the underlying storage medium.
     ///
     /// Either blocks or panics if another sync is inflight.
-    pub fn prepare_sync(&self) -> SyncData {
+    fn prepare_sync(&self) -> (SyncData, Index) {
         // Take the sync lock.
         //
         // That will exclude any other syncs from happening. This is a long running operation.
@@ -218,7 +234,7 @@ impl Tree {
         }
     }
 
-    pub fn finish_sync(&self, bbn_index: Index) {
+    fn finish_sync(&self, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
         let mut inner = self.shared.write();
         inner.secondary_staging = None;
@@ -228,7 +244,6 @@ impl Tree {
 
 /// Data generated during update
 pub struct SyncData {
-    pub bbn_index: Index,
     pub ln_freelist_pn: u32,
     pub ln_bump: u32,
     pub bbn_freelist_pn: u32,
@@ -250,4 +265,80 @@ pub fn create(db_dir: impl AsRef<Path>) -> anyhow::Result<()> {
     ln_fd.sync_all()?;
     bbn_fd.sync_all()?;
     Ok(())
+}
+
+/// A handle that controls the sync process.
+///
+/// The order of the calls should always be:
+///
+/// 1. [`Self::begin_sync`] - Initiates an asynchronous sync operation.
+/// 2. [`Self::wait_pre_meta`] - Blocks until the sync process completes and returns metadata.
+///    The manifest can be updated after this call returns successfully.
+/// 3. [`Self::post_meta`] - Finalizes the sync process by updating internal state.
+///
+/// # Thread Safety
+///
+/// This controller is designed to be used from a single thread. While the underlying operations
+/// are thread-safe, the controller itself maintains state that requires calls to be made in sequence.
+///
+/// # Error Handling
+///
+/// If [`Self::wait_pre_meta`] returns an error, the sync process has failed and the controller
+/// should be discarded.
+// TODO: error handling is coming in a follow up.
+pub struct SyncController {
+    tree: Tree,
+    tp: ThreadPool,
+    sync_data: Arc<Mutex<Option<SyncData>>>,
+    bbn_index: Arc<Mutex<Option<Index>>>,
+}
+
+impl SyncController {
+    /// Begins the sync process.
+    ///
+    /// Accepts a list of changes to be committed to the btree.
+    ///
+    /// Non-blocking.
+    pub fn begin_sync(&mut self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
+        let beatree = self.tree.clone();
+        let sync_data = self.sync_data.clone();
+        let bbn_index = self.bbn_index.clone();
+        self.tp.execute(move || {
+            beatree.commit(changeset);
+            let (out_meta, out_bbn_index) = beatree.prepare_sync();
+
+            let mut sync_data = sync_data.lock();
+            *sync_data = Some(out_meta);
+            drop(sync_data);
+
+            let mut bbn_index = bbn_index.lock();
+            *bbn_index = Some(out_bbn_index);
+            drop(bbn_index);
+
+            beatree.bbn_fsync.fsync();
+            beatree.ln_fsync.fsync();
+        });
+    }
+
+    /// Waits for the writes to the tree to be synced to disk which allows the caller to proceed
+    /// with updating the manifest.
+    ///
+    /// This must be called after [`Self::begin_sync`].
+    pub fn wait_pre_meta(&mut self) -> anyhow::Result<SyncData> {
+        self.tree.bbn_fsync.wait()?;
+        self.tree.ln_fsync.wait()?;
+
+        // UNWRAP: fsync of bbn and ln above ensures that sync_data is Some.
+        let sync_data = self.sync_data.lock().take().unwrap();
+        Ok(sync_data)
+    }
+
+    /// Finishes sync.
+    ///
+    /// Has to be called after the manifest is updated. Must be invoked by the sync
+    /// thread. Blocking.
+    pub fn post_meta(&mut self) {
+        let bbn_index = self.bbn_index.lock().take().unwrap();
+        self.tree.finish_sync(bbn_index);
+    }
 }
