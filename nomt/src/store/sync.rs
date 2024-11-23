@@ -1,14 +1,14 @@
 use super::{meta::Meta, MerkleTransaction, Shared, ValueTransaction};
 use crate::{
     beatree, bitbox,
-    io::{fsyncer::Fsyncer, FatPage, PagePool},
+    io::{FatPage, PagePool},
     merkle,
     page_cache::PageCache,
     rollback,
 };
 
 use crossbeam::channel::{self, Receiver};
-use std::{fs::File, mem, sync::Arc};
+use std::fs::File;
 use threadpool::ThreadPool;
 
 pub struct Sync {
@@ -17,8 +17,6 @@ pub struct Sync {
     pub(crate) bitbox_num_pages: u32,
     pub(crate) bitbox_seed: [u8; 16],
     pub(crate) panic_on_sync: bool,
-    bbn_fsync: Arc<Fsyncer>,
-    ln_fsync: Arc<Fsyncer>,
 }
 
 impl Sync {
@@ -27,8 +25,6 @@ impl Sync {
         bitbox_num_pages: u32,
         bitbox_seed: [u8; 16],
         panic_on_sync: bool,
-        bbn_fd: &File,
-        ln_fd: &File,
     ) -> Self {
         Self {
             tp: ThreadPool::with_name("store-sync".into(), 6),
@@ -36,15 +32,13 @@ impl Sync {
             bitbox_num_pages,
             bitbox_seed,
             panic_on_sync,
-            bbn_fsync: Arc::new(Fsyncer::new("bbn", bbn_fd)),
-            ln_fsync: Arc::new(Fsyncer::new("ln", ln_fd)),
         }
     }
 
     pub fn sync(
         &mut self,
         shared: &Shared,
-        mut value_tx: ValueTransaction,
+        value_tx: ValueTransaction,
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
         rollback: Option<rollback::Rollback>,
@@ -64,18 +58,10 @@ impl Sync {
             page_diffs,
         );
 
-        let meta_wd = spawn_prepare_sync_beatree(
-            &self.tp,
-            &mut value_tx,
-            beatree.clone(),
-            self.bbn_fsync.clone(),
-            self.ln_fsync.clone(),
-        );
+        let mut beatree_sync = beatree.sync();
+        beatree_sync.begin_sync(value_tx.batch);
 
         let bitbox_writeout_done = spawn_wal_writeout(&self.tp, &shared.wal_fd, bitbox_wal_wd);
-
-        self.bbn_fsync.wait()?;
-        self.ln_fsync.wait()?;
 
         bitbox_writeout_done.recv().unwrap();
 
@@ -98,7 +84,9 @@ impl Sync {
             rollback_prune_to_new_end_live = None;
         }
 
-        let beatree_meta_wd = meta_wd.recv().unwrap();
+        // TODO: comprehensive error handling is coming later.
+        let beatree_meta_wd = beatree_sync.wait_pre_meta().unwrap();
+
         let new_meta = Meta {
             ln_freelist_pn: beatree_meta_wd.ln_freelist_pn,
             ln_bump: beatree_meta_wd.ln_bump,
@@ -134,7 +122,7 @@ impl Sync {
         bitbox::writeout::write_ht(shared.io_pool.make_handle(), &shared.ht_fd, ht_pages)?;
         bitbox::writeout::truncate_wal(&shared.wal_fd)?;
 
-        beatree.finish_sync(beatree_meta_wd.bbn_index);
+        beatree_sync.post_meta();
 
         rollback_writeout_end_rx.recv().unwrap();
 
@@ -180,26 +168,6 @@ fn spawn_prepare_sync_bitbox(
         page_cache.evict();
     });
     (ht_result_rx, wal_result_rx)
-}
-
-fn spawn_prepare_sync_beatree(
-    tp: &ThreadPool,
-    tx: &mut ValueTransaction,
-    beatree: beatree::Tree,
-    bbn_fsync: Arc<Fsyncer>,
-    ln_fsync: Arc<Fsyncer>,
-) -> Receiver<beatree::SyncData> {
-    let batch = mem::take(&mut tx.batch);
-    let (meta_result_tx, meta_result_rx) = channel::bounded(1);
-    let tp = tp.clone();
-    tp.execute(move || {
-        beatree.commit(batch);
-        let meta = beatree.prepare_sync();
-        let _ = meta_result_tx.send(meta);
-        bbn_fsync.fsync();
-        ln_fsync.fsync();
-    });
-    meta_result_rx
 }
 
 fn spawn_wal_writeout(
