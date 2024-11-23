@@ -1,19 +1,24 @@
 use crossbeam::channel::TryRecvError;
+use crossbeam_channel::{Receiver, Sender};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    os::{fd::RawFd, unix::fs::FileExt},
+    os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
+use threadpool::ThreadPool;
 
 use crate::{
     io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
+    merkle,
+    page_cache::PageCache,
     page_diff::PageDiff,
+    store::MerkleTransaction,
 };
 
 use self::{ht_file::HTOffsets, meta_map::MetaMap};
@@ -36,11 +41,14 @@ pub struct DB {
 }
 
 pub struct Shared {
+    page_pool: PagePool,
     store: HTOffsets,
     seed: [u8; 16],
     meta_map: Arc<RwLock<MetaMap>>,
     wal_blob_builder: Arc<Mutex<WalBlobBuilder>>,
     occupied_buckets: AtomicUsize,
+    wal_fd: File,
+    ht_fd: File,
 }
 
 impl DB {
@@ -48,11 +56,11 @@ impl DB {
     pub fn open(
         num_pages: u32,
         seed: [u8; 16],
-        page_pool: &PagePool,
-        ht_fd: &File,
-        wal_fd: &File,
+        page_pool: PagePool,
+        ht_fd: File,
+        wal_fd: File,
     ) -> anyhow::Result<Self> {
-        let (store, mut meta_map) = match ht_file::open(num_pages, page_pool, ht_fd) {
+        let (store, mut meta_map) = match ht_file::open(num_pages, &page_pool, &ht_fd) {
             Ok(x) => x,
             Err(e) => {
                 anyhow::bail!("encountered error in opening store: {e:?}");
@@ -60,7 +68,7 @@ impl DB {
         };
 
         if wal_fd.metadata()?.len() > 0 {
-            recover(ht_fd, wal_fd, page_pool, &store, &mut meta_map, seed)?;
+            recover(&ht_fd, &wal_fd, &page_pool, &store, &mut meta_map, seed)?;
         }
 
         let occupied_buckets = meta_map.full_count();
@@ -68,11 +76,14 @@ impl DB {
         let wal_blob_builder = WalBlobBuilder::new()?;
         Ok(Self {
             shared: Arc::new(Shared {
+                page_pool,
                 store,
                 seed,
                 meta_map: Arc::new(RwLock::new(meta_map)),
                 wal_blob_builder: Arc::new(Mutex::new(wal_blob_builder)),
                 occupied_buckets: AtomicUsize::new(occupied_buckets),
+                wal_fd,
+                ht_fd,
             }),
         })
     }
@@ -86,13 +97,19 @@ impl DB {
         }
     }
 
-    pub fn prepare_sync(
+    pub fn sync(&self) -> SyncController {
+        SyncController::new(self.clone(), ThreadPool::with_name("bitbox-sync".into(), 6))
+    }
+
+    fn prepare_sync(
         &self,
         page_pool: &PagePool,
         changes: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
-    ) -> anyhow::Result<WriteoutData> {
+        wal_blob_builder: &mut WalBlobBuilder,
+    ) -> Vec<(u64, FatPage)> {
+        wal_blob_builder.reset();
+
         let mut meta_map = self.shared.meta_map.write();
-        let mut wal_blob_builder = self.shared.wal_blob_builder.lock();
 
         let mut changed_meta_pages = HashSet::new();
         let mut ht_pages = Vec::new();
@@ -157,9 +174,102 @@ impl DB {
                 .fetch_add(occupied_buckets_delta as usize, Ordering::Relaxed);
         }
 
-        let wal_blob = wal_blob_builder.finalize();
+        wal_blob_builder.finalize();
 
-        Ok(WriteoutData { ht_pages, wal_blob })
+        ht_pages
+    }
+}
+
+pub struct SyncController {
+    db: DB,
+    tp: ThreadPool,
+    /// The channel to send the result of the WAL writeout. Option is to allow `take`.
+    wal_result_tx: Option<Sender<anyhow::Result<()>>>,
+    /// The channel to receive the result of the WAL writeout.
+    wal_result_rx: Receiver<anyhow::Result<()>>,
+    /// The pages along with their page numbers to write out to the HT file.
+    ht_to_write: Arc<Mutex<Option<Vec<(u64, FatPage)>>>>,
+}
+
+impl SyncController {
+    fn new(db: DB, tp: ThreadPool) -> Self {
+        let (wal_result_tx, wal_result_rx) = crossbeam_channel::bounded(1);
+        Self {
+            tp,
+            db,
+            wal_result_tx: Some(wal_result_tx),
+            wal_result_rx,
+            ht_to_write: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Begins the sync process.
+    ///
+    /// Non-blocking.
+    pub fn begin_sync(
+        &mut self,
+        page_cache: PageCache,
+        mut merkle_tx: MerkleTransaction,
+        page_diffs: merkle::PageDiffs,
+    ) {
+        let page_pool = self.db.shared.page_pool.clone();
+        let bitbox = self.db.clone();
+        let ht_to_write = self.ht_to_write.clone();
+        let tp = self.tp.clone();
+        let wal_blob_builder = self.db.shared.wal_blob_builder.clone();
+        // UNWRAP: safe because begin_sync is called only once.
+        let wal_result_tx = self.wal_result_tx.take().unwrap();
+        self.tp.execute(move || {
+            page_cache.prepare_transaction(page_diffs.into_iter(), &mut merkle_tx);
+
+            let mut wal_blob_builder = wal_blob_builder.lock();
+            let ht_pages =
+                bitbox.prepare_sync(&page_pool, merkle_tx.new_pages, &mut *wal_blob_builder);
+            drop(wal_blob_builder);
+
+            Self::spawn_wal_writeout(wal_result_tx, &tp, &bitbox.shared);
+
+            let mut ht_to_write = ht_to_write.lock();
+            *ht_to_write = Some(ht_pages);
+
+            // evict outside of the critical path.
+            page_cache.evict();
+        });
+    }
+
+    fn spawn_wal_writeout(
+        wal_result_tx: Sender<anyhow::Result<()>>,
+        tp: &ThreadPool,
+        shared: &Arc<Shared>,
+    ) {
+        let shared = shared.clone();
+        tp.execute(move || {
+            let wal_blob_builder = shared.wal_blob_builder.lock();
+            let wal_slice = wal_blob_builder.as_slice();
+            let wal_result = writeout::write_wal(&shared.wal_fd, wal_slice);
+            let _ = wal_result_tx.send(wal_result);
+        });
+    }
+
+    /// Wait for the pre-meta WAL file to be written out.
+    ///
+    /// Must be invoked by the sync thread. Blocking.
+    pub fn wait_pre_meta(&self) -> anyhow::Result<()> {
+        match self.wal_result_rx.recv() {
+            Ok(wal_result) => wal_result,
+            Err(_) => panic!("unexpected hungup"),
+        }
+    }
+
+    /// Write out the HT pages and truncate the WAL file.
+    ///
+    /// Has to be called after the manifest is updated. Must be invoked by the sync
+    /// thread. Blocking.
+    pub fn post_meta(&self, io_handle: IoHandle) -> anyhow::Result<()> {
+        let ht_pages = self.ht_to_write.lock().take().unwrap();
+        writeout::write_ht(io_handle, &self.db.shared.ht_fd, ht_pages)?;
+        writeout::truncate_wal(&self.db.shared.wal_fd)?;
+        Ok(())
     }
 }
 
@@ -252,17 +362,6 @@ fn recover(
     Ok(())
 }
 
-pub struct WriteoutData {
-    /// The pages to write out to the ht file.
-    pub ht_pages: Vec<(u64, FatPage)>,
-    /// The WAL blob to write out to the WAL file.
-    pub wal_blob: (*mut u8, usize),
-}
-
-// TODO: remove this once we split up the writeout logic.
-unsafe impl Send for WriteoutData {}
-unsafe impl Sync for WriteoutData {}
-
 /// A utility for loading pages from bitbox.
 pub struct PageLoader {
     shared: Arc<Shared>,
@@ -296,12 +395,7 @@ impl PageLoader {
     ///
     /// This returns `Ok(true)` if the page request has been submitted and a completion will be
     /// coming. `Ok(false)` means that the page is guaranteed to be fresh.
-    pub fn advance(
-        &self,
-        ht_fd: RawFd,
-        load: &mut PageLoad,
-        user_data: u64,
-    ) -> anyhow::Result<bool> {
+    pub fn advance(&self, load: &mut PageLoad, user_data: u64) -> anyhow::Result<bool> {
         let bucket = loop {
             match load.probe_sequence.next(&self.meta_map) {
                 ProbeResult::Tombstone(_) => continue,
@@ -314,7 +408,7 @@ impl PageLoader {
 
         let page = self.io_handle.page_pool().alloc_fat_page();
         let command = IoCommand {
-            kind: IoKind::Read(ht_fd, data_page_index, page),
+            kind: IoKind::Read(self.shared.ht_fd.as_raw_fd(), data_page_index, page),
             user_data,
         };
 

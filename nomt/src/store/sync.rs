@@ -1,14 +1,7 @@
 use super::{meta::Meta, MerkleTransaction, Shared, ValueTransaction};
-use crate::{
-    beatree, bitbox,
-    io::{FatPage, PagePool},
-    merkle,
-    page_cache::PageCache,
-    rollback,
-};
+use crate::{beatree, bitbox, merkle, page_cache::PageCache, rollback};
 
 use crossbeam::channel::{self, Receiver};
-use std::fs::File;
 use threadpool::ThreadPool;
 
 pub struct Sync {
@@ -50,20 +43,16 @@ impl Sync {
 
         let rollback_writeout_wd_rx = spawn_rollback_writeout_start(&self.tp, &rollback);
 
-        let (bitbox_ht_wd, bitbox_wal_wd) = spawn_prepare_sync_bitbox(
-            &self.tp,
-            shared.page_pool.clone(),
-            bitbox,
-            page_cache,
-            page_diffs,
-        );
-
+        let mut bitbox_sync = bitbox.sync();
         let mut beatree_sync = beatree.sync();
+
+        let merkle_tx = MerkleTransaction {
+            page_pool: shared.page_pool.clone(),
+            bucket_allocator: bitbox.bucket_allocator(),
+            new_pages: Vec::new(),
+        };
+        bitbox_sync.begin_sync(page_cache, merkle_tx, page_diffs);
         beatree_sync.begin_sync(value_tx.batch);
-
-        let bitbox_writeout_done = spawn_wal_writeout(&self.tp, &shared.wal_fd, bitbox_wal_wd);
-
-        bitbox_writeout_done.recv().unwrap();
 
         let rollback_writeout_wd = rollback_writeout_wd_rx
             .map(|rollback_writeout_wd| rollback_writeout_wd.recv().unwrap());
@@ -85,6 +74,7 @@ impl Sync {
         }
 
         // TODO: comprehensive error handling is coming later.
+        bitbox_sync.wait_pre_meta().unwrap();
         let beatree_meta_wd = beatree_sync.wait_pre_meta().unwrap();
 
         let new_meta = Meta {
@@ -118,75 +108,13 @@ impl Sync {
             rx
         };
 
-        let HtWriteoutData { ht_pages } = bitbox_ht_wd.recv().unwrap();
-        bitbox::writeout::write_ht(shared.io_pool.make_handle(), &shared.ht_fd, ht_pages)?;
-        bitbox::writeout::truncate_wal(&shared.wal_fd)?;
-
+        bitbox_sync.post_meta(shared.io_pool.make_handle())?;
         beatree_sync.post_meta();
 
         rollback_writeout_end_rx.recv().unwrap();
 
         Ok(())
     }
-}
-
-struct WalWriteoutData {
-    wal_blob: (*mut u8, usize),
-}
-unsafe impl Send for WalWriteoutData {}
-
-struct HtWriteoutData {
-    ht_pages: Vec<(u64, FatPage)>,
-}
-
-fn spawn_prepare_sync_bitbox(
-    tp: &ThreadPool,
-    page_pool: PagePool,
-    bitbox: bitbox::DB,
-    page_cache: PageCache,
-    page_diffs: merkle::PageDiffs,
-) -> (Receiver<HtWriteoutData>, Receiver<WalWriteoutData>) {
-    let (ht_result_tx, ht_result_rx) = channel::bounded(1);
-    let (wal_result_tx, wal_result_rx) = channel::bounded(1);
-    tp.execute(move || {
-        let mut merkle_tx = MerkleTransaction {
-            page_pool: page_pool.clone(),
-            bucket_allocator: bitbox.bucket_allocator(),
-            new_pages: Vec::new(),
-        };
-
-        page_cache.prepare_transaction(page_diffs.into_iter(), &mut merkle_tx);
-
-        let bitbox::WriteoutData { ht_pages, wal_blob } = bitbox
-            .prepare_sync(&page_pool, merkle_tx.new_pages)
-            // TODO: handle error.
-            .unwrap();
-        let _ = ht_result_tx.send(HtWriteoutData { ht_pages });
-        let _ = wal_result_tx.send(WalWriteoutData { wal_blob });
-
-        // evict outside of the critical path.
-        page_cache.evict();
-    });
-    (ht_result_rx, wal_result_rx)
-}
-
-fn spawn_wal_writeout(
-    tp: &ThreadPool,
-    wal_fd: &File,
-    wal_wd: Receiver<WalWriteoutData>,
-) -> Receiver<()> {
-    let (result_tx, result_rx) = channel::bounded(1);
-    let mut wal_fd = wal_fd.try_clone().unwrap();
-    tp.execute({
-        let WalWriteoutData { wal_blob } = wal_wd.recv().unwrap();
-        let (data, len) = wal_blob;
-        let wal_blob = unsafe { std::slice::from_raw_parts(data, len) };
-        move || {
-            bitbox::writeout::write_wal(&mut wal_fd, wal_blob).unwrap();
-            let _ = result_tx.send(());
-        }
-    });
-    result_rx
 }
 
 fn spawn_rollback_writeout_start(

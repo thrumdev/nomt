@@ -46,10 +46,8 @@ fn test_write_read() {
         (0..126).map(|x| [x; 32]),
         2,
     );
-    let (ptr, len) = builder.finalize();
-    wal_fd
-        .write_all(unsafe { std::slice::from_raw_parts(ptr, len) })
-        .unwrap();
+    builder.finalize();
+    wal_fd.write_all(builder.as_slice()).unwrap();
     wal_fd.sync_data().unwrap();
 
     let page_pool = PagePool::new();
