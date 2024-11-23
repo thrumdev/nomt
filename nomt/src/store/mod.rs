@@ -44,10 +44,6 @@ struct Shared {
     page_pool: PagePool,
     io_pool: IoPool,
     meta_fd: File,
-    ht_fd: File,
-    // keep alive.
-    #[allow(unused)]
-    wal_fd: File,
     #[allow(unused)]
     flock: flock::Flock,
     #[allow(unused)]
@@ -135,9 +131,9 @@ impl Store {
         let pages = bitbox::DB::open(
             meta.bitbox_num_pages,
             meta.bitbox_seed,
-            &page_pool,
-            &ht_fd,
-            &wal_fd,
+            page_pool.clone(),
+            ht_fd,
+            wal_fd,
         )?;
         let rollback = o
             .rollback
@@ -168,8 +164,6 @@ impl Store {
                 io_pool,
                 db_dir_fd,
                 meta_fd,
-                ht_fd,
-                wal_fd,
                 flock,
             }),
         })
@@ -205,10 +199,7 @@ impl Store {
     /// Creates a new [`PageLoader`].
     pub fn page_loader(&self) -> PageLoader {
         let page_loader = bitbox::PageLoader::new(&self.shared.pages, self.io_pool().make_handle());
-        PageLoader {
-            shared: self.shared.clone(),
-            inner: page_loader,
-        }
+        PageLoader { inner: page_loader }
     }
 
     /// Access the underlying IoPool.
@@ -263,9 +254,9 @@ impl ValueTransaction {
 /// An atomic transaction on merkle tree pages to be applied against the store
 /// with [`Store::commit`].
 pub struct MerkleTransaction {
-    page_pool: PagePool,
-    bucket_allocator: bitbox::BucketAllocator,
-    new_pages: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
+    pub(crate) page_pool: PagePool,
+    pub(crate) bucket_allocator: bitbox::BucketAllocator,
+    pub(crate) new_pages: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
 }
 
 impl MerkleTransaction {

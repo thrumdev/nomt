@@ -1,14 +1,9 @@
 use crate::bitbox;
 use nomt_core::page_id::PageId;
 
-use std::{os::fd::AsRawFd, sync::Arc};
-
-use super::Shared;
-
 pub use bitbox::{PageLoad, PageLoadCompletion};
 
 pub struct PageLoader {
-    pub(super) shared: Arc<Shared>,
     pub(super) inner: bitbox::PageLoader,
 }
 
@@ -26,8 +21,7 @@ impl PageLoader {
     /// This returns `Ok(true)` if the page request has been submitted and a completion will be
     /// coming. `Ok(false)` means that the page is guaranteed to be fresh.
     pub fn advance(&self, load: &mut PageLoad, user_data: u64) -> anyhow::Result<bool> {
-        self.inner
-            .advance(self.shared.ht_fd.as_raw_fd(), load, user_data)
+        self.inner.advance(load, user_data)
     }
 
     /// Try to receive the next completion, without blocking the current thread.

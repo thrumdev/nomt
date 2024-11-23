@@ -13,7 +13,7 @@ use std::{
 
 use crate::io::{FatPage, IoCommand, IoHandle, IoKind};
 
-pub fn write_wal(mut wal_fd: &File, wal_blob: &[u8]) -> anyhow::Result<()> {
+pub(super) fn write_wal(mut wal_fd: &File, wal_blob: &[u8]) -> anyhow::Result<()> {
     wal_fd.set_len(0)?;
     wal_fd.seek(SeekFrom::Start(0))?;
     wal_fd.write_all(wal_blob)?;
@@ -21,13 +21,13 @@ pub fn write_wal(mut wal_fd: &File, wal_blob: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn truncate_wal(mut wal_fd: &File) -> anyhow::Result<()> {
+pub(super) fn truncate_wal(mut wal_fd: &File) -> anyhow::Result<()> {
     wal_fd.set_len(0)?;
     wal_fd.seek(SeekFrom::Start(0))?;
     Ok(())
 }
 
-pub fn write_ht(
+pub(super) fn write_ht(
     io_handle: IoHandle,
     ht_fd: &File,
     mut ht: Vec<(u64, FatPage)>,

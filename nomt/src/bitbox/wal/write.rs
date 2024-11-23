@@ -172,18 +172,18 @@ impl WalBlobBuilder {
         Ok(())
     }
 
-    /// Finalizes the builder and returns the pointer to the start of the blob and its length.
-    ///
-    /// This also resets the builder preparing it for a new batch of writes.
-    ///
-    /// The caller must ensure that the blob is not dropped before the pointer is no longer
-    /// used.
+    /// Resets the builder preparing it for a new batch of writes.
+    pub fn reset(&mut self) {
+        self.cur = 0;
+    }
+
+    /// Finalizes the builder.
     ///
     /// It's possible to overwrite the data in the blob after calling this function so don't keep
     /// the pointer around for too long.
     ///
     /// The pointer is aligned to the page size.
-    pub fn finalize(&mut self) -> (*mut u8, usize) {
+    pub fn finalize(&mut self) {
         self.write_byte(WAL_ENTRY_TAG_END);
 
         let ptr = self.mmap.ptr;
@@ -210,9 +210,11 @@ impl WalBlobBuilder {
                 std::ptr::write_bytes(dst, 0, count);
             }
         }
+        self.cur = len;
+    }
 
-        self.cur = 0;
-        (ptr, len)
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.mmap.ptr, self.cur) }
     }
 }
 
