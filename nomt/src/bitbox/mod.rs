@@ -49,6 +49,7 @@ pub struct Shared {
     occupied_buckets: AtomicUsize,
     wal_fd: File,
     ht_fd: File,
+    sync_tp: ThreadPool,
 }
 
 impl DB {
@@ -84,6 +85,7 @@ impl DB {
                 occupied_buckets: AtomicUsize::new(occupied_buckets),
                 wal_fd,
                 ht_fd,
+                sync_tp: ThreadPool::with_name("bitbox-sync".into(), 2),
             }),
         })
     }
@@ -98,7 +100,7 @@ impl DB {
     }
 
     pub fn sync(&self) -> SyncController {
-        SyncController::new(self.clone(), ThreadPool::with_name("bitbox-sync".into(), 6))
+        SyncController::new(self.clone())
     }
 
     fn prepare_sync(
@@ -182,7 +184,6 @@ impl DB {
 
 pub struct SyncController {
     db: DB,
-    tp: ThreadPool,
     /// The channel to send the result of the WAL writeout. Option is to allow `take`.
     wal_result_tx: Option<Sender<anyhow::Result<()>>>,
     /// The channel to receive the result of the WAL writeout.
@@ -192,10 +193,9 @@ pub struct SyncController {
 }
 
 impl SyncController {
-    fn new(db: DB, tp: ThreadPool) -> Self {
+    fn new(db: DB) -> Self {
         let (wal_result_tx, wal_result_rx) = crossbeam_channel::bounded(1);
         Self {
-            tp,
             db,
             wal_result_tx: Some(wal_result_tx),
             wal_result_rx,
@@ -215,11 +215,10 @@ impl SyncController {
         let page_pool = self.db.shared.page_pool.clone();
         let bitbox = self.db.clone();
         let ht_to_write = self.ht_to_write.clone();
-        let tp = self.tp.clone();
         let wal_blob_builder = self.db.shared.wal_blob_builder.clone();
         // UNWRAP: safe because begin_sync is called only once.
         let wal_result_tx = self.wal_result_tx.take().unwrap();
-        self.tp.execute(move || {
+        self.db.shared.sync_tp.execute(move || {
             page_cache.prepare_transaction(page_diffs.into_iter(), &mut merkle_tx);
 
             let mut wal_blob_builder = wal_blob_builder.lock();
@@ -227,7 +226,7 @@ impl SyncController {
                 bitbox.prepare_sync(&page_pool, merkle_tx.new_pages, &mut *wal_blob_builder);
             drop(wal_blob_builder);
 
-            Self::spawn_wal_writeout(wal_result_tx, &tp, &bitbox.shared);
+            Self::spawn_wal_writeout(wal_result_tx, bitbox);
 
             let mut ht_to_write = ht_to_write.lock();
             *ht_to_write = Some(ht_pages);
@@ -237,16 +236,13 @@ impl SyncController {
         });
     }
 
-    fn spawn_wal_writeout(
-        wal_result_tx: Sender<anyhow::Result<()>>,
-        tp: &ThreadPool,
-        shared: &Arc<Shared>,
-    ) {
-        let shared = shared.clone();
+    fn spawn_wal_writeout(wal_result_tx: Sender<anyhow::Result<()>>, bitbox: DB) {
+        let bitbox = bitbox.clone();
+        let tp = bitbox.shared.sync_tp.clone();
         tp.execute(move || {
-            let wal_blob_builder = shared.wal_blob_builder.lock();
+            let wal_blob_builder = bitbox.shared.wal_blob_builder.lock();
             let wal_slice = wal_blob_builder.as_slice();
-            let wal_result = writeout::write_wal(&shared.wal_fd, wal_slice);
+            let wal_result = writeout::write_wal(&bitbox.shared.wal_fd, wal_slice);
             let _ = wal_result_tx.send(wal_result);
         });
     }
