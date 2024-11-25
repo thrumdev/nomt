@@ -10,7 +10,7 @@ pub(crate) const VERSION: u32 = 1;
 pub(crate) const META_SIZE: usize = 64;
 
 /// This data structure describes the state of the btree.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Meta {
     /// The magic number of the metadata file.
     pub magic: [u8; 4],
@@ -131,5 +131,49 @@ impl Meta {
         fd.write_all_at(&page[..], 0)?;
         fd.sync_all()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Meta, META_SIZE};
+    use quickcheck::quickcheck;
+
+    impl quickcheck::Arbitrary for Meta {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            Meta {
+                magic: u32::arbitrary(g).to_le_bytes(),
+                version: u32::arbitrary(g),
+                ln_freelist_pn: u32::arbitrary(g),
+                ln_bump: u32::arbitrary(g),
+                bbn_freelist_pn: u32::arbitrary(g),
+                bbn_bump: u32::arbitrary(g),
+                sync_seqn: u32::arbitrary(g),
+                bitbox_num_pages: u32::arbitrary(g),
+                bitbox_seed: u128::arbitrary(g).to_le_bytes(),
+                rollback_start_live: u64::arbitrary(g),
+                rollback_end_live: u64::arbitrary(g),
+            }
+        }
+    }
+
+    quickcheck! {
+        fn encode_decode_roundtrip(meta: Meta) -> bool {
+            let mut buf = vec![0u8; META_SIZE];
+            meta.encode_to(&mut buf);
+            let decoded = Meta::decode(&buf);
+
+            meta.magic == decoded.magic &&
+            meta.version == decoded.version &&
+            meta.ln_freelist_pn == decoded.ln_freelist_pn &&
+            meta.ln_bump == decoded.ln_bump &&
+            meta.bbn_freelist_pn == decoded.bbn_freelist_pn &&
+            meta.bbn_bump == decoded.bbn_bump &&
+            meta.sync_seqn == decoded.sync_seqn &&
+            meta.bitbox_num_pages == decoded.bitbox_num_pages &&
+            meta.bitbox_seed == decoded.bitbox_seed &&
+            meta.rollback_start_live == decoded.rollback_start_live &&
+            meta.rollback_end_live == decoded.rollback_end_live
+        }
     }
 }
