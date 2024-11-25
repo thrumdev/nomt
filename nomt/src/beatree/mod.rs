@@ -1,8 +1,8 @@
 use allocator::{PageNumber, Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
-use parking_lot::{Mutex, RwLock};
-use std::{collections::BTreeMap, fs::File, mem, ops::DerefMut, path::Path, sync::Arc};
+use parking_lot::{ArcMutexGuard, Mutex, RwLock};
+use std::{collections::BTreeMap, fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::io::{fsyncer::Fsyncer, IoHandle, IoPool, PagePool};
@@ -25,9 +25,6 @@ pub type Key = [u8; 32];
 pub struct Tree {
     shared: Arc<RwLock<Shared>>,
     sync: Arc<Mutex<Sync>>,
-    bbn_fsync: Arc<Fsyncer>,
-    ln_fsync: Arc<Fsyncer>,
-    sync_tp: ThreadPool,
 }
 
 struct Shared {
@@ -48,6 +45,8 @@ struct Shared {
 struct Sync {
     tp: ThreadPool,
     commit_concurrency: usize,
+    bbn_fsync: Arc<Fsyncer>,
+    ln_fsync: Arc<Fsyncer>,
 }
 
 impl Shared {
@@ -115,16 +114,16 @@ impl Tree {
         };
 
         let sync = Sync {
-            tp: ThreadPool::with_name("beatree-sync".into(), commit_concurrency),
+            // +1 for the begin_sync task.
+            tp: ThreadPool::with_name("beatree-sync".into(), commit_concurrency + 1),
             commit_concurrency,
+            bbn_fsync: Arc::new(Fsyncer::new("bbn", bbn_file)),
+            ln_fsync: Arc::new(Fsyncer::new("ln", ln_file)),
         };
 
         Ok(Tree {
-            sync_tp: ThreadPool::with_name("beatree-sync".into(), 1),
             shared: Arc::new(RwLock::new(shared)),
             sync: Arc::new(Mutex::new(sync)),
-            bbn_fsync: Arc::new(Fsyncer::new("bbn", bbn_file)),
-            ln_fsync: Arc::new(Fsyncer::new("ln", ln_file)),
         })
     }
 
@@ -148,11 +147,17 @@ impl Tree {
 
     /// Returns a controller for the sync process.
     pub fn sync(&self) -> SyncController {
+        // Take the sync lock.
+        //
+        // That will exclude any other syncs from happening. This is a long running operation.
+        let sync = self.sync.lock_arc();
         SyncController {
-            tree: self.clone(),
-            tp: self.sync_tp.clone(),
-            sync_data: Arc::new(Mutex::new(None)),
-            bbn_index: Arc::new(Mutex::new(None)),
+            inner: Arc::new(SharedSyncController {
+                sync,
+                shared: self.shared.clone(),
+                sync_data: Mutex::new(None),
+                bbn_index: Mutex::new(None),
+            }),
         }
     }
 
@@ -162,11 +167,11 @@ impl Tree {
     /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
     // There might be some temptation to unify this with prepare_sync, but this should not be done
     // because in the future sync and commit will be called on different threads at different times.
-    fn commit(&self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
+    fn commit(shared: &Arc<RwLock<Shared>>, changeset: Vec<(Key, Option<Vec<u8>>)>) {
         if changeset.is_empty() {
             return;
         }
-        let mut inner = self.shared.write();
+        let mut inner = shared.write();
         let staging = &mut inner.primary_staging;
         for (key, value) in changeset {
             staging.insert(key, value);
@@ -176,14 +181,7 @@ impl Tree {
     /// Dump all changes performed by commits to the underlying storage medium.
     ///
     /// Either blocks or panics if another sync is inflight.
-    fn prepare_sync(&self) -> (SyncData, Index) {
-        // Take the sync lock.
-        //
-        // That will exclude any other syncs from happening. This is a long running operation.
-        //
-        // Note the ordering of taking locks is important.
-        let mut sync = self.sync.lock();
-
+    fn prepare_sync(sync: &Sync, shared: &Arc<RwLock<Shared>>) -> (SyncData, Index) {
         // Take the shared lock. Briefly.
         let staged_changeset;
         let bbn_index;
@@ -192,7 +190,7 @@ impl Tree {
         let bbn_store;
         let io_handle;
         {
-            let mut shared = self.shared.write();
+            let mut shared = shared.write();
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
@@ -202,8 +200,6 @@ impl Tree {
         }
 
         {
-            let sync = sync.deref_mut();
-
             // Update will modify the index in a CoW manner.
             //
             // Nodes that need to be modified are not modified in place but they are
@@ -235,11 +231,11 @@ impl Tree {
         }
     }
 
-    fn finish_sync(&self, bbn_index: Index) {
+    fn finish_sync(shared: &Arc<RwLock<Shared>>, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
-        let mut inner = self.shared.write();
-        inner.secondary_staging = None;
-        inner.bbn_index = bbn_index;
+        let mut shared = shared.write();
+        shared.secondary_staging = None;
+        shared.bbn_index = bbn_index;
     }
 }
 
@@ -288,10 +284,14 @@ pub fn create(db_dir: impl AsRef<Path>) -> anyhow::Result<()> {
 /// should be discarded.
 // TODO: error handling is coming in a follow up.
 pub struct SyncController {
-    tree: Tree,
-    tp: ThreadPool,
-    sync_data: Arc<Mutex<Option<SyncData>>>,
-    bbn_index: Arc<Mutex<Option<Index>>>,
+    inner: Arc<SharedSyncController>,
+}
+
+struct SharedSyncController {
+    sync: ArcMutexGuard<parking_lot::RawMutex, Sync>,
+    shared: Arc<RwLock<Shared>>,
+    sync_data: Mutex<Option<SyncData>>,
+    bbn_index: Mutex<Option<Index>>,
 }
 
 impl SyncController {
@@ -301,23 +301,21 @@ impl SyncController {
     ///
     /// Non-blocking.
     pub fn begin_sync(&mut self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
-        let beatree = self.tree.clone();
-        let sync_data = self.sync_data.clone();
-        let bbn_index = self.bbn_index.clone();
-        self.tp.execute(move || {
-            beatree.commit(changeset);
-            let (out_meta, out_bbn_index) = beatree.prepare_sync();
+        let inner = self.inner.clone();
+        self.inner.sync.tp.execute(move || {
+            Tree::commit(&inner.shared, changeset);
+            let (out_meta, out_bbn_index) = Tree::prepare_sync(&inner.sync, &inner.shared);
 
-            let mut sync_data = sync_data.lock();
+            let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
             drop(sync_data);
 
-            let mut bbn_index = bbn_index.lock();
+            let mut bbn_index = inner.bbn_index.lock();
             *bbn_index = Some(out_bbn_index);
             drop(bbn_index);
 
-            beatree.bbn_fsync.fsync();
-            beatree.ln_fsync.fsync();
+            inner.sync.bbn_fsync.fsync();
+            inner.sync.ln_fsync.fsync();
         });
     }
 
@@ -326,11 +324,11 @@ impl SyncController {
     ///
     /// This must be called after [`Self::begin_sync`].
     pub fn wait_pre_meta(&mut self) -> anyhow::Result<SyncData> {
-        self.tree.bbn_fsync.wait()?;
-        self.tree.ln_fsync.wait()?;
+        self.inner.sync.bbn_fsync.wait()?;
+        self.inner.sync.ln_fsync.wait()?;
 
         // UNWRAP: fsync of bbn and ln above ensures that sync_data is Some.
-        let sync_data = self.sync_data.lock().take().unwrap();
+        let sync_data = self.inner.sync_data.lock().take().unwrap();
         Ok(sync_data)
     }
 
@@ -339,7 +337,7 @@ impl SyncController {
     /// Has to be called after the manifest is updated. Must be invoked by the sync
     /// thread. Blocking.
     pub fn post_meta(&mut self) {
-        let bbn_index = self.bbn_index.lock().take().unwrap();
-        self.tree.finish_sync(bbn_index);
+        let bbn_index = self.inner.bbn_index.lock().take().unwrap();
+        Tree::finish_sync(&self.inner.shared, bbn_index);
     }
 }
