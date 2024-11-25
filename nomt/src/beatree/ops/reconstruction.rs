@@ -92,6 +92,10 @@ impl SeqFileReader {
             len >= BRANCH_NODE_SIZE as u64,
             "file is too small for BBN store"
         );
+        ensure!(
+            bump as u64 <= len / BRANCH_NODE_SIZE as u64,
+            "bump is out of bounds"
+        );
 
         let pn = 0u32;
         let ptr = unsafe {
