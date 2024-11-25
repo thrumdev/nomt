@@ -298,6 +298,8 @@ fn create(o: &crate::Options) -> anyhow::Result<()> {
     let mut meta_fd = std::fs::File::create(o.path.join("meta"))?;
     let mut buf = [0u8; 4096];
     Meta {
+        magic: meta::MAGIC,
+        version: meta::VERSION,
         ln_freelist_pn: 0,
         ln_bump: 1,
         bbn_freelist_pn: 0,
@@ -308,7 +310,7 @@ fn create(o: &crate::Options) -> anyhow::Result<()> {
         rollback_start_live: 0,
         rollback_end_live: 0,
     }
-    .encode_to(&mut buf[0..56]);
+    .encode_to(&mut buf[0..meta::META_SIZE]);
     meta_fd.write_all(&buf)?;
     meta_fd.sync_all()?;
     drop(meta_fd);

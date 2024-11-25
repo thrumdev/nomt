@@ -5,9 +5,17 @@ use std::os::unix::fs::FileExt as _;
 
 use crate::io::{self, PagePool};
 
+pub(crate) const MAGIC: [u8; 4] = *b"NOMT";
+pub(crate) const VERSION: u32 = 1;
+pub(crate) const META_SIZE: usize = 64;
+
 /// This data structure describes the state of the btree.
 #[derive(Clone)]
 pub struct Meta {
+    /// The magic number of the metadata file.
+    pub magic: [u8; 4],
+    /// The version of the database format.
+    pub version: u32,
     /// The page number of the head of the freelist of the leaf storage file. 0 means the freelist
     /// is empty.
     pub ln_freelist_pn: u32,
@@ -38,29 +46,36 @@ pub struct Meta {
 
 impl Meta {
     pub fn encode_to(&self, buf: &mut [u8]) {
-        assert_eq!(buf.len(), 56);
-        buf[0..4].copy_from_slice(&self.ln_freelist_pn.to_le_bytes());
-        buf[4..8].copy_from_slice(&self.ln_bump.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.bbn_freelist_pn.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.bbn_bump.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.sync_seqn.to_le_bytes());
-        buf[20..24].copy_from_slice(&self.bitbox_num_pages.to_le_bytes());
-        buf[24..40].copy_from_slice(&self.bitbox_seed);
-        buf[40..48].copy_from_slice(&self.rollback_start_live.to_le_bytes());
-        buf[48..56].copy_from_slice(&self.rollback_end_live.to_le_bytes());
+        assert!(buf.len() >= META_SIZE);
+        buf[0..4].copy_from_slice(&self.magic);
+        buf[4..8].copy_from_slice(&self.version.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.ln_freelist_pn.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.ln_bump.to_le_bytes());
+        buf[16..20].copy_from_slice(&self.bbn_freelist_pn.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.bbn_bump.to_le_bytes());
+        buf[24..28].copy_from_slice(&self.sync_seqn.to_le_bytes());
+        buf[28..32].copy_from_slice(&self.bitbox_num_pages.to_le_bytes());
+        buf[32..48].copy_from_slice(&self.bitbox_seed);
+        buf[48..56].copy_from_slice(&self.rollback_start_live.to_le_bytes());
+        buf[56..64].copy_from_slice(&self.rollback_end_live.to_le_bytes());
     }
 
     pub fn decode(buf: &[u8]) -> Self {
-        let ln_freelist_pn = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        let ln_bump = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        let bbn_freelist_pn = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-        let bbn_bump = u32::from_le_bytes(buf[12..16].try_into().unwrap());
-        let sync_seqn = u32::from_le_bytes(buf[16..20].try_into().unwrap());
-        let bitbox_num_pages = u32::from_le_bytes(buf[20..24].try_into().unwrap());
-        let bitbox_seed = buf[24..40].try_into().unwrap();
-        let rollback_start_live = u64::from_le_bytes(buf[40..48].try_into().unwrap());
-        let rollback_end_live = u64::from_le_bytes(buf[48..56].try_into().unwrap());
+        assert!(buf.len() >= META_SIZE);
+        let magic = buf[0..4].try_into().unwrap();
+        let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+        let ln_freelist_pn = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        let ln_bump = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+        let bbn_freelist_pn = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+        let bbn_bump = u32::from_le_bytes(buf[20..24].try_into().unwrap());
+        let sync_seqn = u32::from_le_bytes(buf[24..28].try_into().unwrap());
+        let bitbox_num_pages = u32::from_le_bytes(buf[28..32].try_into().unwrap());
+        let bitbox_seed = buf[32..48].try_into().unwrap();
+        let rollback_start_live = u64::from_le_bytes(buf[48..56].try_into().unwrap());
+        let rollback_end_live = u64::from_le_bytes(buf[56..64].try_into().unwrap());
         Self {
+            magic,
+            version,
             ln_freelist_pn,
             ln_bump,
             bbn_freelist_pn,
@@ -75,6 +90,17 @@ impl Meta {
 
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();
+        if self.magic != MAGIC {
+            errors.push(format!("invalid magic: {:?}", self.magic));
+        }
+        if self.version < 1 {
+            errors.push(format!("invalid version: 0"));
+        } else if self.version > VERSION {
+            errors.push(format!(
+                "DB manifest version ({}) is newer than supported ({})",
+                self.version, VERSION
+            ));
+        }
         let is_rollback_start_live_nil = self.rollback_start_live == 0;
         let is_rollback_end_live_nil = self.rollback_end_live == 0;
         if is_rollback_start_live_nil ^ is_rollback_end_live_nil {
@@ -95,13 +121,13 @@ impl Meta {
 
     pub fn read(page_pool: &PagePool, fd: &File) -> Result<Self> {
         let page = io::read_page(page_pool, fd, 0)?;
-        let meta = Meta::decode(&page[..56]);
+        let meta = Meta::decode(&page[..META_SIZE]);
         Ok(meta)
     }
 
     pub fn write(page_pool: &PagePool, fd: &File, meta: &Meta) -> Result<()> {
         let mut page = page_pool.alloc_fat_page();
-        meta.encode_to(&mut page.as_mut()[..56]);
+        meta.encode_to(&mut page.as_mut()[..META_SIZE]);
         fd.write_all_at(&page[..], 0)?;
         fd.sync_all()?;
         Ok(())

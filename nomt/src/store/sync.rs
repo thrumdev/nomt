@@ -1,4 +1,7 @@
-use super::{meta::Meta, MerkleTransaction, Shared, ValueTransaction};
+use super::{
+    meta::{self, Meta},
+    MerkleTransaction, Shared, ValueTransaction,
+};
 use crate::{beatree, bitbox, merkle, page_cache::PageCache, rollback};
 
 use crossbeam::channel::{self, Receiver};
@@ -78,6 +81,8 @@ impl Sync {
         let beatree_meta_wd = beatree_sync.wait_pre_meta().unwrap();
 
         let new_meta = Meta {
+            magic: meta::MAGIC,
+            version: meta::VERSION,
             ln_freelist_pn: beatree_meta_wd.ln_freelist_pn,
             ln_bump: beatree_meta_wd.ln_bump,
             bbn_freelist_pn: beatree_meta_wd.bbn_freelist_pn,
