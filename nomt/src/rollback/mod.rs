@@ -18,7 +18,7 @@ use std::{
 
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use threadpool::ThreadPool;
 
 use self::delta::Delta;
@@ -49,6 +49,7 @@ struct InMemory {
 
 struct Shared {
     worker_tp: ThreadPool,
+    sync_tp: ThreadPool,
     in_memory: Mutex<InMemory>,
     seglog: Mutex<SegmentedLog>,
     /// The number of items that we should keep in the log. Deltas that are past this limit are
@@ -112,6 +113,7 @@ impl Rollback {
         )?;
         let shared = Arc::new(Shared {
             worker_tp: ThreadPool::new(rollback_tp_size),
+            sync_tp: ThreadPool::new(1),
             in_memory: Mutex::new(in_memory),
             seglog: Mutex::new(seglog),
             max_rollback_log_len: max_rollback_log_len as usize,
@@ -199,8 +201,13 @@ impl Rollback {
         Ok(Some(traceback))
     }
 
+    /// Returns a controller for the sync process.
+    pub fn sync(&self) -> SyncController {
+        SyncController::new(self.clone())
+    }
+
     /// Dumps the contents of the staging to the rollback.
-    pub fn writeout_start(&self) -> WriteoutData {
+    fn writeout_start(&self) -> WriteoutData {
         let mut in_memory = self.shared.in_memory.lock();
         let seglog = self.shared.seglog.lock();
 
@@ -239,7 +246,7 @@ impl Rollback {
     ///
     /// We use this point in time to prune the rollback log, by removing the deltas that are no
     /// longer needed.
-    pub fn writeout_end(
+    fn writeout_end(
         &self,
         new_start_live: Option<u64>,
         new_end_live: Option<u64>,
@@ -256,13 +263,90 @@ impl Rollback {
     }
 }
 
-pub struct WriteoutData {
-    pub rollback_start_live: u64,
-    pub rollback_end_live: u64,
+pub struct SyncController {
+    rollback: Rollback,
+    wd: Arc<Mutex<Option<WriteoutData>>>,
+    wd_cv: Arc<Condvar>,
+    post_meta: Arc<Mutex<Option<anyhow::Result<()>>>>,
+    post_meta_cv: Arc<Condvar>,
+}
+
+impl SyncController {
+    fn new(rollback: Rollback) -> Self {
+        let wd = Arc::new(Mutex::new(None));
+        let wd_cv = Arc::new(Condvar::new());
+        let post_meta = Arc::new(Mutex::new(None));
+        let post_meta_cv = Arc::new(Condvar::new());
+        Self {
+            rollback,
+            wd,
+            wd_cv,
+            post_meta,
+            post_meta_cv,
+        }
+    }
+
+    /// Begins the sync process.
+    ///
+    /// This function doesn't block.
+    pub fn begin_sync(&mut self) {
+        let tp = self.rollback.shared.sync_tp.clone();
+        let rollback = self.rollback.clone();
+        let wd = self.wd.clone();
+        let wd_cv = self.wd_cv.clone();
+        tp.execute(move || {
+            let writeout_data = rollback.writeout_start();
+            let _ = wd.lock().replace(writeout_data);
+            wd_cv.notify_one();
+        });
+    }
+
+    /// Wait for the rollback writeout to complete. Returns the new rollback live range
+    /// `(start_live, end_live)`.
+    ///
+    /// This should be called by the sync thread. Blocking.
+    pub fn wait_pre_meta(&self) -> (u64, u64) {
+        let mut wd = self.wd.lock();
+        self.wd_cv.wait_while(&mut wd, |wd| wd.is_none());
+        // UNWRAP: we checked above that `wd` is not `None`.
+        let wd = wd.as_ref().unwrap();
+        (wd.rollback_start_live, wd.rollback_end_live)
+    }
+
+    /// This should be called after the meta has been updated.
+    ///
+    /// This function doesn't block.
+    pub fn post_meta(&self) {
+        let tp = self.rollback.shared.sync_tp.clone();
+        let wd = self.wd.lock().take().unwrap();
+        let post_meta = self.post_meta.clone();
+        let post_meta_cv = self.post_meta_cv.clone();
+        let rollback = self.rollback.clone();
+        tp.execute(move || {
+            let result =
+                rollback.writeout_end(wd.prune_to_new_start_live, wd.prune_to_new_end_live);
+            let _ = post_meta.lock().replace(result);
+            post_meta_cv.notify_one();
+        });
+    }
+
+    /// Wait until the post-meta writeout completes.
+    pub fn wait_post_meta(&self) -> anyhow::Result<()> {
+        let mut post_meta = self.post_meta.lock();
+        self.post_meta_cv
+            .wait_while(&mut post_meta, |post_meta| post_meta.is_none());
+        // UNWRAP: we checked above that `post_meta` is not `None`.
+        post_meta.take().unwrap()
+    }
+}
+
+struct WriteoutData {
+    rollback_start_live: u64,
+    rollback_end_live: u64,
     /// If this is `Some`, then the [`Rollback::writeout_end`] should be called with this value.
-    pub prune_to_new_start_live: Option<u64>,
+    prune_to_new_start_live: Option<u64>,
     /// If this is `Some`, then the [`Rollback::writeout_end`] should be called with this value.
-    pub prune_to_new_end_live: Option<u64>,
+    prune_to_new_end_live: Option<u64>,
 }
 
 pub struct ReverseDeltaBuilder {
