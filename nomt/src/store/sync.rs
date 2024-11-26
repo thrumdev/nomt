@@ -132,7 +132,7 @@ fn spawn_rollback_writeout_start(
             let (result_tx, result_rx) = channel::bounded(1);
             let rollback = rollback.clone();
             tp.execute(move || {
-                let writeout_data = rollback.writeout_start().unwrap();
+                let writeout_data = rollback.writeout_start();
                 let _ = result_tx.send(writeout_data);
             });
             Some(result_rx)
