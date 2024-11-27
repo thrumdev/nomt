@@ -183,7 +183,7 @@ pub fn bitwise_memcpy(
         if let Some((mask_from, mask_to)) = maybe_masks {
             let destination_chunk = {
                 // the destination could have less then 8 bytes available
-                let n_byte = std::cmp::min(8, bytes_to_write - destination_offset);
+                let n_byte = std::cmp::min(8, destination.len() - destination_offset);
                 let destination_bytes = if n_byte < 8 {
                     let mut buf = [0u8; 8];
                     buf[..n_byte].copy_from_slice(
