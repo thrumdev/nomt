@@ -108,7 +108,7 @@ To reiterate the assumptions:
 - we can expect that a random subset of writes could reach the disk.
 - some page writes could be torn since we assume only sector writes are atomic.
 
-First, let's reduce the problem by addressing the latter point. Say e.g. a page of 4 KiB consists of 8 sectors. Only the first sector, that contains the header of the page containing bbn_seqn, commit sequence number, matters. It doesn't matter what is stored in the body of the page if the page is ignored. Therefore, osentibly, we can focus only on two cases: the header was updated and the header was not updated.
+First, let's reduce the problem by addressing the latter point. Say e.g. a page of 4 KiB consists of 8 sectors. Only the first sector, that contains the header of the page containing bbn_seqn, commit sequence number, matters. It doesn't matter what is stored in the body of the page if the page is ignored. Therefore, ostensibly, we can focus only on two cases: the header was updated and the header was not updated.
 
 Next, due to shadow paging we do not overwrite any live data and thus we will only write into parts of the file which are unused (e.g. stale BBN nodes) or newly allocated space. We can rule out the latter case since we can easily detect writes into the newly allocated space (e.g. by saving the prior file size in the manifest). Building on top of the claim in the previous paragraph, we can conclude that either the header of the stale BBN is updated or it's not updated. In either case, the fact that that BBN is stale is unchanged and consequently will be ignored.
 
