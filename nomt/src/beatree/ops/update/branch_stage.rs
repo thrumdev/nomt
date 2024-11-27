@@ -231,7 +231,7 @@ fn reset_branch_base(
     }
 
     if let Some((_, node, next_separator)) = branches_tracker.pending_base.take() {
-        let base = BaseBranch { node, iter_pos: 0 };
+        let base = BaseBranch::new(node);
         branch_updater.reset_base(Some(base), next_separator);
     } else {
         if let Some(separator) = branches_tracker
@@ -266,10 +266,7 @@ fn reset_branch_base_fresh(
 
     branches_tracker.delete(separator, branch.bbn_pn().into(), cutoff);
 
-    let base = BaseBranch {
-        node: branch,
-        iter_pos: 0,
-    };
+    let base = BaseBranch::new(branch);
     branch_updater.reset_base(Some(base), cutoff);
 }
 

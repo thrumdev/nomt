@@ -63,38 +63,50 @@ pub fn lookup(
 /// Binary search a branch node for the child node containing the key. This returns the last child
 /// node pointer whose separator is less than or equal to the given key.
 fn search_branch(branch: &BranchNode, key: Key) -> Option<(usize, PageNumber)> {
+    let (found, pos) = find_key_pos(branch, &key, None);
+
+    if found {
+        return Some((pos, branch.node_pointer(pos).into()));
+    } else if pos == 0 {
+        return None;
+    } else {
+        // first key greater than the one we are looking for has been returned,
+        // thus the correct child is the previous one
+        return Some((pos - 1, branch.node_pointer(pos - 1).into()));
+    }
+}
+
+// Binary search for a key within a branch node.
+// Accept a field to override the starting point of the binary search.
+// It returns true and the index of the specified key,
+// or false and the index containing the first key greater than the specified one.
+pub fn find_key_pos(branch: &BranchNode, key: &Key, low: Option<usize>) -> (bool, usize) {
     let prefix = branch.prefix();
     let n = branch.n() as usize;
     let prefix_compressed = branch.prefix_compressed() as usize;
 
     match key.view_bits::<Msb0>()[..prefix.len()].cmp(prefix) {
-        Ordering::Less => return None,
-        Ordering::Greater if n == prefix_compressed => {
-            let i = n - 1;
-            return Some((i, branch.node_pointer(i).into()));
-        }
+        Ordering::Less => return (false, 0),
+        Ordering::Greater if n == prefix_compressed => return (false, n),
         Ordering::Equal | Ordering::Greater => {}
     }
 
-    let mut low = 0;
+    let mut low = low.unwrap_or(0);
     let mut high = branch.n() as usize;
 
     while low < high {
         let mid = low + (high - low) / 2;
 
-        if key < get_key(branch, mid) {
-            high = mid;
-        } else {
-            low = mid + 1;
+        match key.cmp(&get_key(branch, mid)) {
+            Ordering::Equal => {
+                return (true, mid);
+            }
+            Ordering::Less => high = mid,
+            Ordering::Greater => low = mid + 1,
         }
     }
 
-    // sanity: this only happens if `key` is less than separator 0.
-    if high == 0 {
-        return None;
-    }
-    let node_pointer = branch.node_pointer(high - 1);
-    Some((high - 1, node_pointer.into()))
+    (false, high)
 }
 
 // Extract the key at a given index from a BranchNode, taking into account prefix compression.
