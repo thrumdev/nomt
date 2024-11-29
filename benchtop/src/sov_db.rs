@@ -21,8 +21,14 @@ struct DBQueryManager {
 // implementing this was necessary because the vanilla SnapshotManager doesn't allow you to
 // directly add/commit snapshots.
 impl QueryManager for DBQueryManager {
-    type Iter<'a, S: Schema> = RawDbReverseIterator<'a> where Self: 'a;
-    type RangeIter<'a, S: Schema> = RawDbReverseIterator<'a> where Self: 'a;
+    type Iter<'a, S: Schema>
+        = RawDbReverseIterator<'a>
+    where
+        Self: 'a;
+    type RangeIter<'a, S: Schema>
+        = RawDbReverseIterator<'a>
+    where
+        Self: 'a;
 
     fn get<S: Schema>(
         &self,
