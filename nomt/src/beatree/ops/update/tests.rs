@@ -28,10 +28,10 @@ use threadpool::ThreadPool;
 
 use super::BRANCH_MERGE_THRESHOLD;
 
-const LEAF_STAGE_INITIAL_CAPACITY: usize = 700;
-const BRANCH_STAGE_INITIAL_CAPACITY: usize = 50_000;
-const LEAF_STAGE_CHANGESET_AVG_SIZE: usize = 300;
-const BRANCH_STAGE_CHANGESET_AVG_SIZE: usize = 100;
+const LEAF_STAGE_INITIAL_CAPACITY: usize = 1 << 23;
+const BRANCH_STAGE_INITIAL_CAPACITY: usize = 1 << 23;
+const LEAF_STAGE_CHANGESET_AVG_SIZE: usize = 1 << 20;
+const BRANCH_STAGE_CHANGESET_AVG_SIZE: usize = 1 << 18;
 const MAX_TESTS: u64 = 50;
 
 // Required to increase reproducibility
@@ -136,13 +136,14 @@ fn init_beatree() -> TreeData {
         PAGE_POOL.clone(),
         IO_POOL.make_handle(),
         THREAD_POOL.clone(),
-        1,
+        64,
     )
     .unwrap();
 
     ln_fd.sync_all().unwrap();
     bbn_fd.sync_all().unwrap();
 
+    println!("done init beatree");
     TreeData {
         ln_fd,
         ln_freelist_pn: sync_data.ln_freelist_pn,
@@ -365,6 +366,7 @@ fn init_bbn_index() -> Index {
         bbn_pn += 1;
     }
 
+    println!("done init bbn index");
     bbn_index
 }
 

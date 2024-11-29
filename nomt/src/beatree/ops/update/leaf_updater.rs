@@ -530,6 +530,32 @@ impl LeafUpdater {
                 }
             }
         }
+
+        //let end_leaf = leaf_builder.finish();
+        //for op in ops {
+        //match op {
+        //LeafOp::Insert(k, v, o) => {
+        //let Some((val, overflow)) = end_leaf.get(k) else {
+        //panic!("Item should be preseng, its {:?}", *k);
+        //};
+        //assert_eq!(&val, &v);
+        //assert_eq!(*o, overflow);
+        //}
+        //LeafOp::KeepChunk(from, to, _) => {
+        //for pos in *from..*to {
+        //let key = self.base.as_ref().unwrap().key(pos);
+        //let (expected_val, o) = self.base.as_ref().unwrap().node.get(&key).unwrap();
+        //
+        //let Some((val, overflow)) = end_leaf.get(&key) else {
+        //panic!("Item should be preseng, its {:?}", key);
+        //};
+        //assert_eq!(val, expected_val);
+        //assert_eq!(o, overflow);
+        //}
+        //}
+        //}
+        //}
+        //end_leaf
         leaf_builder.finish()
     }
 }

@@ -231,6 +231,7 @@ fn update<H: NodeHasher>(
                         &mut write_pass,
                         trie_pos.clone(),
                         ops.clone(),
+                        None,
                     ) {
                         Err(NeedsPage(page)) => page,
                         Ok(()) => break,
@@ -445,10 +446,13 @@ impl<H: NodeHasher> RangeUpdater<H> {
                 .advance(&mut self.write_pass, seek_result.position.clone()),
             Some(ref ops) => {
                 let ops = nomt_core::update::leaf_ops_spliced(seek_result.terminal.clone(), &ops);
+
+                //println!("attempt_adnvance to: {:?}", seek_result.page_id);
                 self.page_walker.advance_and_replace(
                     &mut self.write_pass,
                     seek_result.position.clone(),
                     ops,
+                    Some(seek_result.clone()),
                 )
             }
         };

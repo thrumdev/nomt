@@ -132,6 +132,19 @@ impl Page {
         self.inner.node(read_pass, index)
     }
 
+    pub fn raw_data(&self, read_pass: &ReadPass<impl RegionContains<ShardIndex>>) -> [u8; 4096] {
+        self.inner
+            .data
+            .read(read_pass)
+            .as_ref()
+            .map(|fat_page| {
+                let mut buf = [0; 4096];
+                buf.copy_from_slice(&fat_page);
+                buf
+            })
+            .unwrap_or([0; 4096])
+    }
+
     /// Write the node at the given index.
     pub fn set_node(
         &self,

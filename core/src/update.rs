@@ -14,6 +14,7 @@ pub(crate) fn shared_bits(a: &BitSlice<u8, Msb0>, b: &BitSlice<u8, Msb0>) -> usi
 
 /// Creates an iterator of all provided operations, with the leaf value spliced in if its key
 /// does not appear in the original ops list. Then filters out all `None`s.
+// TODO: this seems to do nothing, splice_index is always zero on fill and empty (maybe not on transfer)
 pub fn leaf_ops_spliced(
     leaf: Option<LeafData>,
     ops: &[(KeyPath, Option<ValueHash>)],

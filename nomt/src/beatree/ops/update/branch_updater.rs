@@ -336,6 +336,30 @@ impl BranchUpdater {
             }
         }
 
+        //let end_branch = builder.finish();
+        //for op in ops {
+        //match op {
+        //BranchOp::Insert(k, expected_pn) => {
+        //let Some((_pos, pn)) = crate::beatree::ops::search_branch(&end_branch, *k)
+        //else {
+        //panic!("must be preset");
+        //};
+        //assert_eq!(*expected_pn, pn);
+        //}
+        //BranchOp::Keep(pos, _separator_len) => {
+        //let expected_key = self.base.as_ref().unwrap().key(*pos);
+        //let expected_pn = self.base.as_ref().unwrap().node.node_pointer(*pos);
+        //
+        //let Some((_pos, pn)) =
+        //crate::beatree::ops::search_branch(&end_branch, expected_key)
+        //else {
+        //panic!("must be preset");
+        //};
+        //assert_eq!(expected_pn, pn.0);
+        //}
+        //}
+        //}
+        //end_branch
         builder.finish()
     }
 

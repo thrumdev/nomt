@@ -14,6 +14,7 @@ pub struct TransferInit {
 impl Workload for TransferInit {
     fn run_step(&mut self, transaction: &mut dyn Transaction) {
         const MAX_INIT_PER_ITERATION: u64 = 2 * 1024 * 1024;
+        //const MAX_INIT_PER_ITERATION: u64 = 10 * 1024;
 
         if self.num_accounts == 0 {
             return;

@@ -30,6 +30,7 @@ impl NomtDB {
         opts.commit_concurrency(commit_concurrency);
         opts.io_workers(io_workers);
         opts.metrics(true);
+        opts.bitbox_seed([0; 16]);
         if let Some(buckets) = hashtable_buckets {
             opts.hashtable_buckets(buckets);
         }

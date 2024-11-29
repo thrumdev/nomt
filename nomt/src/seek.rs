@@ -14,9 +14,12 @@ use nomt_core::{
     trie_pos::{ChildNodeIndices, TriePosition},
 };
 
-use std::collections::{
-    hash_map::{Entry, HashMap},
-    VecDeque,
+use std::{
+    collections::{
+        hash_map::{Entry, HashMap},
+        VecDeque,
+    },
+    ops::Deref,
 };
 
 use bitvec::prelude::*;
@@ -37,9 +40,9 @@ struct SeekRequest {
 impl SeekRequest {
     fn new(key: KeyPath, root: Node) -> SeekRequest {
         let state = if trie::is_terminator(&root) {
-            RequestState::Completed(None)
+            RequestState::Completed(None, root, TriePosition::new(), vec![])
         } else {
-            RequestState::Seeking(root)
+            RequestState::Seeking(root, vec![])
         };
 
         SeekRequest {
@@ -58,8 +61,8 @@ impl SeekRequest {
 
     fn is_completed(&self) -> bool {
         match self.state {
-            RequestState::Seeking(_) => false,
-            RequestState::Completed(_) => true,
+            RequestState::Seeking(_, _) => false,
+            RequestState::Completed(_, _, _, _) => true,
         }
     }
 
@@ -80,9 +83,10 @@ impl SeekRequest {
         page: &Page,
         record_siblings: bool,
     ) {
-        let RequestState::Seeking(mut cur_node) = self.state else {
+        let RequestState::Seeking(mut cur_node, mut stack_pages) = self.state.clone() else {
             panic!("seek past end")
         };
+        stack_pages.push(page.raw_data(read_pass));
 
         // terminator should have yielded completion.
         assert!(!trie::is_terminator(&cur_node));
@@ -110,10 +114,15 @@ impl SeekRequest {
                     ChildNodeIndices::next_page()
                 };
 
-                self.state = RequestState::Completed(Some(trie::LeafData {
-                    key_path: page.node(&read_pass, children.left()),
-                    value_hash: page.node(&read_pass, children.right()),
-                }));
+                self.state = RequestState::Completed(
+                    Some(trie::LeafData {
+                        key_path: page.node(&read_pass, children.left()),
+                        value_hash: page.node(&read_pass, children.right()),
+                    }),
+                    cur_node,
+                    self.position.clone(),
+                    stack_pages,
+                );
                 return;
             }
 
@@ -126,7 +135,8 @@ impl SeekRequest {
             }
 
             if trie::is_terminator(&cur_node) {
-                self.state = RequestState::Completed(None);
+                self.state =
+                    RequestState::Completed(None, cur_node, self.position.clone(), stack_pages);
                 return;
             }
 
@@ -139,19 +149,25 @@ impl SeekRequest {
             // and its children will be part of the same last page, which is only partially used
             assert!(trie::is_leaf(&cur_node));
             let children = self.position.child_node_indices();
-            self.state = RequestState::Completed(Some(trie::LeafData {
-                key_path: page.node(&read_pass, children.left()),
-                value_hash: page.node(&read_pass, children.right()),
-            }));
+            self.state = RequestState::Completed(
+                Some(trie::LeafData {
+                    key_path: page.node(&read_pass, children.left()),
+                    value_hash: page.node(&read_pass, children.right()),
+                }),
+                cur_node,
+                self.position.clone(),
+                stack_pages,
+            );
         } else {
-            self.state = RequestState::Seeking(cur_node);
+            self.state = RequestState::Seeking(cur_node, stack_pages);
         }
     }
 }
 
+#[derive(Clone)]
 enum RequestState {
-    Seeking(Node),
-    Completed(Option<trie::LeafData>),
+    Seeking(Node, Vec<[u8; 4096]>),
+    Completed(Option<trie::LeafData>, Node, TriePosition, Vec<[u8; 4096]>),
 }
 
 enum SinglePageRequestState {
@@ -253,7 +269,8 @@ impl Seeker {
             // UNWRAP: just checked existence.
             let request = self.requests.pop_front().unwrap();
             // PANIC: checked above.
-            let RequestState::Completed(terminal) = request.state else {
+            let RequestState::Completed(terminal, raw_data, trie_pos, stack_pages) = request.state
+            else {
                 unreachable!()
             };
 
@@ -265,6 +282,9 @@ impl Seeker {
                 page_id: request.page_id,
                 siblings: request.siblings,
                 page_loads: request.page_loads,
+                raw_data,
+                stack_pages,
+                trie_pos,
                 terminal,
             }));
         }
@@ -508,6 +528,12 @@ pub struct Seek {
     pub siblings: Vec<Node>,
     /// The terminal node encountered.
     pub terminal: Option<trie::LeafData>,
+
+    // TESTING:
+    pub raw_data: Node,
+    pub trie_pos: TriePosition,
+    pub stack_pages: Vec<[u8; 4096]>,
+
     /// The number of fresh pages loaded uniquely for this `Seek`.
     /// This does not include pages loaded from the cache, or pages which were already requested
     /// for another seek.
