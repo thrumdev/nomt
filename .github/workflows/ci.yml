@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup update stable && rustup default stable
+      - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --verbose --workspace --locked
       - run: cargo test --verbose --workspace
   benchtop_check:
@@ -23,28 +23,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup update stable && rustup default stable
+      - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --verbose --manifest-path=benchtop/Cargo.toml --locked
   loom_rw_pass_cell:
     name: NOMT - loom rw_pass_cell
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup update stable && rustup default stable
+      - uses: dtolnay/rust-toolchain@stable
       - run: RUSTFLAGS="--cfg loom" cargo test rw_pass_cell --release --workspace
   doc:
     name: NOMT - doc
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup update stable && rustup default stable
+      - uses: dtolnay/rust-toolchain@stable
       - run: cargo doc --verbose --workspace --document-private-items
   fmt:
     name: NOMT - fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup update stable && rustup default stable
+      - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path=benchtop/Cargo.toml --check
   darwin_check:
@@ -55,8 +55,9 @@ jobs:
       CARGO_FEATURE_PURE: 1
     steps:
       - uses: actions/checkout@v4
-      - run: rustup update stable && rustup default stable
-      - run: rustup target add x86_64-apple-darwin
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
       # Build only the NOMT crate. Not everything builds cleanly under this configuration.
       - run: cargo check --verbose -p nomt --locked --target x86_64-apple-darwin
 
