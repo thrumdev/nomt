@@ -66,11 +66,16 @@ impl Store {
 
         let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
 
+        #[cfg(target_os = "linux")]
+        let is_tmpfs = crate::sys::linux::tmpfs_check(&db_dir_fd);
+
         let meta_fd = {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            options.custom_flags(libc::O_DIRECT);
+            if !is_tmpfs {
+                options.custom_flags(libc::O_DIRECT);
+            }
             options.open(&o.path.join("meta"))?
         };
 
@@ -78,28 +83,36 @@ impl Store {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            options.custom_flags(libc::O_DIRECT);
+            if !is_tmpfs {
+                options.custom_flags(libc::O_DIRECT);
+            }
             options.open(&o.path.join("ln"))?
         };
         let bbn_fd = {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            options.custom_flags(libc::O_DIRECT);
+            if !is_tmpfs {
+                options.custom_flags(libc::O_DIRECT);
+            }
             options.open(&o.path.join("bbn"))?
         };
         let ht_fd = {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            options.custom_flags(libc::O_DIRECT);
+            if !is_tmpfs {
+                options.custom_flags(libc::O_DIRECT);
+            }
             options.open(&o.path.join("ht"))?
         };
         let wal_fd = {
             let options = &mut OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            options.custom_flags(libc::O_DIRECT);
+            if !is_tmpfs {
+                options.custom_flags(libc::O_DIRECT);
+            }
             options.open(&o.path.join("wal"))?
         };
 
