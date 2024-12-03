@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs::OpenOptions};
+use std::{collections::BTreeSet, fs::OpenOptions, sync::Arc};
 
 use super::{BTreeMap, KeyPath, KeyReadWrite, LoadValue, Rollback};
 use hex_literal::hex;
@@ -83,7 +83,7 @@ fn truncate_works() {
         MAX_ROLLBACK_LOG_LEN,
         ROLLBACK_TP_SIZE,
         db_dir_path,
-        db_dir_fd,
+        Arc::new(db_dir_fd),
         0,
         0,
     )
@@ -162,7 +162,7 @@ fn without_tentative_preserve_prior() {
         MAX_ROLLBACK_LOG_LEN,
         ROLLBACK_TP_SIZE,
         db_dir_path,
-        db_dir_fd,
+        Arc::new(db_dir_fd),
         0,
         0,
     )
@@ -230,7 +230,7 @@ fn delta_builder_doesnt_load_read_then_write_priors() {
         MAX_ROLLBACK_LOG_LEN,
         ROLLBACK_TP_SIZE,
         db_dir_path,
-        db_dir_fd,
+        Arc::new(db_dir_fd),
         0,
         0,
     )

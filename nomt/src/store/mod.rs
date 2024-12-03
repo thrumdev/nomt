@@ -46,8 +46,9 @@ struct Shared {
     meta_fd: File,
     #[allow(unused)]
     flock: flock::Flock,
-    #[allow(unused)]
-    db_dir_fd: File,
+
+    // Retained for the lifetime of the store.
+    _db_dir_fd: Arc<File>,
 }
 
 impl Store {
@@ -60,7 +61,7 @@ impl Store {
         let db_dir_fd = {
             let mut options = OpenOptions::new();
             options.read(true);
-            options.open(&o.path)?
+            Arc::new(options.open(&o.path)?)
         };
         let flock = flock::Flock::lock(&o.path, ".lock")?;
 
@@ -151,12 +152,11 @@ impl Store {
         let rollback = o
             .rollback
             .then(|| {
-                let db_dir_fd = db_dir_fd.try_clone().unwrap();
                 Rollback::read(
                     o.max_rollback_log_len,
                     o.rollback_tp_size,
                     o.path.clone(),
-                    db_dir_fd,
+                    Arc::clone(&db_dir_fd),
                     meta.rollback_start_live,
                     meta.rollback_end_live,
                 )
@@ -175,7 +175,7 @@ impl Store {
                 values,
                 pages,
                 io_pool,
-                db_dir_fd,
+                _db_dir_fd: db_dir_fd,
                 meta_fd,
                 flock,
             }),

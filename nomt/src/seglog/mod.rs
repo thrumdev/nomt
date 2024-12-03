@@ -28,6 +28,7 @@ use std::{
     io::{Seek, SeekFrom},
     mem,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 mod segment_filename;
@@ -144,7 +145,7 @@ pub struct SegmentedLog {
     /// opened in [`Self::root_dir_fd`].
     root_dir_path: PathBuf,
     /// The file descriptor of the directory that contains the segment files.
-    root_dir_fd: File,
+    root_dir_fd: Arc<File>,
     /// The prefix the segment files have.
     filename_prefix: String,
     /// The maximum size of a segment file.
@@ -647,7 +648,7 @@ fn truncate_head_segment(path: &Path, new_end_live: RecordId) -> Result<SegmentF
 /// Returns early in case an error is encountered.
 pub fn open<F>(
     root_dir_path: PathBuf,
-    root_dir_fd: File,
+    root_dir_fd: Arc<File>,
     filename_prefix: String,
     max_segment_size: u64,
     start_live: RecordId,
@@ -740,6 +741,7 @@ mod tests {
     use std::{
         fs::{self, File},
         path::Path,
+        sync::Arc,
     };
     use tempfile::TempDir;
 
@@ -781,7 +783,7 @@ mod tests {
             let mut records = Vec::new();
             let log = open(
                 self.temp_dir.path().to_path_buf(),
-                root_dir_fd,
+                Arc::new(root_dir_fd),
                 self.filename_prefix.clone(),
                 max_segment_size,
                 start_live.into(),
