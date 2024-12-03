@@ -2,6 +2,7 @@
 //!
 //! This splits the work of warming-up and performing the trie update across worker threads.
 
+use anyhow::Context;
 use crossbeam::channel::{self, Receiver, Sender};
 use parking_lot::Mutex;
 
@@ -189,7 +190,7 @@ impl Updater {
 
         let (worker_tx, worker_rx) = crossbeam_channel::bounded(num_workers);
 
-        for write_pass in worker_passes {
+        for (worker_id, write_pass) in worker_passes.into_iter().enumerate() {
             let command = UpdateCommand {
                 shared: shared.clone(),
                 write_pass: write_pass.into_envelope(),
@@ -202,6 +203,7 @@ impl Updater {
                 root: self.root,
                 warm_ups: warm_ups.clone(),
                 command,
+                worker_id,
             };
             spawn_updater::<H>(&self.worker_tp, params, worker_tx.clone());
         }
@@ -217,7 +219,7 @@ impl Updater {
 /// A handle for waiting on the results of a commit operation.
 pub struct UpdateHandle {
     shared: Arc<UpdateShared>,
-    worker_rx: Receiver<WorkerOutput>,
+    worker_rx: Receiver<anyhow::Result<WorkerOutput>>,
     num_workers: usize,
 }
 
@@ -242,6 +244,9 @@ impl UpdateHandle {
 
         let mut received_outputs = 0;
         for output in self.worker_rx.into_iter() {
+            // TODO: handle error better.
+            let output = output.unwrap();
+
             received_outputs += 1;
             if let Some(root) = output.root {
                 assert!(new_root.is_none());
@@ -422,7 +427,16 @@ fn spawn_warm_up(worker_tp: &ThreadPool, params: worker::WarmUpParams) -> WarmUp
 fn spawn_updater<H: NodeHasher>(
     worker_tp: &ThreadPool,
     params: worker::UpdateParams,
-    output_tx: Sender<WorkerOutput>,
+    output_tx: Sender<anyhow::Result<WorkerOutput>>,
 ) {
-    worker_tp.execute(move || worker::run_update::<H>(params, output_tx));
+    let worker_id = params.worker_id;
+    worker_tp.execute(move || {
+        let output_or_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker::run_update::<H>(params)
+        }));
+        let output = output_or_panic
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("panic in updater: {:?}", e)))
+            .with_context(|| format!("worker {} erred out", worker_id));
+        let _ = output_tx.send(output);
+    });
 }
