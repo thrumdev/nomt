@@ -37,9 +37,8 @@ pub struct Fsyncer {
 
 impl Fsyncer {
     /// Creates a new fsyncer with the given file descriptor and identifier.
-    pub fn new(name: &'static str, fd: &File) -> Self {
+    pub fn new(name: &'static str, fd: Arc<File>) -> Self {
         let name = format!("nomt-fsyncer-{}", name);
-        let fd = fd.try_clone().unwrap();
         let shared = Arc::new(Shared {
             cv: Condvar::new(),
             s: Mutex::new(State::Idle),
@@ -91,7 +90,7 @@ impl Drop for Fsyncer {
     }
 }
 
-fn worker(fd: File, shared: Arc<Shared>) {
+fn worker(fd: Arc<File>, shared: Arc<Shared>) {
     let bomb = Bomb;
     'outer: loop {
         let mut s_guard = shared.s.lock();

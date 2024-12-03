@@ -66,8 +66,8 @@ impl Tree {
         bbn_freelist_pn: u32,
         ln_bump: u32,
         bbn_bump: u32,
-        bbn_file: &File,
-        ln_file: &File,
+        bbn_file: Arc<File>,
+        ln_file: Arc<File>,
         commit_concurrency: usize,
     ) -> Result<Tree> {
         let ln_freelist_pn = Some(ln_freelist_pn)
@@ -80,23 +80,13 @@ impl Tree {
         let ln_bump = PageNumber(ln_bump);
         let bbn_bump = PageNumber(bbn_bump);
 
-        let leaf_store = Store::open(
-            &page_pool,
-            ln_file.try_clone().unwrap(),
-            ln_bump,
-            ln_freelist_pn,
-        )?;
+        let leaf_store = Store::open(&page_pool, ln_file.clone(), ln_bump, ln_freelist_pn)?;
 
-        let bbn_store = Store::open(
-            &page_pool,
-            bbn_file.try_clone().unwrap(),
-            bbn_bump,
-            bbn_freelist_pn,
-        )?;
+        let bbn_store = Store::open(&page_pool, bbn_file.clone(), bbn_bump, bbn_freelist_pn)?;
 
         let bbn_freelist_tracked = bbn_store.all_tracked_freelist_pages();
         let index = ops::reconstruct(
-            bbn_file.try_clone().unwrap(),
+            bbn_file.clone(),
             &page_pool,
             &bbn_freelist_tracked,
             bbn_bump,

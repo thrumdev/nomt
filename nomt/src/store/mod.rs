@@ -87,7 +87,7 @@ impl Store {
             if !is_tmpfs {
                 options.custom_flags(libc::O_DIRECT);
             }
-            options.open(&o.path.join("ln"))?
+            Arc::new(options.open(&o.path.join("ln"))?)
         };
         let bbn_fd = {
             let mut options = OpenOptions::new();
@@ -96,7 +96,7 @@ impl Store {
             if !is_tmpfs {
                 options.custom_flags(libc::O_DIRECT);
             }
-            options.open(&o.path.join("bbn"))?
+            Arc::new(options.open(&o.path.join("bbn"))?)
         };
         let ht_fd = {
             let mut options = OpenOptions::new();
@@ -138,8 +138,8 @@ impl Store {
             meta.bbn_freelist_pn,
             meta.ln_bump,
             meta.bbn_bump,
-            &bbn_fd,
-            &ln_fd,
+            bbn_fd,
+            ln_fd,
             o.commit_concurrency,
         )?;
         let pages = bitbox::DB::open(

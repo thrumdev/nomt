@@ -75,7 +75,7 @@ fn rand_keys(n: usize) -> Vec<[u8; 32]> {
 }
 
 struct TreeData {
-    ln_fd: File,
+    ln_fd: Arc<File>,
     ln_freelist_pn: u32,
     ln_bump: u32,
     init_items: BTreeMap<[u8; 32], Vec<u8>>,
@@ -86,7 +86,7 @@ impl TreeData {
     fn leaf_store(&self) -> Store {
         Store::open(
             &PAGE_POOL,
-            self.ln_fd.try_clone().unwrap(),
+            self.ln_fd.clone(),
             PageNumber(self.ln_bump),
             Some(PageNumber(self.ln_freelist_pn)),
         )
@@ -110,17 +110,18 @@ fn init_beatree() -> TreeData {
     ln_fd.set_len(BRANCH_NODE_SIZE as u64).unwrap();
     bbn_fd.set_len(BRANCH_NODE_SIZE as u64).unwrap();
 
+    let ln_fd = Arc::new(ln_fd);
+    let bbn_fd = Arc::new(bbn_fd);
+
     let initial_items: BTreeMap<[u8; 32], Vec<u8>> = KEYS
         .iter()
         .cloned()
         .map(|key| (key, vec![170u8; rng.gen_range(500..MAX_LEAF_VALUE_SIZE)]))
         .collect();
 
-    let leaf_store =
-        Store::open(&PAGE_POOL, ln_fd.try_clone().unwrap(), PageNumber(1), None).unwrap();
+    let leaf_store = Store::open(&PAGE_POOL, ln_fd.clone(), PageNumber(1), None).unwrap();
 
-    let bbn_store =
-        Store::open(&PAGE_POOL, bbn_fd.try_clone().unwrap(), PageNumber(1), None).unwrap();
+    let bbn_store = Store::open(&PAGE_POOL, bbn_fd.clone(), PageNumber(1), None).unwrap();
 
     let (sync_data, bbn_index) = super::update(
         Arc::new(
@@ -453,10 +454,11 @@ fn branch_stage_inner(insertions: BTreeMap<Key, u32>, deletions: Vec<u16>) -> Te
 
     let bbn_fd = tempfile::tempfile().unwrap();
     bbn_fd.set_len(BRANCH_NODE_SIZE as u64).unwrap();
+    let bbn_fd = Arc::new(bbn_fd);
 
     let bbn_store = Store::open(
         &PAGE_POOL,
-        bbn_fd.try_clone().unwrap(),
+        bbn_fd.clone(),
         PageNumber(SEPARATORS.len() as u32),
         None,
     )
