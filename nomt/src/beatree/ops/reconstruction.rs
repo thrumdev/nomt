@@ -9,7 +9,7 @@
 
 use anyhow::{bail, ensure, Ok, Result};
 use bitvec::prelude::*;
-use std::{collections::BTreeSet, fs::File, os::fd::AsRawFd, ptr, sync::Arc};
+use std::{collections::BTreeSet, fs::File, mem::ManuallyDrop, os::fd::AsRawFd, ptr, sync::Arc};
 
 use crate::beatree::{
     allocator::PageNumber,
@@ -21,7 +21,7 @@ use crate::io::PagePool;
 /// Reconstruct the upper branch nodes of the btree from the bottom branch nodes and the leaf nodes.
 /// This places all branches into the BNP and returns an index into all BBNs.
 pub fn reconstruct(
-    bn_fd: File,
+    bn_fd: Arc<File>,
     page_pool: &PagePool,
     bbn_freelist_tracked: &BTreeSet<PageNumber>,
     bump: PageNumber,
@@ -79,10 +79,14 @@ struct SeqFileReader {
     len: u64,
     pn: u32,
     bump: u32,
+
+    // Retained for the lifetime of the reader. ManuallyDrop is to explicitly drop the Arc after
+    // munmap.
+    bbn_fd: ManuallyDrop<Arc<File>>,
 }
 
 impl SeqFileReader {
-    fn new(bbn_fd: File, bump: u32) -> Result<Self> {
+    fn new(bbn_fd: Arc<File>, bump: u32) -> Result<Self> {
         let len = bbn_fd.metadata()?.len();
         ensure!(
             len % BRANCH_NODE_SIZE as u64 == 0,
@@ -123,7 +127,13 @@ impl SeqFileReader {
             addr as *mut u8
         };
 
-        Ok(Self { ptr, len, pn, bump })
+        Ok(Self {
+            ptr,
+            len,
+            pn,
+            bump,
+            bbn_fd: ManuallyDrop::new(bbn_fd),
+        })
     }
 
     pub fn next<'a>(&'a mut self) -> Result<Option<(u32, &'a [u8])>> {
@@ -147,6 +157,12 @@ impl Drop for SeqFileReader {
     fn drop(&mut self) {
         unsafe {
             let _ = libc::munmap(self.ptr as *mut _, self.len as usize);
+            // SAFETY: This is safe because:
+            // - We have exclusive access to self.bbn_fd since we're in Drop
+            // - This is the only place we call drop() on self.bbn_fd
+            // - The File type's Drop impl is safe to run
+            // - After this drop, self.bbn_fd will not be accessed again since we're in Drop
+            ManuallyDrop::drop(&mut self.bbn_fd);
         }
     }
 }

@@ -51,7 +51,7 @@ impl Store {
     /// Create a new `Store` over an existing file.
     pub fn open(
         page_pool: &PagePool,
-        file: File,
+        file: Arc<File>,
         bump: PageNumber,
         free_list_head: Option<PageNumber>,
     ) -> anyhow::Result<Self> {
@@ -64,7 +64,7 @@ impl Store {
         };
 
         Ok(Store {
-            file: Arc::new(file),
+            file,
             sync: Arc::new(Mutex::new(sync)),
         })
     }
