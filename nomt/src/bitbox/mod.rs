@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crossbeam::channel::TryRecvError;
 use crossbeam_channel::{Receiver, Sender};
 use nomt_core::page_id::PageId;
@@ -423,7 +424,9 @@ impl PageLoader {
     pub fn try_complete(&self) -> anyhow::Result<Option<PageLoadCompletion>> {
         match self.io_handle.try_recv() {
             Ok(completion) => {
-                completion.result?;
+                completion
+                    .result
+                    .with_context(|| format!("I/O error: {:?}", completion.command.kind))?;
                 match completion.command.kind {
                     IoKind::Read(_, _, page) => Ok(Some(PageLoadCompletion {
                         page,

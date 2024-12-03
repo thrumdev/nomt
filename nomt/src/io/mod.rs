@@ -2,7 +2,7 @@
 std::compile_error!("NOMT only supports Unix-based OSs");
 
 use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError};
-use std::{fs::File, os::fd::RawFd};
+use std::{fmt, fs::File, os::fd::RawFd};
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -23,6 +23,18 @@ pub enum IoKind {
     Read(RawFd, u64, FatPage),
     Write(RawFd, u64, FatPage),
     WriteRaw(RawFd, u64, *const u8, usize),
+}
+
+impl fmt::Debug for IoKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IoKind::Read(fd, pn, _) => write!(f, "Read(fd={}, pn={})", fd, pn),
+            IoKind::Write(fd, pn, _) => write!(f, "Write(fd={}, pn={})", fd, pn),
+            IoKind::WriteRaw(fd, pn, _, len) => {
+                write!(f, "WriteRaw(fd={}, pn={}, len={})", fd, pn, len)
+            }
+        }
+    }
 }
 
 pub enum IoKindResult {
