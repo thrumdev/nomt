@@ -45,6 +45,7 @@ pub(super) struct UpdateParams {
     pub root: Node,
     pub warm_ups: Arc<HashMap<KeyPath, Seek>>,
     pub command: UpdateCommand,
+    pub worker_id: usize,
 }
 
 pub(super) struct WarmUpParams {
@@ -74,7 +75,7 @@ pub(super) fn run_warm_up(
     }
 }
 
-pub(super) fn run_update<H: NodeHasher>(params: UpdateParams, output_tx: Sender<WorkerOutput>) {
+pub(super) fn run_update<H: NodeHasher>(params: UpdateParams) -> anyhow::Result<WorkerOutput> {
     let UpdateParams {
         page_cache,
         page_pool,
@@ -82,6 +83,7 @@ pub(super) fn run_update<H: NodeHasher>(params: UpdateParams, output_tx: Sender<
         root,
         warm_ups,
         command,
+        ..
     } = params;
 
     let seeker = Seeker::new(
@@ -91,12 +93,7 @@ pub(super) fn run_update<H: NodeHasher>(params: UpdateParams, output_tx: Sender<
         command.shared.witness,
     );
 
-    let output = match update::<H>(root, page_cache, page_pool, seeker, command, warm_ups) {
-        Err(_) => return,
-        Ok(o) => o,
-    };
-
-    let _ = output_tx.send(output);
+    update::<H>(root, page_cache, page_pool, seeker, command, warm_ups)
 }
 
 fn warm_up_phase(
