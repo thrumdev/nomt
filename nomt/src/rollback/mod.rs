@@ -92,7 +92,7 @@ impl Rollback {
         max_rollback_log_len: u32,
         rollback_tp_size: usize,
         db_dir_path: PathBuf,
-        db_dir_fd: File,
+        db_dir_fd: Arc<File>,
         rollback_start_active: u64,
         rollback_end_active: u64,
     ) -> anyhow::Result<Self> {
