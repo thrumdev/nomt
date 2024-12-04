@@ -55,7 +55,7 @@ impl Store {
     /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options, page_pool: PagePool) -> anyhow::Result<Self> {
         if !o.path.exists() {
-            create(o)?;
+            create(&page_pool, &o)?;
         }
 
         let db_dir_fd = {
@@ -308,30 +308,13 @@ impl MerkleTransaction {
     }
 }
 
-fn create(o: &crate::Options) -> anyhow::Result<()> {
-    use std::io::Write as _;
-
+fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<()> {
     // Create the directory and its parent directories.
     std::fs::create_dir_all(&o.path)?;
 
-    let mut meta_fd = std::fs::File::create(o.path.join("meta"))?;
-    let mut buf = [0u8; 4096];
-    Meta {
-        magic: meta::MAGIC,
-        version: meta::VERSION,
-        ln_freelist_pn: 0,
-        ln_bump: 1,
-        bbn_freelist_pn: 0,
-        bbn_bump: 1,
-        sync_seqn: 0,
-        bitbox_num_pages: o.bitbox_num_pages,
-        bitbox_seed: o.bitbox_seed,
-        rollback_start_live: 0,
-        rollback_end_live: 0,
-    }
-    .encode_to(&mut buf[0..meta::META_SIZE]);
-    meta_fd.write_all(&buf)?;
-    meta_fd.sync_all()?;
+    let meta_fd = std::fs::File::create(o.path.join("meta"))?;
+    let meta = Meta::create_new(o.bitbox_seed, o.bitbox_num_pages);
+    Meta::write(page_pool, &meta_fd, &meta)?;
     drop(meta_fd);
 
     bitbox::create(o.path.clone(), o.bitbox_num_pages, o.preallocate_ht)?;
