@@ -54,15 +54,15 @@ struct Shared {
 impl Store {
     /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options, page_pool: PagePool) -> anyhow::Result<Self> {
-        if !o.path.exists() {
-            create(&page_pool, &o)?;
-        }
-
-        let db_dir_fd = {
+        let db_dir_fd = if !o.path.exists() {
+            // NB: note TOCTOU here. Deemed acceptable for this case.
+            create(&page_pool, &o)?
+        } else {
             let mut options = OpenOptions::new();
             options.read(true);
-            Arc::new(options.open(&o.path)?)
+            options.open(&o.path)?
         };
+        let db_dir_fd = Arc::new(db_dir_fd);
         let flock = flock::Flock::lock(&o.path, ".lock")?;
 
         cfg_if::cfg_if! {
@@ -308,9 +308,18 @@ impl MerkleTransaction {
     }
 }
 
-fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<()> {
+/// Creates and initializes a new empty database at the specified path.
+///
+/// This function:
+/// - Creates all necessary directories along the path
+/// - Initializes required database files
+/// - Returns a file descriptor for the database directory
+///
+/// The database directory must not exist when calling this function.
+fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<File> {
     // Create the directory and its parent directories.
     std::fs::create_dir_all(&o.path)?;
+    let db_dir_fd = std::fs::File::open(&o.path)?;
 
     let meta_fd = std::fs::File::create(o.path.join("meta"))?;
     let meta = Meta::create_new(o.bitbox_seed, o.bitbox_num_pages);
@@ -320,7 +329,8 @@ fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<()> {
     bitbox::create(o.path.clone(), o.bitbox_num_pages, o.preallocate_ht)?;
     beatree::create(&o.path)?;
 
-    // As the last step, sync the directory.
-    std::fs::File::open(&o.path)?.sync_all()?;
-    Ok(())
+    // As the last step, sync the directory. This makes sure that the directory is properly
+    // written to disk.
+    db_dir_fd.sync_all()?;
+    Ok(db_dir_fd)
 }
