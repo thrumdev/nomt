@@ -65,10 +65,16 @@ impl Store {
         };
         let flock = flock::Flock::lock(&o.path, ".lock")?;
 
-        let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
+        cfg_if::cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                let is_tmpfs = crate::sys::linux::tmpfs_check(&db_dir_fd);
+                let iopoll = !is_tmpfs;
+            } else {
+                let iopoll = true;
+            }
+        }
 
-        #[cfg(target_os = "linux")]
-        let is_tmpfs = crate::sys::linux::tmpfs_check(&db_dir_fd);
+        let io_pool = io::start_io_pool(o.io_workers, iopoll, page_pool.clone());
 
         let meta_fd = {
             let mut options = OpenOptions::new();
