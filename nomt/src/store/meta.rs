@@ -45,6 +45,24 @@ pub struct Meta {
 }
 
 impl Meta {
+    /// Returns a newly initialized [`Meta`] instance with the given bitbox seed and number of
+    /// pages.
+    pub fn create_new(bitbox_seed: [u8; 16], bitbox_num_pages: u32) -> Self {
+        Self {
+            magic: MAGIC,
+            version: VERSION,
+            ln_freelist_pn: 0,
+            ln_bump: 1,
+            bbn_freelist_pn: 0,
+            bbn_bump: 1,
+            sync_seqn: 0,
+            bitbox_num_pages,
+            bitbox_seed,
+            rollback_start_live: 0,
+            rollback_end_live: 0,
+        }
+    }
+
     pub fn encode_to(&self, buf: &mut [u8]) {
         assert!(buf.len() >= META_SIZE);
         buf[0..4].copy_from_slice(&self.magic);
