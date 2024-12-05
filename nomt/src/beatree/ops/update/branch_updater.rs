@@ -2,7 +2,7 @@ use std::{ops::Range, sync::Arc};
 
 use crate::beatree::{
     allocator::PageNumber,
-    branch::{self as branch_node, BranchNode, BranchNodeBuilder, BRANCH_NODE_BODY_SIZE},
+    branch::{self as branch_node, node, BranchNode, BranchNodeBuilder, BRANCH_NODE_BODY_SIZE},
     ops::{
         bit_ops::{prefix_len, separator_len},
         find_key_pos,
@@ -73,8 +73,23 @@ enum BranchOp {
     // along with the updated page number
     Update(usize, PageNumber),
     // Contains a range of separators that will be transfered unchanged
-    // in the new node from the base
-    KeepChunk(usize, usize),
+    // in the new node from the base.
+    //
+    // These are always items which were prefix-compressed.
+    KeepChunk(KeepChunk),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeepChunk {
+    start: usize,
+    end: usize,
+    sum_separator_lengths: usize,
+}
+
+impl KeepChunk {
+    fn len(&self) -> usize {
+        self.end - self.start
+    }
 }
 
 pub enum DigestResult {
@@ -192,7 +207,7 @@ impl BranchUpdater {
             return None;
         }
 
-        let (from, base_compressed_end, to, found) = {
+        let (maybe_chunk, uncompressed_range, found) = {
             // UNWRAP: self.base is not None
             let base = self.base.as_mut().unwrap();
 
@@ -221,27 +236,43 @@ impl BranchUpdater {
 
             let base_compressed_end = std::cmp::min(to, base.node.prefix_compressed() as usize);
 
-            (from, base_compressed_end, to, found)
+            let maybe_chunk = if from == base_compressed_end {
+                None
+            } else {
+                Some(KeepChunk {
+                    start: from,
+                    end: base_compressed_end,
+                    sum_separator_lengths: node::uncompressed_separator_range_size(
+                        base.node.prefix_len() as usize,
+                        base.node.separator_range_len(from, base_compressed_end),
+                        base_compressed_end - from,
+                        separator_len(&base.key(from)),
+                    ),
+                })
+            };
+
+            (
+                maybe_chunk,
+                base_compressed_end..to,
+                if found { Some(to) } else { None },
+            )
         };
 
         // push compressed chunk
-        self.ops
-            .push(BranchOp::KeepChunk(from, base_compressed_end));
-        self.bulk_split_step(self.ops.len() - 1);
+        if let Some(chunk) = maybe_chunk {
+            self.ops.push(BranchOp::KeepChunk(chunk));
+            self.bulk_split_step(self.ops.len() - 1);
+        }
 
         // convert every kept uncompressed separator into an Insert operation
-        for i in base_compressed_end..to {
+        for i in uncompressed_range {
             // UNWRAP: self.base is not None
             let (key, pn) = self.base.as_ref().unwrap().key_value(i);
             self.ops.push(BranchOp::Insert(key, pn));
             self.bulk_split_step(self.ops.len() - 1);
         }
 
-        if found {
-            Some(to)
-        } else {
-            None
-        }
+        found
     }
 
     // check whether bulk split needs to start, and if so, start it.
@@ -250,10 +281,9 @@ impl BranchUpdater {
     fn bulk_split_step(&mut self, op_index: usize) -> usize {
         // UNWRAPs: if the operation is Update or KeepChunk, then it must be a base to keep the chunk from
         let body_size_after = match self.ops[op_index] {
-            BranchOp::KeepChunk(from, to) => {
-                self.gauge
-                    .body_size_after_chunk(self.base.as_ref().unwrap(), from, to)
-            }
+            BranchOp::KeepChunk(ref chunk) => self
+                .gauge
+                .body_size_after_chunk(self.base.as_ref().unwrap(), &chunk),
             BranchOp::Update(pos, _) => {
                 let key = self.base.as_ref().unwrap().key(pos);
                 self.gauge.body_size_after(key, separator_len(&key))
@@ -288,7 +318,7 @@ impl BranchUpdater {
                                 false
                             }
                         }
-                        BranchOp::KeepChunk(from, to) => {
+                        BranchOp::KeepChunk(chunk) => {
                             let left_n_items = split_keep_chunk(
                                 self.base.as_ref().unwrap(),
                                 &self.gauge,
@@ -307,8 +337,16 @@ impl BranchUpdater {
                                 if self.gauge.body_size() < BRANCH_MERGE_THRESHOLD {
                                     // We can stop prefix compression and separate the first
                                     // element of the keep_chunk into its own.
-                                    self.ops[op_index] = BranchOp::KeepChunk(from + 1, to);
-                                    let (key, pn) = self.base.as_ref().unwrap().key_value(from);
+                                    let (key, pn) =
+                                        self.base.as_ref().unwrap().key_value(chunk.start);
+                                    let separator_len = separator_len(&key);
+                                    self.ops[op_index] = BranchOp::KeepChunk(KeepChunk {
+                                        start: chunk.start + 1,
+                                        end: chunk.end,
+                                        sum_separator_lengths: chunk.sum_separator_lengths
+                                            - separator_len,
+                                    });
+
                                     self.ops.insert(op_index, BranchOp::Insert(key, pn));
 
                                     self.gauge.stop_prefix_compression();
@@ -401,7 +439,7 @@ impl BranchUpdater {
                         }
                     }
                 }
-                BranchOp::KeepChunk(from, to) => {
+                BranchOp::KeepChunk(chunk) => {
                     // try to split the chunk to make it fit into the available space
                     let n_items = split_keep_chunk(
                         self.base.as_ref().unwrap(),
@@ -416,9 +454,15 @@ impl BranchUpdater {
                         // if no item from the chunk is capable to fit then
                         // try to extract the first one and check if it fits
                         // falling into the rare case of BranchOp::Insert
-                        self.ops[split_point] = BranchOp::KeepChunk(from + 1, to);
-                        let (key, pn) = self.base.as_ref().unwrap().key_value(from);
+                        let (key, pn) = self.base.as_ref().unwrap().key_value(chunk.start);
+                        let separator_len = separator_len(&key);
+                        self.ops[split_point] = BranchOp::KeepChunk(KeepChunk {
+                            start: chunk.start + 1,
+                            end: chunk.end,
+                            sum_separator_lengths: chunk.sum_separator_lengths - separator_len,
+                        });
                         self.ops.insert(split_point, BranchOp::Insert(key, pn));
+
                         continue;
                     }
                 }
@@ -549,13 +593,13 @@ impl BranchUpdater {
                             pending_ops_range.take().unwrap(),
                         );
                     }
-                    BranchOp::KeepChunk(from, to) => {
+                    BranchOp::KeepChunk(chunk) => {
                         // UNWRAP: pending_keep_chunk has just been checked to be Some
                         let range = pending_keep_chunk.as_mut().unwrap();
                         let ops_range = pending_ops_range.as_mut().unwrap();
-                        if range.end == *from {
+                        if range.end == chunk.start {
                             // KeepChunk that follow the pending chunk
-                            range.end = *to;
+                            range.end = chunk.end;
                             ops_range.end += 1;
                             i += 1;
                             continue;
@@ -595,8 +639,8 @@ impl BranchUpdater {
                     builder.push(*key, separator_len(key), pn.0);
                     i += 1;
                 }
-                BranchOp::KeepChunk(from, to) => {
-                    pending_keep_chunk = Some(*from..*to);
+                BranchOp::KeepChunk(chunk) => {
+                    pending_keep_chunk = Some(chunk.start..chunk.end);
                     pending_ops_range = Some(i..i + 1);
                     i += 1;
                 }
@@ -629,14 +673,14 @@ impl BranchUpdater {
                 BranchOp::Update(pos, new_pn) => {
                     self.ops[new_insert + i] = BranchOp::Insert(base.key(pos), new_pn);
                 }
-                BranchOp::KeepChunk(from, to) => {
+                BranchOp::KeepChunk(chunk) => {
                     self.ops.remove(new_insert + i);
 
-                    for pos in (from..to).into_iter().rev() {
+                    for pos in (chunk.start..chunk.end).into_iter().rev() {
                         let (key, pn) = base.key_value(pos);
                         self.ops.insert(new_insert + i, BranchOp::Insert(key, pn));
                     }
-                    new_insert += to - from - 1;
+                    new_insert += chunk.end - chunk.start - 1;
                 }
             }
         }
@@ -647,7 +691,7 @@ impl BranchUpdater {
         match branch_op {
             BranchOp::Insert(k, _) => *k,
             BranchOp::Update(pos, _) => self.base.as_ref().unwrap().key(*pos),
-            BranchOp::KeepChunk(from, _) => self.base.as_ref().unwrap().key(*from),
+            BranchOp::KeepChunk(chunk) => self.base.as_ref().unwrap().key(chunk.start),
         }
     }
 }
@@ -668,13 +712,14 @@ fn split_keep_chunk(
     target: usize,
     limit: usize,
 ) -> usize {
-    let BranchOp::KeepChunk(from, to) = ops[index] else {
+    let BranchOp::KeepChunk(chunk) = ops[index] else {
         panic!("Attempted to split non `BranchOp::KeepChunk` operation");
     };
 
     let mut left_chunk_n_items = 0;
+    let mut left_chunk_sum_separator_lengths = 0;
     let mut gauge = gauge.clone();
-    for i in from..to {
+    for i in chunk.start..chunk.end {
         left_chunk_n_items += 1;
 
         let key = get_key(&base.node, i);
@@ -685,16 +730,32 @@ fn split_keep_chunk(
             // if an item jumps from below the target to bigger then the limit, do not use it
             if body_size_after > limit {
                 left_chunk_n_items -= 1;
+            } else {
+                gauge.ingest_key(key, separator_len);
+                left_chunk_sum_separator_lengths += separator_len;
             }
             break;
         }
+        left_chunk_sum_separator_lengths += separator_len;
         gauge.ingest_key(key, separator_len);
     }
 
     // if none or all elements are taken then nothing needs to be changed
-    if left_chunk_n_items != 0 && to - from != left_chunk_n_items {
-        ops.insert(index, BranchOp::KeepChunk(from, from + left_chunk_n_items));
-        ops[index + 1] = BranchOp::KeepChunk(from + left_chunk_n_items, to);
+    if left_chunk_n_items != 0 && chunk.len() != left_chunk_n_items {
+        let left_chunk = KeepChunk {
+            start: chunk.start,
+            end: chunk.start + left_chunk_n_items,
+            sum_separator_lengths: left_chunk_sum_separator_lengths,
+        };
+
+        let right_chunk = KeepChunk {
+            start: chunk.start + left_chunk_n_items,
+            end: chunk.end,
+            sum_separator_lengths: chunk.sum_separator_lengths - left_chunk_sum_separator_lengths,
+        };
+
+        ops.insert(index, BranchOp::KeepChunk(left_chunk));
+        ops[index + 1] = BranchOp::KeepChunk(right_chunk);
     }
 
     left_chunk_n_items
@@ -705,11 +766,10 @@ struct BranchGauge {
     // key and length of the first separator if any
     first_separator: Option<(Key, usize)>,
     prefix_len: usize,
-    // sum of all separator lengths.
+    // sum of all separator lengths (not including the first key).
     sum_separator_lengths: usize,
-    // the number of items that are prefix compressed, paired with their total lengths prior
-    // to compression. `None` means everything will be compressed.
-    prefix_compressed: Option<(usize, usize)>,
+    // the number of items that are prefix compressed.`None` means everything will be compressed.
+    prefix_compressed: Option<usize>,
     n: usize,
 }
 
@@ -747,8 +807,8 @@ impl BranchGauge {
                 let key = get_key(&base.as_ref().unwrap().node, *pos);
                 self.ingest_key(key, separator_len(&key));
             }
-            BranchOp::KeepChunk(from, to) => {
-                for i in *from..*to {
+            BranchOp::KeepChunk(chunk) => {
+                for i in chunk.start..chunk.end {
                     let key = get_key(&base.as_ref().unwrap().node, i);
                     self.ingest_key(key, separator_len(&key));
                 }
@@ -761,30 +821,21 @@ impl BranchGauge {
 
     fn stop_prefix_compression(&mut self) {
         assert!(self.prefix_compressed.is_none());
-        self.prefix_compressed = Some((self.n, self.sum_separator_lengths));
+        self.prefix_compressed = Some(self.n);
     }
 
     fn prefix_compressed_items(&self) -> usize {
-        self.prefix_compressed.map(|(k, _)| k).unwrap_or(self.n)
+        self.prefix_compressed.unwrap_or(self.n)
     }
 
     fn total_separator_lengths(&self, prefix_len: usize) -> usize {
         match self.first_separator {
-            Some((_, first_len)) => {
-                let (prefix_compressed_items, pre_compression_lengths) = self
-                    .prefix_compressed
-                    .unwrap_or((self.n, self.sum_separator_lengths));
-
-                let prefix_uncompressed_lengths =
-                    self.sum_separator_lengths - pre_compression_lengths;
-
-                // first length can be less than the shared prefix due to trailing zero compression.
-                // then add the lengths of the compressed items after compression.
-                // then add the lengths of the uncompressed items.
-                first_len.saturating_sub(prefix_len) + pre_compression_lengths
-                    - (prefix_compressed_items - 1) * prefix_len
-                    + prefix_uncompressed_lengths
-            }
+            Some((_, first_len)) => node::compressed_separator_range_size(
+                first_len,
+                self.prefix_compressed.unwrap_or(self.n),
+                self.sum_separator_lengths,
+                prefix_len,
+            ),
             None => 0,
         }
     }
@@ -792,14 +843,18 @@ impl BranchGauge {
     fn body_size_after(&mut self, key: Key, len: usize) -> usize {
         let p;
         let t;
-        if let Some((ref first, _)) = self.first_separator {
+        if let Some((ref first, first_len)) = self.first_separator {
             if self.prefix_compressed.is_none() {
                 p = prefix_len(first, &key);
-                t = self.total_separator_lengths(p) + len.saturating_sub(p);
             } else {
                 p = self.prefix_len;
-                t = self.total_separator_lengths(p) + len;
             }
+            t = node::compressed_separator_range_size(
+                first_len,
+                self.prefix_compressed.unwrap_or(self.n + 1),
+                self.sum_separator_lengths + len,
+                p,
+            );
         } else {
             t = 0;
             p = len;
@@ -808,84 +863,37 @@ impl BranchGauge {
         branch_node::body_size(p, t, self.n + 1)
     }
 
-    fn body_size_after_chunk(&self, base: &BaseBranch, from: usize, to: usize) -> usize {
-        let n_items = to - from;
-
-        // chunk do not interact with uncompressed items, thus expect to copy them in the
-        // compressed separators
-        // update the prefix len base on the new chunk and evaluate its new length
-        if self.prefix_compressed.is_some() {
-            let mut base_separators_len = 0;
-
-            for i in from..to {
-                let key = get_key(&base.node, i);
-                let separator_len = separator_len(&key);
-                base_separators_len += separator_len;
-            }
-
-            let t = self.total_separator_lengths(self.prefix_len) + base_separators_len;
-            return branch_node::body_size(self.prefix_len, t, self.n + n_items);
-        }
-
+    fn body_size_after_chunk(&self, base: &BaseBranch, chunk: &KeepChunk) -> usize {
         let p;
         let t;
-
-        if let Some((ref first, _)) = self.first_separator {
-            let mut first_separators_len = 0;
-            let mut base_separators_len = 0;
-
-            let mut new_prefix_len = 0;
-            for i in from..from + n_items {
-                let key = get_key(&base.node, i);
-                new_prefix_len = prefix_len(first, &key);
-                let separator_len = separator_len(&key);
-                if i == from {
-                    first_separators_len = separator_len;
-                } else {
-                    base_separators_len += separator_len;
-                }
-            }
-            p = new_prefix_len;
-
-            let base_compressed_separators_len =
-                first_separators_len.saturating_sub(p) + base_separators_len - ((n_items - 1) * p);
-
-            t = self.total_separator_lengths(p) + base_compressed_separators_len
-        } else {
-            let mut first_separators_len = 0;
-            let mut base_separators_len = 0;
-
-            let first = get_key(&base.node, from);
-            let mut new_prefix_len = 0;
-            for i in from..from + n_items {
-                let key = get_key(&base.node, i);
-                new_prefix_len = prefix_len(&first, &key);
-                let separator_len = separator_len(&key);
-                if i == from {
-                    first_separators_len = separator_len;
-                } else {
-                    base_separators_len += separator_len;
-                }
-            }
-            p = if new_prefix_len == 256 {
-                separator_len(&first)
+        if let Some((ref first, first_len)) = self.first_separator {
+            if self.prefix_compressed.is_none() {
+                let chunk_last_key = base.key(chunk.end - 1);
+                p = prefix_len(first, &chunk_last_key);
             } else {
-                new_prefix_len
-            };
+                p = self.prefix_len;
+            }
+            t = node::compressed_separator_range_size(
+                first_len,
+                self.prefix_compressed.unwrap_or(self.n + chunk.len()),
+                self.sum_separator_lengths + chunk.sum_separator_lengths,
+                p,
+            );
+        } else {
+            let chunk_first_key = base.key(chunk.start);
+            let chunk_last_key = base.key(chunk.end - 1);
+            let first_len = separator_len(&chunk_first_key);
 
-            let base_compressed_separators_len =
-                first_separators_len.saturating_sub(p) + base_separators_len - ((n_items - 1) * p);
+            p = prefix_len(&chunk_first_key, &chunk_last_key);
+            t = node::compressed_separator_range_size(
+                first_len,
+                self.n + chunk.len(),
+                chunk.sum_separator_lengths - first_len,
+                p,
+            );
+        };
 
-            t = self.total_separator_lengths(p) + base_compressed_separators_len
-
-            // both prefix and total separatos bit len is inherited from the base
-            //p = base.node.prefix_len() as usize;
-            //t = base.node.view().raw_separators_data(from, to).bit_len;
-        }
-
-        let r = branch_node::body_size(p, t, self.n + n_items);
-        //assert_eq!(exptected, r);
-        r
+        branch_node::body_size(p, t, self.n + chunk.len())
     }
 
     fn body_size(&self) -> usize {
