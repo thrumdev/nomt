@@ -1,5 +1,7 @@
 use crate::page_cache::NODES_PER_PAGE;
 
+const CLEAR_BIT: u64 = 1 << 63;
+
 /// A bitfield tracking which nodes have changed within a page.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PageDiff {
@@ -26,13 +28,15 @@ impl PageDiff {
     }
 
     /// Note that some 32-byte slot in the page data has changed.
-    /// The acceptable range is 0..NODES_PER_PAGE
+    /// The acceptable range is 0..NODES_PER_PAGE.
+    /// Erase the clear bit.
     pub fn set_changed(&mut self, slot_index: usize) {
         assert!(slot_index < NODES_PER_PAGE);
         let word = slot_index / 64;
         let index = slot_index % 64;
         let mask = 1 << index;
         self.changed_nodes[word] |= mask;
+        self.changed_nodes[1] &= !CLEAR_BIT;
     }
 
     /// Whether a bit is set within the page data.
@@ -44,18 +48,13 @@ impl PageDiff {
     }
 
     /// Mark the page as having been cleared.
-    pub fn set_cleared(&mut self, cleared: bool) {
-        let mask = 1 << 63;
-        if cleared {
-            self.changed_nodes[1] |= mask;
-        } else {
-            self.changed_nodes[1] &= !mask;
-        }
+    pub fn set_cleared(&mut self) {
+        self.changed_nodes[1] |= CLEAR_BIT;
     }
 
     /// Whether the page was completely cleared.
     pub fn cleared(&self) -> bool {
-        self.changed_nodes[1] >> 63 == 1
+        self.changed_nodes[1] & CLEAR_BIT == CLEAR_BIT
     }
 
     /// Given the page data, collect the nodes that have changed according to this diff.
