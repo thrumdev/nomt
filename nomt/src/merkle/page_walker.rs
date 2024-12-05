@@ -603,17 +603,22 @@ impl<H: NodeHasher> PageWalker<H> {
         node: Node,
     ) {
         let node_index = self.position.node_index();
-        if self.position.is_first_layer_in_page() {
-            let cleared =
-                node == TERMINATOR && self.sibling_node(write_pass.downgrade()) == TERMINATOR;
-            self.stack.last_mut().unwrap().diff.set_cleared(cleared);
-        }
+        let sibling_node = self.sibling_node(write_pass.downgrade());
 
+        // UNWRAP: if a node is being set, then a page in the stack must be present
         let stack_top = self.stack.last_mut().unwrap();
         stack_top
             .page
             .set_node(&self.page_pool, write_pass, node_index, node);
-        stack_top.diff.set_changed(node_index);
+
+        if self.position.is_first_layer_in_page()
+            && node == TERMINATOR
+            && sibling_node == TERMINATOR
+        {
+            stack_top.diff.set_cleared();
+        } else {
+            stack_top.diff.set_changed(node_index);
+        }
     }
 
     // set the sibling node in the current page at the given index. panics if no current page.
@@ -696,21 +701,24 @@ impl<H: NodeHasher> PageWalker<H> {
             (page_id, children, cleared)
         };
 
+        let update_diff = |diff: &mut PageDiff| {
+            if cleared {
+                diff.set_cleared();
+            } else {
+                diff.set_changed(children.left());
+                diff.set_changed(children.right());
+            }
+        };
+
         if let Some(stack_item) = self.stack.last_mut().filter(|item| item.page_id == page_id) {
-            stack_item.diff.set_changed(children.left());
-            stack_item.diff.set_changed(children.right());
-            stack_item.diff.set_cleared(cleared);
+            update_diff(&mut stack_item.diff);
         } else if let Some((_, diff)) = self.diffs.last_mut().filter(|item| item.0 == page_id) {
             // it's possible for us to revisit a page which was just popped off the stack, for
             // example, when compacting up.
-            diff.set_changed(children.left());
-            diff.set_changed(children.right());
-            diff.set_cleared(cleared);
+            update_diff(diff);
         } else {
             let mut diff = PageDiff::default();
-            diff.set_changed(children.left());
-            diff.set_changed(children.right());
-            diff.set_cleared(cleared);
+            update_diff(&mut diff);
             self.diffs.push((page_id, diff));
         }
     }
