@@ -43,7 +43,6 @@ mod page_diff;
 mod page_region;
 mod rollback;
 mod rw_pass_cell;
-mod seek;
 mod seglog;
 mod store;
 mod sys;
