@@ -143,8 +143,8 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-        IoKind::WriteRaw(fd, page_index, ptr, size) => {
-            opcode::Write::new(types::Fd(fd), ptr, size as u32)
+        IoKind::WriteRaw(fd, page_index, ref page) => {
+            opcode::Write::new(types::Fd(fd), page.as_ptr(), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }

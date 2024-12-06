@@ -22,7 +22,7 @@ use crate::beatree::{
     },
     Key, ValueChange,
 };
-use crate::io::{IoCommand, IoHandle, IoKind, IoPool, PAGE_SIZE};
+use crate::io::{IoCommand, IoHandle, IoKind, IoPool};
 
 /// Tracker of all changes that happen to leaves during an update
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
@@ -577,10 +577,10 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
         let page_number = self.leaf_writer.allocate().unwrap();
 
         // TODO: handle error
-        let ptr = leaf.inner.as_ptr();
+        let page = leaf.inner.page();
         self.io_handle
             .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, ptr, PAGE_SIZE),
+                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
                 user_data: 0,
             })
             .expect("I/O Pool Down");
