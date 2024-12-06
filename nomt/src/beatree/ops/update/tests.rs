@@ -126,13 +126,11 @@ fn init_beatree() -> TreeData {
     let bbn_store = Store::open(&PAGE_POOL, bbn_fd.clone(), PageNumber(1), None).unwrap();
 
     let (sync_data, bbn_index, _) = super::update(
-        Arc::new(
-            initial_items
-                .clone()
-                .into_iter()
-                .map(|(k, v)| (k, ValueChange::Insert(v)))
-                .collect(),
-        ),
+        initial_items
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (k, ValueChange::Insert(v)))
+            .collect(),
         Index::default(),
         LeafCache::new(1, 1024),
         leaf_store,
@@ -211,7 +209,7 @@ fn exec_leaf_stage(
         leaf_reader,
         leaf_writer,
         io_handle.clone(),
-        Arc::new(changeset.into_iter().collect()),
+        changeset.into_iter().collect(),
         THREAD_POOL.clone(),
         commit_concurrency,
     )
