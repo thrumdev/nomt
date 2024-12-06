@@ -348,7 +348,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
             if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
-                tx.write_value(path, value);
+                tx.write_value::<T>(path, value);
             }
         }
 

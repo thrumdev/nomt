@@ -15,7 +15,7 @@ use crate::{
                 leaf_stage::LeafStageOutput, LEAF_MERGE_THRESHOLD,
             },
         },
-        Index,
+        Index, ValueChange,
     },
     io::{start_test_io_pool, IoPool, PagePool},
 };
@@ -130,7 +130,7 @@ fn init_beatree() -> TreeData {
             initial_items
                 .clone()
                 .into_iter()
-                .map(|(k, v)| (k, Some(v)))
+                .map(|(k, v)| (k, ValueChange::Insert(v)))
                 .collect(),
         ),
         Index::default(),
@@ -194,7 +194,7 @@ fn leaf_page_numbers(
 // given a changeset execute the leaf stage on top of a pre-initialized nomt-db
 fn exec_leaf_stage(
     commit_concurrency: usize,
-    changeset: BTreeMap<[u8; 32], Option<Vec<u8>>>,
+    changeset: BTreeMap<[u8; 32], ValueChange>,
 ) -> (LeafStageOutput, BTreeSet<PageNumber>) {
     let leaf_store = TREE_DATA.leaf_store();
     let leaf_reader = StoreReader::new(leaf_store.clone(), PAGE_POOL.clone());
@@ -317,17 +317,17 @@ fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> Test
         .into_iter()
         // rescale deletions to contain indexes over only alredy present items in the db
         .map(|d| rescale(d, 0, KEYS.len()))
-        .map(|index| (KEYS[index], None))
+        .map(|index| (KEYS[index], ValueChange::Delete))
         .collect();
 
     let insertions: BTreeMap<_, _> = insertions
         .into_iter()
         // rescale raw_size to be between 0 and MAX_LEAF_VALUE_SIZE
         .map(|(k, raw_size)| (k, rescale(raw_size, 1, MAX_LEAF_VALUE_SIZE)))
-        .map(|(k, size)| (k.inner, Some(vec![170; size])))
+        .map(|(k, size)| (k.inner, ValueChange::Insert(vec![170; size])))
         .collect();
 
-    let mut changeset: BTreeMap<[u8; 32], Option<Vec<u8>>> = insertions.clone();
+    let mut changeset: BTreeMap<[u8; 32], ValueChange> = insertions.clone();
     changeset.extend(deletions.clone());
 
     let (leaf_stage_output, prior_leaf_page_numbers) = exec_leaf_stage(64, changeset);
@@ -338,7 +338,7 @@ fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> Test
         deletions.into_iter().map(|(k, _)| k).collect(),
         insertions
             .into_iter()
-            .map(|(k, v)| (k, v.unwrap()))
+            .map(|(k, v)| (k, v.as_option().unwrap().to_vec()))
             .collect(),
     ))
 }

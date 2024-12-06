@@ -10,6 +10,7 @@ use crate::{
     page_cache::PageCache,
     page_diff::PageDiff,
     rollback::Rollback,
+    ValueHasher,
 };
 use meta::Meta;
 use nomt_core::{page_id::PageId, trie::KeyPath};
@@ -260,13 +261,14 @@ impl Store {
 /// An atomic transaction on raw key/value pairs to be applied against the store
 /// with [`Store::commit`].
 pub struct ValueTransaction {
-    batch: Vec<(KeyPath, Option<Vec<u8>>)>,
+    batch: Vec<(KeyPath, beatree::ValueChange)>,
 }
 
 impl ValueTransaction {
     /// Write a value to flat storage.
-    pub fn write_value(&mut self, path: KeyPath, value: Option<Vec<u8>>) {
-        self.batch.push((path, value))
+    pub fn write_value<T: ValueHasher>(&mut self, path: KeyPath, value: Option<Vec<u8>>) {
+        self.batch
+            .push((path, beatree::ValueChange::from_option::<T>(value)))
     }
 }
 
