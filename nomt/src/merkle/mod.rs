@@ -11,6 +11,7 @@ use nomt_core::{
     trie::{self, KeyPath, Node, NodeHasher, ValueHash},
     trie_pos::TriePosition,
 };
+use seek::Seek;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -19,13 +20,13 @@ use crate::{
     page_cache::{PageCache, ShardIndex},
     page_diff::PageDiff,
     rw_pass_cell::WritePassEnvelope,
-    seek::Seek,
     store::Store,
     Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
 
 mod page_walker;
+mod seek;
 mod worker;
 
 /// Page diffs produced by update workers.
