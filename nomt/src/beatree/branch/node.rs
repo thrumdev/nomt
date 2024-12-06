@@ -489,7 +489,7 @@ impl BranchNodeBuilder {
         base: &BranchNode,
         from: usize,
         to: usize,
-        mut updated: impl Iterator<Item = (usize, PageNumber)>,
+        //updated: impl Iterator<Item = (usize, PageNumber)>,
     ) {
         let n_items = to - from;
         assert!(self.index + n_items <= self.branch.prefix_compressed() as usize);
@@ -498,16 +498,9 @@ impl BranchNodeBuilder {
             base.prefix_len() as isize - self.branch.prefix_len() as isize;
 
         if bit_prefix_len_difference != 0 {
-            let mut next_updated = updated.next();
-            for (i, pos) in (from..to).enumerate() {
+            for pos in from..to {
                 let key = get_key(base, pos);
-                let pn = match next_updated {
-                    Some((updated_i, pn)) if i == updated_i => {
-                        next_updated = updated.next();
-                        pn.0
-                    }
-                    _ => base.node_pointer(pos),
-                };
+                let pn = base.node_pointer(pos);
                 self.push(key, separator_len(&key), pn);
             }
             return;
@@ -548,10 +541,10 @@ impl BranchNodeBuilder {
         self.branch.node_pointers_mut()[self.index..self.index + n_items]
             .copy_from_slice(base_node_pointers);
 
-        // update page numbers of modified separators
-        for (i, new_pn) in updated {
-            self.branch.set_node_pointer(self.index + i, new_pn.0)
-        }
+        //// update page numbers of modified separators
+        //for (i, new_pn) in updated {
+        //self.branch.set_node_pointer(self.index + i, new_pn.0)
+        //}
 
         // 3. copy and shift separators
         // fast path, copy and shift all compressed separators at once
@@ -728,7 +721,7 @@ mod test {
             4, /*prefix_compressed*/
             9, /*prefix_len*/
         );
-        builder.push_chunk(&base_branch, 1, 4, [].into_iter());
+        builder.push_chunk(&base_branch, 1, 4);
         let mut key255 = [0; 32];
         key255[0] = 0x11;
         key255[1] = 255;
@@ -751,7 +744,7 @@ mod test {
             4, /*prefix_compressed*/
             7, /*prefix_len*/
         );
-        builder.push_chunk(&base_branch, 1, 4, [].into_iter());
+        builder.push_chunk(&base_branch, 1, 4);
         builder.push(key255, separator_len(&key255), 10);
         // prefix: 0001000
         // key 1:         1_10000000_00000001 // cell_poiter: 17
