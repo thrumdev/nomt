@@ -6,7 +6,10 @@ use super::BRANCH_NODE_SIZE;
 use crate::{
     beatree::{
         allocator::PageNumber,
-        ops::{bit_ops::bitwise_memcpy, get_key},
+        ops::{
+            bit_ops::{bitwise_memcpy, separator_len},
+            get_key,
+        },
         Key,
     },
     io::{FatPage, PagePool},
@@ -422,7 +425,6 @@ impl BranchNodeBuilder {
         if self.index == 0 {
             self.branch.set_prefix(&key);
         }
-
         let separator = if self.index < self.prefix_compressed {
             // The first separator can have length less than prefix due to trailing zero
             // compression.
@@ -455,21 +457,37 @@ impl BranchNodeBuilder {
         base: &BranchNode,
         from: usize,
         to: usize,
-        updated: impl Iterator<Item = (usize, PageNumber)>,
+        mut updated: impl Iterator<Item = (usize, PageNumber)>,
     ) {
         let n_items = to - from;
         assert!(self.index + n_items <= self.branch.prefix_compressed() as usize);
+
+        let bit_prefix_len_difference =
+            base.prefix_len() as isize - self.branch.prefix_len() as isize;
+
+        if bit_prefix_len_difference != 0 {
+            let mut next_updated = updated.next();
+            for (i, pos) in (from..to).enumerate() {
+                let key = get_key(base, pos);
+                let pn = match next_updated {
+                    Some((updated_i, pn)) if i == updated_i => {
+                        next_updated = updated.next();
+                        pn.0
+                    }
+                    _ => base.node_pointer(pos),
+                };
+                self.push(key, separator_len(&key), pn);
+            }
+            return;
+        }
+
+        // here just the fastest path
 
         if self.index == 0 {
             // set the prefix if this is the first inserted item
             let key = get_key(base, from);
             self.branch.set_prefix(&key);
         }
-
-        let bit_prefix_len_difference =
-            base.prefix_len() as isize - self.branch.prefix_len() as isize;
-        let is_prefix_extension = bit_prefix_len_difference.is_positive();
-        let bit_prefix_len_difference = bit_prefix_len_difference.abs() as usize;
 
         // 1. copy and update cells
         // self.separator_bit_offset is the end offset of the last inserted separator
@@ -485,14 +503,8 @@ impl BranchNodeBuilder {
             .zip(&mut self.branch.cells_mut()[self.index..self.index + n_items])
         {
             let base_cell_pointer = u16::from_le_bytes(*base_cell) as usize;
-            let mut separator_len = base_cell_pointer - base_prev_cell_pointer;
+            let separator_len = base_cell_pointer - base_prev_cell_pointer;
             base_prev_cell_pointer = base_cell_pointer;
-
-            if is_prefix_extension {
-                separator_len += bit_prefix_len_difference;
-            } else {
-                separator_len = separator_len.saturating_sub(bit_prefix_len_difference);
-            }
 
             cell_pointer += separator_len as usize;
             cell.copy_from_slice(&u16::try_from(cell_pointer).unwrap().to_le_bytes());
@@ -510,138 +522,127 @@ impl BranchNodeBuilder {
         }
 
         // 3. copy and shift separators
-        if bit_prefix_len_difference == 0 {
-            // fast path, copy and shift all compressed separators at once
-            let (separators_bytes, separators_bit_start, _separators_bit_len) = self
-                .branch
-                .raw_separators_mut(self.index, self.index + n_items);
+        // fast path, copy and shift all compressed separators at once
+        let (separators_bytes, separators_bit_start, _separators_bit_len) = self
+            .branch
+            .raw_separators_mut(self.index, self.index + n_items);
 
-            let (base_separators_bytes, base_separators_bit_start, base_separators_bit_len) =
-                base_view.raw_separators(from, to);
+        let (base_separators_bytes, base_separators_bit_start, base_separators_bit_len) =
+            base_view.raw_separators(from, to);
 
-            bitwise_memcpy(
-                separators_bytes,
-                separators_bit_start,
-                base_separators_bytes,
-                base_separators_bit_start,
-                base_separators_bit_len,
-            );
-        } else {
-            // slow path, copy and shift separators one by one
-            self.copy_and_shift_separators(
-                base,
-                self.index..self.index + n_items,
-                from..to,
-                is_prefix_extension,
-                bit_prefix_len_difference,
-            );
-        }
+        bitwise_memcpy(
+            separators_bytes,
+            separators_bit_start,
+            base_separators_bytes,
+            base_separators_bit_start,
+            base_separators_bit_len,
+        );
 
         self.index += n_items;
         self.separator_bit_offset = cell_pointer;
     }
 
-    fn copy_and_shift_separators(
-        &mut self,
-        base: &BranchNode,
-        range: Range<usize>,
-        base_range: Range<usize>,
-        is_prefix_extension: bool,
-        bit_prefix_len_difference: usize,
-    ) {
-        if range.is_empty() {
-            return;
-        }
-
-        let carry_prefix: Option<(usize, usize, usize)> = if is_prefix_extension {
-            // bit_prefix_len_difference is the amount of bits that need to be taken from
-            // the base prefix and added in front of every separator.
-            // The interested bits are the last bits of the prefix
-
-            let bits_to_skip = base.prefix_len() as usize - bit_prefix_len_difference as usize;
-            let bytes_to_skip = bits_to_skip / 8;
-            let prefix_bit_start = bits_to_skip % 8;
-
-            let base_prefix_start = BRANCH_NODE_HEADER_SIZE + base.n() as usize * 2;
-            let start = base_prefix_start + bytes_to_skip;
-            let byte_len = (((bit_prefix_len_difference as usize) + 7) / 8).next_multiple_of(8);
-
-            Some((start, start + byte_len, prefix_bit_start))
-        } else {
-            None
-        };
-
-        // iterate over all separators that need to be copied and shifted
-        for (index, base_index) in range.clone().into_iter().zip(base_range) {
-            let RawSeparatorsData {
-                start: mut separator_bytes_start,
-                byte_len: separator_bytes_len,
-                bit_start: mut separator_bit_start,
-                bit_len: separator_bit_len,
-            } = self.branch.view().raw_separators_data(index, index + 1);
-
-            let RawSeparatorsData {
-                start: mut base_separator_bytes_start,
-                byte_len: base_separator_bytes_len,
-                bit_start: mut base_separator_bit_start,
-                bit_len: base_separator_bit_len,
-            } = base.view().raw_separators_data(base_index, base_index + 1);
-
-            // copy the prefix in place if this is_prefix_extension
-            if let Some((base_prefix_start, base_prefix_end, base_prefix_bit_start)) = carry_prefix
-            {
-                bitwise_memcpy(
-                    &mut self.branch.page
-                        [separator_bytes_start..separator_bytes_start + separator_bytes_len],
-                    separator_bit_start,
-                    &base.page[base_prefix_start..base_prefix_end],
-                    base_prefix_bit_start,
-                    bit_prefix_len_difference,
-                );
-            }
-
-            // shift and copy the separator from the base to the new node.
-            //
-            // If there is a prefix extension, `handle_prefix_offset` helps to understand
-            // how many bytes need to be skipped, given the amount of extended prefix. The same
-            // function, in the case of a non-prefix extension, is used to understand how many
-            // bits to skip from the base_separator.
-            let handle_prefix_offset = |bit_start: &mut usize, byte_init: &mut usize| {
-                if *bit_start > 7 {
-                    // skip some bytes because they are part of the prefix
-                    let bytes_to_skip = *bit_start / 8;
-                    *bit_start = *bit_start % 8;
-                    *byte_init += bytes_to_skip;
-                }
-            };
-
-            let bit_len;
-            if is_prefix_extension {
-                // carry_prefix is already being applied, so skip bits in the new node's separator
-                separator_bit_start += bit_prefix_len_difference;
-                handle_prefix_offset(&mut separator_bit_start, &mut separator_bytes_start);
-                bit_len = base_separator_bit_len;
-            } else {
-                // the prefix in the new node is bigger, so skip bits in the base's separator
-                base_separator_bit_start += bit_prefix_len_difference;
-                handle_prefix_offset(
-                    &mut base_separator_bit_start,
-                    &mut base_separator_bytes_start,
-                );
-                bit_len = separator_bit_len;
-            }
-
-            bitwise_memcpy(
-                &mut self.branch.page
-                    [separator_bytes_start..separator_bytes_start + separator_bytes_len],
-                separator_bit_start,
-                &base.page[base_separator_bytes_start
-                    ..base_separator_bytes_start + base_separator_bytes_len],
-                base_separator_bit_start,
-                bit_len,
-            );
-        }
-    }
+    //fn copy_and_shift_separators(
+    //&mut self,
+    //base: &BranchNode,
+    //range: Range<usize>,
+    //base_range: Range<usize>,
+    //is_prefix_extension: bool,
+    //bit_prefix_len_difference: usize,
+    //) {
+    //if range.is_empty() {
+    //return;
+    //}
+    //
+    //let carry_prefix: Option<(usize, usize, usize)> = if is_prefix_extension {
+    //// bit_prefix_len_difference is the amount of bits that need to be taken from
+    //// the base prefix and added in front of every separator.
+    //// The interested bits are the last bits of the prefix
+    //
+    //let bits_to_skip = base.prefix_len() as usize - bit_prefix_len_difference as usize;
+    //let bytes_to_skip = bits_to_skip / 8;
+    //let prefix_bit_start = bits_to_skip % 8;
+    //
+    //let base_prefix_start = BRANCH_NODE_HEADER_SIZE + base.n() as usize * 2;
+    //let start = base_prefix_start + bytes_to_skip;
+    //let byte_len = (((bit_prefix_len_difference as usize) + 7) / 8).next_multiple_of(8);
+    //
+    //Some((start, start + byte_len, prefix_bit_start))
+    //} else {
+    //None
+    //};
+    //
+    //// iterate over all separators that need to be copied and shifted
+    //for (index, base_index) in range.clone().into_iter().zip(base_range) {
+    //let RawSeparatorsData {
+    //start: mut separator_bytes_start,
+    //byte_len: separator_bytes_len,
+    //bit_start: mut separator_bit_start,
+    //bit_len: separator_bit_len,
+    //} = self.branch.view().raw_separators_data(index, index + 1);
+    //
+    //let RawSeparatorsData {
+    //start: mut base_separator_bytes_start,
+    //byte_len: base_separator_bytes_len,
+    //bit_start: mut base_separator_bit_start,
+    //bit_len: base_separator_bit_len,
+    //} = base.view().raw_separators_data(base_index, base_index + 1);
+    //
+    //// copy the prefix in place if this is_prefix_extension
+    //if let Some((base_prefix_start, base_prefix_end, base_prefix_bit_start)) = carry_prefix
+    //{
+    //bitwise_memcpy(
+    //&mut self.branch.page
+    //[separator_bytes_start..separator_bytes_start + separator_bytes_len],
+    //separator_bit_start,
+    //&base.page[base_prefix_start..base_prefix_end],
+    //base_prefix_bit_start,
+    //bit_prefix_len_difference,
+    //);
+    //}
+    //
+    //// shift and copy the separator from the base to the new node.
+    ////
+    //// If there is a prefix extension, `handle_prefix_offset` helps to understand
+    //// how many bytes need to be skipped, given the amount of extended prefix. The same
+    //// function, in the case of a non-prefix extension, is used to understand how many
+    //// bits to skip from the base_separator.
+    //let handle_prefix_offset = |bit_start: &mut usize, byte_init: &mut usize| {
+    //if *bit_start > 7 {
+    //// skip some bytes because they are part of the prefix
+    //let bytes_to_skip = *bit_start / 8;
+    //*bit_start = *bit_start % 8;
+    //*byte_init += bytes_to_skip;
+    //}
+    //};
+    //
+    //let bit_len;
+    //if is_prefix_extension {
+    //// carry_prefix is already being applied, so skip bits in the new node's separator
+    //separator_bit_start += bit_prefix_len_difference;
+    //handle_prefix_offset(&mut separator_bit_start, &mut separator_bytes_start);
+    //bit_len = base_separator_bit_len;
+    //} else {
+    //// the prefix in the new node is bigger, so skip bits in the base's separator
+    //base_separator_bit_start += bit_prefix_len_difference;
+    //handle_prefix_offset(
+    //&mut base_separator_bit_start,
+    //&mut base_separator_bytes_start,
+    //);
+    //bit_len = separator_bit_len;
+    //}
+    //
+    //bitwise_memcpy(
+    //&mut self.branch.page
+    //[separator_bytes_start..separator_bytes_start + separator_bytes_len],
+    //separator_bit_start,
+    //&base.page[base_separator_bytes_start
+    //..base_separator_bytes_start + base_separator_bytes_len],
+    //base_separator_bit_start,
+    //bit_len,
+    //);
+    //}
+    //}
 
     pub fn finish(self) -> BranchNode {
         self.branch
