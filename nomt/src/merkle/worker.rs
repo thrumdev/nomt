@@ -25,6 +25,7 @@ use std::{
 
 use super::{
     page_walker::{NeedsPage, Output, PageSource, PageWalker},
+    seek::{Completion, Seek, Seeker},
     KeyReadWrite, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand, WorkerOutput,
 };
 
@@ -33,7 +34,6 @@ use crate::{
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, WritePass},
-    seek::{Completion, Seek, Seeker},
     store::Store,
     PathProof, WitnessedPath,
 };
