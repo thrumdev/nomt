@@ -807,16 +807,34 @@ impl BranchGauge {
                 let key = get_key(&base.as_ref().unwrap().node, *pos);
                 self.ingest_key(key, separator_len(&key));
             }
-            BranchOp::KeepChunk(chunk) => {
-                for i in chunk.start..chunk.end {
-                    let key = get_key(&base.as_ref().unwrap().node, i);
-                    self.ingest_key(key, separator_len(&key));
-                }
+            BranchOp::KeepChunk(ref chunk) => {
+                // UNWRAP: `KeepChunk` requires the base branch to exist.
+                self.ingest_chunk(base.as_ref().unwrap(), chunk);
             }
             BranchOp::Insert(key, _) => {
                 self.ingest_key(*key, separator_len(key));
             }
         }
+    }
+
+    fn ingest_chunk(&mut self, base: &BaseBranch, chunk: &KeepChunk) {
+        if let Some((ref first, _)) = self.first_separator {
+            if self.prefix_compressed.is_none() {
+                let chunk_last_key = base.key(chunk.end - 1);
+                self.prefix_len = prefix_len(first, &chunk_last_key);
+            }
+            self.sum_separator_lengths += chunk.sum_separator_lengths;
+            self.n += chunk.len();
+        } else {
+            let chunk_first_key = base.key(chunk.start);
+            let chunk_last_key = base.key(chunk.end - 1);
+            let first_separator_len = separator_len(&chunk_first_key);
+
+            self.prefix_len = prefix_len(&chunk_first_key, &chunk_last_key);
+            self.first_separator = Some((chunk_first_key, first_separator_len));
+            self.sum_separator_lengths = chunk.sum_separator_lengths - first_separator_len;
+            self.n = chunk.len();
+        };
     }
 
     fn stop_prefix_compression(&mut self) {
