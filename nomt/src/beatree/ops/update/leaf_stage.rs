@@ -23,7 +23,7 @@ use crate::beatree::{
             leaf_updater::{BaseLeaf, DigestResult as LeafDigestResult, LeafUpdater},
         },
     },
-    Key,
+    Key, ValueChange,
 };
 use crate::io::{IoCommand, IoHandle, IoKind, IoPool, PAGE_SIZE};
 
@@ -87,7 +87,7 @@ pub fn run(
     leaf_reader: StoreReader,
     leaf_writer: SyncAllocator,
     io_handle: IoHandle,
-    changeset: Arc<BTreeMap<Key, Option<Vec<u8>>>>,
+    changeset: Arc<BTreeMap<Key, ValueChange>>,
     thread_pool: ThreadPool,
     num_workers: usize,
 ) -> anyhow::Result<LeafStageOutput> {
@@ -101,16 +101,16 @@ pub fn run(
     let changeset = changeset
         .iter()
         .map(|(k, v)| match v {
-            Some(v) if v.len() <= MAX_LEAF_VALUE_SIZE => Ok((*k, Some((v.clone(), false)))),
-            Some(large_value) => {
+            ValueChange::Insert(v) => Ok((*k, Some((v.clone(), false)))),
+            ValueChange::InsertOverflow(large_value, value_hash) => {
                 let (pages, num_writes) =
                     overflow::chunk(&large_value, &leaf_writer, &page_pool, &io_handle)?;
                 overflow_io += num_writes;
 
-                let cell = overflow::encode_cell(large_value.len(), &pages);
+                let cell = overflow::encode_cell(large_value.len(), value_hash.clone(), &pages);
                 Ok((*k, Some((cell, true))))
             }
-            None => Ok((*k, None)),
+            ValueChange::Delete => Ok((*k, None)),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
