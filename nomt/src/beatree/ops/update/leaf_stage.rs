@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use imbl::OrdMap;
 use threadpool::ThreadPool;
 
 use crate::beatree::{
@@ -84,7 +84,7 @@ pub fn run(
     leaf_reader: StoreReader,
     leaf_writer: SyncAllocator,
     io_handle: IoHandle,
-    changeset: Arc<BTreeMap<Key, ValueChange>>,
+    changeset: OrdMap<Key, ValueChange>,
     thread_pool: ThreadPool,
     num_workers: usize,
 ) -> anyhow::Result<LeafStageOutput> {
