@@ -272,8 +272,7 @@ impl Seeker {
         None
     }
 
-    /// Try to process the next I/O. Does not block the current thread. Returns `true` if
-    /// a completion was processed.
+    /// Try to process the next I/O. Does not block the current thread.
     pub fn try_recv_page(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<()> {
         if let Some(completion) = self.page_loader.try_complete()? {
             self.handle_completion(read_pass, completion);
