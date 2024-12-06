@@ -63,15 +63,12 @@ impl BaseBranch {
 
 // BranchOp used to create a new node starting off a possible base node.
 //
-// `Update` and `KeepChunk` refers to compressed separator present into
-// the base node. Every uncompressed separator present in the base or
-// that will be inserted in the new node will be represented as an `Insert` operation.
+// `KeepChunk` refers to only compressed separator present into the base node.
+// Every uncompressed separator taken from the base node or that will be inserted
+// into the new node will be represented as an `Insert`
 enum BranchOp {
     // Separator and its page number
     Insert(Key, PageNumber),
-    // Contains the position at which the separator is saved in the base,
-    // along with the updated page number
-    Update(usize, PageNumber),
     // Contains a range of separators that will be transfered unchanged
     // in the new node from the base.
     //
@@ -132,24 +129,13 @@ impl BranchUpdater {
     /// Ingest a key and page number into the branch updater.
     pub fn ingest(&mut self, key: Key, pn: Option<PageNumber>) {
         // keep all elements that are skipped looking for `key`
-        let res = self.keep_up_to(Some(&key));
+        self.keep_up_to(Some(&key));
 
-        match (res, pn) {
-            // UNWRAP: if the item has been found it must be a base node
-            (Some(pos), Some(pn))
-                if pos < self.base.as_ref().unwrap().node.prefix_compressed() as usize =>
-            {
-                // a compressed separator has been changed
-                self.ops.push(BranchOp::Update(pos, pn));
-                self.bulk_split_step(self.ops.len() - 1);
-            }
-            (_, Some(pn)) => {
-                // a new key or a previous uncompressed separator has been updated
-                self.ops.push(BranchOp::Insert(key, pn));
-                self.bulk_split_step(self.ops.len() - 1);
-            }
-            _ => (),
-        }
+        if let Some(pn) = pn {
+            // a new key or a previous uncompressed separator has been updated
+            self.ops.push(BranchOp::Insert(key, pn));
+            self.bulk_split_step(self.ops.len() - 1);
+        };
     }
 
     pub fn digest(&mut self, new_branches: &mut impl HandleNewBranch) -> DigestResult {
@@ -201,37 +187,38 @@ impl BranchUpdater {
     // Advance the base looking for `up_to`, stops if a bigger Key is found or the end is reached.
     // Collect in `self.ops` all separators that are skipped.
     // Returns the index at which 'up_to' was found, otherwise, returns None.
-    fn keep_up_to(&mut self, up_to: Option<&Key>) -> Option<usize> {
+    fn keep_up_to(&mut self, up_to: Option<&Key>) {
         if self.base.is_none() {
             // empty db
-            return None;
+            return;
         }
 
-        let (maybe_chunk, uncompressed_range, found) = {
+        let (maybe_chunk, uncompressed_range) = {
             // UNWRAP: self.base is not None
             let base = self.base.as_mut().unwrap();
 
             let from = base.low;
             let base_n = base.node.n() as usize;
 
-            let (found, to) = match up_to {
+            let (_found, to) = match up_to {
                 // Nothing more to do, the end has already been reached
-                None if from == base_n => return None,
+                None if from == base_n => return,
                 // Jump directly to the end of the base node and update `base.low` accordingly
                 None => {
                     base.low = base_n;
                     (false, base_n)
                 }
+                // TODO: maybe totally remove found from `find_key`?
                 Some(up_to) => match base.find_key(up_to) {
                     Some(res) => res,
                     // already at the end
-                    None => return None,
+                    None => return,
                 },
             };
 
             if from == to {
                 // nothing to keep
-                return None;
+                return;
             }
 
             let base_compressed_end = std::cmp::min(to, base.node.prefix_compressed() as usize);
@@ -251,11 +238,7 @@ impl BranchUpdater {
                 })
             };
 
-            (
-                maybe_chunk,
-                base_compressed_end..to,
-                if found { Some(to) } else { None },
-            )
+            (maybe_chunk, base_compressed_end..to)
         };
 
         // push compressed chunk
@@ -271,8 +254,6 @@ impl BranchUpdater {
             self.ops.push(BranchOp::Insert(key, pn));
             self.bulk_split_step(self.ops.len() - 1);
         }
-
-        found
     }
 
     // check whether bulk split needs to start, and if so, start it.
@@ -284,10 +265,6 @@ impl BranchUpdater {
             BranchOp::KeepChunk(ref chunk) => self
                 .gauge
                 .body_size_after_chunk(self.base.as_ref().unwrap(), &chunk),
-            BranchOp::Update(pos, _) => {
-                let key = self.base.as_ref().unwrap().key(pos);
-                self.gauge.body_size_after(key, separator_len(&key))
-            }
             BranchOp::Insert(key, _) => self.gauge.body_size_after(key, separator_len(&key)),
         };
 
@@ -307,7 +284,7 @@ impl BranchUpdater {
 
                 let accept_item = body_size_after <= BRANCH_NODE_BODY_SIZE || {
                     match self.ops[op_index] {
-                        BranchOp::Insert(..) | BranchOp::Update(..) => {
+                        BranchOp::Insert(..) => {
                             if self.gauge.body_size() < BRANCH_MERGE_THRESHOLD {
                                 // rare case: body was artifically small due to long shared prefix.
                                 // start applying items without prefix compression. we assume items are less
@@ -427,18 +404,6 @@ impl BranchUpdater {
                         }
                     }
                 }
-                BranchOp::Update(pos, _) => {
-                    let key = self.base.as_ref().unwrap().key(pos);
-                    if left_gauge.body_size_after(key, separator_len(&key)) > BRANCH_NODE_BODY_SIZE
-                    {
-                        if left_gauge.body_size() < BRANCH_MERGE_THRESHOLD {
-                            // same case as above
-                            left_gauge.stop_prefix_compression();
-                        } else {
-                            break;
-                        }
-                    }
-                }
                 BranchOp::KeepChunk(chunk) => {
                     // try to split the chunk to make it fit into the available space
                     let n_items = split_keep_chunk(
@@ -537,123 +502,15 @@ impl BranchUpdater {
             return builder.finish();
         };
 
-        // This second phase of joining Update and KeepChunk into a unique update chunk is performed
-        // for two reasons:
-        //
-        // 1. It could often happen that the sequence of KeepChunk are interleaved by Update with only a change
-        // in the node pointers
-        // 2. To avoid keeping all the update information within the BranchOp::KeepChunk because it would require
-        // further allocations
-        let apply_chunk =
-            |builder: &mut BranchNodeBuilder, base_range: Range<usize>, ops_range: Range<usize>| {
-                let n_compressed_left = gauge
-                    .prefix_compressed_items()
-                    .saturating_sub(builder.n_pushed());
-
-                let compressed_end =
-                    std::cmp::min(base_range.start + n_compressed_left, base_range.end);
-
-                builder.push_chunk(
-                    &base.node,
-                    base_range.start,
-                    compressed_end,
-                    ops[ops_range]
-                        .iter()
-                        .filter_map(|op| {
-                            if let BranchOp::Update(pos, pn) = op {
-                                Some((pos - base_range.start, *pn))
-                            } else {
-                                None
-                            }
-                        })
-                        .into_iter(),
-                );
-
-                for pos in compressed_end..base_range.end {
-                    let (key, pn) = self.base.as_ref().unwrap().key_value(pos);
-                    builder.push(key, separator_len(&key), pn.0);
-                }
-            };
-
-        let mut pending_keep_chunk = None;
-        // contains a range within `ops` which define the `pending_keep_chunk`
-        let mut pending_ops_range = None;
-        let mut i = 0;
-        while i < ops.len() {
-            // Check if the chunk could grow.
-            // If yes, then update it and restart the loop on the next operation.
-            // Otherwise, apply the pending chunk and let the same operation be re-evaluated.
-            if pending_keep_chunk.is_some() {
-                match &ops[i] {
-                    // found a insert, apply pending chunk
-                    BranchOp::Insert(_, _) => {
-                        apply_chunk(
-                            &mut builder,
-                            pending_keep_chunk.take().unwrap(),
-                            pending_ops_range.take().unwrap(),
-                        );
-                    }
-                    BranchOp::KeepChunk(chunk) => {
-                        // UNWRAP: pending_keep_chunk has just been checked to be Some
-                        let range = pending_keep_chunk.as_mut().unwrap();
-                        let ops_range = pending_ops_range.as_mut().unwrap();
-                        if range.end == chunk.start {
-                            // KeepChunk that follow the pending chunk
-                            range.end = chunk.end;
-                            ops_range.end += 1;
-                            i += 1;
-                            continue;
-                        } else {
-                            // KeepChunk that doens't follow the pending chunk
-                            apply_chunk(
-                                &mut builder,
-                                pending_keep_chunk.take().unwrap(),
-                                pending_ops_range.take().unwrap(),
-                            );
-                        }
-                    }
-                    BranchOp::Update(pos, _) => {
-                        // UNWRAP: pending_keep_chunk has just been checked to be Some
-                        let range = pending_keep_chunk.as_mut().unwrap();
-                        let ops_range = pending_ops_range.as_mut().unwrap();
-                        if range.end == *pos {
-                            // Update that follow the pending chunk
-                            range.end += 1;
-                            ops_range.end += 1;
-                            i += 1;
-                            continue;
-                        } else {
-                            // Update that doens't follow the pending chunk
-                            apply_chunk(
-                                &mut builder,
-                                pending_keep_chunk.take().unwrap(),
-                                pending_ops_range.take().unwrap(),
-                            );
-                        }
-                    }
-                }
-            }
-
-            match &ops[i] {
+        for op in ops {
+            match op {
                 BranchOp::Insert(key, pn) => {
                     builder.push(*key, separator_len(key), pn.0);
-                    i += 1;
                 }
                 BranchOp::KeepChunk(chunk) => {
-                    pending_keep_chunk = Some(chunk.start..chunk.end);
-                    pending_ops_range = Some(i..i + 1);
-                    i += 1;
+                    builder.push_chunk(&base.node, chunk.start, chunk.end);
                 }
-                BranchOp::Update(pos, _) => {
-                    pending_keep_chunk = Some(*pos..*pos + 1);
-                    pending_ops_range = Some(i..i + 1);
-                    i += 1;
-                }
-            };
-        }
-
-        if let (Some(range), Some(ops_range)) = (pending_keep_chunk, pending_ops_range) {
-            apply_chunk(&mut builder, range, ops_range);
+            }
         }
 
         builder.finish()
@@ -664,15 +521,12 @@ impl BranchUpdater {
 
         let Some(ref base) = self.base else { return };
 
-        // replace `KeepChunk` and `Update` ops with pure key-value ops,
+        // replace `KeepChunk` ops with pure key-value ops,
         // preparing for the base to be changed.
         let mut new_insert = 0;
         for i in 0..self.ops.len() {
             match self.ops[new_insert + i] {
                 BranchOp::Insert(_, _) => (),
-                BranchOp::Update(pos, new_pn) => {
-                    self.ops[new_insert + i] = BranchOp::Insert(base.key(pos), new_pn);
-                }
                 BranchOp::KeepChunk(chunk) => {
                     self.ops.remove(new_insert + i);
 
@@ -690,7 +544,6 @@ impl BranchUpdater {
         // UNWRAP: `KeepChunk` leaf ops only exist when base is `Some`.
         match branch_op {
             BranchOp::Insert(k, _) => *k,
-            BranchOp::Update(pos, _) => self.base.as_ref().unwrap().key(*pos),
             BranchOp::KeepChunk(chunk) => self.base.as_ref().unwrap().key(chunk.start),
         }
     }
@@ -803,10 +656,6 @@ impl BranchGauge {
     fn ingest_branch_op(&mut self, base: &Option<BaseBranch>, op: &BranchOp) {
         // UNWRAPs: if op is Update or KeepChunk, then it must be a base
         match op {
-            BranchOp::Update(pos, _) => {
-                let key = get_key(&base.as_ref().unwrap().node, *pos);
-                self.ingest_key(key, separator_len(&key));
-            }
             BranchOp::KeepChunk(ref chunk) => {
                 // UNWRAP: `KeepChunk` requires the base branch to exist.
                 self.ingest_chunk(base.as_ref().unwrap(), chunk);
