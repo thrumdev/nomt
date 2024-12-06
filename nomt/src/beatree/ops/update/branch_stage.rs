@@ -8,8 +8,7 @@ use crate::beatree::{
     index::Index,
     Key,
 };
-
-use crate::io::{IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE};
+use crate::io::{IoCommand, IoHandle, IoKind, PagePool};
 
 use super::branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
 use super::extend_range_protocol::{
@@ -417,10 +416,10 @@ impl super::branch_updater::HandleNewBranch for NewBranchHandler {
         let bbn = Arc::new(bbn);
 
         // TODO: handle error
-        let ptr = bbn.as_slice().as_ptr();
+        let page = bbn.page();
         self.io_handle
             .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, ptr, PAGE_SIZE),
+                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
                 user_data: 0,
             })
             .expect("I/O Pool Down");

@@ -9,7 +9,7 @@ use crate::{
         ops::{bit_ops::bitwise_memcpy, get_key},
         Key,
     },
-    io::{FatPage, PagePool},
+    io::{page_pool::Page, FatPage, PagePool},
 };
 
 // Here is the layout of a branch node:
@@ -53,6 +53,10 @@ impl BranchNode {
 
     pub fn as_slice(&self) -> &[u8] {
         &*self.page
+    }
+
+    pub fn page(&self) -> Page {
+        self.page.page()
     }
 
     pub fn view(&self) -> BranchNodeView {
