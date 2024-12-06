@@ -2,6 +2,8 @@ use allocator::{PageNumber, Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
 use crossbeam_channel::Receiver;
+use leaf::node::MAX_LEAF_VALUE_SIZE;
+use nomt_core::trie::ValueHash;
 use parking_lot::{ArcMutexGuard, Mutex, RwLock};
 use std::{collections::BTreeMap, fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
@@ -38,10 +40,10 @@ struct Shared {
     leaf_store_rd: StoreReader,
     /// Primary staging collects changes that are committed but not synced yet. Upon sync, changes
     /// from here are moved to secondary staging.
-    primary_staging: BTreeMap<Key, Option<Vec<u8>>>,
+    primary_staging: BTreeMap<Key, ValueChange>,
     /// Secondary staging collects committed changes that are currently being synced. This is None
     /// if there is no sync in progress.
-    secondary_staging: Option<Arc<BTreeMap<Key, Option<Vec<u8>>>>>,
+    secondary_staging: Option<Arc<BTreeMap<Key, ValueChange>>>,
     leaf_cache: leaf_cache::LeafCache,
 }
 
@@ -53,7 +55,7 @@ struct Sync {
 }
 
 impl Shared {
-    fn take_staged_changeset(&mut self) -> Arc<BTreeMap<Key, Option<Vec<u8>>>> {
+    fn take_staged_changeset(&mut self) -> Arc<BTreeMap<Key, ValueChange>> {
         assert!(self.secondary_staging.is_none());
         let staged = Arc::new(mem::take(&mut self.primary_staging));
         self.secondary_staging = Some(staged.clone());
@@ -127,12 +129,12 @@ impl Tree {
 
         // First look up in the primary staging which contains the most recent changes.
         if let Some(val) = shared.primary_staging.get(&key) {
-            return val.clone();
+            return val.as_option().map(|v| v.to_vec());
         }
 
         // Then check the secondary staging which is a bit older, but fresher still than the btree.
         if let Some(val) = shared.secondary_staging.as_ref().and_then(|x| x.get(&key)) {
-            return val.clone();
+            return val.as_option().map(|v| v.to_vec());
         }
 
         // Finally, look up in the btree.
@@ -168,7 +170,7 @@ impl Tree {
     /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
     // There might be some temptation to unify this with prepare_sync, but this should not be done
     // because in the future sync and commit will be called on different threads at different times.
-    fn commit(shared: &Arc<RwLock<Shared>>, changeset: Vec<(Key, Option<Vec<u8>>)>) {
+    fn commit(shared: &Arc<RwLock<Shared>>, changeset: Vec<(Key, ValueChange)>) {
         if changeset.is_empty() {
             return;
         }
@@ -245,6 +247,46 @@ impl Tree {
     }
 }
 
+/// A change in the value associated with a key.
+#[derive(Clone)]
+pub enum ValueChange {
+    /// The key-value pair is deleted.
+    Delete,
+    /// A new value small enough to fit in a leaf is inserted.
+    Insert(Vec<u8>),
+    /// A new value which requires an overflow page is inserted.
+    InsertOverflow(Vec<u8>, ValueHash),
+}
+
+impl ValueChange {
+    /// Create a [`ValueChange`] from an option, determining whether to use the normal or overflow
+    /// variant based on size.
+    pub fn from_option<T: crate::ValueHasher>(maybe_value: Option<Vec<u8>>) -> Self {
+        match maybe_value {
+            None => ValueChange::Delete,
+            Some(v) => Self::insert::<T>(v),
+        }
+    }
+
+    /// Create an insertion, determining whether to use the normal or overflow variant based on size.
+    pub fn insert<T: crate::ValueHasher>(v: Vec<u8>) -> Self {
+        if v.len() > MAX_LEAF_VALUE_SIZE {
+            let value_hash = T::hash_value(&v);
+            ValueChange::InsertOverflow(v, value_hash)
+        } else {
+            ValueChange::Insert(v)
+        }
+    }
+
+    /// Get the value bytes, optionally.
+    pub fn as_option(&self) -> Option<&[u8]> {
+        match self {
+            ValueChange::Delete => None,
+            ValueChange::Insert(ref v) | ValueChange::InsertOverflow(ref v, _) => Some(&v[..]),
+        }
+    }
+}
+
 /// Data generated during update
 pub struct SyncData {
     pub ln_freelist_pn: u32,
@@ -307,7 +349,7 @@ impl SyncController {
     /// Accepts a list of changes to be committed to the btree.
     ///
     /// Non-blocking.
-    pub fn begin_sync(&mut self, changeset: Vec<(Key, Option<Vec<u8>>)>) {
+    pub fn begin_sync(&mut self, changeset: Vec<(Key, ValueChange)>) {
         let inner = self.inner.clone();
         self.inner.sync.tp.execute(move || {
             Tree::commit(&inner.shared, changeset);

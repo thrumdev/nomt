@@ -89,24 +89,27 @@ pub fn chunk(
 }
 
 /// Decode an overflow cell, returning the size of the value plus the pages numbers within the cell.
-pub fn decode_cell<'a>(raw: &'a [u8]) -> (usize, impl Iterator<Item = PageNumber> + 'a) {
-    assert!(raw.len() >= 12);
+pub fn decode_cell<'a>(raw: &'a [u8]) -> (usize, [u8; 32], impl Iterator<Item = PageNumber> + 'a) {
+    // the minimum legal size is the length plus one page pointer plus the value hash.
+    assert!(raw.len() >= 8 + 4 + 32);
     assert_eq!(raw.len() % 4, 0);
 
     let value_size = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+    let value_hash: [u8; 32] = raw[8..40].try_into().unwrap();
 
-    let iter = raw[8..]
+    let iter = raw[40..]
         .chunks(4)
         .map(|slice| PageNumber(u32::from_le_bytes(slice.try_into().unwrap())));
 
-    (value_size as usize, iter)
+    (value_size as usize, value_hash, iter)
 }
 
 /// Encode a list of page numbers into an overflow cell.
-pub fn encode_cell(value_size: usize, pages: &[PageNumber]) -> Vec<u8> {
-    let mut v = vec![0u8; 8 + pages.len() * 4];
+pub fn encode_cell(value_size: usize, value_hash: [u8; 32], pages: &[PageNumber]) -> Vec<u8> {
+    let mut v = vec![0u8; 8 + 32 + pages.len() * 4];
     v[0..8].copy_from_slice(&(value_size as u64).to_le_bytes());
-    for (pn, slice) in pages.iter().zip(v[8..].chunks_mut(4)) {
+    v[8..40].copy_from_slice(&value_hash);
+    for (pn, slice) in pages.iter().zip(v[40..].chunks_mut(4)) {
         slice.copy_from_slice(&pn.0.to_le_bytes());
     }
 
@@ -170,7 +173,7 @@ fn needed_pages(size: usize) -> usize {
 
 /// Read a large value from pages referenced by an overflow cell.
 pub fn read(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
-    let (value_size, cell_pages) = decode_cell(cell);
+    let (value_size, _, cell_pages) = decode_cell(cell);
     let total_pages = total_needed_pages(value_size);
 
     let mut value = Vec::with_capacity(value_size);
@@ -193,7 +196,7 @@ pub fn read(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
 
 /// Iterate all pages related to an overflow cell and push onto a free-list.
 pub fn delete(cell: &[u8], leaf_reader: &StoreReader, freed: &mut Vec<PageNumber>) {
-    let (value_size, cell_pages) = decode_cell(cell);
+    let (value_size, _, cell_pages) = decode_cell(cell);
     let total_pages = total_needed_pages(value_size);
 
     let start = freed.len();

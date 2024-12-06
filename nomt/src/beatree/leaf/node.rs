@@ -6,7 +6,7 @@
 /// padding: [u8] // empty space between cell_pointers and cells
 /// cells: [Cell; n]
 /// value cell: [u8]
-/// overflow cell: (u64, [NodePointer]) | semantically, (value_size, [NodePointer]).
+/// overflow cell: (u64, u256, [NodePointer]) | semantically, (value_size, value_hash, [NodePointer]).
 /// ```
 ///
 /// | n | [(key ++ offset); n] | ----  | [[u8]; n] |
@@ -41,7 +41,7 @@ pub const MAX_LEAF_VALUE_SIZE: usize = (LEAF_NODE_BODY_SIZE / 3) - 32;
 /// The maximum number of node pointers which may appear directly in an overflow cell.
 ///
 /// Note that this gives an overflow value cell maximum size of 100 bytes.
-pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 23;
+pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 15;
 
 /// We use the high bit to encode whether a cell is an overflow cell.
 const OVERFLOW_BIT: u16 = 1 << 15;

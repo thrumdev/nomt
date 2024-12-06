@@ -11,7 +11,7 @@ use crate::beatree::{
     leaf::node::LEAF_NODE_BODY_SIZE,
     leaf_cache::LeafCache,
     ops::get_key,
-    Key, SyncData,
+    Key, SyncData, ValueChange,
 };
 use crate::io::{IoHandle, PagePool};
 
@@ -43,7 +43,7 @@ const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
-    changeset: Arc<BTreeMap<Key, Option<Vec<u8>>>>,
+    changeset: Arc<BTreeMap<Key, ValueChange>>,
     mut bbn_index: Index,
     leaf_cache: LeafCache,
     leaf_store: Store,
