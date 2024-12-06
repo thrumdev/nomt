@@ -154,9 +154,12 @@ impl BranchNode {
     fn set_separator(
         &mut self,
         i: usize,
-        separator: &BitSlice<u8, Msb0>,
         bit_offset_start: usize,
         bit_offset_end: usize,
+        key: &[u8; 32],
+        separator_byte_start: usize,
+        separator_bit_start: usize,
+        separator_bit_len: usize,
     ) {
         let n = self.n() as usize;
         let prefix_len = self.prefix_len() as usize;
@@ -165,9 +168,26 @@ impl BranchNode {
         let cells_start = BRANCH_NODE_HEADER_SIZE + (i * 2);
         slice[cells_start..][..2].copy_from_slice(&(bit_offset_end as u16).to_le_bytes());
 
-        let separators_start = BRANCH_NODE_HEADER_SIZE + (n * 2);
-        slice[separators_start..].view_bits_mut()[prefix_len..][bit_offset_start..bit_offset_end]
-            .copy_from_bitslice(&separator);
+        let prefix_and_separators_bits = prefix_len + bit_offset_start;
+        let separators_byte_start =
+            BRANCH_NODE_HEADER_SIZE + n * 2 + (prefix_and_separators_bits / 8);
+        let separators_bit_start = prefix_and_separators_bits % 8;
+
+        // needs to be a multiple of 8 and fit into the key
+        let separator_needed_byte_len =
+            ((separator_bit_start + separator_bit_len + 7) / 8).next_multiple_of(8);
+
+        if separator_needed_byte_len > 32 - separator_byte_start {
+            todo!("rare case, the key should be moved to the left, coverign the prefix which is useless, to have a 8byte multiple source")
+        } else {
+            bitwise_memcpy(
+                &mut slice[separators_byte_start..],
+                separators_bit_start,
+                &key[separator_byte_start..separator_byte_start + separator_needed_byte_len],
+                separator_bit_start,
+                separator_bit_len,
+            );
+        }
     }
 
     pub fn node_pointer(&self, i: usize) -> u32 {
@@ -414,31 +434,43 @@ impl BranchNodeBuilder {
         }
     }
 
-    // returns the number of separtors already pushed
+    // returns the number of separators already pushed
     pub fn n_pushed(&self) -> usize {
         self.index
     }
 
-    pub fn push(&mut self, key: Key, mut separator_len: usize, pn: u32) {
+    pub fn push(&mut self, key: Key, separator_len: usize, pn: u32) {
         assert!(self.index < self.branch.n() as usize);
 
         if self.index == 0 {
             self.branch.set_prefix(&key);
         }
-        let separator = if self.index < self.prefix_compressed {
-            // The first separator can have length less than prefix due to trailing zero
-            // compression.
-            separator_len = separator_len.saturating_sub(self.prefix_len);
-            &key.view_bits::<Msb0>()[self.prefix_len..][..separator_len]
-        } else {
-            &key.view_bits::<Msb0>()[..separator_len]
-        };
+
+        let (separator_byte_start, separator_bit_start, separator_bit_len) =
+            if self.index < self.prefix_compressed {
+                // The first separator can have length less than prefix due to trailing zero
+                // compression.
+                (
+                    self.prefix_len / 8,
+                    self.prefix_len % 8,
+                    separator_len.saturating_sub(self.prefix_len),
+                )
+            } else {
+                (0, 0, separator_len)
+            };
 
         let offset_start = self.separator_bit_offset;
-        let offset_end = self.separator_bit_offset + separator_len;
+        let offset_end = self.separator_bit_offset + separator_bit_len;
 
-        self.branch
-            .set_separator(self.index, separator, offset_start, offset_end);
+        self.branch.set_separator(
+            self.index,
+            offset_start,
+            offset_end,
+            &key,
+            separator_byte_start,
+            separator_bit_start,
+            separator_bit_len,
+        );
 
         self.separator_bit_offset = offset_end;
 
