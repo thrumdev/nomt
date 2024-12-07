@@ -232,8 +232,10 @@ fn read_page<'a>(page: &'a FatPage) -> (impl Iterator<Item = PageNumber> + 'a, &
 #[cfg(test)]
 mod tests {
     use super::{
-        needed_pages, total_needed_pages, BODY_SIZE, MAX_OVERFLOW_CELL_NODE_POINTERS, MAX_PNS,
+        decode_cell, encode_cell, needed_pages, total_needed_pages, PageNumber, BODY_SIZE,
+        MAX_OVERFLOW_CELL_NODE_POINTERS, MAX_PNS,
     };
+    use quickcheck::{Arbitrary, Gen, QuickCheck};
 
     #[test]
     fn total_needed_pages_all_in_cell() {
@@ -301,5 +303,71 @@ mod tests {
 
         assert_eq!(pages1, pages2);
         assert_eq!(pages1, total_needed_pages(size));
+    }
+
+    #[derive(Debug, Clone)]
+    struct ValidOverflowCell {
+        value_size: usize,
+        value_hash: [u8; 32],
+        pages: Vec<PageNumber>,
+    }
+
+    impl Arbitrary for ValidOverflowCell {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let value_size = usize::arbitrary(g) & 0x7FFFFFFF; // Keep sizes reasonable
+            let mut value_hash = [0u8; 32];
+            for b in value_hash.iter_mut() {
+                *b = u8::arbitrary(g);
+            }
+
+            // Generate 1 to MAX_OVERFLOW_CELL_NODE_POINTERS page numbers
+            let len = (usize::arbitrary(g) % MAX_OVERFLOW_CELL_NODE_POINTERS) + 1;
+            let pages = (0..len).map(|_| PageNumber(u32::arbitrary(g))).collect();
+
+            ValidOverflowCell {
+                value_size,
+                value_hash,
+                pages,
+            }
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_cell_roundtrip() {
+        fn prop(cell: ValidOverflowCell) -> bool {
+            let encoded = encode_cell(cell.value_size, cell.value_hash, &cell.pages);
+            let (decoded_size, decoded_hash, decoded_pages) = decode_cell(&encoded);
+
+            let pages_match = decoded_pages.eq(cell.pages.iter().cloned());
+
+            decoded_size == cell.value_size && decoded_hash == cell.value_hash && pages_match
+        }
+
+        QuickCheck::new()
+            .tests(5000000)
+            .quickcheck(prop as fn(ValidOverflowCell) -> bool);
+    }
+
+    #[test]
+    fn test_decode_cell_safety() {
+        fn prop(mut bytes: Vec<u8>) -> bool {
+            // Only test vectors that could potentially be valid cells
+            // (must be at least 44 bytes and a multiple of 4)
+            let len = std::cmp::max(bytes.len(), 44);
+            // make sure the length is a multiple of 4
+            let len = (len + 3) & !3;
+            bytes.resize(len, 0);
+
+            // decode_cell should not panic
+            let result = std::panic::catch_unwind(|| {
+                let _ = decode_cell(&bytes);
+            });
+
+            result.is_ok()
+        }
+
+        QuickCheck::new()
+            .tests(5000000)
+            .quickcheck(prop as fn(Vec<u8>) -> bool);
     }
 }
