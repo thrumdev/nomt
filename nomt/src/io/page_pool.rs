@@ -76,6 +76,14 @@ impl FatPage {
     pub fn as_mut_ptr(&self) -> *mut u8 {
         self.page.as_mut_ptr()
     }
+
+    /// Returns underlying [`Page`].
+    ///
+    /// Care must be taken that the returned page is not used after `self` is dropped. However,
+    /// failing to do so will not cause safety bugs.
+    pub fn page(&self) -> Page {
+        self.page.clone()
+    }
 }
 
 impl Deref for FatPage {
