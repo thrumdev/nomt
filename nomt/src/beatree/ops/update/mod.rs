@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossbeam_channel::Receiver;
+use imbl::OrdMap;
 use threadpool::ThreadPool;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -43,7 +44,7 @@ const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
-    changeset: Arc<BTreeMap<Key, ValueChange>>,
+    changeset: OrdMap<Key, ValueChange>,
     mut bbn_index: Index,
     leaf_cache: LeafCache,
     leaf_store: Store,

@@ -2,10 +2,12 @@ use allocator::{PageNumber, Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
 use crossbeam_channel::Receiver;
+use imbl::OrdMap;
+
 use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
-use parking_lot::{ArcMutexGuard, Mutex, RwLock};
-use std::{collections::BTreeMap, fs::File, mem, path::Path, sync::Arc};
+use parking_lot::{ArcMutexGuard, Condvar, Mutex, MutexGuard, RwLock};
+use std::{fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::io::{fsyncer::Fsyncer, IoHandle, IoPool, PagePool};
@@ -27,6 +29,7 @@ pub type Key = [u8; 32];
 
 #[derive(Clone)]
 pub struct Tree {
+    read_transaction_latch: ReadTransactionLatch,
     shared: Arc<RwLock<Shared>>,
     sync: Arc<Mutex<Sync>>,
 }
@@ -40,10 +43,10 @@ struct Shared {
     leaf_store_rd: StoreReader,
     /// Primary staging collects changes that are committed but not synced yet. Upon sync, changes
     /// from here are moved to secondary staging.
-    primary_staging: BTreeMap<Key, ValueChange>,
+    primary_staging: OrdMap<Key, ValueChange>,
     /// Secondary staging collects committed changes that are currently being synced. This is None
     /// if there is no sync in progress.
-    secondary_staging: Option<Arc<BTreeMap<Key, ValueChange>>>,
+    secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_cache: leaf_cache::LeafCache,
 }
 
@@ -55,9 +58,9 @@ struct Sync {
 }
 
 impl Shared {
-    fn take_staged_changeset(&mut self) -> Arc<BTreeMap<Key, ValueChange>> {
+    fn take_staged_changeset(&mut self) -> OrdMap<Key, ValueChange> {
         assert!(self.secondary_staging.is_none());
-        let staged = Arc::new(mem::take(&mut self.primary_staging));
+        let staged = mem::take(&mut self.primary_staging);
         self.secondary_staging = Some(staged.clone());
         staged
     }
@@ -104,7 +107,7 @@ impl Tree {
             leaf_store_rd: StoreReader::new(leaf_store.clone(), io_pool.page_pool().clone()),
             leaf_store,
             bbn_store,
-            primary_staging: BTreeMap::new(),
+            primary_staging: OrdMap::new(),
             secondary_staging: None,
             leaf_cache: leaf_cache::LeafCache::new(32, 1 << 16),
         };
@@ -120,6 +123,7 @@ impl Tree {
         Ok(Tree {
             shared: Arc::new(RwLock::new(shared)),
             sync: Arc::new(Mutex::new(sync)),
+            read_transaction_latch: ReadTransactionLatch::new(),
         })
     }
 
@@ -147,7 +151,8 @@ impl Tree {
         .unwrap()
     }
 
-    /// Returns a controller for the sync process.
+    /// Returns a controller for the sync process. This is blocked by other `sync`s running as well
+    /// as the existence of any read transactions.
     pub fn sync(&self) -> SyncController {
         // Take the sync lock.
         //
@@ -157,10 +162,27 @@ impl Tree {
             inner: Arc::new(SharedSyncController {
                 sync,
                 shared: self.shared.clone(),
+                read_transaction_latch: self.read_transaction_latch.clone(),
                 sync_data: Mutex::new(None),
                 bbn_index: Mutex::new(None),
                 pre_swap_rx: Mutex::new(None),
             }),
+        }
+    }
+
+    /// Initiate a new read transaction, as-of the current state of the last commit.
+    /// This blocks new `sync`s from starting until it is dropped.
+    #[allow(unused)]
+    pub fn read_transaction(&self) -> ReadTransaction {
+        self.read_transaction_latch.add_one();
+        let shared = self.shared.read();
+        ReadTransaction {
+            bbn_index: shared.bbn_index.clone(),
+            primary_staging: shared.primary_staging.clone(),
+            secondary_staging: shared.secondary_staging.clone(),
+            leaf_store: shared.leaf_store.clone(),
+            leaf_cache: shared.leaf_cache.clone(),
+            latch: self.read_transaction_latch.clone(),
         }
     }
 
@@ -185,8 +207,13 @@ impl Tree {
     /// The returned received indicates that all eviction has completed and it is safe to swap the
     /// index. This receiver must be blocked on before finishing sync.
     ///
-    /// Either blocks or panics if another sync is inflight.
-    fn prepare_sync(sync: &Sync, shared: &Arc<RwLock<Shared>>) -> (SyncData, Index, Receiver<()>) {
+    /// Blocks until all outstanding read transactions have concluded, and either blocks or panics
+    /// if another sync is inflight.
+    fn prepare_sync(
+        sync: &Sync,
+        shared: &Arc<RwLock<Shared>>,
+        read_transaction_latch: &ReadTransactionLatch,
+    ) -> (SyncData, Index, Receiver<()>) {
         // Take the shared lock. Briefly.
         let staged_changeset;
         let bbn_index;
@@ -196,7 +223,15 @@ impl Tree {
         let bbn_store;
         let io_handle;
         {
+            // Wait for all outstanding read transactions to conclude. This ensures they won't
+            // be invalidated by any destructive changes.
+            //
+            // Once this guard drops, it will be safe to initiate a new read transaction.
+            let read_tx_guard = read_transaction_latch.block_until_unique();
+
             let mut shared = shared.write();
+            drop(read_tx_guard);
+
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
@@ -338,6 +373,7 @@ pub struct SyncController {
 struct SharedSyncController {
     sync: ArcMutexGuard<parking_lot::RawMutex, Sync>,
     shared: Arc<RwLock<Shared>>,
+    read_transaction_latch: ReadTransactionLatch,
     sync_data: Mutex<Option<SyncData>>,
     bbn_index: Mutex<Option<Index>>,
     pre_swap_rx: Mutex<Option<Receiver<()>>>,
@@ -354,7 +390,7 @@ impl SyncController {
         self.inner.sync.tp.execute(move || {
             Tree::commit(&inner.shared, changeset);
             let (out_meta, out_bbn_index, out_pre_swap_rx) =
-                Tree::prepare_sync(&inner.sync, &inner.shared);
+                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_latch);
 
             let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
@@ -400,4 +436,70 @@ impl SyncController {
         let bbn_index = self.inner.bbn_index.lock().take().unwrap();
         Tree::finish_sync(&self.inner.shared, bbn_index);
     }
+}
+
+/// A read-transaction freezes a read-only state of the beatree as-of the last commit and enables
+/// lookups while it is alive.
+///
+/// The existence of a read transaction blocks new `Sync`s from starting, but may start when
+/// a sync is already ongoing and does not block an ongoing sync from completing.
+///
+/// This is because sync may perform destructive changes to leaves, invalidating the read
+/// transaction.
+///
+/// Further commits may be performed while the read transaction is live, but they won't be reflected
+/// within the transaction.
+#[allow(unused)]
+pub struct ReadTransaction {
+    bbn_index: Index,
+    primary_staging: OrdMap<Key, ValueChange>,
+    secondary_staging: Option<OrdMap<Key, ValueChange>>,
+    leaf_store: Store,
+    leaf_cache: leaf_cache::LeafCache,
+    latch: ReadTransactionLatch,
+}
+
+impl Drop for ReadTransaction {
+    fn drop(&mut self) {
+        self.latch.release_one()
+    }
+}
+
+/// This latch protects against new syncs starting while a read transaction is live.
+#[derive(Clone)]
+struct ReadTransactionLatch {
+    inner: Arc<ReadTransactionLatchInner>,
+}
+
+impl ReadTransactionLatch {
+    fn new() -> Self {
+        ReadTransactionLatch {
+            inner: Arc::new(ReadTransactionLatchInner {
+                read_transactions: Mutex::new(0),
+                cvar: Condvar::new(),
+            }),
+        }
+    }
+
+    fn release_one(&self) {
+        // UNWRAP: this is only called when a read transaction is dropped, which always pairs with
+        // the `add_one` call when the read transaction was created.
+        self.inner.read_transactions.lock().checked_sub(1).unwrap();
+        self.inner.cvar.notify_one();
+    }
+
+    fn add_one(&self) {
+        *self.inner.read_transactions.lock() += 1;
+    }
+
+    fn block_until_unique(&self) -> MutexGuard<usize> {
+        let mut guard = self.inner.read_transactions.lock();
+        self.inner.cvar.wait_while(&mut guard, |count| *count > 0);
+        guard
+    }
+}
+
+struct ReadTransactionLatchInner {
+    read_transactions: Mutex<usize>,
+    cvar: Condvar,
 }
