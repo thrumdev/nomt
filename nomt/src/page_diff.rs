@@ -6,14 +6,18 @@ const CLEAR_BIT: u64 = 1 << 63;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PageDiff {
     /// Each bit indicates whether the node at the corresponding index has changed.
-    /// Later bits are unused.
+    ///
+    /// There are only effectively [`NODES_PER_PAGE`] (126) nodes per page. The last two bits are
+    /// reserved.
+    ///
+    /// See [`CLEAR_BIT`].
     changed_nodes: [u64; 2],
 }
 
 impl PageDiff {
     /// Create a new page diff from bytes.
     ///
-    /// Returns `None` if any of unused bits are set to 1.
+    /// Returns `None` if any of reserved bits are set to 1.
     pub fn from_bytes(bytes: [u8; 16]) -> Option<Self> {
         let mut changed_nodes = [0u64; 2];
         changed_nodes[0] = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
@@ -28,8 +32,8 @@ impl PageDiff {
     }
 
     /// Note that some 32-byte slot in the page data has changed.
-    /// The acceptable range is 0..NODES_PER_PAGE.
-    /// Erase the clear bit.
+    ///
+    /// The acceptable range is 0..NODES_PER_PAGE. Erases the clear bit.
     pub fn set_changed(&mut self, slot_index: usize) {
         assert!(slot_index < NODES_PER_PAGE);
         let word = slot_index / 64;
@@ -89,7 +93,8 @@ impl PageDiff {
         (self.changed_nodes[0].count_ones() + self.changed_nodes[1].count_ones()) as usize
     }
 
-    /// Get raw bytes representing the PageDiff
+    /// Get raw bytes representing the PageDiff.
+    ///
     /// Panics if this is a cleared page-diff.
     pub fn as_bytes(&self) -> [u8; 16] {
         let mut bytes = [0u8; 16];
