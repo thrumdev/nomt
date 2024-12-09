@@ -142,6 +142,12 @@ impl BranchNode {
         (&mut self.page[start..start + byte_len], bit_start, bit_len)
     }
 
+    /// Get the total bit-len of the provided half-open range of separators as represented in
+    /// this branch.
+    pub fn separator_range_len(&self, from: usize, to: usize) -> usize {
+        self.view().separator_range_len(from, to)
+    }
+
     fn set_separator(
         &mut self,
         i: usize,
@@ -255,6 +261,14 @@ impl<'a> BranchNodeView<'a> {
         }
     }
 
+    /// Get the total bit-len of the provided half-open range of separators as represented in
+    /// this branch.
+    pub fn separator_range_len(&self, from: usize, to: usize) -> usize {
+        let bit_offset_start = if from != 0 { self.cell(from - 1) } else { 0 };
+        let bit_offset_end = self.cell(to - 1);
+        bit_offset_end - bit_offset_start
+    }
+
     pub fn raw_separator(&self, i: usize) -> RawSeparator<'a> {
         self.raw_separators(i, i + 1)
     }
@@ -331,6 +345,42 @@ pub fn body_size(prefix_len: usize, total_separator_lengths: usize, n: usize) ->
     // prefix plus separator lengths are measured in bits, which we round
     // up to the next byte boundary. They are preceded by cells and followed by node pointers
     (n * 2) + (prefix_len + total_separator_lengths + 7) / 8 + (n * 4)
+}
+
+/// Given inputs describing a range of compressed separators, output the sum of the separator
+/// lengths when uncompressed.
+/// Provide:
+///   - The length of the compressed prefix
+///   - The length of the compressed range
+///   - The number of separators in the range
+///   - The length of the first separator in the range.
+pub fn uncompressed_separator_range_size(
+    prefix_len: usize,
+    compressed_lengths: usize,
+    n: usize,
+    first_len: usize,
+) -> usize {
+    let first_contraction = prefix_len.saturating_sub(first_len);
+    let expansion = prefix_len * n;
+    compressed_lengths + expansion - first_contraction
+}
+
+/// Given inputs describing a set of separators for a branch, output the compressed size if compressed
+/// with the given prefix length.
+///
+/// `prefix_compressed_items` must be greater than zero.
+/// `pre_compression_size_sum` is the sum of all separator lengths, not including the first.
+pub fn compressed_separator_range_size(
+    first_separator_length: usize,
+    prefix_compressed_items: usize,
+    pre_compression_size_sum: usize,
+    prefix_len: usize,
+) -> usize {
+    // first length can be less than the shared prefix due to trailing zero compression.
+    // then add the total size.
+    // then subtract the size difference due to compression of the remaining items.
+    first_separator_length.saturating_sub(prefix_len) + pre_compression_size_sum
+        - (prefix_compressed_items - 1) * prefix_len
 }
 
 pub struct BranchNodeBuilder {
