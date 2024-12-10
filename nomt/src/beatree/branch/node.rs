@@ -5,6 +5,7 @@ use bitvec::prelude::*;
 use super::BRANCH_NODE_SIZE;
 use crate::{
     beatree::{
+        allocator::PageNumber,
         ops::{bit_ops::bitwise_memcpy, get_key},
         Key,
     },
@@ -360,6 +361,11 @@ impl BranchNodeBuilder {
         }
     }
 
+    // returns the number of separtors already pushed
+    pub fn n_pushed(&self) -> usize {
+        self.index
+    }
+
     pub fn push(&mut self, key: Key, mut separator_len: usize, pn: u32) {
         assert!(self.index < self.branch.n() as usize);
 
@@ -390,8 +396,17 @@ impl BranchNodeBuilder {
     }
 
     // Copy the given chunk of separators from the provided base to the new node.
-    // Only compressed separators are expected in the specified range.
-    pub fn push_chunk(&mut self, base: &BranchNode, from: usize, to: usize) {
+    // Only compressed separators are expected in the specified range `from..to`.
+    //
+    // `updated` represents a list of new page numbers alongside the index
+    // of the separator to update within the specified range
+    pub fn push_chunk(
+        &mut self,
+        base: &BranchNode,
+        from: usize,
+        to: usize,
+        updated: impl Iterator<Item = (usize, PageNumber)>,
+    ) {
         let n_items = to - from;
         assert!(self.index + n_items <= self.branch.prefix_compressed() as usize);
 
@@ -438,6 +453,11 @@ impl BranchNodeBuilder {
         let base_node_pointers = &base_view.node_pointers()[from..to];
         self.branch.node_pointers_mut()[self.index..self.index + n_items]
             .copy_from_slice(base_node_pointers);
+
+        // update page numbers of modified separators
+        for (i, new_pn) in updated {
+            self.branch.set_node_pointer(self.index + i, new_pn.0)
+        }
 
         // 3. copy and shift separators
         if bit_prefix_len_difference == 0 {
@@ -625,7 +645,7 @@ mod test {
             4, /*prefix_compressed*/
             9, /*prefix_len*/
         );
-        builder.push_chunk(&base_branch, 1, 4);
+        builder.push_chunk(&base_branch, 1, 4, [].into_iter());
         let mut key255 = [0; 32];
         key255[0] = 0x11;
         key255[1] = 255;
@@ -648,7 +668,7 @@ mod test {
             4, /*prefix_compressed*/
             7, /*prefix_len*/
         );
-        builder.push_chunk(&base_branch, 1, 4);
+        builder.push_chunk(&base_branch, 1, 4, [].into_iter());
         builder.push(key255, separator_len(&key255), 10);
         // prefix: 0001000
         // key 1:         1_10000000_00000001 // cell_poiter: 17
