@@ -77,6 +77,11 @@ enum BranchOp {
     KeepChunk(KeepChunk),
 }
 
+// KeepChunk represents a sequence of separators contained in a branch node.
+// `start` and `end` represents the separators range where `end` is non inclusive.
+// 0-Sized chunks are not allowed, thus `start > end` must always hold.
+// `sum_separator_lengths` is the sum of the separator lengths of each separator
+// represented by the chunk itself.
 #[derive(Debug, Clone, Copy)]
 struct KeepChunk {
     start: usize,
@@ -316,7 +321,7 @@ impl BranchUpdater {
                                 false
                             }
                         }
-                        BranchOp::KeepChunk(chunk) => {
+                        BranchOp::KeepChunk(..) => {
                             let left_n_items = split_keep_chunk(
                                 self.base.as_ref().unwrap(),
                                 &self.gauge,
@@ -335,20 +340,15 @@ impl BranchUpdater {
                                 if self.gauge.body_size() < BRANCH_MERGE_THRESHOLD {
                                     // We can stop prefix compression and separate the first
                                     // element of the keep_chunk into its own.
-                                    let (key, pn) =
-                                        self.base.as_ref().unwrap().key_value(chunk.start);
-                                    let separator_len = separator_len(&key);
-                                    self.ops[op_index] = BranchOp::KeepChunk(KeepChunk {
-                                        start: chunk.start + 1,
-                                        end: chunk.end,
-                                        sum_separator_lengths: chunk.sum_separator_lengths
-                                            - separator_len,
-                                    });
-
-                                    self.ops.insert(op_index, BranchOp::Insert(key, pn));
+                                    extract_insert_from_keep_chunk(
+                                        self.base.as_ref().unwrap(),
+                                        &mut self.ops,
+                                        op_index,
+                                    );
 
                                     self.gauge.stop_prefix_compression();
                                     recursive_on_split = true;
+
                                     true
                                 } else {
                                     false
@@ -437,7 +437,7 @@ impl BranchUpdater {
                         }
                     }
                 }
-                BranchOp::KeepChunk(chunk) => {
+                BranchOp::KeepChunk(..) => {
                     // try to split the chunk to make it fit into the available space
                     let n_items = split_keep_chunk(
                         self.base.as_ref().unwrap(),
@@ -452,14 +452,11 @@ impl BranchUpdater {
                         // if no item from the chunk is capable to fit then
                         // try to extract the first element from the chunk and storing it
                         // back as an Insert to check if `stop_prefix_compression` is required
-                        let (key, pn) = self.base.as_ref().unwrap().key_value(chunk.start);
-                        let separator_len = separator_len(&key);
-                        self.ops[split_point] = BranchOp::KeepChunk(KeepChunk {
-                            start: chunk.start + 1,
-                            end: chunk.end,
-                            sum_separator_lengths: chunk.sum_separator_lengths - separator_len,
-                        });
-                        self.ops.insert(split_point, BranchOp::Insert(key, pn));
+                        extract_insert_from_keep_chunk(
+                            self.base.as_ref().unwrap(),
+                            &mut self.ops,
+                            split_point,
+                        );
 
                         continue;
                     }
@@ -757,6 +754,28 @@ fn split_keep_chunk(
     }
 
     left_chunk_n_items
+}
+
+// extract the first item within a `BranchOp::KeepChunk` operation into a `BranchOp::Insert`
+fn extract_insert_from_keep_chunk(base: &BaseBranch, ops: &mut Vec<BranchOp>, index: usize) {
+    let BranchOp::KeepChunk(chunk) = ops[index] else {
+        panic!("Attempted to extract `BranchOp::Insert` from non `BranchOp::KeepChunk` operation");
+    };
+
+    let (key, pn) = base.key_value(chunk.start);
+    let separator_len = separator_len(&key);
+
+    if chunk.start == chunk.end - 1 {
+        // 0-sized chunks are not allowed, thus 1-Sized chunks become just an BranchOp::Insert
+        ops[index] = BranchOp::Insert(key, pn);
+    } else {
+        ops[index] = BranchOp::KeepChunk(KeepChunk {
+            start: chunk.start + 1,
+            end: chunk.end,
+            sum_separator_lengths: chunk.sum_separator_lengths - separator_len,
+        });
+        ops.insert(index, BranchOp::Insert(key, pn));
+    }
 }
 
 #[derive(Clone)]
