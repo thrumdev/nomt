@@ -7,7 +7,7 @@ use std::{cmp::Ordering, sync::Arc};
 
 use super::{
     allocator::{PageNumber, StoreReader},
-    branch::BranchNode,
+    branch::{node::get_key, BranchNode},
     index::Index,
     leaf::{self, node::LeafNode},
     leaf_cache::LeafCache,
@@ -62,7 +62,7 @@ pub fn lookup(
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
 /// node pointer whose separator is less than or equal to the given key.
-fn search_branch(branch: &BranchNode, key: Key) -> Option<(usize, PageNumber)> {
+pub fn search_branch(branch: &BranchNode, key: Key) -> Option<(usize, PageNumber)> {
     let (found, pos) = find_key_pos(branch, &key, None);
 
     if found {
@@ -107,16 +107,6 @@ pub fn find_key_pos(branch: &BranchNode, key: &Key, low: Option<usize>) -> (bool
     }
 
     (false, high)
-}
-
-// Extract the key at a given index from a BranchNode, taking into account prefix compression.
-pub fn get_key(node: &BranchNode, index: usize) -> Key {
-    let prefix = if index < node.prefix_compressed() as usize {
-        Some(node.raw_prefix())
-    } else {
-        None
-    };
-    bit_ops::reconstruct_key(prefix, node.raw_separator(index))
 }
 
 #[cfg(feature = "benchmarks")]
