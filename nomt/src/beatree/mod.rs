@@ -12,6 +12,8 @@ use threadpool::ThreadPool;
 
 use crate::io::{fsyncer::Fsyncer, IoHandle, IoPool, PagePool};
 
+pub mod iterator;
+
 mod allocator;
 mod branch;
 mod index;
@@ -20,7 +22,9 @@ mod leaf_cache;
 mod ops;
 
 mod writeout;
+
 use index::Index;
+pub use iterator::BeatreeIterator;
 
 #[cfg(feature = "benchmarks")]
 pub mod benches;
@@ -486,6 +490,14 @@ pub struct ReadTransaction {
     leaf_store: Store,
     leaf_cache: leaf_cache::LeafCache,
     read_counter: ReadTransactionCounter,
+}
+
+impl ReadTransaction {
+    /// Create a new iterator with the given half-open start and end range.
+    #[allow(unused)]
+    pub fn iterator(&self, start: Key, end: Option<Key>) -> BeatreeIterator {
+        BeatreeIterator::new(self, start, end)
+    }
 }
 
 impl Drop for ReadTransaction {
