@@ -6,7 +6,7 @@ use super::BRANCH_NODE_SIZE;
 use crate::{
     beatree::{
         allocator::PageNumber,
-        ops::{bit_ops::bitwise_memcpy, get_key},
+        ops::bit_ops::{bitwise_memcpy, reconstruct_key},
         Key,
     },
     io::{page_pool::Page, FatPage, PagePool},
@@ -387,6 +387,16 @@ pub fn compressed_separator_range_size(
         - (prefix_compressed_items - 1) * prefix_len
 }
 
+// Extract the key at a given index from a BranchNode, taking into account prefix compression.
+pub fn get_key(node: &BranchNode, index: usize) -> Key {
+    let prefix = if index < node.prefix_compressed() as usize {
+        Some(node.raw_prefix())
+    } else {
+        None
+    };
+    reconstruct_key(prefix, node.raw_separator(index))
+}
+
 pub struct BranchNodeBuilder {
     branch: BranchNode,
     index: usize,
@@ -654,11 +664,9 @@ impl BranchNodeBuilder {
 
 #[cfg(test)]
 mod test {
+    use super::get_key;
     use crate::{
-        beatree::{
-            branch::BranchNodeBuilder,
-            ops::{bit_ops::separator_len, get_key},
-        },
+        beatree::{branch::BranchNodeBuilder, ops::bit_ops::separator_len},
         io::PagePool,
     };
 
