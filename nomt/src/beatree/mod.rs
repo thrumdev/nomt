@@ -6,7 +6,7 @@ use imbl::OrdMap;
 
 use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
-use parking_lot::{ArcMutexGuard, Condvar, Mutex, MutexGuard, RwLock};
+use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
 use std::{fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
@@ -29,7 +29,7 @@ pub type Key = [u8; 32];
 
 #[derive(Clone)]
 pub struct Tree {
-    read_transaction_latch: ReadTransactionLatch,
+    read_transaction_counter: ReadTransactionCounter,
     shared: Arc<RwLock<Shared>>,
     sync: Arc<Mutex<Sync>>,
 }
@@ -123,7 +123,7 @@ impl Tree {
         Ok(Tree {
             shared: Arc::new(RwLock::new(shared)),
             sync: Arc::new(Mutex::new(sync)),
-            read_transaction_latch: ReadTransactionLatch::new(),
+            read_transaction_counter: ReadTransactionCounter::new(),
         })
     }
 
@@ -162,7 +162,7 @@ impl Tree {
             inner: Arc::new(SharedSyncController {
                 sync,
                 shared: self.shared.clone(),
-                read_transaction_latch: self.read_transaction_latch.clone(),
+                read_transaction_counter: self.read_transaction_counter.clone(),
                 sync_data: Mutex::new(None),
                 bbn_index: Mutex::new(None),
                 pre_swap_rx: Mutex::new(None),
@@ -171,10 +171,12 @@ impl Tree {
     }
 
     /// Initiate a new read transaction, as-of the current state of the last commit.
-    /// This blocks new `sync`s from starting until it is dropped.
+    /// This blocks new sync operations from starting until it is dropped.
     #[allow(unused)]
     pub fn read_transaction(&self) -> ReadTransaction {
-        self.read_transaction_latch.add_one();
+        // Increment the count. This will block any sync from starting between now and the point
+        // where the read transaction is dropped.
+        self.read_transaction_counter.add_one();
         let shared = self.shared.read();
         ReadTransaction {
             bbn_index: shared.bbn_index.clone(),
@@ -182,7 +184,7 @@ impl Tree {
             secondary_staging: shared.secondary_staging.clone(),
             leaf_store: shared.leaf_store.clone(),
             leaf_cache: shared.leaf_cache.clone(),
-            latch: self.read_transaction_latch.clone(),
+            read_counter: self.read_transaction_counter.clone(),
         }
     }
 
@@ -212,7 +214,7 @@ impl Tree {
     fn prepare_sync(
         sync: &Sync,
         shared: &Arc<RwLock<Shared>>,
-        read_transaction_latch: &ReadTransactionLatch,
+        read_transaction_counter: &ReadTransactionCounter,
     ) -> (SyncData, Index, Receiver<()>) {
         // Take the shared lock. Briefly.
         let staged_changeset;
@@ -226,12 +228,39 @@ impl Tree {
             // Wait for all outstanding read transactions to conclude. This ensures they won't
             // be invalidated by any destructive changes.
             //
-            // Once this guard drops, it will be safe to initiate a new read transaction.
-            let read_tx_guard = read_transaction_latch.block_until_unique();
+            // The reason we do this is somewhat subtle and depends on internal details of the
+            // database. Some elaboration follows.
+            //
+            // Any outstanding read transaction may have been started before the last sync
+            // concluded. That means that it may have a copy of the index referring to leaf pages
+            // which have been logically deleted but which are still present on disk or in the
+            // cache. This is due to our use of shadow paging and CoW techniques which do not
+            // perform destructive changes of on-disk pages until the sync after the one which
+            // logically changed them.
+            //
+            // However, this next sync may overwrite those pages. Therefore we must force those
+            // read transactions to conclude.
+            //
+            // note: there are other possible implementations of this protocol which are more
+            // permissive, i.e. only forcing read transactions to end if they were created before
+            // the most recent call to `finish_sync`.
+            //
+            // As a diagram, where 's' marks sync start points and 'f' marks sync finish points.
+            //
+            // ```
+            //        we want to exclude any transactions started before this point
+            //       |
+            // [s____f____s]
+            // time->     |
+            //            |
+            //            but we exclude all transactions before this point as a simplification.
+            // ```
+            read_transaction_counter.block_until_zero();
+
+            // It is safe for a read transaction to be created here, since it follows the conclusion
+            // of the most recent sync and therefore references no logically free pages.
 
             let mut shared = shared.write();
-            drop(read_tx_guard);
-
             staged_changeset = shared.take_staged_changeset();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
@@ -373,7 +402,7 @@ pub struct SyncController {
 struct SharedSyncController {
     sync: ArcMutexGuard<parking_lot::RawMutex, Sync>,
     shared: Arc<RwLock<Shared>>,
-    read_transaction_latch: ReadTransactionLatch,
+    read_transaction_counter: ReadTransactionCounter,
     sync_data: Mutex<Option<SyncData>>,
     bbn_index: Mutex<Option<Index>>,
     pre_swap_rx: Mutex<Option<Receiver<()>>>,
@@ -390,7 +419,7 @@ impl SyncController {
         self.inner.sync.tp.execute(move || {
             Tree::commit(&inner.shared, changeset);
             let (out_meta, out_bbn_index, out_pre_swap_rx) =
-                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_latch);
+                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_counter);
 
             let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
@@ -456,25 +485,26 @@ pub struct ReadTransaction {
     secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_store: Store,
     leaf_cache: leaf_cache::LeafCache,
-    latch: ReadTransactionLatch,
+    read_counter: ReadTransactionCounter,
 }
 
 impl Drop for ReadTransaction {
     fn drop(&mut self) {
-        self.latch.release_one()
+        self.read_counter.release_one()
     }
 }
 
-/// This latch protects against new syncs starting while a read transaction is live.
+/// This keeps track of the count of outstanding read transactions, and enables blocking until
+/// the count is zero.
 #[derive(Clone)]
-struct ReadTransactionLatch {
-    inner: Arc<ReadTransactionLatchInner>,
+struct ReadTransactionCounter {
+    inner: Arc<ReadTransactionCounterInner>,
 }
 
-impl ReadTransactionLatch {
+impl ReadTransactionCounter {
     fn new() -> Self {
-        ReadTransactionLatch {
-            inner: Arc::new(ReadTransactionLatchInner {
+        ReadTransactionCounter {
+            inner: Arc::new(ReadTransactionCounterInner {
                 read_transactions: Mutex::new(0),
                 cvar: Condvar::new(),
             }),
@@ -492,14 +522,14 @@ impl ReadTransactionLatch {
         *self.inner.read_transactions.lock() += 1;
     }
 
-    fn block_until_unique(&self) -> MutexGuard<usize> {
+    // Block until all outstanding read transactions have been released.
+    fn block_until_zero(&self) {
         let mut guard = self.inner.read_transactions.lock();
         self.inner.cvar.wait_while(&mut guard, |count| *count > 0);
-        guard
     }
 }
 
-struct ReadTransactionLatchInner {
+struct ReadTransactionCounterInner {
     read_transactions: Mutex<usize>,
     cvar: Condvar,
 }
