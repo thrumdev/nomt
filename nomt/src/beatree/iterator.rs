@@ -17,7 +17,7 @@ use super::{
     branch::node::{get_key, BranchNode},
     index::Index,
     leaf::node::LeafNode,
-    Key, ValueChange,
+    Key, LeafNodeRef, ValueChange,
 };
 
 /// An iterator over the state of the beatree at some particular point.
@@ -145,8 +145,8 @@ impl BeatreeIterator {
     /// i.e. if it has not returned [`IterOutput::Blocked`].
     ///
     /// This does no checking of whether the provided page is actually the correct one. GIGO.
-    pub fn provide_leaf(&mut self, leaf: Arc<LeafNode>) {
-        self.leaf_values.provide_leaf(leaf);
+    pub fn provide_leaf(&mut self, leaf: LeafNodeRef) {
+        self.leaf_values.provide_leaf(leaf.inner);
     }
 }
 
@@ -568,7 +568,7 @@ mod tests {
         index::Index,
         leaf::node::{LeafBuilder, LeafNode},
         ops::bit_ops,
-        Key, PageNumber, ValueChange,
+        Key, LeafNodeRef, PageNumber, ValueChange,
     };
 
     use imbl::OrdMap;
@@ -678,7 +678,9 @@ mod tests {
         let mut collected = Vec::new();
         while let Some(iter_output) = iterator.next() {
             match iter_output {
-                IterOutput::Blocked => iterator.provide_leaf(leaf.clone()),
+                IterOutput::Blocked => iterator.provide_leaf(LeafNodeRef {
+                    inner: leaf.clone(),
+                }),
                 IterOutput::Item(key, value) => collected.push((key, decode_value(value))),
                 IterOutput::OverflowItem(_, _, _) => panic!(),
             }
@@ -720,7 +722,9 @@ mod tests {
             let mut iter = BeatreeIterator::new(OrdMap::new(), None, index.clone(), start, None);
             while let Some(output) = iter.next() {
                 match output {
-                    IterOutput::Blocked => iter.provide_leaf(leaves.next().unwrap()),
+                    IterOutput::Blocked => iter.provide_leaf(LeafNodeRef {
+                        inner: leaves.next().unwrap(),
+                    }),
                     IterOutput::Item(k, _) => assert!(k >= start),
                     IterOutput::OverflowItem(_, _, _) => panic!(),
                 }
@@ -749,7 +753,9 @@ mod tests {
             );
             while let Some(output) = iter.next() {
                 match output {
-                    IterOutput::Blocked => iter.provide_leaf(leaves.next().unwrap()),
+                    IterOutput::Blocked => iter.provide_leaf(LeafNodeRef {
+                        inner: leaves.next().unwrap(),
+                    }),
                     IterOutput::Item(k, _) => assert!(k < end),
                     IterOutput::OverflowItem(_, _, _) => panic!(),
                 }
@@ -770,7 +776,9 @@ mod tests {
             );
             while let Some(output) = iter.next() {
                 match output {
-                    IterOutput::Blocked => iter.provide_leaf(leaves.next().unwrap()),
+                    IterOutput::Blocked => iter.provide_leaf(LeafNodeRef {
+                        inner: leaves.next().unwrap(),
+                    }),
                     IterOutput::Item(k, _) => assert!(k < end),
                     IterOutput::OverflowItem(_, _, _) => panic!(),
                 }
