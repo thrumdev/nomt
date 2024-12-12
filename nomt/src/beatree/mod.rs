@@ -10,7 +10,7 @@ use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
 use std::{fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
-use crate::io::{fsyncer::Fsyncer, IoHandle, IoPool, PagePool};
+use crate::io::{fsyncer::Fsyncer, FatPage, IoHandle, IoPool, PagePool};
 
 pub mod iterator;
 
@@ -25,6 +25,7 @@ mod writeout;
 
 use index::Index;
 pub use iterator::BeatreeIterator;
+use leaf_cache::LeafCache;
 
 #[cfg(feature = "benchmarks")]
 pub mod benches;
@@ -182,14 +183,16 @@ impl Tree {
         // where the read transaction is dropped.
         self.read_transaction_counter.add_one();
         let shared = self.shared.read();
-        ReadTransaction {
+        let inner = Arc::new(ReadTransactionInner {
             bbn_index: shared.bbn_index.clone(),
             primary_staging: shared.primary_staging.clone(),
             secondary_staging: shared.secondary_staging.clone(),
             leaf_store: shared.leaf_store.clone(),
             leaf_cache: shared.leaf_cache.clone(),
             read_counter: self.read_transaction_counter.clone(),
-        }
+        });
+
+        ReadTransaction { inner }
     }
 
     /// Commit a set of changes to the btree.
@@ -482,13 +485,20 @@ impl SyncController {
 ///
 /// Further commits may be performed while the read transaction is live, but they won't be reflected
 /// within the transaction.
+///
+/// This is cheap to clone.
+#[derive(Clone)]
 #[allow(unused)]
 pub struct ReadTransaction {
+    inner: Arc<ReadTransactionInner>,
+}
+
+struct ReadTransactionInner {
     bbn_index: Index,
     primary_staging: OrdMap<Key, ValueChange>,
     secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_store: Store,
-    leaf_cache: leaf_cache::LeafCache,
+    leaf_cache: LeafCache,
     read_counter: ReadTransactionCounter,
 }
 
@@ -497,19 +507,76 @@ impl ReadTransaction {
     #[allow(unused)]
     pub fn iterator(&self, start: Key, end: Option<Key>) -> BeatreeIterator {
         BeatreeIterator::new(
-            self.primary_staging.clone(),
-            self.secondary_staging.clone(),
-            self.bbn_index.clone(),
+            self.inner.primary_staging.clone(),
+            self.inner.secondary_staging.clone(),
+            self.inner.bbn_index.clone(),
             start,
             end,
         )
     }
+
+    /// Initiate an asynchronous leaf page fetch. This may return immediately if the leaf is cached.
+    ///
+    /// This is an error-prone, low-level API you should not use unless you know what you are doing.
+    ///
+    /// If `Ok` is returned, then no I/O command has been submitted along the handle.
+    /// If `Err` is returned, then an I/O command has been submitted along the handle, and the
+    /// user_data is as specified.
+    #[allow(unused)]
+    pub fn load_leaf_async(
+        &self,
+        page_pool: &PagePool,
+        page_number: PageNumber,
+        io_handle: &IoHandle,
+        user_data: u64,
+    ) -> Result<LeafNodeRef, AsyncLeafLoad> {
+        if let Some(leaf) = self.inner.leaf_cache.get(page_number) {
+            Ok(LeafNodeRef { inner: leaf })
+        } else {
+            let command = self
+                .inner
+                .leaf_store
+                .io_command(page_pool, page_number, user_data);
+            Err(AsyncLeafLoad {
+                page_number,
+                read_tx: self.inner.clone(),
+            })
+        }
+    }
 }
 
-impl Drop for ReadTransaction {
+impl Drop for ReadTransactionInner {
     fn drop(&mut self) {
         self.read_counter.release_one()
     }
+}
+
+/// A type representing a pending leaf load. This keeps the associated read transaction alive
+/// throughout its lifetime.
+#[allow(unused)]
+pub struct AsyncLeafLoad {
+    read_tx: Arc<ReadTransactionInner>,
+    page_number: PageNumber,
+}
+
+impl AsyncLeafLoad {
+    /// Finish the leaf load.
+    /// Calling this with the wrong page will likely lead to panics or bugs in the future.
+    #[allow(unused)]
+    pub fn finish(self, page: FatPage) -> LeafNodeRef {
+        let leaf_node = Arc::new(leaf::node::LeafNode { inner: page });
+
+        self.read_tx
+            .leaf_cache
+            .insert(self.page_number, leaf_node.clone());
+        LeafNodeRef { inner: leaf_node }
+    }
+}
+
+/// An opaque reference to a leaf node. These cannot be manipulated directly and instead must be
+/// passed to a struct which can make use of them, such as the [`BeatreeIterator`].
+pub struct LeafNodeRef {
+    inner: Arc<leaf::node::LeafNode>,
 }
 
 /// This keeps track of the count of outstanding read transactions, and enables blocking until
