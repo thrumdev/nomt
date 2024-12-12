@@ -97,12 +97,22 @@ impl LeafNode {
     }
 
     pub fn cell_pointers(&self) -> &[[u8; 34]] {
+        let cell_pointers_end = self.n() * 34;
+        assert!(cell_pointers_end < LEAF_NODE_BODY_SIZE);
+
+        // SAFETY: This creates a slice of length 34 * N starting at index 2. This is ensured
+        // to be within the bounds by the assertion above.
         unsafe {
             std::slice::from_raw_parts(self.inner[2..36].as_ptr() as *const [u8; 34], self.n())
         }
     }
 
     fn cell_pointers_mut(&mut self) -> &mut [[u8; 34]] {
+        let cell_pointers_end = self.n() * 34;
+        assert!(cell_pointers_end < LEAF_NODE_BODY_SIZE);
+
+        // SAFETY: This creates a slice of length 34 * N starting at index 2. This is ensured
+        // to be within the bounds by the assertion above.
         unsafe {
             std::slice::from_raw_parts_mut(
                 self.inner[2..36].as_mut_ptr() as *mut [u8; 34],
