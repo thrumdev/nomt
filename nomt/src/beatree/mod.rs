@@ -496,7 +496,13 @@ impl ReadTransaction {
     /// Create a new iterator with the given half-open start and end range.
     #[allow(unused)]
     pub fn iterator(&self, start: Key, end: Option<Key>) -> BeatreeIterator {
-        BeatreeIterator::new(self, start, end)
+        BeatreeIterator::new(
+            self.primary_staging.clone(),
+            self.secondary_staging.clone(),
+            self.bbn_index.clone(),
+            start,
+            end,
+        )
     }
 }
 
