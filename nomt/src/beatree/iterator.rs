@@ -37,10 +37,16 @@ pub struct BeatreeIterator {
 }
 
 impl BeatreeIterator {
-    pub(super) fn new(tx: &ReadTransaction, start: Key, end: Option<Key>) -> Self {
+    pub(super) fn new(
+        primary_staging: OrdMap<Key, ValueChange>,
+        secondary_staging: Option<OrdMap<Key, ValueChange>>,
+        bbn_index: Index,
+        start: Key,
+        end: Option<Key>,
+    ) -> Self {
         BeatreeIterator {
-            memory_values: StagingIterator::new(tx, start, end),
-            leaf_values: LeafIterator::new(tx.bbn_index.clone(), start, end),
+            memory_values: StagingIterator::new(primary_staging, secondary_staging, start, end),
+            leaf_values: LeafIterator::new(bbn_index, start, end),
         }
     }
 
@@ -173,8 +179,8 @@ impl CurrentLeaf {
         let index = self.index - 1;
         let key = self.leaf.key(index);
         let (cell, overflow) = self.leaf.value(index);
-        let (_, value_hash, _) = super::leaf::overflow::decode_cell(cell);
         if overflow {
+            let (_, value_hash, _) = super::leaf::overflow::decode_cell(cell);
             IterOutput::OverflowItem(key, value_hash, cell)
         } else {
             IterOutput::Item(key, cell)
@@ -314,12 +320,17 @@ impl LeafIterator {
                 }
             }
         } else {
-            LeafIteratorState::Blocked {
-                index_in_branch: next_index_in_branch,
-                pn: branch.node_pointer(next_index_in_branch).into(),
-                separator: get_key(&branch, next_index_in_branch),
-                branch,
-                last: Some(last),
+            let separator = get_key(&branch, next_index_in_branch);
+            if self.end.map_or(false, |end| separator < end) {
+                LeafIteratorState::Blocked {
+                    index_in_branch: next_index_in_branch,
+                    pn: branch.node_pointer(next_index_in_branch).into(),
+                    separator: get_key(&branch, next_index_in_branch),
+                    branch,
+                    last: Some(last),
+                }
+            } else {
+                LeafIteratorState::Done { last: Some(last) }
             }
         }
     }
@@ -461,13 +472,15 @@ struct StagingIterator {
 }
 
 impl StagingIterator {
-    fn new(tx: &ReadTransaction, start: Key, end: Option<Key>) -> Self {
+    fn new(
+        primary_staging: OrdMap<Key, ValueChange>,
+        secondary_staging: Option<OrdMap<Key, ValueChange>>,
+        start: Key,
+        end: Option<Key>,
+    ) -> Self {
         StagingIterator {
-            primary: OrdMapOwnedIter::new(tx.primary_staging.clone(), start, end),
-            secondary: tx
-                .secondary_staging
-                .clone()
-                .map(|s| OrdMapOwnedIter::new(s, start, end)),
+            primary: OrdMapOwnedIter::new(primary_staging, start, end),
+            secondary: secondary_staging.map(|s| OrdMapOwnedIter::new(s, start, end)),
         }
     }
 
@@ -490,20 +503,34 @@ impl StagingIterator {
     }
 
     fn next<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
-        let primary_peek = self.primary.next();
-        let secondary_peek = self.secondary.as_mut().and_then(|s| s.next());
-
+        let primary_peek = self.primary.peek().map(|(k, _)| k);
+        let secondary_peek = self
+            .secondary
+            .as_mut()
+            .and_then(|s| s.peek())
+            .map(|(k, _)| k);
         match (primary_peek, secondary_peek) {
             (None, None) => None,
-            (Some(x), None) | (None, Some(x)) => Some(x),
+            (Some(x), None) => self.primary.next(),
+            (None, Some(x)) => self.next_secondary(),
             (Some(primary), Some(secondary)) => {
-                if primary.0 <= secondary.0 {
-                    Some(primary)
-                } else {
-                    Some(secondary)
+                match primary.cmp(&secondary) {
+                    Ordering::Less => self.primary.next(),
+                    Ordering::Equal => {
+                        // if equal, favor the primary (more recent) staging map.
+                        // consume the secondary item.
+                        // UNWRAP: known to be `Some`
+                        let _ = self.next_secondary();
+                        self.primary.next()
+                    }
+                    Ordering::Greater => self.next_secondary(),
                 }
             }
         }
+    }
+
+    fn next_secondary<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
+        self.secondary.as_mut().and_then(|s| s.next())
     }
 }
 
@@ -519,7 +546,7 @@ impl OrdMapOwnedIter {
     }
 
     fn next<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
-        self.iter.peek().map(|x| (x.0, x.1))
+        self.iter.next().map(|x| (x.0, x.1))
     }
 }
 
@@ -538,6 +565,241 @@ impl OrdMapOwnedIter {
         OrdMapOwnedIter {
             _map: map,
             iter: iter.peekable(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IterOutput;
+    use crate::beatree::{self as beatree, BeatreeIterator};
+    use crate::io::PagePool;
+    use beatree::{
+        branch::{node::get_key, BranchNode, BranchNodeBuilder},
+        index::Index,
+        leaf::node::{LeafBuilder, LeafNode},
+        ops::bit_ops,
+        Key, PageNumber, ValueChange,
+    };
+    use lazy_static::lazy_static;
+
+    use imbl::OrdMap;
+    use std::sync::Arc;
+
+    lazy_static::lazy_static! {
+        static ref PAGE_POOL: PagePool = PagePool::new();
+    }
+
+    fn encode_value(x: u64) -> Vec<u8> {
+        x.to_be_bytes().to_vec()
+    }
+
+    fn decode_value(v: &[u8]) -> u64 {
+        u64::from_be_bytes(v.try_into().unwrap())
+    }
+
+    fn build_leaf(values: Vec<(Key, u64)>) -> (Key, Arc<LeafNode>) {
+        let n = values.len();
+        let total_value_size = n * 8;
+        let mut builder = LeafBuilder::new(&PAGE_POOL, n, total_value_size);
+        let separator = values[0].0;
+        for (key, value) in values {
+            builder.push_cell(key, &encode_value(value), false);
+        }
+
+        (separator, Arc::new(builder.finish()))
+    }
+
+    fn build_branch(leaves: Vec<(Key, PageNumber)>) -> Arc<BranchNode> {
+        let n = leaves.len();
+        let mut total_separator_lengths = 0;
+        let prefix_len = {
+            let mut prefix_len = 0;
+            let mut first_key = None;
+            for (key, _) in &leaves {
+                total_separator_lengths += bit_ops::separator_len(key);
+                if let Some(first_key) = first_key {
+                    prefix_len = bit_ops::prefix_len(key, first_key)
+                } else {
+                    prefix_len = bit_ops::separator_len(key);
+                    first_key = Some(key);
+                }
+            }
+
+            prefix_len
+        };
+
+        let branch = BranchNode::new_in(&PAGE_POOL);
+        let mut builder = BranchNodeBuilder::new(branch, n, n, prefix_len);
+        for (key, pn) in leaves {
+            builder.push(key, bit_ops::separator_len(&key), pn.0);
+        }
+
+        Arc::new(builder.finish())
+    }
+
+    fn build_index(branches: Vec<Arc<BranchNode>>) -> Index {
+        let mut index = Index::default();
+        for branch in branches {
+            let separator = get_key(&branch, 0);
+            index.insert(separator, branch);
+        }
+
+        index
+    }
+
+    fn key(x: u16) -> Key {
+        let mut k = Key::default();
+        k[0..2].copy_from_slice(&x.to_be_bytes());
+        k
+    }
+
+    #[test]
+    fn overlay_takes_priority() {
+        let (leaf_separator, leaf) = build_leaf(vec![
+            (key(1), 1),
+            (key(2), 2),
+            (key(3), 3),
+            (key(4), 4),
+            (key(5), 5),
+        ]);
+
+        let branch = build_branch(vec![(key(0), 69.into())]);
+        let index = build_index(vec![branch.clone()]);
+
+        let secondary_staging = vec![
+            (key(1), ValueChange::Delete),
+            (key(2), ValueChange::Insert(encode_value(200))),
+            (key(3), ValueChange::Insert(encode_value(300))),
+        ]
+        .into_iter()
+        .collect::<OrdMap<Key, ValueChange>>();
+
+        let primary_staging = vec![
+            (key(3), ValueChange::Delete),
+            (key(4), ValueChange::Insert(encode_value(400))),
+        ]
+        .into_iter()
+        .collect::<OrdMap<Key, ValueChange>>();
+
+        let mut iterator = BeatreeIterator::new(
+            primary_staging,
+            Some(secondary_staging),
+            index,
+            Key::default(),
+            None,
+        );
+        let mut collected = Vec::new();
+        while let Some(iter_output) = iterator.next() {
+            match iter_output {
+                IterOutput::Blocked => iterator.provide_leaf(leaf.clone()),
+                IterOutput::Item(key, value) => collected.push((key, decode_value(value))),
+                IterOutput::OverflowItem(_, _, _) => panic!(),
+            }
+        }
+
+        assert_eq!(collected, vec![(key(2), 200), (key(4), 400), (key(5), 5)]);
+    }
+
+    #[test]
+    fn needed_leaves_is_accurate() {
+        // 4 leaves
+        let (leaf_separator_1, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
+
+        let (leaf_separator_2, leaf_2) = build_leaf(vec![(key(4), 4), (key(5), 5)]);
+
+        let (leaf_separator_3, leaf_3) = build_leaf(vec![(key(6), 6), (key(7), 7)]);
+
+        let (leaf_separator_4, leaf_4) = build_leaf(vec![(key(8), 8), (key(9), 9), (key(10), 10)]);
+
+        // split across 2 branches
+        let branch_1 = build_branch(vec![(key(0), 69.into()), (key(4), 70.into())]);
+        let branch_2 = build_branch(vec![(key(6), 420.into()), (key(8), 421.into())]);
+
+        let index = build_index(vec![branch_1.clone(), branch_2.clone()]);
+
+        let get_needed = |start, end| {
+            let iter = BeatreeIterator::new(OrdMap::new(), None, index.clone(), start, end);
+            iter.needed_leaves().map(|pn| pn.0).collect::<Vec<_>>()
+        };
+
+        assert_eq!(get_needed(Key::default(), None), vec![69, 70, 420, 421]);
+        assert_eq!(get_needed(key(2), Some(key(7))), vec![69, 70, 420]);
+        assert_eq!(get_needed(key(4), Some(key(8))), vec![70, 420]);
+    }
+
+    #[test]
+    fn start_bound_respected_in_leaves() {
+        let (leaf_separator_1, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
+
+        let (leaf_separator_2, leaf_2) = build_leaf(vec![(key(4), 4), (key(5), 5)]);
+
+        let branch = build_branch(vec![(key(0), 69.into()), (key(4), 70.into())]);
+
+        let index = build_index(vec![branch.clone()]);
+        {
+            let start = key(2);
+            let mut leaves = vec![leaf_1.clone(), leaf_2.clone()].into_iter();
+            let mut iter = BeatreeIterator::new(OrdMap::new(), None, index.clone(), start, None);
+            while let Some(output) = iter.next() {
+                match output {
+                    IterOutput::Blocked => iter.provide_leaf(leaves.next().unwrap()),
+                    IterOutput::Item(k, _) => assert!(k >= start),
+                    IterOutput::OverflowItem(_, _, _) => panic!(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn end_bound_respected_in_leaves() {
+        let (leaf_separator_1, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
+
+        let (leaf_separator_2, leaf_2) = build_leaf(vec![(key(6), 6), (key(7), 7)]);
+
+        let branch = build_branch(vec![(key(0), 69.into()), (key(6), 70.into())]);
+
+        let index = build_index(vec![branch.clone()]);
+        {
+            let end = key(7);
+            let mut leaves = vec![leaf_1.clone(), leaf_2.clone()].into_iter();
+            let mut iter = BeatreeIterator::new(
+                OrdMap::new(),
+                None,
+                index.clone(),
+                Key::default(),
+                Some(end),
+            );
+            while let Some(output) = iter.next() {
+                match output {
+                    IterOutput::Blocked => iter.provide_leaf(leaves.next().unwrap()),
+                    IterOutput::Item(k, _) => assert!(k < end),
+                    IterOutput::OverflowItem(_, _, _) => panic!(),
+                }
+            }
+
+            assert!(leaves.next().is_none());
+        }
+
+        {
+            let end = key(4);
+            let mut leaves = vec![leaf_1.clone()].into_iter();
+            let mut iter = BeatreeIterator::new(
+                OrdMap::new(),
+                None,
+                index.clone(),
+                Key::default(),
+                Some(end),
+            );
+            while let Some(output) = iter.next() {
+                match output {
+                    IterOutput::Blocked => iter.provide_leaf(leaves.next().unwrap()),
+                    IterOutput::Item(k, _) => assert!(k < end),
+                    IterOutput::OverflowItem(_, _, _) => panic!(),
+                }
+            }
+
+            assert!(leaves.next().is_none());
         }
     }
 }
