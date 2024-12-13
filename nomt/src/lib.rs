@@ -261,7 +261,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         };
         Session {
             store,
-            merkle_updater: Some(self.merkle_update_pool.begin(
+            merkle_updater: Some(self.merkle_update_pool.begin::<T>(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
                 self.store.clone(),

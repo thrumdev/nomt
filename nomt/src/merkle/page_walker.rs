@@ -289,13 +289,6 @@ impl<H: NodeHasher> PageWalker<H> {
 
         assert!(!trie::is_internal(&node));
 
-        // clear leaf children before overwriting terminal, but the leaf-children page
-        // is only guaranteed to be in cache if the previous node is a leaf.
-        let was_leaf = trie::is_leaf(&node);
-        if was_leaf {
-            self.write_leaf_children(write_pass, None, false);
-        }
-
         let start_position = self.position.clone();
 
         // replace sub-trie at the given position
@@ -334,12 +327,12 @@ impl<H: NodeHasher> PageWalker<H> {
                 self.up()
             }
 
-            let under = self.position.depth() > start_position.depth();
-            let fresh = !was_leaf || under;
+            let fresh = self.position.depth() > start_position.depth();
 
             if !fresh && !down.is_empty() {
-                // first bit is definitely not a fresh page. after that, definitely is.
-                self.down(&down[..1], false);
+                // first bit is only fresh if we are at the start position and the start is at the
+                // end of its page. after that, definitely is.
+                self.down(&down[..1], self.position.depth_in_page() == DEPTH);
                 self.down(&down[1..], true);
             } else {
                 self.down(&down, true);
@@ -349,13 +342,6 @@ impl<H: NodeHasher> PageWalker<H> {
                 self.root = node;
             } else {
                 self.set_node(write_pass, node);
-            }
-
-            let under = self.position.depth() > start_position.depth();
-            let fresh = !was_leaf || under;
-
-            if let WriteNode::Leaf { leaf_data, .. } = control {
-                self.write_leaf_children(write_pass, Some(leaf_data), fresh);
             }
         });
 
@@ -497,13 +483,8 @@ impl<H: NodeHasher> PageWalker<H> {
         };
 
         for i in 0..compact_layers {
-            let (next_node, prev_leaf_data) = self.compact_step(write_pass)?;
+            let next_node = self.compact_step(write_pass)?;
             self.up();
-
-            if let Some(prev_leaf_data) = prev_leaf_data {
-                // writing leaf children is always guaranteed in-bounds.
-                self.write_leaf_children(write_pass, Some(prev_leaf_data), false);
-            }
 
             if self.stack.is_empty() {
                 if self.parent_page.is_none() {
@@ -535,7 +516,7 @@ impl<H: NodeHasher> PageWalker<H> {
     fn compact_step(
         &mut self,
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
-    ) -> Result<(Node, Option<trie::LeafData>), NeedsPage> {
+    ) -> Result<Node, NeedsPage> {
         let node = self.node(write_pass.downgrade());
         let sibling = self.sibling_node(write_pass.downgrade());
         let bit = self.position.peek_last_bit();
@@ -543,25 +524,20 @@ impl<H: NodeHasher> PageWalker<H> {
         match (NodeKind::of(&node), NodeKind::of(&sibling)) {
             (NodeKind::Terminator, NodeKind::Terminator) => {
                 // compact terminators.
-                Ok((trie::TERMINATOR, None))
+                Ok(trie::TERMINATOR)
             }
             (NodeKind::Leaf, NodeKind::Terminator) => {
                 // compact: clear this node, move leaf up.
-                // UNWRAP: only sibling leaf children reads can fail due to a missing page.
-                let leaf_data = self.read_leaf_children(write_pass.downgrade()).unwrap();
-                self.write_leaf_children(write_pass, None, false);
                 self.set_node(write_pass, trie::TERMINATOR);
 
-                Ok((node, Some(leaf_data)))
+                Ok(node)
             }
             (NodeKind::Terminator, NodeKind::Leaf) => {
                 // compact: clear sibling node, move leaf up.
                 self.position.sibling();
-                let leaf_data = self.read_leaf_children(write_pass.downgrade())?;
-                self.write_leaf_children(write_pass, None, false);
                 self.set_node(write_pass, trie::TERMINATOR);
 
-                Ok((sibling, Some(leaf_data)))
+                Ok(sibling)
             }
             _ => {
                 // otherwise, internal
@@ -577,7 +553,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     }
                 };
 
-                Ok((H::hash_internal(&node_data), None))
+                Ok(H::hash_internal(&node_data))
             }
         }
     }
@@ -633,94 +609,6 @@ impl<H: NodeHasher> PageWalker<H> {
             .page
             .set_node(&self.page_pool, write_pass, node_index, node);
         stack_top.diff.set_changed(node_index);
-    }
-
-    // read the leaf children of a node in the current page at the given position.
-    fn read_leaf_children(
-        &self,
-        read_pass: &ReadPass<impl RegionContains<ShardIndex>>,
-    ) -> Result<trie::LeafData, NeedsPage> {
-        let cur_page = self
-            .stack
-            .last()
-            .map(|stack_item| (&stack_item.page_id, &stack_item.page))
-            .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
-
-        let (page, _, children) = crate::page_cache::locate_leaf_data::<NeedsPage>(
-            &self.position,
-            cur_page,
-            |page_id| {
-                get_page(&self.page_source, page_id.clone()).ok_or_else(move || NeedsPage(page_id))
-            },
-        )?;
-
-        Ok(trie::LeafData {
-            key_path: page.node(&read_pass, children.left()),
-            value_hash: page.node(&read_pass, children.right()),
-        })
-    }
-
-    // write the leaf children of a node in the current page at the given index.
-    fn write_leaf_children(
-        &mut self,
-        write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
-        leaf_data: Option<trie::LeafData>,
-        hint_fresh: bool,
-    ) {
-        let (page_id, children, cleared) = {
-            let cur_page = self
-                .stack
-                .last()
-                .map(|stack_item| (&stack_item.page_id, &stack_item.page))
-                .or(self.parent_page.as_ref().map(|(ref id, ref p)| (id, p)));
-
-            let (page, page_id, children) =
-                crate::page_cache::locate_leaf_data::<()>(&self.position, cur_page, |page_id| {
-                    if hint_fresh {
-                        Ok(self.page_source.insert_fresh(page_id))
-                    } else {
-                        // UNWRAP: all pages on the path to the position are in the cache,
-                        // and we never write sibling leaf children without reading them first, which
-                        // protects this.
-                        Ok(get_page(&self.page_source, page_id).unwrap())
-                    }
-                })
-                .unwrap();
-
-            let cleared = match leaf_data {
-                None => {
-                    page.clear_leaf_data(&self.page_pool, write_pass, children);
-                    children.in_next_page()
-                }
-                Some(leaf) => {
-                    page.set_leaf_data(&self.page_pool, write_pass, children, leaf);
-                    false
-                }
-            };
-
-            (page_id, children, cleared)
-        };
-
-        let update_diff = |diff: &mut PageDiff| {
-            if cleared {
-                diff.set_cleared();
-            } else {
-                diff.set_changed(children.left());
-                diff.set_changed(children.right());
-            }
-        };
-
-        if let Some(stack_item) = self.stack.last_mut().filter(|item| item.page_id == page_id) {
-            update_diff(&mut stack_item.diff);
-        } else if let Some((_, diff)) = self.diffs.last_mut().filter(|item| item.0 == page_id) {
-            // it's possible for us to revisit a page which was just popped off the stack, for
-            // example, when compacting up.
-            update_diff(diff);
-        } else {
-            let mut diff = PageDiff::default();
-            update_diff(&mut diff);
-            self.diffs.push((page_id, diff));
-        }
     }
 
     fn assert_page_in_scope(&self, page_id: Option<&PageId>) {

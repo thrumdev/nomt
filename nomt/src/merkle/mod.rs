@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use nomt_core::{
     page_id::PageId,
-    trie::{self, KeyPath, Node, NodeHasher, ValueHash},
+    trie::{self, KeyPath, Node, ValueHash},
     trie_pos::TriePosition,
 };
 use seek::Seek;
@@ -21,7 +21,7 @@ use crate::{
     page_diff::PageDiff,
     rw_pass_cell::WritePassEnvelope,
     store::Store,
-    Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
+    HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
 
@@ -106,7 +106,7 @@ impl UpdatePool {
     /// The Updater expects to have exclusive access to the page cache, so if there
     /// are outstanding read passes, write passes, or threads waiting on write passes,
     /// deadlocks are practically guaranteed at some point during the lifecycle of the Updater.
-    pub fn begin(
+    pub fn begin<H: HashAlgorithm>(
         &self,
         page_cache: PageCache,
         page_pool: PagePool,
@@ -120,7 +120,7 @@ impl UpdatePool {
         };
 
         let warm_up = if self.do_warm_up {
-            Some(spawn_warm_up(&self.worker_tp, params))
+            Some(spawn_warm_up::<H>(&self.worker_tp, params))
         } else {
             None
         };
@@ -160,7 +160,7 @@ impl Updater {
     /// Key-paths should be in sorted order
     /// and should appear at most once within the vector. Witness specifies whether or not
     /// to collect the witness of the operation.
-    pub fn update_and_prove<H: NodeHasher>(
+    pub fn update_and_prove<H: HashAlgorithm>(
         self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
@@ -411,12 +411,15 @@ struct WarmUpHandle {
     output_rx: Receiver<HashMap<KeyPath, Seek>>,
 }
 
-fn spawn_warm_up(worker_tp: &ThreadPool, params: worker::WarmUpParams) -> WarmUpHandle {
+fn spawn_warm_up<H: HashAlgorithm>(
+    worker_tp: &ThreadPool,
+    params: worker::WarmUpParams,
+) -> WarmUpHandle {
     let (warmup_tx, warmup_rx) = channel::unbounded();
     let (output_tx, output_rx) = channel::bounded(1);
     let (finish_tx, finish_rx) = channel::bounded(1);
 
-    worker_tp.execute(move || worker::run_warm_up(params, warmup_rx, finish_rx, output_tx));
+    worker_tp.execute(move || worker::run_warm_up::<H>(params, warmup_rx, finish_rx, output_tx));
 
     WarmUpHandle {
         warmup_tx,
@@ -425,7 +428,7 @@ fn spawn_warm_up(worker_tp: &ThreadPool, params: worker::WarmUpParams) -> WarmUp
     }
 }
 
-fn spawn_updater<H: NodeHasher>(
+fn spawn_updater<H: HashAlgorithm>(
     worker_tp: &ThreadPool,
     params: worker::UpdateParams,
     output_tx: Sender<anyhow::Result<WorkerOutput>>,

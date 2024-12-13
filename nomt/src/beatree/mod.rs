@@ -178,7 +178,6 @@ impl Tree {
 
     /// Initiate a new read transaction, as-of the current state of the last commit.
     /// This blocks new sync operations from starting until it is dropped.
-    #[allow(unused)]
     pub fn read_transaction(&self) -> ReadTransaction {
         // Increment the count. This will block any sync from starting between now and the point
         // where the read transaction is dropped.
@@ -490,7 +489,6 @@ impl SyncController {
 ///
 /// This is cheap to clone.
 #[derive(Clone)]
-#[allow(unused)]
 pub struct ReadTransaction {
     inner: Arc<ReadTransactionInner>,
 }
@@ -507,7 +505,6 @@ struct ReadTransactionInner {
 
 impl ReadTransaction {
     /// Create a new iterator with the given half-open start and end range.
-    #[allow(unused)]
     pub fn iterator(&self, start: Key, end: Option<Key>) -> BeatreeIterator {
         BeatreeIterator::new(
             self.inner.primary_staging.clone(),
@@ -525,7 +522,6 @@ impl ReadTransaction {
     /// If `Ok` is returned, then no I/O command has been submitted along the handle.
     /// If `Err` is returned, then an I/O command has been submitted along the handle, and the
     /// user_data is as specified.
-    #[allow(unused)]
     pub fn load_leaf_async(
         &self,
         page_number: PageNumber,
@@ -557,13 +553,11 @@ impl Drop for ReadTransactionInner {
 
 /// A type representing a pending leaf load. This keeps the associated read transaction alive
 /// throughout its lifetime.
-#[allow(dead_code)]
 pub struct AsyncLeafLoad {
     read_tx: Arc<ReadTransactionInner>,
     page_number: PageNumber,
 }
 
-#[allow(dead_code)]
 impl AsyncLeafLoad {
     /// Finish the leaf load.
     /// Calling this with the wrong page will likely lead to panics or bugs in the future.
