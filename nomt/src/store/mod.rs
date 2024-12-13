@@ -222,6 +222,11 @@ impl Store {
         }
     }
 
+    /// Creates a new [`beatree::ReadTransaction`]. `sync` will be blocked until this is dropped.
+    pub fn read_transaction(&self) -> beatree::ReadTransaction {
+        self.shared.values.read_transaction()
+    }
+
     /// Creates a new [`PageLoader`].
     pub fn page_loader(&self) -> PageLoader {
         let page_loader = bitbox::PageLoader::new(&self.shared.pages);

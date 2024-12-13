@@ -1,4 +1,4 @@
-use allocator::{PageNumber, Store, StoreReader, FREELIST_EMPTY};
+use allocator::{Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
 use crossbeam_channel::Receiver;
@@ -23,6 +23,7 @@ mod ops;
 
 mod writeout;
 
+pub use allocator::PageNumber;
 use index::Index;
 pub use iterator::BeatreeIterator;
 use leaf_cache::LeafCache;
@@ -575,6 +576,9 @@ impl AsyncLeafLoad {
 
 /// An opaque reference to a leaf node. These cannot be manipulated directly and instead must be
 /// passed to a struct which can make use of them, such as the [`BeatreeIterator`].
+///
+/// This is cheap to clone.
+#[derive(Clone)]
 pub struct LeafNodeRef {
     inner: Arc<leaf::node::LeafNode>,
 }

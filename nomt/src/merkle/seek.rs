@@ -1,6 +1,10 @@
 //! Multiplexer for page requests.
 
 use crate::{
+    beatree::{
+        iterator::NeededLeavesIter, AsyncLeafLoad, BeatreeIterator, LeafNodeRef, PageNumber,
+        ReadTransaction,
+    },
     io::{CompleteIo, FatPage, IoHandle},
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::ReadPass,
@@ -31,7 +35,7 @@ struct SeekRequest {
     page_id: Option<PageId>,
     siblings: Vec<Node>,
     state: RequestState,
-    page_loads: usize,
+    ios: usize,
 }
 
 impl SeekRequest {
@@ -48,28 +52,35 @@ impl SeekRequest {
             page_id: None,
             siblings: Vec::new(),
             state,
-            page_loads: 0,
+            ios: 0,
         }
     }
 
-    fn note_page_load(&mut self) {
-        self.page_loads += 1;
+    fn note_io(&mut self) {
+        self.ios += 1;
     }
 
     fn is_completed(&self) -> bool {
         match self.state {
             RequestState::Seeking(_) => false,
+            RequestState::FetchingLeaf(_, _) => false,
             RequestState::Completed(_) => true,
         }
     }
 
-    fn next_page_id(&self) -> PageId {
-        match self.page_id {
-            None => ROOT_PAGE_ID,
-            // UNWRAP: all page IDs for key paths are in scope.
-            Some(ref page_id) => page_id
-                .child_page_id(self.position.child_page_index())
-                .unwrap(),
+    fn next_query(&mut self) -> Option<IoQuery> {
+        match self.state {
+            RequestState::Seeking(_) => Some(IoQuery::MerklePage(match self.page_id {
+                None => ROOT_PAGE_ID,
+                // UNWRAP: all page IDs for key paths are in scope.
+                Some(ref page_id) => page_id
+                    .child_page_id(self.position.child_page_index())
+                    .unwrap(),
+            })),
+            RequestState::FetchingLeaf(_, ref mut needed) => {
+                needed.next().map(|pn| IoQuery::LeafPage(pn))
+            }
+            RequestState::Completed(_) => None,
         }
     }
 
@@ -151,6 +162,7 @@ impl SeekRequest {
 
 enum RequestState {
     Seeking(Node),
+    FetchingLeaf(BeatreeIterator, NeededLeavesIter),
     Completed(Option<trie::LeafData>),
 }
 
@@ -158,6 +170,26 @@ enum SinglePageRequestState {
     Pending(PageId),
     Submitted,
     Completed,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum IoQuery {
+    MerklePage(PageId),
+    LeafPage(PageNumber),
+}
+
+enum IoRequest {
+    Merkle(PageLoad),
+    Leaf(AsyncLeafLoad),
+}
+
+impl IoRequest {
+    fn is_active(&self) -> bool {
+        match self {
+            IoRequest::Merkle(load) => load.needs_completion(),
+            IoRequest::Leaf(_) => true,
+        }
+    }
 }
 
 /// The `Seeker` seeks for the terminal nodes of multiple keys simultaneously, multiplexing requests
@@ -178,8 +210,8 @@ pub struct Seeker {
     page_loader: PageLoader,
     processed: usize,
     requests: VecDeque<SeekRequest>,
-    page_loads: HashMap<PageId, Vec<usize>>,
-    page_load_slab: Slab<PageLoad>,
+    io_waiters: HashMap<IoQuery, Vec<usize>>,
+    io_slab: Slab<IoRequest>,
     /// FIFO, pushed onto back.
     idle_requests: VecDeque<usize>,
     /// FIFO, pushed onto back, except when trying the front item and getting blocked.
@@ -204,8 +236,8 @@ impl Seeker {
             page_loader,
             processed: 0,
             requests: VecDeque::new(),
-            page_loads: HashMap::new(),
-            page_load_slab: Slab::new(),
+            io_waiters: HashMap::new(),
+            io_slab: Slab::new(),
             idle_requests: VecDeque::new(),
             idle_page_loads: VecDeque::new(),
             record_siblings,
@@ -218,7 +250,7 @@ impl Seeker {
     }
 
     pub fn has_room(&self) -> bool {
-        self.page_loads.len() < MAX_INFLIGHT
+        self.io_waiters.len() < MAX_INFLIGHT
     }
 
     pub fn first_key(&self) -> Option<&KeyPath> {
@@ -226,7 +258,7 @@ impl Seeker {
     }
 
     pub fn has_live_requests(&self) -> bool {
-        self.idle_page_loads.len() < self.page_load_slab.len()
+        self.idle_page_loads.len() < self.io_slab.len()
     }
 
     /// Try to submit as many requests as possible. Returns `true` if blocked.
@@ -267,7 +299,7 @@ impl Seeker {
                 position: request.position,
                 page_id: request.page_id,
                 siblings: request.siblings,
-                page_loads: request.page_loads,
+                ios: request.ios,
                 terminal,
             }));
         }
@@ -341,8 +373,6 @@ impl Seeker {
         front: bool,
     ) -> anyhow::Result<bool> {
         if !self.has_room() {
-            assert!(!self.page_load_slab[slab_index].needs_completion());
-
             if front {
                 self.idle_page_loads.push_front(slab_index);
             } else {
@@ -351,13 +381,19 @@ impl Seeker {
             return Ok(true);
         }
 
-        let page_load = &mut self.page_load_slab[slab_index];
-        if !self
-            .page_loader
-            .probe(page_load, &self.io_handle, slab_index as u64)?
-        {
-            // guaranteed fresh page
-            self.remove_and_continue_seeks(read_pass, slab_index, None);
+        match self.io_slab[slab_index] {
+            IoRequest::Merkle(ref mut page_load) => {
+                if !self
+                    .page_loader
+                    .probe(page_load, &self.io_handle, slab_index as u64)?
+                {
+                    // guaranteed fresh page
+                    self.handle_merkle_page_and_continue(read_pass, slab_index, None);
+                }
+            }
+            IoRequest::Leaf(ref mut _leaf_load) => {
+                todo!()
+            }
         }
 
         Ok(false)
@@ -370,7 +406,10 @@ impl Seeker {
     ) -> anyhow::Result<bool> {
         if let Some(SinglePageRequestState::Pending(ref page_id)) = self.single_page_request {
             let page_id = page_id.clone();
-            let waiters = self.page_loads.entry(page_id.clone()).or_default();
+            let waiters = self
+                .io_waiters
+                .entry(IoQuery::MerklePage(page_id.clone()))
+                .or_default();
 
             waiters.push(SINGLE_PAGE_REQUEST_INDEX);
 
@@ -378,7 +417,7 @@ impl Seeker {
 
             if waiters.len() == 1 {
                 let page_load = self.page_loader.start_load(page_id);
-                let slab_index = self.page_load_slab.insert(page_load);
+                let slab_index = self.io_slab.insert(IoRequest::Merkle(page_load));
                 return self.submit_page_load(read_pass, slab_index, false);
             }
         }
@@ -400,29 +439,35 @@ impl Seeker {
 
         let request = &mut self.requests[i];
 
-        while !request.is_completed() {
-            let page_id: PageId = request.next_page_id();
+        while let Some(query) = request.next_query() {
+            match query {
+                IoQuery::MerklePage(page_id) => {
+                    if let Some(page) = self.page_cache.get(page_id.clone()) {
+                        request.continue_seek(read_pass, page_id, &page, self.record_siblings);
+                        continue;
+                    }
 
-            if let Some(page) = self.page_cache.get(page_id.clone()) {
-                request.continue_seek(read_pass, page_id, &page, self.record_siblings);
-                continue;
-            }
+                    let vacant_entry =
+                        match self.io_waiters.entry(IoQuery::MerklePage(page_id.clone())) {
+                            Entry::Occupied(mut occupied) => {
+                                assert!(!occupied.get().contains(&request_index));
+                                occupied.get_mut().push(request_index);
+                                break;
+                            }
+                            Entry::Vacant(vacant) => vacant,
+                        };
 
-            let vacant_entry = match self.page_loads.entry(page_id.clone()) {
-                Entry::Occupied(mut occupied) => {
-                    assert!(!occupied.get().contains(&request_index));
-                    occupied.get_mut().push(request_index);
-                    break;
+                    request.note_io();
+
+                    let load = self.page_loader.start_load(page_id.clone());
+                    vacant_entry.insert(vec![request_index]);
+                    let slab_index = self.io_slab.insert(IoRequest::Merkle(load));
+                    return self.submit_page_load(read_pass, slab_index, false);
                 }
-                Entry::Vacant(vacant) => vacant,
-            };
-
-            request.note_page_load();
-
-            let load = self.page_loader.start_load(page_id.clone());
-            vacant_entry.insert(vec![request_index]);
-            let slab_index = self.page_load_slab.insert(load);
-            return self.submit_page_load(read_pass, slab_index, false);
+                IoQuery::LeafPage(_page_number) => {
+                    todo!()
+                }
+            }
         }
 
         Ok(false)
@@ -438,32 +483,40 @@ impl Seeker {
 
         // UNWRAP: requests are submitted with slab indices that are populated and never cleared
         // until this point is reached.
-        let page_load = self.page_load_slab.get_mut(slab_index).unwrap();
-
-        // UNWRAP: page loader always submits a `Read` command that yields a fat page.
-        let page = io.command.kind.unwrap_buf();
-        match page_load.try_complete(page) {
-            Some(p) => self.remove_and_continue_seeks(read_pass, slab_index, Some(p)),
-            None => self.idle_page_loads.push_back(slab_index),
-        };
+        match self.io_slab.get_mut(slab_index).unwrap() {
+            IoRequest::Merkle(page_load) => {
+                // UNWRAP: page loader always submits a `Read` command that yields a fat page.
+                let page = io.command.kind.unwrap_buf();
+                match page_load.try_complete(page) {
+                    Some(p) => self.handle_merkle_page_and_continue(read_pass, slab_index, Some(p)),
+                    None => self.idle_page_loads.push_back(slab_index),
+                };
+            }
+            IoRequest::Leaf(_) => {
+                todo!()
+            }
+        }
 
         Ok(())
     }
 
-    fn remove_and_continue_seeks(
+    fn handle_merkle_page_and_continue(
         &mut self,
         read_pass: &ReadPass<ShardIndex>,
         slab_index: usize,
         page_data: Option<(FatPage, BucketIndex)>,
     ) {
-        let page_load = self.page_load_slab.remove(slab_index);
+        let IoRequest::Merkle(page_load) = self.io_slab.remove(slab_index) else {
+            panic!()
+        };
+
         let page = self
             .page_cache
             .insert(page_load.page_id().clone(), page_data);
 
         for waiting_request in self
-            .page_loads
-            .remove(page_load.page_id())
+            .io_waiters
+            .remove(&IoQuery::MerklePage(page_load.page_id().clone()))
             .into_iter()
             .flatten()
         {
@@ -515,9 +568,9 @@ pub struct Seek {
     pub siblings: Vec<Node>,
     /// The terminal node encountered.
     pub terminal: Option<trie::LeafData>,
-    /// The number of fresh pages loaded uniquely for this `Seek`.
+    /// The number of I/Os loaded uniquely for this `Seek`.
     /// This does not include pages loaded from the cache, or pages which were already requested
     /// for another seek.
     #[allow(dead_code)]
-    pub page_loads: usize,
+    pub ios: usize,
 }
