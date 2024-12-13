@@ -1,10 +1,10 @@
 //! Multiplexer for page requests.
 
 use crate::{
-    io::page_pool::FatPage,
+    io::{CompleteIo, FatPage, IoHandle},
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::ReadPass,
-    store::{BucketIndex, PageLoad, PageLoadCompletion, PageLoader},
+    store::{BucketIndex, PageLoad, PageLoader},
 };
 
 use nomt_core::{
@@ -174,6 +174,7 @@ enum SinglePageRequestState {
 pub struct Seeker {
     root: Node,
     page_cache: PageCache,
+    io_handle: IoHandle,
     page_loader: PageLoader,
     processed: usize,
     requests: VecDeque<SeekRequest>,
@@ -192,12 +193,14 @@ impl Seeker {
     pub fn new(
         root: Node,
         page_cache: PageCache,
+        io_handle: IoHandle,
         page_loader: PageLoader,
         record_siblings: bool,
     ) -> Self {
         Seeker {
             root,
             page_cache,
+            io_handle,
             page_loader,
             processed: 0,
             requests: VecDeque::new(),
@@ -274,8 +277,8 @@ impl Seeker {
 
     /// Try to process the next I/O. Does not block the current thread.
     pub fn try_recv_page(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<()> {
-        if let Some(completion) = self.page_loader.try_complete()? {
-            self.handle_completion(read_pass, completion);
+        if let Ok(io) = self.io_handle.try_recv() {
+            self.handle_completion(read_pass, io)?;
         }
 
         Ok(())
@@ -283,8 +286,8 @@ impl Seeker {
 
     /// Block on processing the next I/O. Blocks the current thread.
     pub fn recv_page(&mut self, read_pass: &ReadPass<ShardIndex>) -> anyhow::Result<()> {
-        let completion = self.page_loader.complete()?;
-        self.handle_completion(read_pass, completion);
+        let io = self.io_handle.recv()?;
+        self.handle_completion(read_pass, io)?;
         Ok(())
     }
 
@@ -349,7 +352,10 @@ impl Seeker {
         }
 
         let page_load = &mut self.page_load_slab[slab_index];
-        if !self.page_loader.advance(page_load, slab_index as u64)? {
+        if !self
+            .page_loader
+            .probe(page_load, &self.io_handle, slab_index as u64)?
+        {
             // guaranteed fresh page
             self.remove_and_continue_seeks(read_pass, slab_index, None);
         }
@@ -425,21 +431,23 @@ impl Seeker {
     fn handle_completion(
         &mut self,
         read_pass: &ReadPass<ShardIndex>,
-        completion: PageLoadCompletion,
-    ) {
-        let slab_index = completion.user_data() as usize;
+        io: CompleteIo,
+    ) -> anyhow::Result<()> {
+        io.result?;
+        let slab_index = io.command.user_data as usize;
 
         // UNWRAP: requests are submitted with slab indices that are populated and never cleared
         // until this point is reached.
-        let mut page_load = self.page_load_slab.get_mut(slab_index).unwrap();
+        let page_load = self.page_load_slab.get_mut(slab_index).unwrap();
 
-        match completion.apply_to(&mut page_load) {
+        // UNWRAP: page loader always submits a `Read` command that yields a fat page.
+        let page = io.command.kind.unwrap_buf();
+        match page_load.try_complete(page) {
             Some(p) => self.remove_and_continue_seeks(read_pass, slab_index, Some(p)),
-            None => {
-                self.idle_page_loads.push_back(slab_index);
-                return;
-            }
-        }
+            None => self.idle_page_loads.push_back(slab_index),
+        };
+
+        Ok(())
     }
 
     fn remove_and_continue_seeks(

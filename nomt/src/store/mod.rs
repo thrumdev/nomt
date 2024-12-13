@@ -23,7 +23,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt as _;
 
-pub use self::page_loader::{PageLoad, PageLoadCompletion, PageLoader};
+pub use self::page_loader::{PageLoad, PageLoader};
 pub use bitbox::BucketIndex;
 
 mod flock;
@@ -202,15 +202,21 @@ impl Store {
     /// Loads the given page, blocking the current thread.
     pub fn load_page(&self, page_id: PageId) -> anyhow::Result<Option<(FatPage, BucketIndex)>> {
         let page_loader = self.page_loader();
+        let io_handle = self.io_pool().make_handle();
         let mut page_load = page_loader.start_load(page_id);
         loop {
-            if !page_loader.advance(&mut page_load, 0)? {
+            if !page_loader.probe(&mut page_load, &io_handle, 0)? {
                 return Ok(None);
             }
 
-            let completion = page_loader.complete()?;
-            assert_eq!(completion.user_data(), 0);
-            if let Some(res) = completion.apply_to(&mut page_load) {
+            let completion = io_handle.recv()?;
+            completion.result?;
+            assert_eq!(completion.command.user_data, 0);
+
+            // UNWRAP: page loader always submits a `Read` command that yields a fat page.
+            let page = completion.command.kind.unwrap_buf();
+
+            if let Some(res) = page_load.try_complete(page) {
                 return Ok(Some(res));
             }
         }
@@ -218,7 +224,7 @@ impl Store {
 
     /// Creates a new [`PageLoader`].
     pub fn page_loader(&self) -> PageLoader {
-        let page_loader = bitbox::PageLoader::new(&self.shared.pages, self.io_pool().make_handle());
+        let page_loader = bitbox::PageLoader::new(&self.shared.pages);
         PageLoader { inner: page_loader }
     }
 
