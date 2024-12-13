@@ -971,11 +971,19 @@ impl BranchBulkSplitter {
 #[cfg(test)]
 pub mod tests {
     use super::{
-        get_key, prefix_len, Arc, BaseBranch, BranchGauge, BranchNode, BranchNodeBuilder,
+        get_key, prefix_len, Arc, BaseBranch, BranchGauge, BranchNode, BranchNodeBuilder, BranchOp,
         BranchUpdater, DigestResult, HandleNewBranch, Key, PageNumber, PagePool,
         BRANCH_MERGE_THRESHOLD, BRANCH_NODE_BODY_SIZE,
     };
-    use crate::beatree::ops::bit_ops::separator_len;
+    use crate::beatree::{
+        branch::node,
+        ops::{
+            bit_ops::separator_len,
+            update::{
+                branch_updater::KeepChunk, BRANCH_BULK_SPLIT_TARGET, BRANCH_BULK_SPLIT_THRESHOLD,
+            },
+        },
+    };
     use std::collections::HashMap;
 
     lazy_static::lazy_static! {
@@ -1437,5 +1445,734 @@ pub mod tests {
             new_branch_2.node_pointer(new_branch_2.n() as usize - 1),
             n2 as u32 - 1
         );
+    }
+
+    // initiate a bulk split step, ingest enough key to reach BRANCH_BULK_SPLIT_THRESHOLD
+    fn init_bulk_split() -> (usize, BranchUpdater) {
+        let key = |i| prefixed_key(0x00, 16, i);
+
+        let mut gauge = BranchGauge::new();
+        let mut n_keys = 0;
+
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+        updater.reset_base(None, Some(key(u16::MAX as usize)));
+
+        while gauge.body_size() < BRANCH_BULK_SPLIT_THRESHOLD {
+            let key = key(n_keys);
+
+            gauge.ingest_key(key, separator_len(&key));
+            updater.ingest(key, Some(PageNumber(n_keys as u32)));
+
+            n_keys += 1;
+        }
+
+        (n_keys, updater)
+    }
+
+    #[test]
+    fn bulk_split_initiation() {
+        let (n_keys, updater) = init_bulk_split();
+
+        let expected_bulk_split = BRANCH_BULK_SPLIT_THRESHOLD / BRANCH_BULK_SPLIT_TARGET;
+        // After ingesting all those ops, the bulk split is expected to be initiated.
+        let bulk_splitter = updater.bulk_split.as_ref().unwrap();
+        assert_eq!(bulk_splitter.items.len(), expected_bulk_split);
+        // The gauge needs to contain all the ops not present in the previous split.
+        assert_eq!(updater.gauge.n, n_keys - bulk_splitter.total_count);
+        // No operations are expected to be consumed yet.
+        assert_eq!(updater.ops.len(), n_keys);
+    }
+
+    #[test]
+    fn bulk_split_continuation() {
+        let key = |i| prefixed_key(0x00, 16, i);
+        let (mut n_keys, mut updater) = init_bulk_split();
+
+        let present_bulk_split_item = updater.bulk_split.as_ref().unwrap().items.len();
+
+        // Given an initialized bulk split, ingest more keys to reach the next bulk split.
+        let mut gauge = updater.gauge.clone();
+        while gauge.body_size() < BRANCH_BULK_SPLIT_TARGET {
+            let key = key(n_keys);
+
+            gauge.ingest_key(key, separator_len(&key));
+            updater.ingest(key, Some(PageNumber(n_keys as u32)));
+
+            n_keys += 1;
+        }
+
+        let bulk_splitter = updater.bulk_split.as_ref().unwrap();
+        // One new item in bulk split is expected.
+        assert_eq!(bulk_splitter.items.len(), present_bulk_split_item + 1);
+        // All ingested keys are expected to be part of the bulk_splitter.
+        assert_eq!(bulk_splitter.total_count, n_keys);
+        // The gauge is expected to be emtpy.
+        assert_eq!(updater.gauge.n, 0);
+        assert_eq!(updater.gauge.body_size(), 0);
+        // No operations are expected to be consumed yet.
+        assert_eq!(updater.ops.len(), n_keys);
+    }
+
+    #[test]
+    fn split_left_node_needs_merge() {
+        let compressed_key = |i| prefixed_key(0x00, 25, i);
+        let uncompressed_key = |i| prefixed_key(0xFF, 25, i);
+
+        let mut gauge = BranchGauge::new();
+        let mut n_keys = 0;
+
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+        let expected_cutoff = uncompressed_key(u16::MAX as usize);
+        updater.reset_base(None, Some(expected_cutoff));
+
+        // Ingesting keys up to a point where just one single key which doesn't share the
+        // prefix makes the body size to exceed BRANCH_NODE_BODY_SIZE.
+        loop {
+            let key = compressed_key(n_keys);
+
+            gauge.ingest_key(key, separator_len(&key));
+            updater.ingest(key, Some(PageNumber(n_keys as u32)));
+
+            let unc_key = uncompressed_key(n_keys + 1);
+            if gauge.body_size_after(unc_key, separator_len(&unc_key)) > BRANCH_NODE_BODY_SIZE {
+                updater.ingest(unc_key, Some(PageNumber((n_keys + 1) as u32)));
+                n_keys += 2;
+                break;
+            }
+            n_keys += 1;
+        }
+
+        // Digesting this will activate `stop_prefix_compression` and thus create space
+        // for more than one single key requiring a merge.
+        // This happens because the initial shared prefix is 25bytes and thus the difference
+        // in body_size with and without stop_prefix_compression leave a lot of space for
+        // non compressed keys.
+        let mut new_branches = TestHandleNewBranch::default();
+        let DigestResult::NeedsMerge(cutoff) = updater.digest(&mut new_branches) else {
+            panic!()
+        };
+        assert_eq!(cutoff, expected_cutoff);
+        assert_eq!(new_branches.inner.len(), 0);
+        assert_eq!(updater.ops.len(), n_keys);
+    }
+
+    #[test]
+    fn split_only_left_node_finishes() {
+        let compressed_key = |i| prefixed_key(0x00, 5, i);
+        let uncompressed_key = |i| prefixed_key(0xFF, 5, i);
+
+        let mut gauge = BranchGauge::new();
+        let mut n_keys = 0;
+
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+        updater.reset_base(None, Some(uncompressed_key(u16::MAX as usize)));
+
+        // Ingesting keys up to just before reaching BRANCH_MERGE_THRESHOLD
+        loop {
+            let key = compressed_key(n_keys);
+            let len = separator_len(&key);
+            if gauge.body_size_after(key, len) > BRANCH_MERGE_THRESHOLD {
+                break;
+            }
+
+            gauge.ingest_key(key, len);
+            updater.ingest(key, Some(PageNumber(n_keys as u32)));
+            n_keys += 1;
+        }
+
+        // Ingesting a key which doesn't share the prefix
+        updater.ingest(uncompressed_key(n_keys), Some(PageNumber(n_keys as u32)));
+
+        // All ops are expected to perfectly fit in only the left
+        let mut new_branches = TestHandleNewBranch::default();
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+            panic!()
+        };
+        assert_eq!(new_branches.inner.len(), 1);
+        assert!(updater.ops.is_empty());
+    }
+
+    #[test]
+    fn split_only_left_node_finishes_without_cutoff() {
+        let compressed_key = |i| prefixed_key(0x00, 25, i);
+        let uncompressed_key = |i| prefixed_key(0xFF, 25, i);
+
+        let mut gauge = BranchGauge::new();
+        let mut n_keys = 0;
+
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+        updater.reset_base(None, None);
+
+        // Ingesting keys up to a point where just one single key which doesn't share the
+        // prefix makes the body size to exceed BRANCH_NODE_BODY_SIZE.
+        loop {
+            let key = compressed_key(n_keys);
+
+            gauge.ingest_key(key, separator_len(&key));
+            updater.ingest(key, Some(PageNumber(n_keys as u32)));
+
+            let unc_key = uncompressed_key(n_keys + 1);
+            if gauge.body_size_after(unc_key, separator_len(&unc_key)) > BRANCH_NODE_BODY_SIZE {
+                updater.ingest(unc_key, Some(PageNumber((n_keys + 1) as u32)));
+                break;
+            }
+            n_keys += 1;
+        }
+
+        // This happens because the initial shared prefix is 25bytes and thus the difference
+        // in body_size with and without stop_prefix_compression leave a lot of space for
+        // non compressed keys to reach the half full requirement, but cutoff is none
+        // and thus the node is constructed anyway.
+        let mut new_branches = TestHandleNewBranch::default();
+        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+            panic!()
+        };
+        assert_eq!(new_branches.inner.len(), 1);
+        assert!(updater.ops.is_empty());
+    }
+
+    #[test]
+    fn consume_and_update_until_inserts() {
+        let key = |i| prefixed_key(0x00, 16, i);
+        let mut gauge = BranchGauge::new();
+        let target = BRANCH_MERGE_THRESHOLD;
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+
+        // Collect BranchOp::Insert into updater.ops until the gauge associated
+        // to the ops is just after the target.
+        let mut rightsized = false;
+        updater.ops = (0..)
+            .map(|i| key(i))
+            .take_while(|key| {
+                let res = !rightsized;
+                rightsized = gauge.body_size_after(*key, separator_len(key)) >= target;
+
+                if res {
+                    gauge.ingest_key(*key, separator_len(key));
+                }
+                res
+            })
+            .enumerate()
+            .map(|(i, key)| BranchOp::Insert(key, PageNumber(i as u32)))
+            .collect();
+
+        // All ops are expected to be consumed without any modification.
+        let Ok((item_count, res_gauge)) = updater.consume_and_update_until(0, target) else {
+            panic!()
+        };
+        assert_eq!(item_count, updater.ops.len());
+        assert_eq!(res_gauge.body_size(), gauge.body_size());
+    }
+
+    #[test]
+    fn consume_and_update_updates() {
+        let key = |i| prefixed_key(0x00, 16, i);
+
+        let mut gauge = BranchGauge::new();
+        let target = BRANCH_MERGE_THRESHOLD;
+
+        let branch = make_branch_with_body_size_target(key, |size| size < BRANCH_NODE_BODY_SIZE);
+
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+        updater.reset_base(
+            Some(BaseBranch {
+                node: branch.clone(),
+                low: 0,
+            }),
+            None,
+        );
+
+        // Collect BranchOp::Update into updater.ops until the gauge associated
+        // to the ops is just after the target.
+        let mut rightsized = false;
+        updater.ops = (0..)
+            .map(|i| (i, get_key(&branch, i)))
+            .take_while(|(_i, key)| {
+                let res = !rightsized;
+                rightsized = gauge.body_size_after(*key, separator_len(key)) >= target;
+
+                if res {
+                    gauge.ingest_key(*key, separator_len(key));
+                }
+                res
+            })
+            .map(|(i, _key)| BranchOp::Update(i, PageNumber(i as u32)))
+            .collect();
+
+        // All ops are expected to be consumed without any modification.
+        let Ok((item_count, res_gauge)) = updater.consume_and_update_until(0, target) else {
+            panic!()
+        };
+        assert_eq!(item_count, updater.ops.len());
+        assert_eq!(res_gauge.body_size(), gauge.body_size());
+    }
+
+    #[test]
+    fn consume_and_update_keeps() {
+        let key = |i| prefixed_key(0x00, 16, i);
+
+        let mut gauge = BranchGauge::new();
+        let target = BRANCH_MERGE_THRESHOLD;
+
+        let branch = make_branch_with_body_size_target(key, |size| size < BRANCH_NODE_BODY_SIZE);
+
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+        updater.reset_base(
+            Some(BaseBranch {
+                node: branch.clone(),
+                low: 0,
+            }),
+            None,
+        );
+
+        let base_branch = BaseBranch {
+            node: branch.clone(),
+            low: 0,
+        };
+
+        // Collect BranchOp::KeepChunk into updater.ops until the gauge associated
+        // to the ops is just after the target.
+        // The chunks are increasingly bigger, the first one covers 1 element, and each
+        // of the following chunks covers one more element.
+        let mut rightsized = false;
+        let mut from = 0;
+        updater.ops = (1usize..)
+            .map(|to| {
+                let start = from;
+                let end = from + to;
+                from += to;
+                KeepChunk {
+                    start,
+                    end,
+                    sum_separator_lengths: node::uncompressed_separator_range_size(
+                        branch.prefix_len() as usize,
+                        branch.separator_range_len(start, end),
+                        end - start,
+                        separator_len(&get_key(&branch, start)),
+                    ),
+                }
+            })
+            .take_while(|keep_chunk| {
+                let res = !rightsized;
+                rightsized = gauge.body_size_after_chunk(&base_branch, &keep_chunk) >= target;
+                if res {
+                    gauge.ingest_chunk(&base_branch, &keep_chunk);
+                }
+                res
+            })
+            .map(|keep_chunk| BranchOp::KeepChunk(keep_chunk))
+            .collect();
+
+        // Almost all ops are expected to be consumed.
+        let Ok((item_count, res_gauge)) = updater.consume_and_update_until(0, target) else {
+            panic!()
+        };
+        // Last keep_chunk is expected to have been split.
+        assert_eq!(item_count, updater.ops.len() - 1);
+        assert!(res_gauge.body_size() > target);
+    }
+
+    #[test]
+    fn consume_and_update_stop_prefix_compression_on_updates() {
+        let compressed_key = |i| prefixed_key(0x00, 30, i);
+        let uncompressed_key = |i| prefixed_key(0xFF, 30, i);
+
+        let mut gauge = BranchGauge::new();
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+
+        // Collect BranchOp::Insert into updater.ops until the gauge associated
+        // to the ops is just after the BRANCH_MERGE_THRESHOLD / 2
+        updater.ops = (0..)
+            .map(|i| compressed_key(i))
+            .take_while(|key| {
+                if gauge.body_size_after(*key, separator_len(key)) >= BRANCH_MERGE_THRESHOLD / 2 {
+                    false
+                } else {
+                    gauge.ingest_key(*key, separator_len(key));
+                    true
+                }
+            })
+            .enumerate()
+            .map(|(i, key)| BranchOp::Insert(key, PageNumber(i as u32)))
+            .collect();
+        let n_insert_op = updater.ops.len();
+
+        // Use a branch containing keys which do not share a prefix with the just ingested keys
+        let branch = make_branch_with_body_size_target(uncompressed_key, |size| {
+            size < BRANCH_NODE_BODY_SIZE
+        });
+
+        updater.reset_base(
+            Some(BaseBranch {
+                node: branch.clone(),
+                low: 0,
+            }),
+            None,
+        );
+
+        // Extends updater.ops with BranchOp::Update operations until the final expected gauge
+        // reaches the target.
+        gauge.stop_prefix_compression();
+        let mut rightsized = false;
+        let update_ops: Vec<BranchOp> = (0..)
+            .map(|i| (i, get_key(&branch, i)))
+            .take_while(|(_i, key)| {
+                let res = !rightsized;
+                rightsized =
+                    gauge.body_size_after(*key, separator_len(key)) >= BRANCH_MERGE_THRESHOLD;
+
+                if res {
+                    gauge.ingest_key(*key, separator_len(key));
+                }
+                res
+            })
+            .map(|(i, _key)| BranchOp::Update(i, PageNumber(i as u32)))
+            .collect();
+
+        updater.ops.extend(update_ops);
+
+        let Ok((item_count, res_gauge)) =
+            updater.consume_and_update_until(0, BRANCH_NODE_BODY_SIZE)
+        else {
+            panic!()
+        };
+
+        // Make sure that not only the update operation on which the stop_prefix_compression
+        // requirement has been found has been updated to insert, but also all subsequent operations.
+        for i in n_insert_op..item_count {
+            assert!(matches!(
+                updater.ops[i],
+                BranchOp::Insert(k, PageNumber(_)) if k == uncompressed_key(i - n_insert_op)
+            ));
+        }
+
+        // The target has been downgraded to reduce the amount of uncompressed items
+        assert!(res_gauge.body_size() > BRANCH_MERGE_THRESHOLD);
+        assert!(res_gauge.body_size() < BRANCH_NODE_BODY_SIZE);
+    }
+
+    #[test]
+    fn consume_and_update_stop_prefix_compression_on_keeps() {
+        let compressed_key = |i| prefixed_key(0x00, 30, i);
+        let uncompressed_key = |i| prefixed_key(0xFF, 30, i);
+
+        let mut gauge = BranchGauge::new();
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+
+        // Collect BranchOp::Insert into updater.ops until the gauge associated
+        // to the ops is just after the BRANCH_MERGE_THRESHOLD / 2
+        updater.ops = (0..)
+            .map(|i| compressed_key(i))
+            .take_while(|key| {
+                if gauge.body_size_after(*key, separator_len(key)) >= BRANCH_MERGE_THRESHOLD / 2 {
+                    false
+                } else {
+                    gauge.ingest_key(*key, separator_len(key));
+                    true
+                }
+            })
+            .enumerate()
+            .map(|(i, key)| BranchOp::Insert(key, PageNumber(i as u32)))
+            .collect();
+        let n_insert_op = updater.ops.len();
+
+        // Use a branch containing keys which do not share a prefix with the just ingested keys.
+        let branch = make_branch_with_body_size_target(uncompressed_key, |size| {
+            size < BRANCH_NODE_BODY_SIZE
+        });
+
+        updater.reset_base(
+            Some(BaseBranch {
+                node: branch.clone(),
+                low: 0,
+            }),
+            None,
+        );
+        let base_branch = BaseBranch {
+            node: branch.clone(),
+            low: 0,
+        };
+
+        // Extends updater.ops with BranchOp::KeepChunk operations until the final expected gauge
+        // reaches the target.
+        // The chunks are increasingly bigger, the first one covers 7 elements, and each
+        // of the following chunks covers one more element.
+        gauge.stop_prefix_compression();
+        let mut rightsized = false;
+        let mut from = 0;
+        let mut total_kept_itmes = 0;
+        let keep_ops: Vec<BranchOp> = (7..)
+            .map(|to| {
+                let start = from;
+                let end = from + to;
+                from += to;
+                KeepChunk {
+                    start,
+                    end,
+                    sum_separator_lengths: node::uncompressed_separator_range_size(
+                        branch.prefix_len() as usize,
+                        branch.separator_range_len(start, end),
+                        end - start,
+                        separator_len(&get_key(&branch, start)),
+                    ),
+                }
+            })
+            .take_while(|keep_chunk| {
+                let res = !rightsized;
+                rightsized = gauge.body_size_after_chunk(&base_branch, &keep_chunk)
+                    >= BRANCH_MERGE_THRESHOLD;
+                if res {
+                    gauge.ingest_chunk(&base_branch, &keep_chunk);
+                    total_kept_itmes += keep_chunk.end - keep_chunk.start;
+                }
+                res
+            })
+            .map(|keep_chunk| BranchOp::KeepChunk(keep_chunk))
+            .collect();
+
+        updater.ops.extend(keep_ops);
+
+        let Ok((item_count, res_gauge)) =
+            updater.consume_and_update_until(0, BRANCH_NODE_BODY_SIZE)
+        else {
+            panic!()
+        };
+
+        // Make sure that not only the KeepChunk operation on which the stop_prefix_compression
+        // requirement has been found has been updated to insert, but also all subsequent operations.
+        for i in n_insert_op..item_count {
+            assert!(matches!(
+                updater.ops[i],
+                BranchOp::Insert(k, PageNumber(_)) if k == uncompressed_key(i - n_insert_op)
+            ));
+        }
+
+        // Ensure that the last keep operation has been split correctly.
+        let expected_size_split_chunk = total_kept_itmes - (item_count - n_insert_op);
+        let BranchOp::KeepChunk(split_keep_chunk) = &updater.ops[item_count] else {
+            panic!()
+        };
+        let split_keep_chunk = split_keep_chunk.end - split_keep_chunk.start;
+        assert_eq!(split_keep_chunk, expected_size_split_chunk);
+
+        // The target has been downgraded to reduce the amount of uncompressed items.
+        assert!(res_gauge.body_size() > BRANCH_MERGE_THRESHOLD);
+        assert!(res_gauge.body_size() < BRANCH_NODE_BODY_SIZE);
+    }
+
+    #[test]
+    fn ingest_after_stop_prefix_compression() {
+        let key = |i| prefixed_key(0x00, 6, i);
+
+        let mut updater = BranchUpdater::new(PAGE_POOL.clone(), None, None);
+
+        let n_keep = 10;
+        let branch = make_branch((2..n_keep).map(|i| (key(i), i)).collect());
+
+        updater.reset_base(
+            Some(BaseBranch {
+                node: branch,
+                low: 0,
+            }),
+            None,
+        );
+
+        updater.ingest(key(0), Some(PageNumber(0))); // insert
+        updater.gauge.stop_prefix_compression();
+        updater.ingest(key(1), Some(PageNumber(0))); // insert
+        updater.ingest(key(2), Some(PageNumber(1))); // update
+        updater.ingest(key(n_keep), Some(PageNumber(0))); // keep_chunk + insert
+
+        // Make sure that all ops are Insert type.
+        for op in updater.ops {
+            assert!(matches!(op, BranchOp::Insert(..)));
+        }
+    }
+
+    #[test]
+    fn try_split_keep_chunk() {
+        let key = |i| prefixed_key(0x00, 16, i);
+        let keys: Vec<(Key, usize)> = (0..100).map(|i| (key(i), i)).collect();
+
+        let mut base_node_gauge = BranchGauge::new();
+
+        let mut sum_separator_lengths = 0;
+        for (key, _) in keys.clone() {
+            let len = separator_len(&key);
+            base_node_gauge.ingest_key(key, len);
+            sum_separator_lengths += len;
+        }
+
+        let branch = make_branch(keys.clone());
+        let base = BaseBranch {
+            node: branch,
+            low: 0,
+        };
+
+        let chunk = KeepChunk {
+            start: 0,
+            end: keys.len(),
+            sum_separator_lengths,
+        };
+
+        // Perform a standard split
+        let gauge = BranchGauge::new();
+        let target = base_node_gauge.body_size() / 3;
+        let limit = base_node_gauge.body_size() / 2;
+        let mut ops = vec![BranchOp::KeepChunk(chunk)];
+        let left_split_len = super::try_split_keep_chunk(&base, &gauge, &mut ops, 0, target, limit);
+
+        assert_eq!(ops.len(), 2);
+        let chunk1 = match &ops[0] {
+            BranchOp::KeepChunk(c1) => c1,
+            _ => panic!(),
+        };
+        let chunk2 = match &ops[1] {
+            BranchOp::KeepChunk(c2) => c2,
+            _ => panic!(),
+        };
+        assert_eq!(chunk1.len(), left_split_len);
+        assert_eq!(chunk1.len() + chunk2.len(), keys.len());
+        assert!(gauge.body_size_after_chunk(&base, chunk1) > target);
+        assert!(gauge.body_size_after_chunk(&base, chunk1) < limit);
+
+        // Perform a split which is not able to reach the target
+        let gauge = BranchGauge::new();
+        let target = base_node_gauge.body_size() * 2;
+        let limit = base_node_gauge.body_size() * 2;
+        let mut ops = vec![BranchOp::KeepChunk(chunk)];
+        super::try_split_keep_chunk(&base, &gauge, &mut ops, 0, target, limit);
+
+        assert_eq!(ops.len(), 1);
+        let chunk1 = match &ops[0] {
+            BranchOp::KeepChunk(c1) => c1,
+            _ => panic!(),
+        };
+        assert_eq!(chunk1.len(), keys.len());
+        assert!(gauge.body_size_after_chunk(&base, chunk1) < target);
+
+        // Perform a split with a target too little,
+        // but something smaller than the limit will still be split.
+        let gauge = BranchGauge::new();
+        let target = 1;
+        let limit = BRANCH_NODE_BODY_SIZE;
+        let mut ops = vec![BranchOp::KeepChunk(chunk)];
+        super::try_split_keep_chunk(&base, &gauge, &mut ops, 0, target, limit);
+
+        assert_eq!(ops.len(), 2);
+        let chunk1 = match &ops[0] {
+            BranchOp::KeepChunk(c1) => c1,
+            _ => panic!(),
+        };
+        assert_eq!(chunk1.len(), 1);
+        assert!(gauge.body_size_after_chunk(&base, chunk1) > target);
+        assert!(gauge.body_size_after_chunk(&base, chunk1) < limit);
+
+        // Perform a split with a limit too little,
+        // nothing will still be split.
+        let gauge = BranchGauge::new();
+        let target = 1;
+        let limit = 1;
+        let mut ops = vec![BranchOp::KeepChunk(chunk)];
+        super::try_split_keep_chunk(&base, &gauge, &mut ops, 0, target, limit);
+
+        assert_eq!(ops.len(), 1);
+        let chunk1 = match &ops[0] {
+            BranchOp::KeepChunk(c1) => c1,
+            _ => panic!(),
+        };
+        assert_eq!(chunk1.len(), keys.len());
+    }
+
+    #[test]
+    fn replace_with_insert() {
+        let key = |i| prefixed_key(0x00, 16, i);
+        let n_keys = 100;
+        let keys: Vec<(Key, usize)> = (1..1 + n_keys).map(|i| (key(i), i)).collect();
+
+        let mut base_node_gauge = BranchGauge::new();
+
+        let mut sum_separator_lengths = 0;
+        for (key, _) in keys.clone() {
+            let len = separator_len(&key);
+            base_node_gauge.ingest_key(key, len);
+            sum_separator_lengths += len;
+        }
+
+        let branch = make_branch(keys.clone());
+        let base = BaseBranch {
+            node: branch,
+            low: 0,
+        };
+
+        let insert1 = BranchOp::Insert(key(0), PageNumber(1));
+        let insert2 = BranchOp::Insert(key(n_keys + 2), PageNumber(2));
+        let chunk = KeepChunk {
+            start: 1,
+            end: keys.len(),
+            sum_separator_lengths,
+        };
+
+        let mut ops = vec![
+            insert1,
+            BranchOp::Update(0, PageNumber(3)),
+            BranchOp::KeepChunk(chunk),
+            insert2,
+        ];
+
+        // insert remains insert
+        super::replace_with_insert(&mut ops, 0, None);
+        assert!(matches!(ops[0], BranchOp::Insert(k,..) if k == key(0)));
+        assert_eq!(ops.len(), 4);
+
+        // update becomes insert
+        super::replace_with_insert(&mut ops, 1, Some(&base));
+        assert!(matches!(ops[1], BranchOp::Insert(k,..) if k == key(1)));
+        assert_eq!(ops.len(), 4);
+
+        // keep becomes multiple inserts
+        super::replace_with_insert(&mut ops, 2, Some(&base));
+        for (i, op) in ops[2..ops.len() - 2].iter().enumerate() {
+            assert!(matches!(op, BranchOp::Insert(k,..) if *k == key(i + 2)));
+        }
+        assert!(matches!(ops[ops.len() - 1], BranchOp::Insert(k,..) if k == key(n_keys + 2)));
+        assert_eq!(ops.len(), 2 + n_keys);
+    }
+
+    #[test]
+    fn extract_insert_from_keep_chunk() {
+        let key = |i| prefixed_key(0x00, 16, i);
+        let n_keys = 100;
+        let keys: Vec<(Key, usize)> = (0..n_keys).map(|i| (key(i), i)).collect();
+        let sum_separator_lengths = keys.clone().iter().map(|(k, _)| separator_len(k)).sum();
+
+        let branch = make_branch(keys.clone());
+        let base = BaseBranch {
+            node: branch,
+            low: 0,
+        };
+
+        let chunk = KeepChunk {
+            start: 0,
+            end: keys.len(),
+            sum_separator_lengths,
+        };
+        let mut ops = vec![BranchOp::KeepChunk(chunk)];
+
+        super::extract_insert_from_keep_chunk(&base, &mut ops, 0);
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], BranchOp::Insert(k,..) if k == key(0)));
+        assert!(matches!(ops[1], BranchOp::KeepChunk(c) if c.len() == n_keys - 1));
+
+        // 0-sized chunks are not allowed.
+        let chunk = KeepChunk {
+            start: 0,
+            end: 1,
+            sum_separator_lengths,
+        };
+        let mut ops = vec![BranchOp::KeepChunk(chunk)];
+        super::extract_insert_from_keep_chunk(&base, &mut ops, 0);
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(ops[0], BranchOp::Insert(k,..) if k == key(0)));
     }
 }
