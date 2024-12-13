@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 
+mod message;
 mod spawn;
 
 fn main() -> Result<()> {
