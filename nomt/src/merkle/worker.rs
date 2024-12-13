@@ -62,8 +62,15 @@ pub(super) fn run_warm_up(
 ) {
     let read_pass = params.page_cache.new_read_pass();
     let page_loader = params.store.page_loader();
-    let page_io_receiver = page_loader.io_handle().receiver().clone();
-    let seeker = Seeker::new(params.root, params.page_cache.clone(), page_loader, true);
+    let io_handle = params.store.io_pool().make_handle();
+    let page_io_receiver = io_handle.receiver().clone();
+    let seeker = Seeker::new(
+        params.root,
+        params.page_cache.clone(),
+        io_handle,
+        page_loader,
+        true,
+    );
 
     let result = warm_up_phase(read_pass, page_io_receiver, seeker, warmup_rx, finish_rx);
 
@@ -89,6 +96,7 @@ pub(super) fn run_update<H: NodeHasher>(params: UpdateParams) -> anyhow::Result<
     let seeker = Seeker::new(
         root,
         page_cache.clone(),
+        store.io_pool().make_handle(),
         store.page_loader(),
         command.shared.witness,
     );

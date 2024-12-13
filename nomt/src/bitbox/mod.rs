@@ -1,5 +1,3 @@
-use anyhow::Context;
-use crossbeam::channel::TryRecvError;
 use crossbeam_channel::{Receiver, Sender};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
@@ -363,16 +361,14 @@ fn recover(
 pub struct PageLoader {
     shared: Arc<Shared>,
     meta_map: ArcRwLockReadGuard<parking_lot::RawRwLock, MetaMap>,
-    io_handle: IoHandle,
 }
 
 impl PageLoader {
     /// Create a new page loader.
-    pub fn new(db: &DB, io_handle: IoHandle) -> Self {
+    pub fn new(db: &DB) -> Self {
         PageLoader {
             shared: db.shared.clone(),
             meta_map: RwLock::read_arc(&db.shared.meta_map),
-            io_handle,
         }
     }
 
@@ -392,7 +388,19 @@ impl PageLoader {
     ///
     /// This returns `Ok(true)` if the page request has been submitted and a completion will be
     /// coming. `Ok(false)` means that the page is guaranteed to be fresh.
-    pub fn advance(&self, load: &mut PageLoad, user_data: u64) -> anyhow::Result<bool> {
+    ///
+    /// An `IoCommand` of kind `Read` will be submitted along the I/O handle with the provided
+    /// user-data.
+    ///
+    /// Note that the page loaded by the I/O pool may be a misprobe. You must use
+    /// [`PageLoad::try_complete`] to verify whether the hash-table probe has completed or must be
+    /// tried again.
+    pub fn probe(
+        &self,
+        load: &mut PageLoad,
+        io_handle: &IoHandle,
+        user_data: u64,
+    ) -> anyhow::Result<bool> {
         let bucket = loop {
             match load.probe_sequence.next(&self.meta_map) {
                 ProbeResult::Tombstone(_) => continue,
@@ -403,86 +411,18 @@ impl PageLoader {
 
         let data_page_index = self.shared.store.data_page_index(bucket.0);
 
-        let page = self.io_handle.page_pool().alloc_fat_page();
+        let page = io_handle.page_pool().alloc_fat_page();
         let command = IoCommand {
             kind: IoKind::Read(self.shared.ht_fd.as_raw_fd(), data_page_index, page),
             user_data,
         };
 
-        match self.io_handle.send(command) {
+        match io_handle.send(command) {
             Ok(()) => {
                 load.state = PageLoadState::Submitted;
                 Ok(true)
             }
             Err(_) => anyhow::bail!("I/O pool hangup"),
-        }
-    }
-
-    /// Try to receive the next completion, without blocking the current thread.
-    ///
-    /// Fails if the I/O pool is down or a request caused an I/O error.
-    pub fn try_complete(&self) -> anyhow::Result<Option<PageLoadCompletion>> {
-        match self.io_handle.try_recv() {
-            Ok(completion) => {
-                completion
-                    .result
-                    .with_context(|| format!("I/O error: {:?}", completion.command.kind))?;
-                match completion.command.kind {
-                    IoKind::Read(_, _, page) => Ok(Some(PageLoadCompletion {
-                        page,
-                        user_data: completion.command.user_data,
-                    })),
-                    _ => panic!(),
-                }
-            }
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => anyhow::bail!("I/O pool hangup"),
-        }
-    }
-
-    /// Receive the next completion, blocking the current thread.
-    ///
-    /// Fails if the I/O pool is down or a request caused an I/O error.
-    pub fn complete(&self) -> anyhow::Result<PageLoadCompletion> {
-        match self.io_handle.recv() {
-            Ok(completion) => {
-                completion.result?;
-                match completion.command.kind {
-                    IoKind::Read(_, _, page) => Ok(PageLoadCompletion {
-                        page,
-                        user_data: completion.command.user_data,
-                    }),
-                    _ => panic!(),
-                }
-            }
-            Err(_) => anyhow::bail!("I/O pool hangup"),
-        }
-    }
-
-    /// Get the underlying I/O handle.
-    pub fn io_handle(&self) -> &IoHandle {
-        &self.io_handle
-    }
-}
-
-/// Represents the completion of a page load.
-pub struct PageLoadCompletion {
-    page: FatPage,
-    user_data: u64,
-}
-
-impl PageLoadCompletion {
-    pub fn user_data(&self) -> u64 {
-        self.user_data
-    }
-
-    pub fn apply_to(self, load: &mut PageLoad) -> Option<(FatPage, BucketIndex)> {
-        assert!(load.needs_completion());
-        if self.page[PAGE_SIZE - 32..] == load.page_id.encode() {
-            Some((self.page, BucketIndex(load.probe_sequence.bucket())))
-        } else {
-            load.state = PageLoadState::Pending;
-            None
         }
     }
 }
@@ -500,6 +440,20 @@ impl PageLoad {
 
     pub fn page_id(&self) -> &PageId {
         &self.page_id
+    }
+
+    /// Try to complete the page load.
+    ///
+    /// If this returns `Some`, then the load has completed and this struct may be discarded.
+    /// Otherwise, you must continue with [`PageLoader::probe`].
+    pub fn try_complete(&mut self, page: FatPage) -> Option<(FatPage, BucketIndex)> {
+        assert!(self.needs_completion());
+        if page[PAGE_SIZE - 32..] == self.page_id.encode() {
+            Some((page, BucketIndex(self.probe_sequence.bucket())))
+        } else {
+            self.state = PageLoadState::Pending;
+            None
+        }
     }
 }
 

@@ -1,7 +1,7 @@
-use crate::bitbox;
+use crate::{bitbox, io::IoHandle};
 use nomt_core::page_id::PageId;
 
-pub use bitbox::{PageLoad, PageLoadCompletion};
+pub use bitbox::PageLoad;
 
 pub struct PageLoader {
     pub(super) inner: bitbox::PageLoader,
@@ -20,26 +20,12 @@ impl PageLoader {
     ///
     /// This returns `Ok(true)` if the page request has been submitted and a completion will be
     /// coming. `Ok(false)` means that the page is guaranteed to be fresh.
-    pub fn advance(&self, load: &mut PageLoad, user_data: u64) -> anyhow::Result<bool> {
-        self.inner.advance(load, user_data)
-    }
-
-    /// Try to receive the next completion, without blocking the current thread.
-    ///
-    /// Fails if the I/O pool is down or a request caused an I/O error.
-    pub fn try_complete(&self) -> anyhow::Result<Option<PageLoadCompletion>> {
-        self.inner.try_complete()
-    }
-
-    /// Receive the next completion, blocking the current thread.
-    ///
-    /// Fails if the I/O pool is down or a request caused an I/O error.
-    pub fn complete(&self) -> anyhow::Result<PageLoadCompletion> {
-        self.inner.complete()
-    }
-
-    /// Get the underlying I/O handle.
-    pub fn io_handle(&self) -> &crate::io::IoHandle {
-        self.inner.io_handle()
+    pub fn probe(
+        &self,
+        load: &mut PageLoad,
+        io_handle: &IoHandle,
+        user_data: u64,
+    ) -> anyhow::Result<bool> {
+        self.inner.probe(load, io_handle, user_data)
     }
 }
