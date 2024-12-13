@@ -15,7 +15,7 @@ use crossbeam::channel::{Receiver, Select, Sender, TryRecvError};
 use nomt_core::{
     page_id::{PageId, ROOT_PAGE_ID},
     proof::PathProofTerminal,
-    trie::{KeyPath, Node, NodeHasher, ValueHash},
+    trie::{KeyPath, Node, ValueHash},
 };
 
 use std::{
@@ -35,7 +35,7 @@ use crate::{
     page_region::PageRegion,
     rw_pass_cell::{ReadPass, WritePass},
     store::Store,
-    PathProof, WitnessedPath,
+    HashAlgorithm, PathProof, WitnessedPath,
 };
 
 pub(super) struct UpdateParams {
@@ -54,7 +54,7 @@ pub(super) struct WarmUpParams {
     pub root: Node,
 }
 
-pub(super) fn run_warm_up(
+pub(super) fn run_warm_up<H: HashAlgorithm>(
     params: WarmUpParams,
     warmup_rx: Receiver<WarmUpCommand>,
     finish_rx: Receiver<()>,
@@ -64,8 +64,9 @@ pub(super) fn run_warm_up(
     let page_loader = params.store.page_loader();
     let io_handle = params.store.io_pool().make_handle();
     let page_io_receiver = io_handle.receiver().clone();
-    let seeker = Seeker::new(
+    let seeker = Seeker::<H>::new(
         params.root,
+        params.store.read_transaction(),
         params.page_cache.clone(),
         io_handle,
         page_loader,
@@ -82,7 +83,7 @@ pub(super) fn run_warm_up(
     }
 }
 
-pub(super) fn run_update<H: NodeHasher>(params: UpdateParams) -> anyhow::Result<WorkerOutput> {
+pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Result<WorkerOutput> {
     let UpdateParams {
         page_cache,
         page_pool,
@@ -93,8 +94,9 @@ pub(super) fn run_update<H: NodeHasher>(params: UpdateParams) -> anyhow::Result<
         ..
     } = params;
 
-    let seeker = Seeker::new(
+    let seeker = Seeker::<H>::new(
         root,
+        store.read_transaction(),
         page_cache.clone(),
         store.io_pool().make_handle(),
         store.page_loader(),
@@ -104,10 +106,10 @@ pub(super) fn run_update<H: NodeHasher>(params: UpdateParams) -> anyhow::Result<
     update::<H>(root, page_cache, page_pool, seeker, command, warm_ups)
 }
 
-fn warm_up_phase(
+fn warm_up_phase<H: HashAlgorithm>(
     read_pass: ReadPass<ShardIndex>,
     page_io_receiver: Receiver<crate::io::CompleteIo>,
-    mut seeker: Seeker,
+    mut seeker: Seeker<H>,
     warmup_rx: Receiver<WarmUpCommand>,
     finish_rx: Receiver<()>,
 ) -> anyhow::Result<HashMap<KeyPath, Seek>> {
@@ -128,8 +130,8 @@ fn warm_up_phase(
             continue;
         }
 
-        let blocked = seeker.submit_all(&read_pass)?;
-        if blocked || !seeker.has_room() {
+        seeker.submit_all(&read_pass)?;
+        if !seeker.has_room() {
             // block on interrupt or next page ready.
             let index = select_no_work.ready();
             if index == finish_no_work_idx {
@@ -144,7 +146,7 @@ fn warm_up_phase(
                 unreachable!()
             }
         } else {
-            // not blocked and has room. select on everything, pushing new work as available.
+            // has room. select on everything, pushing new work as available.
             let index = select_all.ready();
             if index == finish_idx {
                 match finish_rx.try_recv() {
@@ -182,11 +184,11 @@ fn warm_up_phase(
     Ok(warm_ups)
 }
 
-fn update<H: NodeHasher>(
+fn update<H: HashAlgorithm>(
     root: Node,
     page_cache: PageCache,
     page_pool: PagePool,
-    mut seeker: Seeker,
+    mut seeker: Seeker<H>,
     command: UpdateCommand,
     warm_ups: Arc<HashMap<KeyPath, Seek>>,
 ) -> anyhow::Result<WorkerOutput> {
@@ -266,8 +268,8 @@ fn update<H: NodeHasher>(
     Ok(output)
 }
 
-fn drive_page_fetch(
-    seeker: &mut Seeker,
+fn drive_page_fetch<H: HashAlgorithm>(
+    seeker: &mut Seeker<H>,
     read_pass: &ReadPass<ShardIndex>,
     page: PageId,
 ) -> anyhow::Result<()> {
@@ -300,7 +302,7 @@ struct RangeUpdater<H> {
     saved_advance: Option<SavedAdvance>,
 }
 
-impl<H: NodeHasher> RangeUpdater<H> {
+impl<H: HashAlgorithm> RangeUpdater<H> {
     fn new(
         root: Node,
         shared: Arc<UpdateShared>,
@@ -350,7 +352,7 @@ impl<H: NodeHasher> RangeUpdater<H> {
     // this terminal.
     fn handle_completion(
         &mut self,
-        seeker: &mut Seeker,
+        seeker: &mut Seeker<H>,
         output: &mut WorkerOutput,
         start_index: usize,
         seek_result: Seek,
@@ -438,7 +440,7 @@ impl<H: NodeHasher> RangeUpdater<H> {
     // the seeker and stores the `SavedAdvance`. if this succeeds, it updates the output.
     fn attempt_advance(
         &mut self,
-        seeker: &mut Seeker,
+        seeker: &mut Seeker<H>,
         output: &mut WorkerOutput,
         seek_result: Seek,
         ops: Option<Vec<(KeyPath, Option<ValueHash>)>>,
@@ -492,7 +494,7 @@ impl<H: NodeHasher> RangeUpdater<H> {
         }
     }
 
-    fn reattempt_advance(&mut self, seeker: &mut Seeker, output: &mut WorkerOutput) {
+    fn reattempt_advance(&mut self, seeker: &mut Seeker<H>, output: &mut WorkerOutput) {
         // UNWRAP: guaranteed by behavior of seeker / update / advance.
         let SavedAdvance {
             ops,
@@ -504,7 +506,7 @@ impl<H: NodeHasher> RangeUpdater<H> {
 
     fn update(
         mut self,
-        seeker: &mut Seeker,
+        seeker: &mut Seeker<H>,
         output: &mut WorkerOutput,
         warm_ups: Arc<HashMap<KeyPath, Seek>>,
     ) -> anyhow::Result<Option<WritePass<ShardIndex>>> {
@@ -556,18 +558,14 @@ impl<H: NodeHasher> RangeUpdater<H> {
                 }
             }
 
-            let blocked = seeker.submit_all(self.write_pass.downgrade())?;
+            seeker.submit_all(self.write_pass.downgrade())?;
             if !seeker.has_room() && seeker.has_live_requests() {
                 // no way to push work until at least one page fetch has concluded.
                 seeker.recv_page(self.write_pass.downgrade())?;
                 continue;
-            } else if blocked {
-                // blocked, so try to make progress, but no problem if we can't. stay busy.
-                seeker.try_recv_page(self.write_pass.downgrade())?;
-                continue;
             }
 
-            // push work until blocked or out of work.
+            // push work until out of work.
             while seeker.has_room() && start_index + pushes < self.range_end {
                 let next_push = start_index + pushes;
                 pushes += 1;
@@ -579,10 +577,7 @@ impl<H: NodeHasher> RangeUpdater<H> {
                     }
                 } else {
                     seeker.push(self.shared.read_write[next_push].0);
-                    let blocked = seeker.submit_all(self.write_pass.downgrade())?;
-                    if blocked {
-                        break;
-                    }
+                    seeker.submit_all(self.write_pass.downgrade())?;
                 }
             }
 

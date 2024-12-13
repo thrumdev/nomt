@@ -1,8 +1,5 @@
 //! Database iterators over the Beatree.
 
-// TODO: remove this once used
-#![allow(dead_code)]
-
 use std::{
     cmp::Ordering,
     ops::{Range, RangeFrom},
