@@ -1,8 +1,5 @@
 //! Database iterators over the Beatree.
 
-// TODO: remove this once used.
-#![allow(unused)]
-
 use std::{
     cmp::Ordering,
     ops::{Range, RangeFrom},
@@ -17,7 +14,7 @@ use super::{
     branch::node::{get_key, BranchNode},
     index::Index,
     leaf::node::LeafNode,
-    Key, LeafNodeRef, ReadTransaction, ValueChange,
+    Key, LeafNodeRef, ValueChange,
 };
 
 /// An iterator over the state of the beatree at some particular point.
@@ -157,13 +154,13 @@ pub enum IterOutput<'a> {
     // The iterator has produced a new item.
     Item(Key, &'a [u8]),
     // The iterator has produced a new overflow item. The slice here is the entire overflow cell.
+    #[allow(dead_code)]
     OverflowItem(Key, ValueHash, &'a [u8]),
 }
 
 struct CurrentLeaf {
     index: usize,
     leaf: Arc<LeafNode>,
-    separator: Key,
 }
 
 impl CurrentLeaf {
@@ -204,19 +201,17 @@ impl LeafIterator {
             start: Some(start),
             end,
         };
-
         let Some((_, branch)) = iter.index.lookup(start) else {
             return iter;
         };
 
-        let Some((index_in_branch, pn)) = super::ops::search_branch(&branch, start) else {
+        let Some((index_in_branch, _)) = super::ops::search_branch(&branch, start) else {
             return iter;
         };
 
         let separator = get_key(&branch, index_in_branch);
         iter.state = LeafIteratorState::Blocked {
             branch,
-            pn,
             index_in_branch,
             separator,
             last: None,
@@ -304,7 +299,7 @@ impl LeafIterator {
                 .next_key(get_key(&*branch, next_index_in_branch - 1));
             match next_key {
                 None => LeafIteratorState::Done { last: Some(last) },
-                Some(k) if self.end.as_ref().map_or(false, |end| end < &k) => {
+                Some(k) if self.end.as_ref().map_or(false, |end| end <= &k) => {
                     LeafIteratorState::Done { last: Some(last) }
                 }
                 Some(k) => {
@@ -312,7 +307,6 @@ impl LeafIterator {
                     let (separator, branch) = self.index.lookup(k).unwrap();
                     LeafIteratorState::Blocked {
                         index_in_branch: 0,
-                        pn: branch.node_pointer(0).into(),
                         separator,
                         branch,
                         last: Some(last),
@@ -321,10 +315,9 @@ impl LeafIterator {
             }
         } else {
             let separator = get_key(&branch, next_index_in_branch);
-            if self.end.map_or(false, |end| separator < end) {
+            if self.end.map_or(true, |end| separator < end) {
                 LeafIteratorState::Blocked {
                     index_in_branch: next_index_in_branch,
-                    pn: branch.node_pointer(next_index_in_branch).into(),
                     separator: get_key(&branch, next_index_in_branch),
                     branch,
                     last: Some(last),
@@ -353,9 +346,7 @@ impl LeafIterator {
         let prev_state = std::mem::replace(&mut self.state, LeafIteratorState::Done { last: None });
         let LeafIteratorState::Blocked {
             branch,
-            pn,
             index_in_branch,
-            separator,
             ..
         } = prev_state
         else {
@@ -363,11 +354,7 @@ impl LeafIterator {
             panic!("No leaf expected in iterator")
         };
 
-        let leaf = CurrentLeaf {
-            index,
-            leaf,
-            separator,
-        };
+        let leaf = CurrentLeaf { index, leaf };
 
         self.state = if leaf.is_consumed() {
             self.new_state_leaf_consumed(branch, index_in_branch + 1, leaf)
@@ -450,7 +437,6 @@ impl Iterator for NeededLeavesIter {
 enum LeafIteratorState {
     Blocked {
         branch: Arc<BranchNode>,
-        pn: PageNumber,
         index_in_branch: usize,
         separator: Key,
         // this ensures that borrows can be kept valid.
@@ -511,8 +497,8 @@ impl StagingIterator {
             .map(|(k, _)| k);
         match (primary_peek, secondary_peek) {
             (None, None) => None,
-            (Some(x), None) => self.primary.next(),
-            (None, Some(x)) => self.next_secondary(),
+            (Some(_), None) => self.primary.next(),
+            (None, Some(_)) => self.next_secondary(),
             (Some(primary), Some(secondary)) => {
                 match primary.cmp(&secondary) {
                     Ordering::Less => self.primary.next(),
@@ -581,7 +567,6 @@ mod tests {
         ops::bit_ops,
         Key, LeafNodeRef, PageNumber, ValueChange,
     };
-    use lazy_static::lazy_static;
 
     use imbl::OrdMap;
     use std::sync::Arc;
@@ -612,12 +597,10 @@ mod tests {
 
     fn build_branch(leaves: Vec<(Key, PageNumber)>) -> Arc<BranchNode> {
         let n = leaves.len();
-        let mut total_separator_lengths = 0;
         let prefix_len = {
             let mut prefix_len = 0;
             let mut first_key = None;
             for (key, _) in &leaves {
-                total_separator_lengths += bit_ops::separator_len(key);
                 if let Some(first_key) = first_key {
                     prefix_len = bit_ops::prefix_len(key, first_key)
                 } else {
@@ -656,7 +639,7 @@ mod tests {
 
     #[test]
     fn overlay_takes_priority() {
-        let (leaf_separator, leaf) = build_leaf(vec![
+        let (_, leaf) = build_leaf(vec![
             (key(1), 1),
             (key(2), 2),
             (key(3), 3),
@@ -705,15 +688,6 @@ mod tests {
 
     #[test]
     fn needed_leaves_is_accurate() {
-        // 4 leaves
-        let (leaf_separator_1, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
-
-        let (leaf_separator_2, leaf_2) = build_leaf(vec![(key(4), 4), (key(5), 5)]);
-
-        let (leaf_separator_3, leaf_3) = build_leaf(vec![(key(6), 6), (key(7), 7)]);
-
-        let (leaf_separator_4, leaf_4) = build_leaf(vec![(key(8), 8), (key(9), 9), (key(10), 10)]);
-
         // split across 2 branches
         let branch_1 = build_branch(vec![(key(0), 69.into()), (key(4), 70.into())]);
         let branch_2 = build_branch(vec![(key(6), 420.into()), (key(8), 421.into())]);
@@ -732,9 +706,9 @@ mod tests {
 
     #[test]
     fn start_bound_respected_in_leaves() {
-        let (leaf_separator_1, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
+        let (_, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
 
-        let (leaf_separator_2, leaf_2) = build_leaf(vec![(key(4), 4), (key(5), 5)]);
+        let (_, leaf_2) = build_leaf(vec![(key(4), 4), (key(5), 5)]);
 
         let branch = build_branch(vec![(key(0), 69.into()), (key(4), 70.into())]);
 
@@ -757,9 +731,9 @@ mod tests {
 
     #[test]
     fn end_bound_respected_in_leaves() {
-        let (leaf_separator_1, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
+        let (_, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
 
-        let (leaf_separator_2, leaf_2) = build_leaf(vec![(key(6), 6), (key(7), 7)]);
+        let (_, leaf_2) = build_leaf(vec![(key(6), 6), (key(7), 7)]);
 
         let branch = build_branch(vec![(key(0), 69.into()), (key(6), 70.into())]);
 

@@ -178,7 +178,6 @@ impl Tree {
 
     /// Initiate a new read transaction, as-of the current state of the last commit.
     /// This blocks new sync operations from starting until it is dropped.
-    #[allow(unused)]
     pub fn read_transaction(&self) -> ReadTransaction {
         // Increment the count. This will block any sync from starting between now and the point
         // where the read transaction is dropped.
@@ -191,6 +190,7 @@ impl Tree {
             leaf_store: shared.leaf_store.clone(),
             leaf_cache: shared.leaf_cache.clone(),
             read_counter: self.read_transaction_counter.clone(),
+            page_pool: shared.page_pool.clone(),
         });
 
         ReadTransaction { inner }
@@ -489,7 +489,6 @@ impl SyncController {
 ///
 /// This is cheap to clone.
 #[derive(Clone)]
-#[allow(unused)]
 pub struct ReadTransaction {
     inner: Arc<ReadTransactionInner>,
 }
@@ -501,11 +500,11 @@ struct ReadTransactionInner {
     leaf_store: Store,
     leaf_cache: LeafCache,
     read_counter: ReadTransactionCounter,
+    page_pool: PagePool,
 }
 
 impl ReadTransaction {
     /// Create a new iterator with the given half-open start and end range.
-    #[allow(unused)]
     pub fn iterator(&self, start: Key, end: Option<Key>) -> BeatreeIterator {
         BeatreeIterator::new(
             self.inner.primary_staging.clone(),
@@ -523,10 +522,8 @@ impl ReadTransaction {
     /// If `Ok` is returned, then no I/O command has been submitted along the handle.
     /// If `Err` is returned, then an I/O command has been submitted along the handle, and the
     /// user_data is as specified.
-    #[allow(unused)]
     pub fn load_leaf_async(
         &self,
-        page_pool: &PagePool,
         page_number: PageNumber,
         io_handle: &IoHandle,
         user_data: u64,
@@ -534,10 +531,12 @@ impl ReadTransaction {
         if let Some(leaf) = self.inner.leaf_cache.get(page_number) {
             Ok(LeafNodeRef { inner: leaf })
         } else {
-            let command = self
-                .inner
-                .leaf_store
-                .io_command(page_pool, page_number, user_data);
+            let command =
+                self.inner
+                    .leaf_store
+                    .io_command(&self.inner.page_pool, page_number, user_data);
+
+            let _ = io_handle.send(command);
             Err(AsyncLeafLoad {
                 page_number,
                 read_tx: self.inner.clone(),
@@ -554,7 +553,6 @@ impl Drop for ReadTransactionInner {
 
 /// A type representing a pending leaf load. This keeps the associated read transaction alive
 /// throughout its lifetime.
-#[allow(unused)]
 pub struct AsyncLeafLoad {
     read_tx: Arc<ReadTransactionInner>,
     page_number: PageNumber,
@@ -563,7 +561,6 @@ pub struct AsyncLeafLoad {
 impl AsyncLeafLoad {
     /// Finish the leaf load.
     /// Calling this with the wrong page will likely lead to panics or bugs in the future.
-    #[allow(unused)]
     pub fn finish(self, page: FatPage) -> LeafNodeRef {
         let leaf_node = Arc::new(leaf::node::LeafNode { inner: page });
 
@@ -571,6 +568,11 @@ impl AsyncLeafLoad {
             .leaf_cache
             .insert(self.page_number, leaf_node.clone());
         LeafNodeRef { inner: leaf_node }
+    }
+
+    /// Get the page number associated with this leaf load.
+    pub fn page_number(&self) -> PageNumber {
+        self.page_number
     }
 }
 
@@ -601,9 +603,12 @@ impl ReadTransactionCounter {
     }
 
     fn release_one(&self) {
-        // UNWRAP: this is only called when a read transaction is dropped, which always pairs with
-        // the `add_one` call when the read transaction was created.
-        self.inner.read_transactions.lock().checked_sub(1).unwrap();
+        {
+            let mut guard = self.inner.read_transactions.lock();
+            // UNWRAP: this is only called when a read transaction is dropped, which always pairs with
+            // the `add_one` call when the read transaction was created.
+            *guard = guard.checked_sub(1).unwrap();
+        }
         self.inner.cvar.notify_one();
     }
 

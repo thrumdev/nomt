@@ -97,6 +97,13 @@ impl TriePosition {
         &self.path.view_bits::<Msb0>()[..self.depth as usize]
     }
 
+    /// Get the raw key at the current position.
+    ///
+    /// Note that if you have called `up`, this might have bits beyond `depth` which are set.
+    pub fn raw_path(&self) -> [u8; 32] {
+        self.path
+    }
+
     /// Move the position down by 1, towards either the left or right child.
     ///
     /// Panics on depth out of range.
@@ -323,11 +330,6 @@ impl ChildNodeIndices {
     /// Create from a left child index.
     pub fn from_left(left: usize) -> Self {
         ChildNodeIndices(left)
-    }
-
-    /// Child node indices for the top two nodes of a page.
-    pub fn next_page() -> Self {
-        Self::from_left(0)
     }
 
     /// Whether these are at the top of a page.
