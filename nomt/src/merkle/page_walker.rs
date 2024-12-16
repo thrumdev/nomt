@@ -58,14 +58,6 @@ use crate::{
     rw_pass_cell::{ReadPass, RegionContains, WritePass},
 };
 
-/// An error type that's returned when a page is needed in order to compact up.
-///
-/// Sometimes, while compacting the trie after modifications, it will be necessary to reposition
-/// a sibling node, and therefore the `trie::LeafData` which resides below it. If that exists in a
-/// previously un-fetched page, this error variant exists to fetch it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NeedsPage(pub PageId);
-
 /// The output of the page walker.
 pub enum Output {
     /// A new root node.
@@ -168,11 +160,6 @@ impl<H: NodeHasher> PageWalker<H> {
     ///
     /// An empty vector deletes any existing terminal node.
     ///
-    /// # Error
-    ///
-    /// If NeedsPage is returned, that page should be fetched, added to the page cache, and this
-    /// call should be retried with the exact same parameters.
-    ///
     /// # Panics
     ///
     /// Panics if the current trie position is not a terminal node.
@@ -184,16 +171,15 @@ impl<H: NodeHasher> PageWalker<H> {
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         new_pos: TriePosition,
         ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
-    ) -> Result<(), NeedsPage> {
+    ) {
         if let Some(ref pos) = self.last_position {
             assert!(new_pos.path() > pos.path());
-            self.compact_up(write_pass, Some(new_pos.clone()))?;
+            self.compact_up(write_pass, Some(new_pos.clone()));
         }
         self.last_position = Some(new_pos.clone());
         self.build_stack(new_pos);
 
         self.replace_terminal(write_pass, ops);
-        Ok(())
     }
 
     /// Advance to a given trie position and place the given node at that position.
@@ -206,11 +192,6 @@ impl<H: NodeHasher> PageWalker<H> {
     /// The expected usage of this function is to be called with the values of
     /// `Output::ChildPageRoots`.
     ///
-    /// # Error
-    ///
-    /// If NeedsPage is returned, that page should be fetched, added to the page cache, and this
-    /// call should be retried with the exact same parameters.
-    ///
     /// # Panics
     ///
     /// Panics if the current trie position is not a terminal node.
@@ -222,23 +203,17 @@ impl<H: NodeHasher> PageWalker<H> {
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         new_pos: TriePosition,
         node: Node,
-    ) -> Result<(), NeedsPage> {
+    ) {
         if let Some(ref pos) = self.last_position {
             assert!(new_pos.path() > pos.path());
-            self.compact_up(write_pass, Some(new_pos.clone()))?;
+            self.compact_up(write_pass, Some(new_pos.clone()));
         }
         self.last_position = Some(new_pos.clone());
         self.build_stack(new_pos);
         self.place_node(write_pass, node);
-        Ok(())
     }
 
     /// Advance to a given trie position without updating.
-    ///
-    /// # Error
-    ///
-    /// If NeedsPage is returned, that page should be fetched, added to the page cache, and this
-    /// call should be retried with the exact same parameters.
     ///
     /// # Panics
     ///
@@ -248,16 +223,15 @@ impl<H: NodeHasher> PageWalker<H> {
         &mut self,
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         new_pos: TriePosition,
-    ) -> Result<(), NeedsPage> {
+    ) {
         if let Some(ref pos) = self.last_position {
             assert!(new_pos.path() > pos.path());
-            self.compact_up(write_pass, Some(new_pos.clone()))?;
+            self.compact_up(write_pass, Some(new_pos.clone()));
         }
 
         let page_id = new_pos.page_id();
         self.assert_page_in_scope(page_id.as_ref());
         self.last_position = Some(new_pos);
-        Ok(())
     }
 
     fn place_node(
@@ -420,22 +394,15 @@ impl<H: NodeHasher> PageWalker<H> {
 
     /// Conclude walking and updating and return an output - either a new root, or a list
     /// of node changes to apply to the parent page.
-    ///
-    /// # Error
-    ///
-    /// If NeedsPage is returned, that page should be fetched, added to the page cache, and this
-    /// call should be retried.
     pub fn conclude(
         mut self,
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
-    ) -> Result<Output, (NeedsPage, Self)> {
-        if let Err(p) = self.compact_up(write_pass, None) {
-            return Err((p, self));
-        }
+    ) -> Output {
+        self.compact_up(write_pass, None);
         if self.parent_page.is_none() {
-            Ok(Output::Root(self.root, self.diffs))
+            Output::Root(self.root, self.diffs)
         } else {
-            Ok(Output::ChildPageRoots(self.child_page_roots, self.diffs))
+            Output::ChildPageRoots(self.child_page_roots, self.diffs)
         }
     }
 
@@ -443,10 +410,10 @@ impl<H: NodeHasher> PageWalker<H> {
         &mut self,
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
         target_pos: Option<TriePosition>,
-    ) -> Result<(), NeedsPage> {
+    ) {
         // This serves as a check to see if we have anything to compact.
         if self.stack.is_empty() {
-            return Ok(());
+            return;
         }
 
         let compact_layers = if let Some(target_pos) = target_pos {
@@ -483,7 +450,7 @@ impl<H: NodeHasher> PageWalker<H> {
         };
 
         for i in 0..compact_layers {
-            let next_node = self.compact_step(write_pass)?;
+            let next_node = self.compact_step(write_pass);
             self.up();
 
             if self.stack.is_empty() {
@@ -509,14 +476,12 @@ impl<H: NodeHasher> PageWalker<H> {
                 self.set_node(write_pass, next_node);
             }
         }
-
-        Ok(())
     }
 
     fn compact_step(
         &mut self,
         write_pass: &mut WritePass<impl RegionContains<ShardIndex>>,
-    ) -> Result<Node, NeedsPage> {
+    ) -> Node {
         let node = self.node(write_pass.downgrade());
         let sibling = self.sibling_node(write_pass.downgrade());
         let bit = self.position.peek_last_bit();
@@ -524,20 +489,20 @@ impl<H: NodeHasher> PageWalker<H> {
         match (NodeKind::of(&node), NodeKind::of(&sibling)) {
             (NodeKind::Terminator, NodeKind::Terminator) => {
                 // compact terminators.
-                Ok(trie::TERMINATOR)
+                trie::TERMINATOR
             }
             (NodeKind::Leaf, NodeKind::Terminator) => {
                 // compact: clear this node, move leaf up.
                 self.set_node(write_pass, trie::TERMINATOR);
 
-                Ok(node)
+                node
             }
             (NodeKind::Terminator, NodeKind::Leaf) => {
                 // compact: clear sibling node, move leaf up.
                 self.position.sibling();
                 self.set_node(write_pass, trie::TERMINATOR);
 
-                Ok(sibling)
+                sibling
             }
             _ => {
                 // otherwise, internal
@@ -553,7 +518,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     }
                 };
 
-                Ok(H::hash_internal(&node_data))
+                H::hash_internal(&node_data)
             }
         }
     }
@@ -733,8 +698,8 @@ mod tests {
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![1];
         let trie_pos_b = trie_pos![0];
-        walker.advance(&mut write_pass, trie_pos_a).unwrap();
-        walker.advance(&mut write_pass, trie_pos_b).unwrap();
+        walker.advance(&mut write_pass, trie_pos_a);
+        walker.advance(&mut write_pass, trie_pos_b);
     }
 
     #[test]
@@ -749,8 +714,8 @@ mod tests {
             PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![0];
-        walker.advance(&mut write_pass, trie_pos_a.clone()).unwrap();
-        walker.advance(&mut write_pass, trie_pos_a).unwrap();
+        walker.advance(&mut write_pass, trie_pos_a.clone());
+        walker.advance(&mut write_pass, trie_pos_a);
     }
 
     #[test]
@@ -769,7 +734,7 @@ mod tests {
         );
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![0, 0, 0, 0, 0, 0];
-        walker.advance(&mut write_pass, trie_pos_a).unwrap();
+        walker.advance(&mut write_pass, trie_pos_a);
     }
 
     #[test]
@@ -787,9 +752,7 @@ mod tests {
             Some(ROOT_PAGE_ID),
         );
         let mut write_pass = page_cache.new_write_pass();
-        walker
-            .advance(&mut write_pass, TriePosition::new())
-            .unwrap();
+        walker.advance(&mut write_pass, TriePosition::new());
     }
 
     #[test]
@@ -803,31 +766,27 @@ mod tests {
             PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![0, 0];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_a,
-                vec![
-                    (key_path![0, 0, 1, 0], val(1)),
-                    (key_path![0, 0, 1, 1], val(2)),
-                ],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_a,
+            vec![
+                (key_path![0, 0, 1, 0], val(1)),
+                (key_path![0, 0, 1, 1], val(2)),
+            ],
+        );
 
         let trie_pos_b = trie_pos![0, 1];
-        walker.advance(&mut write_pass, trie_pos_b).unwrap();
+        walker.advance(&mut write_pass, trie_pos_b);
 
         let trie_pos_c = trie_pos![1];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_c,
-                vec![(key_path![1, 0], val(3)), (key_path![1, 1], val(4))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_c,
+            vec![(key_path![1, 0], val(3)), (key_path![1, 1], val(4))],
+        );
 
         match walker.conclude(&mut write_pass) {
-            Ok(Output::Root(new_root, diffs)) => {
+            Output::Root(new_root, diffs) => {
                 assert_eq!(
                     new_root,
                     nomt_core::update::build_trie::<Blake3Hasher>(
@@ -844,7 +803,7 @@ mod tests {
                 assert_eq!(diffs.len(), 1);
                 assert_eq!(&diffs[0].0, &ROOT_PAGE_ID);
             }
-            Ok(Output::ChildPageRoots(_, _)) | Err(_) => unreachable!(),
+            _ => unreachable!(),
         }
     }
 
@@ -864,42 +823,33 @@ mod tests {
         let mut write_pass = page_cache.new_write_pass();
         let trie_pos_a = trie_pos![0, 0, 0, 0, 0, 0, 0];
 
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_a.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 0, 0], val(1))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_a.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 0, 0], val(1))],
+        );
         let trie_pos_b = trie_pos![0, 0, 0, 0, 0, 0, 1];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_b.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 0, 1], val(2))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_b.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 0, 1], val(2))],
+        );
 
         let trie_pos_c = trie_pos![0, 0, 0, 0, 0, 1, 0];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_c.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 1, 0], val(3))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_c.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 1, 0], val(3))],
+        );
         let trie_pos_d = trie_pos![0, 0, 0, 0, 0, 1, 1];
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                trie_pos_d.clone(),
-                vec![(key_path![0, 0, 0, 0, 0, 1, 1], val(4))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos_d.clone(),
+            vec![(key_path![0, 0, 0, 0, 0, 1, 1], val(4))],
+        );
 
         match walker.conclude(&mut write_pass) {
-            Ok(Output::Root(_, _)) | Err(_) => unreachable!(),
-            Ok(Output::ChildPageRoots(page_roots, diffs)) => {
+            Output::ChildPageRoots(page_roots, diffs) => {
                 assert_eq!(page_roots.len(), 2);
                 assert_eq!(diffs.len(), 2);
                 let left_page_id = ROOT_PAGE_ID
@@ -939,6 +889,7 @@ mod tests {
                     )
                 );
             }
+            _ => unreachable!(),
         }
     }
 
@@ -961,22 +912,20 @@ mod tests {
         let root = {
             let mut walker =
                 PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
-            walker
-                .advance_and_replace(
-                    &mut write_pass,
-                    TriePosition::new(),
-                    vec![
-                        (path_1, val(1)),
-                        (path_2, val(2)),
-                        (path_3, val(3)),
-                        (path_4, val(4)),
-                        (path_5, val(5)),
-                    ],
-                )
-                .unwrap();
+            walker.advance_and_replace(
+                &mut write_pass,
+                TriePosition::new(),
+                vec![
+                    (path_1, val(1)),
+                    (path_2, val(2)),
+                    (path_3, val(3)),
+                    (path_4, val(4)),
+                    (path_5, val(5)),
+                ],
+            );
 
             match walker.conclude(&mut write_pass) {
-                Ok(Output::Root(new_root, _)) => new_root,
+                Output::Root(new_root, _) => new_root,
                 _ => unreachable!(),
             }
         };
@@ -1002,49 +951,39 @@ mod tests {
         // replace those leaf nodes one at a time.
         // the sibling stack will be populated as we go.
 
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                TriePosition::from_path_and_depth(path_1, 4),
-                vec![(path_1, val(11))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_1, 4),
+            vec![(path_1, val(11))],
+        );
         assert_eq!(walker.siblings(), &expected_siblings[..0]);
 
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                TriePosition::from_path_and_depth(path_2, 4),
-                vec![(path_2, val(12))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_2, 4),
+            vec![(path_2, val(12))],
+        );
         assert_eq!(walker.siblings(), &expected_siblings[..1]);
 
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                TriePosition::from_path_and_depth(path_3, 4),
-                vec![(path_3, val(13))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_3, 4),
+            vec![(path_3, val(13))],
+        );
         assert_eq!(walker.siblings(), &expected_siblings[..2]);
 
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                TriePosition::from_path_and_depth(path_4, 4),
-                vec![(path_4, val(14))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_4, 4),
+            vec![(path_4, val(14))],
+        );
         assert_eq!(walker.siblings(), &expected_siblings[..3]);
 
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                TriePosition::from_path_and_depth(path_5, 4),
-                vec![(path_5, val(15))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::from_path_and_depth(path_5, 4),
+            vec![(path_5, val(15))],
+        );
         assert_eq!(walker.siblings(), &expected_siblings[..4]);
     }
 
@@ -1123,15 +1062,13 @@ mod tests {
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
 
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                TriePosition::new(),
-                vec![(leaf_1, val(1)), (leaf_2, val(2))],
-            )
-            .unwrap();
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::new(),
+            vec![(leaf_1, val(1)), (leaf_2, val(2))],
+        );
 
-        let Ok(Output::Root(_, _)) = walker.conclude(&mut write_pass) else {
+        let Output::Root(_, _) = walker.conclude(&mut write_pass) else {
             panic!()
         };
 
@@ -1179,7 +1116,10 @@ mod tests {
 
         let leaf_a_key_path = key_path![0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0];
         let leaf_b_key_path = key_path![0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
-        let leaf_a_pos = trie_pos![0, 0, 1, 0, 0, 0];
+        let leaf_c_key_path = key_path![0, 0, 1, 0, 0, 0, 0];
+
+        let leaf_b_pos = trie_pos![0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+        let leaf_c_pos = trie_pos![0, 0, 1, 0, 0, 0, 0];
 
         let mut page_id_iter = PageIdsIterator::new(leaf_a_key_path);
         page_id_iter.next(); // root
@@ -1189,26 +1129,19 @@ mod tests {
         let root = {
             let mut walker =
                 PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
-            walker
-                .advance_and_replace(
-                    &mut write_pass,
-                    TriePosition::new(),
-                    vec![
-                        (leaf_a_key_path, val(1)),
-                        (key_path![0, 0, 1, 0, 0, 1], val(2)),
-                    ],
-                )
-                .unwrap();
+            walker.advance_and_replace(
+                &mut write_pass,
+                TriePosition::new(),
+                vec![
+                    (leaf_a_key_path, val(1)),
+                    (leaf_b_key_path, val(2)),
+                    (leaf_c_key_path, val(3)),
+                ],
+            );
 
             match walker.conclude(&mut write_pass) {
-                Ok(Output::Root(new_root, diffs)) => {
-                    // We expect `page_id_1` to contain only leaf_a's children
-                    let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
-                    let diff = diffs.get(&page_id_1).unwrap().clone();
-                    let mut expected_diff = PageDiff::default();
-                    expected_diff.set_changed(0);
-                    expected_diff.set_changed(1);
-                    assert_eq!(diff, expected_diff);
+                Output::Root(new_root, diffs) => {
+                    println!("{diffs:?}");
                     new_root
                 }
                 _ => unreachable!(),
@@ -1219,28 +1152,33 @@ mod tests {
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
 
-        // `leaf_b_key_path` has 13 bits of shared prefix with `leaf_a_key_path`,
-        // this means that `page_id_1` that previously contained only leaf_a's children
-        // will be update to contain only internal nodes and both `leaf_a` and `leaf_b`
-        // related nodes will be stored in `page_id_2`
-        walker
-            .advance_and_replace(
-                &mut write_pass,
-                leaf_a_pos,
-                vec![(leaf_a_key_path, val(1)), (leaf_b_key_path, val(3))],
-            )
-            .unwrap();
+        // Remove leaf B. This should clear page 2.
+        walker.advance_and_replace(&mut write_pass, leaf_b_pos, vec![]);
+
+        let root = match walker.conclude(&mut write_pass) {
+            Output::Root(new_root, diffs) => {
+                let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
+                println!("{diffs:?}");
+                assert!(!diffs.get(&page_id_2).unwrap().cleared());
+                new_root
+            }
+            _ => unreachable!(),
+        };
+
+        let page_source = PageSource::PageCache(page_cache.clone());
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
+
+        // Now removing leaf C will remove the previous page.
+        walker.advance_and_replace(&mut write_pass, leaf_c_pos, vec![]);
 
         match walker.conclude(&mut write_pass) {
-            Ok(Output::Root(_new_root, diffs)) => {
+            Output::Root(_new_root, diffs) => {
                 // No page is expected to be cleared.
                 let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
                 assert!(!diffs.get(&page_id_1).unwrap().cleared());
-                assert!(!diffs.get(&page_id_2).unwrap().cleared());
             }
             _ => unreachable!(),
         }
     }
-
-    // TODO: test that `NeedsPage` is returned when the sibling child page is needed.
 }
