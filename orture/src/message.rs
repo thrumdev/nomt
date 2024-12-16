@@ -54,3 +54,7 @@ pub enum ToAgent {
     /// do a clean shutdown.
     GracefulShutdown,
 }
+
+pub enum ToSupervisor {
+    Ack,
+}

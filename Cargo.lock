@@ -982,6 +982,7 @@ dependencies = [
  "nix",
  "nomt",
  "serde",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",

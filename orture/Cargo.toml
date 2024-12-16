@@ -15,6 +15,7 @@ tokio = { version = "1.42.0", features = ["full"] }
 tokio-util = { version = "0.7.13", features = ["codec"] }
 tokio-stream = "0.1.17"
 futures = "0.3.31"
+tempfile = "3.10"
 
 [[bin]]
 name = "orture"
