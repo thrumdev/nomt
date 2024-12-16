@@ -158,4 +158,16 @@ mod tests {
 
         assert_eq!(iterated_set_bits, set_bits);
     }
+
+    #[test]
+    fn clear_bit() {
+        let mut diff = PageDiff::default();
+
+        diff.set_cleared();
+        assert!(diff.cleared());
+
+        // Make sure that setting a node as changed zeros out the clear bit
+        diff.set_changed(0);
+        assert!(!diff.cleared());
+    }
 }
