@@ -28,7 +28,6 @@ use bitvec::prelude::*;
 use slab::Slab;
 
 const MAX_INFLIGHT: usize = 1024;
-const SINGLE_PAGE_REQUEST_INDEX: usize = usize::MAX;
 
 struct SeekRequest {
     key: KeyPath,
@@ -214,12 +213,6 @@ fn range_bounds(raw_path: KeyPath, depth: usize) -> (KeyPath, Option<KeyPath>) {
     (start, Some(end))
 }
 
-enum SinglePageRequestState {
-    Pending(PageId),
-    Submitted,
-    Completed,
-}
-
 #[derive(Hash, PartialEq, Eq)]
 enum IoQuery {
     MerklePage(PageId),
@@ -232,16 +225,14 @@ enum IoRequest {
 }
 
 /// The `Seeker` seeks for the terminal nodes of multiple keys simultaneously, multiplexing requests
-/// over an I/O pool. Advance the seeker, provide new keys, and handle completions. A key path
+/// over an I/O pool.
+///
+/// Advance the seeker, provide new keys, and handle completions. A key path
 /// request is considered completed when the terminal node has been found, and all pages along the
 /// path to the terminal node are in the page cache. This includes the page that contains the leaf
 /// children of the request.
 ///
-/// While requests are normally completed in the order they're submitted,
-/// it is possible to submit a special request for a single page, which will be prioritized over
-/// other requests and whose completion will be handled first. This has a particular use case in
-/// mind: the fetching of sibling leaf node child pages, as is an edge case during merkle tree
-/// updates.
+/// Requests are completed in the order the are submitted.
 pub struct Seeker<H: HashAlgorithm> {
     root: Node,
     beatree_read_transaction: BeatreeReadTx,
@@ -257,7 +248,6 @@ pub struct Seeker<H: HashAlgorithm> {
     /// FIFO, pushed onto back.
     idle_page_loads: VecDeque<usize>,
     record_siblings: bool,
-    single_page_request: Option<SinglePageRequestState>,
     _marker: std::marker::PhantomData<H>,
 }
 
@@ -284,13 +274,12 @@ impl<H: HashAlgorithm> Seeker<H> {
             idle_requests: VecDeque::new(),
             idle_page_loads: VecDeque::new(),
             record_siblings,
-            single_page_request: None,
             _marker: std::marker::PhantomData,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.requests.is_empty() && self.single_page_request.is_none()
+        self.requests.is_empty()
     }
 
     pub fn has_room(&self) -> bool {
@@ -311,23 +300,13 @@ impl<H: HashAlgorithm> Seeker<H> {
             return Ok(());
         }
         self.submit_idle_page_loads(read_pass)?;
-        self.submit_single_page_request(read_pass)?;
         self.submit_idle_key_path_requests(read_pass)?;
 
         Ok(())
     }
 
     /// Take the result of a complete request.
-    pub fn take_completion(&mut self) -> Option<Completion> {
-        match self.single_page_request {
-            Some(SinglePageRequestState::Completed) => {
-                self.single_page_request = None;
-                return Some(Completion::SinglePage);
-            }
-            Some(_) => return None,
-            None => (),
-        }
-
+    pub fn take_completion(&mut self) -> Option<Seek> {
         if self.requests.front().map_or(false, |r| r.is_completed()) {
             // UNWRAP: just checked existence.
             let request = self.requests.pop_front().unwrap();
@@ -338,14 +317,14 @@ impl<H: HashAlgorithm> Seeker<H> {
 
             self.processed += 1;
 
-            return Some(Completion::Seek(Seek {
+            return Some(Seek {
                 key: request.key,
                 position: request.position,
                 page_id: request.page_id,
                 siblings: request.siblings,
                 ios: request.ios,
                 terminal,
-            }));
+            });
         }
 
         None
@@ -376,13 +355,6 @@ impl<H: HashAlgorithm> Seeker<H> {
             self.root,
         ));
         self.idle_requests.push_back(request_index);
-    }
-
-    /// Push a request for a single page to jump the line. Panics if another special page
-    /// request has been pushed, but is not completed.
-    pub fn push_single_request(&mut self, page_id: PageId) {
-        assert!(self.single_page_request.is_none());
-        self.single_page_request = Some(SinglePageRequestState::Pending(page_id));
     }
 
     // resubmit all idle page loads until no more remain.
@@ -425,32 +397,6 @@ impl<H: HashAlgorithm> Seeker<H> {
             {
                 // guaranteed fresh page
                 self.handle_merkle_page_and_continue(read_pass, slab_index, None);
-            }
-        }
-
-        Ok(())
-    }
-
-    // submit a single page request, if any exists.
-    fn submit_single_page_request(
-        &mut self,
-        read_pass: &ReadPass<ShardIndex>,
-    ) -> anyhow::Result<()> {
-        if let Some(SinglePageRequestState::Pending(ref page_id)) = self.single_page_request {
-            let page_id = page_id.clone();
-            let waiters = self
-                .io_waiters
-                .entry(IoQuery::MerklePage(page_id.clone()))
-                .or_default();
-
-            waiters.push(SINGLE_PAGE_REQUEST_INDEX);
-
-            self.single_page_request = Some(SinglePageRequestState::Submitted);
-
-            if waiters.len() == 1 {
-                let page_load = self.page_loader.start_load(page_id);
-                let slab_index = self.io_slab.insert(IoRequest::Merkle(page_load));
-                return self.submit_idle_page_load(read_pass, slab_index);
             }
         }
 
@@ -585,10 +531,6 @@ impl<H: HashAlgorithm> Seeker<H> {
             .into_iter()
             .flatten()
         {
-            if waiting_request == SINGLE_PAGE_REQUEST_INDEX {
-                self.single_page_request = Some(SinglePageRequestState::Completed);
-                continue;
-            }
             if waiting_request < self.processed {
                 continue;
             }
@@ -636,14 +578,6 @@ impl<H: HashAlgorithm> Seeker<H> {
             }
         }
     }
-}
-
-/// Complete requests.
-pub enum Completion {
-    /// A seek request was completed.
-    Seek(Seek),
-    /// The single page request was completed.
-    SinglePage,
 }
 
 /// The result of a seek.

@@ -13,7 +13,7 @@
 use crossbeam::channel::{Receiver, Select, Sender, TryRecvError};
 
 use nomt_core::{
-    page_id::{PageId, ROOT_PAGE_ID},
+    page_id::ROOT_PAGE_ID,
     proof::PathProofTerminal,
     trie::{KeyPath, Node, ValueHash},
 };
@@ -24,8 +24,8 @@ use std::{
 };
 
 use super::{
-    page_walker::{NeedsPage, Output, PageSource, PageWalker},
-    seek::{Completion, Seek, Seeker},
+    page_walker::{Output, PageSource, PageWalker},
+    seek::{Seek, Seeker},
     KeyReadWrite, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand, WorkerOutput,
 };
 
@@ -125,7 +125,7 @@ fn warm_up_phase<H: HashAlgorithm>(
     let mut warm_ups = HashMap::new();
 
     loop {
-        if let Some(Completion::Seek(result)) = seeker.take_completion() {
+        if let Some(result) = seeker.take_completion() {
             warm_ups.insert(result.key, result);
             continue;
         }
@@ -171,7 +171,7 @@ fn warm_up_phase<H: HashAlgorithm>(
     }
 
     while !seeker.is_empty() {
-        if let Some(Completion::Seek(result)) = seeker.take_completion() {
+        if let Some(result) = seeker.take_completion() {
             warm_ups.insert(result.key, result);
             continue;
         }
@@ -215,17 +215,9 @@ fn update<H: HashAlgorithm>(
 
     for (trie_pos, pending_op) in pending_ops {
         match pending_op {
-            RootPagePending::Node(node) => loop {
-                let page = match root_page_updater.advance_and_place_node(
-                    &mut write_pass,
-                    trie_pos.clone(),
-                    node,
-                ) {
-                    Err(NeedsPage(page)) => page,
-                    Ok(()) => break,
-                };
-                drive_page_fetch(&mut seeker, write_pass.downgrade(), page)?;
-            },
+            RootPagePending::Node(node) => {
+                root_page_updater.advance_and_place_node(&mut write_pass, trie_pos.clone(), node)
+            }
             RootPagePending::SubTrie {
                 range_start,
                 range_end,
@@ -233,59 +225,25 @@ fn update<H: HashAlgorithm>(
             } => {
                 let ops = subtrie_ops(&shared.read_write[range_start..range_end]);
                 let ops = nomt_core::update::leaf_ops_spliced(prev_terminal, &ops);
-                loop {
-                    let page = match root_page_updater.advance_and_replace(
-                        &mut write_pass,
-                        trie_pos.clone(),
-                        ops.clone(),
-                    ) {
-                        Err(NeedsPage(page)) => page,
-                        Ok(()) => break,
-                    };
-                    drive_page_fetch(&mut seeker, write_pass.downgrade(), page)?;
-                }
+                root_page_updater.advance_and_replace(
+                    &mut write_pass,
+                    trie_pos.clone(),
+                    ops.clone(),
+                );
             }
         }
     }
 
     // PANIC: output is always root when no parent page is specified.
-    loop {
-        let page = match root_page_updater.conclude(&mut write_pass) {
-            Ok(Output::Root(new_root, diffs)) => {
-                output.page_diffs.extend(diffs);
-                output.root = Some(new_root);
-                break;
-            }
-            Ok(Output::ChildPageRoots(_, _)) => unreachable!(),
-            Err((NeedsPage(page), page_walker)) => {
-                root_page_updater = page_walker;
-                page
-            }
-        };
-        drive_page_fetch(&mut seeker, write_pass.downgrade(), page)?;
-    }
+    match root_page_updater.conclude(&mut write_pass) {
+        Output::Root(new_root, diffs) => {
+            output.page_diffs.extend(diffs);
+            output.root = Some(new_root);
+        }
+        Output::ChildPageRoots(_, _) => unreachable!(),
+    };
 
     Ok(output)
-}
-
-fn drive_page_fetch<H: HashAlgorithm>(
-    seeker: &mut Seeker<H>,
-    read_pass: &ReadPass<ShardIndex>,
-    page: PageId,
-) -> anyhow::Result<()> {
-    seeker.push_single_request(page);
-    loop {
-        match seeker.take_completion() {
-            Some(Completion::SinglePage) => return Ok(()),
-            Some(_) => continue,
-            None => {
-                seeker.submit_all(read_pass)?;
-                if seeker.has_live_requests() {
-                    seeker.recv_page(&read_pass)?;
-                }
-            }
-        }
-    }
 }
 
 // helper for iterating all paths in the range and performing
@@ -299,7 +257,6 @@ struct RangeUpdater<H> {
     page_walker: PageWalker<H>,
     range_start: usize,
     range_end: usize,
-    saved_advance: Option<SavedAdvance>,
 }
 
 impl<H: HashAlgorithm> RangeUpdater<H> {
@@ -344,7 +301,6 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             ),
             range_start,
             range_end,
-            saved_advance: None,
         }
     }
 
@@ -352,13 +308,10 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
     // this terminal.
     fn handle_completion(
         &mut self,
-        seeker: &mut Seeker<H>,
         output: &mut WorkerOutput,
         start_index: usize,
         seek_result: Seek,
     ) -> usize {
-        assert!(self.saved_advance.is_none());
-
         // note that this is only true when the seek result is in the shared area - so multiple
         // workers will encounter it. we use this to defer to the first worker.
         let batch_starts_in_our_range = start_index != self.range_start
@@ -431,7 +384,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         } else {
             None
         };
-        self.attempt_advance(seeker, output, seek_result, ops, batch_size);
+        self.attempt_advance(output, seek_result, ops, batch_size);
 
         next_index
     }
@@ -440,13 +393,12 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
     // the seeker and stores the `SavedAdvance`. if this succeeds, it updates the output.
     fn attempt_advance(
         &mut self,
-        seeker: &mut Seeker<H>,
         output: &mut WorkerOutput,
         seek_result: Seek,
         ops: Option<Vec<(KeyPath, Option<ValueHash>)>>,
         batch_size: usize,
     ) {
-        let res = match ops {
+        match ops {
             None => self
                 .page_walker
                 .advance(&mut self.write_pass, seek_result.position.clone()),
@@ -459,16 +411,6 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                 )
             }
         };
-
-        if let Err(NeedsPage(page)) = res {
-            seeker.push_single_request(page);
-            self.saved_advance = Some(SavedAdvance {
-                seek_result,
-                ops,
-                batch_size,
-            });
-            return;
-        }
 
         if let Some(ref mut witnessed_paths) = output.witnessed_paths {
             let siblings = {
@@ -494,16 +436,6 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         }
     }
 
-    fn reattempt_advance(&mut self, seeker: &mut Seeker<H>, output: &mut WorkerOutput) {
-        // UNWRAP: guaranteed by behavior of seeker / update / advance.
-        let SavedAdvance {
-            ops,
-            seek_result,
-            batch_size,
-        } = self.saved_advance.take().unwrap();
-        self.attempt_advance(seeker, output, seek_result, ops, batch_size);
-    }
-
     fn update(
         mut self,
         seeker: &mut Seeker<H>,
@@ -518,16 +450,15 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
 
         // 1. drive until work is done.
         while start_index < self.range_end || !seeker.is_empty() {
-            let completion = if self.saved_advance.is_none()
-                && warmed_up
-                    .front()
-                    .map_or(false, |res| match seeker.first_key() {
-                        None => true,
-                        Some(k) => &res.key < k,
-                    }) {
+            let completion = if warmed_up
+                .front()
+                .map_or(false, |res| match seeker.first_key() {
+                    None => true,
+                    Some(k) => &res.key < k,
+                }) {
                 // take a "completion" from our warm-ups instead.
                 // UNWRAP: checked front exists above.
-                Some(Completion::Seek(warmed_up.pop_front().unwrap()))
+                Some(warmed_up.pop_front().unwrap())
             } else {
                 seeker.take_completion()
             };
@@ -535,13 +466,12 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             // handle a single completion (only when blocked / at max capacity)
             match completion {
                 None => {}
-                Some(Completion::Seek(seek_result)) => {
+                Some(seek_result) => {
                     // skip completions until we're past the end of the last batch.
                     if skips > 0 {
                         skips -= 1;
                     } else {
-                        let end_index =
-                            self.handle_completion(seeker, output, start_index, seek_result);
+                        let end_index = self.handle_completion(output, start_index, seek_result);
 
                         // account for stuff we pushed that was already covered by the terminal
                         // we just popped off.
@@ -552,9 +482,6 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
 
                         start_index = end_index;
                     }
-                }
-                Some(Completion::SinglePage) => {
-                    self.reattempt_advance(seeker, output);
                 }
             }
 
@@ -584,26 +511,19 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             seeker.try_recv_page(self.write_pass.downgrade())?;
         }
 
-        // 2. conclude, driving additional page fetches as necessary.
-        loop {
-            // PANIC: walker was configured with a parent page.
-            let (new_nodes, diffs) = match self.page_walker.conclude(&mut self.write_pass) {
-                Ok(Output::Root(_, _)) => unreachable!(),
-                Ok(Output::ChildPageRoots(new_nodes, diffs)) => (new_nodes, diffs),
-                Err((NeedsPage(page), page_walker)) => {
-                    self.page_walker = page_walker;
-                    drive_page_fetch(seeker, self.write_pass.downgrade(), page)?;
-                    continue;
-                }
-            };
+        // 2. conclude.
+        // PANIC: walker was configured with a parent page.
+        let (new_nodes, diffs) = match self.page_walker.conclude(&mut self.write_pass) {
+            Output::Root(_, _) => unreachable!(),
+            Output::ChildPageRoots(new_nodes, diffs) => (new_nodes, diffs),
+        };
 
-            assert!(!diffs.iter().any(|item| item.0 == ROOT_PAGE_ID));
-            output.page_diffs = diffs;
+        assert!(!diffs.iter().any(|item| item.0 == ROOT_PAGE_ID));
+        output.page_diffs = diffs;
 
-            self.shared.push_pending_root_nodes(new_nodes);
+        self.shared.push_pending_root_nodes(new_nodes);
 
-            return Ok(self.write_pass.consume());
-        }
+        return Ok(self.write_pass.consume());
     }
 }
 
@@ -617,11 +537,4 @@ fn subtrie_ops(read_write: &[(KeyPath, KeyReadWrite)]) -> Vec<(KeyPath, Option<V
             KeyReadWrite::Read => None,
         })
         .collect::<Vec<_>>()
-}
-
-struct SavedAdvance {
-    // none: no writes
-    ops: Option<Vec<(KeyPath, Option<ValueHash>)>>,
-    seek_result: Seek,
-    batch_size: usize,
 }
