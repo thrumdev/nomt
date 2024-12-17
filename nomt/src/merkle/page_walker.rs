@@ -1140,10 +1140,7 @@ mod tests {
             );
 
             match walker.conclude(&mut write_pass) {
-                Output::Root(new_root, diffs) => {
-                    println!("{diffs:?}");
-                    new_root
-                }
+                Output::Root(new_root, _) => new_root,
                 _ => unreachable!(),
             }
         };
@@ -1158,7 +1155,6 @@ mod tests {
         let root = match walker.conclude(&mut write_pass) {
             Output::Root(new_root, diffs) => {
                 let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
-                println!("{diffs:?}");
                 assert!(!diffs.get(&page_id_2).unwrap().cleared());
                 new_root
             }
