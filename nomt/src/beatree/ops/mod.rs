@@ -21,6 +21,27 @@ mod update;
 pub use reconstruction::reconstruct;
 pub use update::update;
 
+/// Partially look up a key in the btree. This will determine the leaf node page the leaf is within.
+pub fn partial_lookup(key: Key, bbn_index: &Index) -> Option<PageNumber> {
+    let branch = match bbn_index.lookup(key) {
+        None => return None,
+        Some((_, branch)) => branch,
+    };
+
+    search_branch(&branch, key.clone()).map(|(_, leaf_pn)| leaf_pn)
+}
+
+/// Finish looking up a key in a leaf node.
+pub fn finish_lookup(key: Key, leaf: &LeafNode, leaf_store: &StoreReader) -> Option<Vec<u8>> {
+    leaf.get(&key).map(|(v, is_overflow)| {
+        if is_overflow {
+            leaf::overflow::read(v, leaf_store)
+        } else {
+            v.to_vec()
+        }
+    })
+}
+
 /// Lookup a key in the btree.
 pub fn lookup(
     key: Key,
@@ -28,14 +49,9 @@ pub fn lookup(
     leaf_cache: &LeafCache,
     leaf_store: &StoreReader,
 ) -> Result<Option<Vec<u8>>> {
-    let branch = match bbn_index.lookup(key) {
+    let leaf_pn = match partial_lookup(key, bbn_index) {
         None => return Ok(None),
-        Some((_, branch)) => branch,
-    };
-
-    let leaf_pn = match search_branch(&branch, key.clone()) {
-        None => return Ok(None),
-        Some((_, leaf_pn)) => leaf_pn,
+        Some(pn) => pn,
     };
 
     let leaf = match leaf_cache.get(leaf_pn) {
@@ -49,15 +65,7 @@ pub fn lookup(
         }
     };
 
-    let maybe_value = leaf.get(&key).map(|(v, is_overflow)| {
-        if is_overflow {
-            leaf::overflow::read(v, leaf_store)
-        } else {
-            v.to_vec()
-        }
-    });
-
-    Ok(maybe_value)
+    Ok(finish_lookup(key, &leaf, leaf_store))
 }
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
