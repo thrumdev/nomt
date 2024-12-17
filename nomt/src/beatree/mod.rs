@@ -187,10 +187,9 @@ impl Tree {
             bbn_index: shared.bbn_index.clone(),
             primary_staging: shared.primary_staging.clone(),
             secondary_staging: shared.secondary_staging.clone(),
-            leaf_store: shared.leaf_store.clone(),
+            leaf_store: StoreReader::new(shared.leaf_store.clone(), shared.page_pool.clone()),
             leaf_cache: shared.leaf_cache.clone(),
             read_counter: self.read_transaction_counter.clone(),
-            page_pool: shared.page_pool.clone(),
         });
 
         ReadTransaction { inner }
@@ -497,10 +496,9 @@ struct ReadTransactionInner {
     bbn_index: Index,
     primary_staging: OrdMap<Key, ValueChange>,
     secondary_staging: Option<OrdMap<Key, ValueChange>>,
-    leaf_store: Store,
+    leaf_store: StoreReader,
     leaf_cache: LeafCache,
     read_counter: ReadTransactionCounter,
-    page_pool: PagePool,
 }
 
 impl ReadTransaction {
@@ -531,16 +529,53 @@ impl ReadTransaction {
         if let Some(leaf) = self.inner.leaf_cache.get(page_number) {
             Ok(LeafNodeRef { inner: leaf })
         } else {
-            let command =
-                self.inner
-                    .leaf_store
-                    .io_command(&self.inner.page_pool, page_number, user_data);
+            let command = self.inner.leaf_store.io_command(page_number, user_data);
 
             let _ = io_handle.send(command);
             Err(AsyncLeafLoad {
                 page_number,
                 read_tx: self.inner.clone(),
             })
+        }
+    }
+
+    /// Initiate an asynchronous lookup of a value. This may return immediately if the leaf is cached.
+    ///
+    /// This is an error-prone, low-level API you should not use unless you know what you are doing.
+    ///
+    /// If `Ok` is returned, then no I/O command has been submitted along the handle.
+    /// If `Err` is returned, then an I/O command has been submitted along the handle, and the
+    /// user_data is as specified.
+    #[allow(dead_code)]
+    pub fn lookup_async(
+        &self,
+        key: Key,
+        io_handle: &IoHandle,
+        user_data: u64,
+    ) -> Result<Option<Vec<u8>>, AsyncLookup> {
+        // First look up in the primary staging which contains the most recent changes.
+        if let Some(val) = self.inner.primary_staging.get(&key) {
+            return Ok(val.as_option().map(|v| v.to_vec()));
+        }
+
+        // Then check the secondary staging which is a bit older, but fresher still than the btree.
+        if let Some(val) = self
+            .inner
+            .secondary_staging
+            .as_ref()
+            .and_then(|x| x.get(&key))
+        {
+            return Ok(val.as_option().map(|v| v.to_vec()));
+        }
+
+        let leaf_pn = match ops::partial_lookup(key, &self.inner.bbn_index) {
+            None => return Ok(None),
+            Some(pn) => pn,
+        };
+
+        match self.load_leaf_async(leaf_pn, io_handle, user_data) {
+            Ok(leaf) => Ok(ops::finish_lookup(key, &leaf.inner, &self.inner.leaf_store)),
+            Err(pending) => Err(AsyncLookup(key, pending)),
         }
     }
 }
@@ -553,26 +588,50 @@ impl Drop for ReadTransactionInner {
 
 /// A type representing a pending leaf load. This keeps the associated read transaction alive
 /// throughout its lifetime.
+#[allow(dead_code)]
 pub struct AsyncLeafLoad {
     read_tx: Arc<ReadTransactionInner>,
     page_number: PageNumber,
 }
 
+#[allow(dead_code)]
 impl AsyncLeafLoad {
     /// Finish the leaf load.
     /// Calling this with the wrong page will likely lead to panics or bugs in the future.
     pub fn finish(self, page: FatPage) -> LeafNodeRef {
+        LeafNodeRef {
+            inner: self.finish_inner(page),
+        }
+    }
+
+    fn finish_inner(&self, page: FatPage) -> Arc<leaf::node::LeafNode> {
         let leaf_node = Arc::new(leaf::node::LeafNode { inner: page });
 
         self.read_tx
             .leaf_cache
             .insert(self.page_number, leaf_node.clone());
-        LeafNodeRef { inner: leaf_node }
+
+        leaf_node
     }
 
     /// Get the page number associated with this leaf load.
     pub fn page_number(&self) -> PageNumber {
         self.page_number
+    }
+}
+
+/// A type representing a pending lookup. This keeps the associated read transaction alive
+/// throughout its lifetime.
+#[allow(dead_code)]
+pub struct AsyncLookup(Key, AsyncLeafLoad);
+
+#[allow(dead_code)]
+impl AsyncLookup {
+    /// Finish the lookup.
+    /// Calling this with the wrong page will likely lead to panics or bugs in the future.
+    pub fn finish(self, page: FatPage) -> Option<Vec<u8>> {
+        let leaf = self.1.finish_inner(page);
+        ops::finish_lookup(self.0, &leaf, &self.1.read_tx.leaf_store)
     }
 }
 
