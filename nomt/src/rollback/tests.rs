@@ -1,10 +1,10 @@
 use std::{collections::BTreeSet, fs::OpenOptions, sync::Arc};
 
-use super::{BTreeMap, KeyPath, KeyReadWrite, LoadValue, Rollback};
+use super::{AsyncPending, BTreeMap, KeyPath, KeyReadWrite, LoadValueAsync, Rollback};
+use crossbeam::channel::{Receiver, Sender};
 use hex_literal::hex;
 
 const MAX_ROLLBACK_LOG_LEN: u32 = 100;
-const ROLLBACK_TP_SIZE: usize = 4;
 
 /// A mock implementation of `LoadValue` for testing. Describes the "current" state of the
 /// database.
@@ -40,18 +40,59 @@ impl MockStore {
         );
         self.traps.insert(key_path);
     }
+
+    fn async_reader(&self) -> MockStoreAsync {
+        let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
+        MockStoreAsync {
+            inner: self.clone(),
+            completion_tx,
+            completion_rx,
+        }
+    }
 }
 
-impl LoadValue for MockStore {
-    fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>> {
-        if self.traps.contains(&key_path) {
+struct MockStoreAsync {
+    inner: MockStore,
+    completion_tx: Sender<(u64, Option<Vec<u8>>)>,
+    completion_rx: Receiver<(u64, Option<Vec<u8>>)>,
+}
+
+struct MockPending;
+
+impl AsyncPending<Option<Vec<u8>>> for MockPending {
+    fn complete(self, completion: Option<Vec<u8>>) -> Option<Vec<u8>> {
+        completion
+    }
+}
+
+impl LoadValueAsync for MockStoreAsync {
+    type Completion = Option<Vec<u8>>;
+    type Pending = MockPending;
+
+    fn start_load(
+        &self,
+        key_path: KeyPath,
+        user_data: u64,
+    ) -> Result<Option<Vec<u8>>, Self::Pending> {
+        if self.inner.traps.contains(&key_path) {
             panic!("the caller requested a value that was trapped by the test");
         }
 
-        match self.values.get(&key_path) {
-            Some(value) => return Ok(value.clone()),
+        let res = match self.inner.values.get(&key_path) {
+            Some(value) => value.clone(),
             None => panic!("the caller requested a value that was not inserted by the test"),
-        }
+        };
+
+        self.completion_tx.send((user_data, res)).unwrap();
+
+        Err(MockPending)
+    }
+
+    fn build_next(
+        &self,
+    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static {
+        let mut rx = self.completion_rx.clone().into_iter();
+        move || rx.next().map(|(user_data, res)| (user_data, Ok(res)))
     }
 }
 
@@ -79,22 +120,14 @@ fn truncate_works() {
         Some(b"old_value3".to_vec()),
     );
 
-    let rollback = Rollback::read(
-        MAX_ROLLBACK_LOG_LEN,
-        ROLLBACK_TP_SIZE,
-        db_dir_path,
-        Arc::new(db_dir_fd),
-        0,
-        0,
-    )
-    .unwrap();
-    let builder = rollback.delta_builder();
-    builder.tentative_preserve_prior(store.clone(), [1; 32]);
-    builder.tentative_preserve_prior(store.clone(), [2; 32]);
-    builder.tentative_preserve_prior(store.clone(), [3; 32]);
+    let rollback =
+        Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, Arc::new(db_dir_fd), 0, 0).unwrap();
+    let builder = rollback.delta_builder_inner(store.async_reader());
+    builder.tentative_preserve_prior([1; 32]);
+    builder.tentative_preserve_prior([2; 32]);
+    builder.tentative_preserve_prior([3; 32]);
     rollback
         .commit(
-            store.clone(),
             &[
                 (
                     hex!("0101010101010101010101010101010101010101010101010101010101010101"),
@@ -158,19 +191,11 @@ fn without_tentative_preserve_prior() {
         Some(b"old_value3".to_vec()),
     );
 
-    let rollback = Rollback::read(
-        MAX_ROLLBACK_LOG_LEN,
-        ROLLBACK_TP_SIZE,
-        db_dir_path,
-        Arc::new(db_dir_fd),
-        0,
-        0,
-    )
-    .unwrap();
-    let builder = rollback.delta_builder();
+    let rollback =
+        Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, Arc::new(db_dir_fd), 0, 0).unwrap();
+    let builder = rollback.delta_builder_inner(store.async_reader());
     rollback
         .commit(
-            store.clone(),
             &[
                 (
                     hex!("0101010101010101010101010101010101010101010101010101010101010101"),
@@ -226,19 +251,11 @@ fn delta_builder_doesnt_load_read_then_write_priors() {
     let mut store = MockStore::new();
     store.trap(key_1);
 
-    let rollback = Rollback::read(
-        MAX_ROLLBACK_LOG_LEN,
-        ROLLBACK_TP_SIZE,
-        db_dir_path,
-        Arc::new(db_dir_fd),
-        0,
-        0,
-    )
-    .unwrap();
-    let builder = rollback.delta_builder();
+    let rollback =
+        Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, Arc::new(db_dir_fd), 0, 0).unwrap();
+    let builder = rollback.delta_builder_inner(store.async_reader());
     rollback
         .commit(
-            store,
             &[(
                 key_1,
                 KeyReadWrite::ReadThenWrite(

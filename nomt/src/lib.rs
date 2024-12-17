@@ -275,7 +275,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         assert_eq!(prev, 0, "only one session could be active at a time");
         let store = self.store.clone();
         let rollback_delta = if allow_rollback {
-            self.store.rollback().map(|r| r.delta_builder())
+            self.store.rollback().map(|r| r.delta_builder(&store))
         } else {
             None
         };
@@ -349,7 +349,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         if let Some(delta_builder) = session.rollback_delta.take() {
             // UNWRAP: if rollback_delta is `Some``, then rollback must be also `Some`.
             let rollback = self.store.rollback().unwrap();
-            rollback.commit(self.store.clone(), &actuals, delta_builder)?;
+            rollback.commit(&actuals, delta_builder)?;
         }
 
         let mut compact_actuals = Vec::with_capacity(actuals.len());
@@ -490,7 +490,7 @@ impl Session {
     /// this call is issued, the better for efficiency.
     pub fn preserve_prior_value(&self, path: KeyPath) {
         if let Some(rollback) = &self.rollback_delta {
-            rollback.tentative_preserve_prior(self.store.clone(), path);
+            rollback.tentative_preserve_prior(path);
         }
     }
 }

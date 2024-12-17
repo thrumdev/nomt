@@ -548,7 +548,6 @@ impl ReadTransaction {
     /// If `Ok` is returned, then no I/O command has been submitted along the handle.
     /// If `Err` is returned, then an I/O command has been submitted along the handle, and the
     /// user_data is as specified.
-    #[allow(dead_code)]
     pub fn lookup_async(
         &self,
         key: Key,
@@ -604,13 +603,11 @@ impl Drop for ReadTransactionInner {
 
 /// A type representing a pending leaf load. This keeps the associated read transaction alive
 /// throughout its lifetime.
-#[allow(dead_code)]
 pub struct AsyncLeafLoad {
     read_tx: Arc<ReadTransactionInner>,
     page_number: PageNumber,
 }
 
-#[allow(dead_code)]
 impl AsyncLeafLoad {
     /// Finish the leaf load.
     ///
@@ -650,11 +647,11 @@ enum AsyncLookupState {
     Done,
 }
 
-#[allow(dead_code)]
 impl AsyncLookup {
     /// Attempt to submit a continuation request along the handle.
     ///
     /// This should not be called unless `try_finish` has failed at least once.
+    #[allow(dead_code)]
     pub fn submit(&mut self, io_handle: &IoHandle, user_data: u64) -> Option<OverflowPageInfo> {
         match self.state {
             AsyncLookupState::Initial(_) => None,
