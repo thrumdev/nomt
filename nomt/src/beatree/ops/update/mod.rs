@@ -16,6 +16,7 @@ use crate::beatree::{
 };
 use crate::io::{IoHandle, PagePool};
 
+mod branch_ops;
 mod branch_stage;
 mod branch_updater;
 mod extend_range_protocol;
