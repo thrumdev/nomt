@@ -9,13 +9,14 @@
 //! The deltas are also persisted on disk in a [`seglog`].
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs::File,
     io::Cursor,
     path::PathBuf,
     sync::Arc,
 };
 
+use crossbeam::channel::{Receiver, RecvError, Sender};
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
 use parking_lot::{Condvar, Mutex};
@@ -23,6 +24,8 @@ use threadpool::ThreadPool;
 
 use self::delta::Delta;
 use crate::{
+    beatree::{AsyncLookup, ReadTransaction},
+    io::{FatPage, IoHandle},
     seglog::{self, RecordId, SegmentedLog},
     KeyReadWrite,
 };
@@ -80,6 +83,8 @@ impl InMemory {
     }
 }
 
+const ROLLBACK_TP_SIZE: usize = 2;
+
 /// This structure manages the rollback log. Modifications to the rollback log are made using
 /// [`ReverseDeltaBuilder`] supplied to [`Rollback::commit`].
 #[derive(Clone)]
@@ -90,7 +95,6 @@ pub struct Rollback {
 impl Rollback {
     pub fn read(
         max_rollback_log_len: u32,
-        rollback_tp_size: usize,
         db_dir_path: PathBuf,
         db_dir_fd: Arc<File>,
         rollback_start_active: u64,
@@ -112,7 +116,7 @@ impl Rollback {
             },
         )?;
         let shared = Arc::new(Shared {
-            worker_tp: ThreadPool::new(rollback_tp_size),
+            worker_tp: ThreadPool::new(ROLLBACK_TP_SIZE),
             sync_tp: ThreadPool::new(1),
             in_memory: Mutex::new(in_memory),
             seglog: Mutex::new(seglog),
@@ -122,10 +126,28 @@ impl Rollback {
     }
 
     /// Begin a rollback delta.
-    pub fn delta_builder(&self) -> ReverseDeltaBuilder {
+    pub fn delta_builder(&self, store: &crate::Store) -> ReverseDeltaBuilder {
+        self.delta_builder_inner(StoreLoadValueAsync::new(store))
+    }
+
+    // generality is primarily for testing.
+    fn delta_builder_inner(&self, store: impl LoadValueAsync) -> ReverseDeltaBuilder {
+        let (command_tx, command_rx) = crossbeam::channel::unbounded();
+        let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
+
+        let priors = Arc::new(DashMap::new());
+        let next_fn = store.build_next();
+        self.shared.worker_tp.execute({
+            let priors = priors.clone();
+            move || reverse_delta_worker(store, command_rx, completion_rx, priors)
+        });
+        self.shared
+            .worker_tp
+            .execute(move || reverse_delta_completion_worker(completion_tx, next_fn));
         ReverseDeltaBuilder {
+            command_tx,
             tp: self.shared.worker_tp.clone(),
-            priors: Arc::new(DashMap::new()),
+            priors,
         }
     }
 
@@ -135,11 +157,10 @@ impl Rollback {
     /// key paths in ascending order.
     pub fn commit(
         &self,
-        store: impl LoadValue,
         actuals: &[(KeyPath, KeyReadWrite)],
         delta: ReverseDeltaBuilder,
     ) -> anyhow::Result<()> {
-        let delta = delta.finalize(store, actuals);
+        let delta = delta.finalize(actuals);
         let delta_bytes = delta.encode();
 
         let mut in_memory = self.shared.in_memory.lock();
@@ -350,6 +371,7 @@ struct WriteoutData {
 }
 
 pub struct ReverseDeltaBuilder {
+    command_tx: Sender<DeltaBuilderCommand>,
     tp: ThreadPool,
     /// The values of the keys that should be preserved at commit time for this delta.
     ///
@@ -357,16 +379,134 @@ pub struct ReverseDeltaBuilder {
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
 }
 
-/// A trait for loading values from the store.
+/// A trait for asynchronously loading values from the store.
 ///
-/// This seam allows us to mock the store in tests.
-pub trait LoadValue: Clone + Send + Sync + 'static {
-    fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>>;
+/// This family of traits allows us to mock the store in tests.
+///
+/// Dropping a value implementing this trait should end its corresponding completion stream.
+pub trait LoadValueAsync: Send + Sync + 'static {
+    type Pending: AsyncPending<Self::Completion>;
+    type Completion: Send;
+
+    /// Start a load. This may complete eagerly or return a pending result.
+    fn start_load(
+        &self,
+        key_path: KeyPath,
+        user_data: u64,
+    ) -> Result<Option<Vec<u8>>, Self::Pending>;
+
+    /// Create the completion function.
+    fn build_next(
+        &self,
+    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static;
 }
 
-impl LoadValue for crate::store::Store {
-    fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>> {
-        self.load_value(key_path)
+/// A trait for a pending asynchronous value load.
+///
+/// This family of traits allows us to mock the store in tests.
+pub trait AsyncPending<Completion> {
+    fn complete(self, completion: Completion) -> Option<Vec<u8>>;
+}
+
+struct LoadValueCompletion<T>(u64, anyhow::Result<T>);
+
+enum DeltaBuilderCommand {
+    /// Start lookup on a key path.
+    Lookup(KeyPath),
+    /// Join all outstanding lookups, then send a signal over the channel.
+    /// Replace the priors with the given map.
+    Join(Sender<()>, Arc<DashMap<KeyPath, Option<Vec<u8>>>>),
+}
+
+// This worker manages all reverse value requests asynchronously.
+fn reverse_delta_worker<Store: LoadValueAsync>(
+    store: Store,
+    command_rx: Receiver<DeltaBuilderCommand>,
+    completion_rx: Receiver<LoadValueCompletion<Store::Completion>>,
+    mut priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
+) {
+    let mut requests = HashMap::new();
+    let mut request_index = 0u64;
+    let mut store = Some(store);
+
+    let mut handle_lookup = |key_path,
+                             store: &mut Option<Store>,
+                             priors: &DashMap<_, _>,
+                             requests: &mut HashMap<_, _>| {
+        // UNWRAP: `Load` commands never come after finish.
+        let store = store.as_ref().unwrap();
+        match store.start_load(key_path, request_index) {
+            Ok(val) => {
+                priors.insert(key_path, val);
+            }
+            Err(pending) => {
+                requests.insert(request_index, (pending, key_path));
+                request_index += 1;
+            }
+        }
+    };
+
+    let handle_completion = |user_data,
+                             maybe_completion: anyhow::Result<_>,
+                             priors: &DashMap<_, _>,
+                             requests: &mut HashMap<_, _>| {
+        // TODO handle error properly
+        let completion: Store::Completion = maybe_completion.unwrap();
+
+        // UNWRAP: completions always come for issued requests only.
+        let (request, key_path): (Store::Pending, _) = requests.remove(&user_data).unwrap();
+        let value = request.complete(completion);
+        priors.insert(key_path, value);
+    };
+
+    loop {
+        let join = crossbeam::select! {
+            recv(command_rx) -> command => match command {
+                Err(RecvError) => {
+                    // drop the store, so completions stop as well.
+                    let _ = store.take();
+                    break
+                }
+                Ok(DeltaBuilderCommand::Lookup(key_path)) => {
+                    handle_lookup(key_path, &mut store, &priors, &mut requests);
+                    None
+                },
+                Ok(DeltaBuilderCommand::Join(done_joining, new_priors)) => Some((done_joining, new_priors)),
+            },
+            recv(completion_rx) -> completion => match completion {
+                // PANIC: completions never disconnect before commands.
+                Err(RecvError) => unreachable!(),
+                Ok(LoadValueCompletion(user_data, completion)) => {
+                    handle_completion(user_data, completion, &priors, &mut requests);
+                    None
+                },
+            },
+        };
+
+        if let Some((done_joining, new_priors)) = join {
+            while !requests.is_empty() {
+                // UNWRAP: completions never disconnect before `commands` does.
+                let LoadValueCompletion(user_data, completion) = completion_rx.recv().unwrap();
+                handle_completion(user_data, completion, &priors, &mut requests);
+            }
+
+            priors = new_priors;
+            let _ = done_joining.send(());
+        }
+    }
+
+    // wait on outstanding completions.
+    for LoadValueCompletion(user_data, completion) in completion_rx {
+        handle_completion(user_data, completion, &priors, &mut requests);
+    }
+}
+
+fn reverse_delta_completion_worker<F, T>(completion_tx: Sender<LoadValueCompletion<T>>, mut next: F)
+where
+    F: FnMut() -> Option<(u64, anyhow::Result<T>)>,
+{
+    while let Some((user_data, result)) = next() {
+        let _ = completion_tx.send(LoadValueCompletion(user_data, result));
     }
 }
 
@@ -376,28 +516,26 @@ impl ReverseDeltaBuilder {
     /// different set of operations, and some of the tentative operations may be discarded.
     ///
     /// This function doesn't block.
-    pub fn tentative_preserve_prior(&self, store: impl LoadValue, key_path: KeyPath) {
-        self.tp.execute({
-            let priors = self.priors.clone();
-            move || {
-                let value = store.load_value(key_path).unwrap();
-                priors.insert(key_path, value);
-            }
-        });
+    pub fn tentative_preserve_prior(&self, key_path: KeyPath) {
+        let _ = self.command_tx.send(DeltaBuilderCommand::Lookup(key_path));
     }
 
     /// Finalize the delta.
     ///
     /// This function is expected to be called before the store is modified.
-    fn finalize(self, store: impl LoadValue, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
-        // Wait for all tentative writes issued so far to complete.
-        //
-        // NB: This doesn't take into account other users of `tp`. If there are any, we will be
-        // needlessly blocking on them.
-        self.tp.join();
+    fn finalize(self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
+        // wait for all submitted requests to finish.
+        let fresh_priors = Arc::new(DashMap::new());
+        let (join_tx, join_rx) = crossbeam::channel::bounded(1);
+        let _ = self
+            .command_tx
+            .send(DeltaBuilderCommand::Join(join_tx, fresh_priors.clone()));
+        let _ = join_rx.recv();
 
-        let tentative_priors = Arc::clone(&self.priors);
-        let final_priors = Arc::new(DashMap::with_capacity(tentative_priors.len() * 2));
+        // At this point, `tentative_priors` is unique, because the worker has swapped
+        // with `fresh_priors`.
+        let tentative_priors = self.priors;
+        let mut final_priors = HashMap::with_capacity(tentative_priors.len() * 2);
 
         for (path, read_write) in actuals {
             match read_write {
@@ -413,13 +551,7 @@ impl ReverseDeltaBuilder {
                     } else {
                         // The delta builder was not aware of this write. Initiate a fetch from the store
                         // and record the result as a prior.
-                        let store = store.clone();
-                        let path = path.clone();
-                        let final_priors = final_priors.clone();
-                        self.tp.execute(move || {
-                            let value = store.load_value(path).unwrap();
-                            final_priors.insert(path, value);
-                        });
+                        let _ = self.command_tx.send(DeltaBuilderCommand::Lookup(*path));
                     }
                 }
                 KeyReadWrite::ReadThenWrite(prior, _) => {
@@ -429,12 +561,69 @@ impl ReverseDeltaBuilder {
             }
         }
 
-        // Wait for all the fetches to complete. After this point, priors contains the final set of
+        // Wait for the load worker to join. After this point, priors contains the final set of
         // values to be preserved.
-        self.tp.join();
+        drop(self.command_tx);
+        let _ = self.tp.join();
 
+        // UNWRAP: At this point, `fresh_priors` is unique because the worker thread has joined.
+        // At this point, fresh_priors is fully populated with all lookups submitted in the loop.
+        let fresh_priors = Arc::into_inner(fresh_priors).unwrap().into_iter();
+        final_priors.extend(fresh_priors);
         Delta {
-            priors: Arc::into_inner(final_priors).unwrap().into_iter().collect(),
+            priors: final_priors,
+        }
+    }
+}
+
+pub struct StoreLoadValueAsync {
+    read_tx: ReadTransaction,
+    io_handle: IoHandle,
+}
+
+impl StoreLoadValueAsync {
+    /// Create a new asynchronous value loader from the store.
+    pub fn new(store: &crate::store::Store) -> Self {
+        let read_tx = store.read_transaction();
+        let io_handle = store.io_pool().make_handle();
+
+        StoreLoadValueAsync { read_tx, io_handle }
+    }
+}
+
+impl AsyncPending<FatPage> for AsyncLookup {
+    fn complete(mut self, completion: FatPage) -> Option<Vec<u8>> {
+        // UNWRAP: fixed in follow up
+        self.try_finish(completion, None).unwrap()
+    }
+}
+
+impl LoadValueAsync for StoreLoadValueAsync {
+    type Completion = FatPage;
+    type Pending = AsyncLookup;
+
+    fn start_load(
+        &self,
+        key_path: KeyPath,
+        user_data: u64,
+    ) -> Result<Option<Vec<u8>>, Self::Pending> {
+        self.read_tx
+            .lookup_async(key_path, &self.io_handle, user_data)
+    }
+
+    fn build_next(
+        &self,
+    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static {
+        // using just the receiver ensures that when `self` is dropped, the completion stream ends.
+        let mut receiver = self.io_handle.receiver().clone().into_iter();
+        move || {
+            receiver.next().map(|complete_io| {
+                let user_data = complete_io.command.user_data;
+                let res = complete_io
+                    .result
+                    .map(|()| complete_io.command.kind.unwrap_buf());
+                (user_data, res.map_err(Into::into))
+            })
         }
     }
 }
