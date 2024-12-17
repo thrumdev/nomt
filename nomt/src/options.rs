@@ -17,8 +17,6 @@ pub struct Options {
     /// The maximum number of commits that can be rolled back.
     pub(crate) max_rollback_log_len: u32,
     pub(crate) warm_up: bool,
-    /// The number of threads to use for fetching prior values.
-    pub(crate) rollback_tp_size: usize,
     /// Whether to preallocate the hashtable file.
     pub(crate) preallocate_ht: bool,
 }
@@ -41,7 +39,6 @@ impl Options {
             rollback: false,
             max_rollback_log_len: 100,
             warm_up: false,
-            rollback_tp_size: 4,
             preallocate_ht: true,
         }
     }
@@ -114,15 +111,6 @@ impl Options {
     /// Enabling this feature can pessimize performance.
     pub fn warm_up(&mut self, warm_up: bool) {
         self.warm_up = warm_up;
-    }
-
-    /// Set the number of threads to use for fetching prior values.
-    ///
-    /// Only relevant if rollback is enabled.
-    ///
-    /// Default: 4.
-    pub fn rollback_tp_size(&mut self, rollback_tp_size: usize) {
-        self.rollback_tp_size = rollback_tp_size;
     }
 
     /// Sets whether to preallocate the hashtable file.
