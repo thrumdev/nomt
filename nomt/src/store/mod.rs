@@ -24,7 +24,7 @@ use std::{
 use std::os::unix::fs::OpenOptionsExt as _;
 
 pub use self::page_loader::{PageLoad, PageLoader};
-pub use bitbox::BucketIndex;
+pub use bitbox::{BucketIndex, HashTableUtilization};
 
 mod flock;
 mod meta;
@@ -237,6 +237,11 @@ impl Store {
     /// Access the underlying IoPool.
     pub fn io_pool(&self) -> &IoPool {
         &self.shared.io_pool
+    }
+
+    /// Get the hash-table bucket counts.
+    pub fn hash_table_utilization(&self) -> HashTableUtilization {
+        self.shared.pages.utilization()
     }
 
     /// Create a new raw value transaction to be applied against this database.

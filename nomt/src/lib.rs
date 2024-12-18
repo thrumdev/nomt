@@ -26,7 +26,7 @@ use store::Store;
 pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node, NodePreimage};
 pub use options::{Options, PanicOnSyncMode};
-
+pub use store::HashTableUtilization;
 // beatree module needs to be exposed to be benchmarked
 #[cfg(feature = "benchmarks")]
 #[allow(missing_docs)]
@@ -421,6 +421,11 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// To collect them, they need to be activated at [`Nomt`] creation
     pub fn metrics(&self) -> Metrics {
         self.metrics.clone()
+    }
+
+    /// Get the hash-table space utilization.
+    pub fn hash_table_utilization(&self) -> HashTableUtilization {
+        self.store.hash_table_utilization()
     }
 }
 
