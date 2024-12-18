@@ -103,7 +103,7 @@ struct TestPlan {
 impl TestPlan {
     /// Generate a test plan for a NOMT with `n` commits. The zero-th commit always corresponds
     /// to the initial empty tree.
-    fn generate(name: &'static str, n: usize) -> Self {
+    fn generate(name: &'static str, n: usize, overflow: bool) -> Self {
         let mut every_key = BTreeSet::new();
         let mut to_insert = Vec::new();
         let mut to_remove = Vec::new();
@@ -126,7 +126,17 @@ impl TestPlan {
                 key[30] = commit_ix as u8;
                 key[31] = j as u8;
                 let key = *blake3::hash(&key).as_bytes();
-                let value: Vec<u8> = blake3::hash(&key).as_bytes().to_vec();
+
+                let value: Vec<u8> = if overflow {
+                    // 32KB
+                    std::iter::repeat(blake3::hash(&key).as_bytes())
+                        .take(1024)
+                        .flatten()
+                        .copied()
+                        .collect()
+                } else {
+                    blake3::hash(&key).as_bytes().to_vec()
+                };
                 // vec![commit_ix as u8, j as u8];
 
                 per_commit_insert.insert(key, value.clone());
@@ -287,7 +297,7 @@ fn display_keys_and_values<'a>(kv: impl IntoIterator<Item = (&'a KeyPath, &'a Va
 #[test]
 fn test_rollback_all() {
     let n = 10;
-    let plan = TestPlan::generate("all", n);
+    let plan = TestPlan::generate("all", n, false);
     let mut nomt = setup_nomt(
         "test_rollback_all",
         /* enable_rollback */ true,
@@ -303,7 +313,7 @@ fn test_rollback_all() {
 #[test]
 fn test_rollback_one_by_one() {
     let n = 10;
-    let plan = TestPlan::generate("one_by_one", n);
+    let plan = TestPlan::generate("one_by_one", n, false);
     let mut nomt = setup_nomt(
         "one_by_one",
         /* enable_rollback */ true,
@@ -320,9 +330,28 @@ fn test_rollback_one_by_one() {
 }
 
 #[test]
+fn test_rollback_one_by_one_with_overflow() {
+    let n = 10;
+    let plan = TestPlan::generate("one_by_one_overflow", n, true);
+    let mut nomt = setup_nomt(
+        "one_by_one_overflow",
+        /* enable_rollback */ true,
+        /* commit_concurrency */ 10,
+        /* should_clean_up */ true,
+    );
+
+    plan.apply_forward(&mut nomt);
+
+    for i in (0..n).rev() {
+        nomt.rollback(1).unwrap();
+        plan.verify_restored_state(&mut nomt, i);
+    }
+}
+
+#[test]
 fn test_rollback_multiple_equivalence() {
     let n = 10;
-    let plan = TestPlan::generate("multiple_equivalence", n);
+    let plan = TestPlan::generate("multiple_equivalence", n, false);
     let mut nomt = setup_nomt(
         "multiple_equivalence",
         /* rollback_enabled */ true,
@@ -352,7 +381,7 @@ fn test_rollback_multiple_equivalence() {
 fn test_rollback_reopen() {
     // This test ensures that we can still rollback after restarting of NOMT.
     let n = 10;
-    let plan = TestPlan::generate("rollback_reopen", n);
+    let plan = TestPlan::generate("rollback_reopen", n, false);
     let mut nomt = setup_nomt(
         "rollback_reopen",
         /* rollback_enabled */ true,
@@ -380,7 +409,7 @@ fn test_rollback_reopen() {
 #[test]
 fn test_rollback_change_history() {
     let n = 10;
-    let plan = TestPlan::generate("rollback_change_history", n);
+    let plan = TestPlan::generate("rollback_change_history", n, false);
     let mut nomt = setup_nomt(
         "rollback_change_history",
         /* rollback_enabled */ true,
