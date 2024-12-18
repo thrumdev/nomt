@@ -15,7 +15,6 @@ fn setup_nomt(path: &str, should_clean_up: bool) -> anyhow::Result<Nomt<Blake3Ha
     }
     let mut o = Options::new();
     o.path(path);
-    o.panic_on_sync(false);
     o.bitbox_seed([0; 16]);
     Nomt::open(o)
 }

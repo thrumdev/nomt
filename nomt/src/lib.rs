@@ -25,7 +25,7 @@ use store::Store;
 
 pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node, NodePreimage};
-pub use options::Options;
+pub use options::{Options, PanicOnSyncMode};
 
 // beatree module needs to be exposed to be benchmarked
 #[cfg(feature = "benchmarks")]

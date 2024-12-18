@@ -14,6 +14,7 @@ fn test_write_read() {
     };
 
     let mut builder = WalBlobBuilder::new().unwrap();
+    builder.reset(69);
     builder.write_clear(0);
     builder.write_update(
         [0; 32],
@@ -52,6 +53,8 @@ fn test_write_read() {
 
     let page_pool = PagePool::new();
     let mut reader = WalBlobReader::new(&page_pool, &wal_fd).unwrap();
+
+    assert_eq!(reader.sync_seqn(), 69);
     assert_eq!(
         reader.read_entry().unwrap(),
         Some(WalEntry::Clear { bucket: 0 })

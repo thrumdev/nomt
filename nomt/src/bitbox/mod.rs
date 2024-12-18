@@ -54,6 +54,7 @@ pub struct Shared {
 impl DB {
     /// Opens an existing bitbox database.
     pub fn open(
+        sync_seqn: u32,
         num_pages: u32,
         seed: [u8; 16],
         page_pool: PagePool,
@@ -68,7 +69,15 @@ impl DB {
         };
 
         if wal_fd.metadata()?.len() > 0 {
-            recover(&ht_fd, &wal_fd, &page_pool, &store, &mut meta_map, seed)?;
+            recover(
+                sync_seqn,
+                &ht_fd,
+                &wal_fd,
+                &page_pool,
+                &store,
+                &mut meta_map,
+                seed,
+            )?;
         }
 
         let occupied_buckets = meta_map.full_count();
@@ -104,11 +113,12 @@ impl DB {
 
     fn prepare_sync(
         &self,
+        sync_seqn: u32,
         page_pool: &PagePool,
         changes: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
         wal_blob_builder: &mut WalBlobBuilder,
     ) -> Vec<(u64, FatPage)> {
-        wal_blob_builder.reset();
+        wal_blob_builder.reset(sync_seqn);
 
         let mut meta_map = self.shared.meta_map.write();
 
@@ -207,6 +217,7 @@ impl SyncController {
     /// Non-blocking.
     pub fn begin_sync(
         &mut self,
+        sync_seqn: u32,
         page_cache: PageCache,
         mut merkle_tx: MerkleTransaction,
         page_diffs: merkle::PageDiffs,
@@ -221,8 +232,12 @@ impl SyncController {
             page_cache.prepare_transaction(page_diffs.into_iter(), &mut merkle_tx);
 
             let mut wal_blob_builder = wal_blob_builder.lock();
-            let ht_pages =
-                bitbox.prepare_sync(&page_pool, merkle_tx.new_pages, &mut *wal_blob_builder);
+            let ht_pages = bitbox.prepare_sync(
+                sync_seqn,
+                &page_pool,
+                merkle_tx.new_pages,
+                &mut *wal_blob_builder,
+            );
             drop(wal_blob_builder);
 
             Self::spawn_wal_writeout(wal_result_tx, bitbox);
@@ -270,6 +285,7 @@ impl SyncController {
 
 /// Perform recovery by applying the WAL to the HT file.
 fn recover(
+    sync_seqn: u32,
     ht_fd: &File,
     mut wal_fd: &File,
     page_pool: &PagePool,
@@ -282,10 +298,19 @@ fn recover(
 
     wal_fd.seek(SeekFrom::Start(0))?;
 
-    // The indicies of pages (in the metabits page space) that were changed and require updates.
+    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
+
+    // This condition triggers either if:
+    //   1. the WAL holds data for a sync that never concluded. Safe to discard.
+    //   2. the WAL holds data for a sync that fully concluded. (somehow). Safe to discard.
+    if wal_reader.sync_seqn() != sync_seqn {
+        wal_fd.set_len(0)?;
+        return Ok(());
+    }
+
+    // The indices of pages (in the metabits page space) that were changed and require updates.
     // Note those are not ht page numbers yet and still require additional conversion.
     let mut changed_meta_page_ixs = HashSet::new();
-    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
 
     while let Some(entry) = wal_reader.read_entry()? {
         match entry {

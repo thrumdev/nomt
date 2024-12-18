@@ -12,7 +12,7 @@ pub struct Options {
     pub(crate) metrics: bool,
     pub(crate) bitbox_num_pages: u32,
     pub(crate) bitbox_seed: [u8; 16],
-    pub(crate) panic_on_sync: bool,
+    pub(crate) panic_on_sync: Option<PanicOnSyncMode>,
     pub(crate) rollback: bool,
     /// The maximum number of commits that can be rolled back.
     pub(crate) max_rollback_log_len: u32,
@@ -37,7 +37,7 @@ impl Options {
             metrics: false,
             bitbox_num_pages: 64_000,
             bitbox_seed,
-            panic_on_sync: false,
+            panic_on_sync: None,
             rollback: false,
             max_rollback_log_len: 100,
             warm_up: false,
@@ -87,12 +87,11 @@ impl Options {
         self.bitbox_seed = bitbox_seed;
     }
 
-    /// Set to `true` to panic on sync after writing the WAL file and updating the manifest, but
-    /// before the data has been written to the HT file.
+    /// Set to `true` to panic during sync at different points.
     ///
-    /// Useful to test WAL recovery.
-    pub fn panic_on_sync(&mut self, panic_on_sync: bool) {
-        self.panic_on_sync = panic_on_sync;
+    /// Useful to test WAL recovery and will just cause your DB to be unusable otherwise.
+    pub fn panic_on_sync(&mut self, mode: PanicOnSyncMode) {
+        self.panic_on_sync = Some(mode);
     }
 
     /// Set to `true` to enable rolling back committed sessions.
@@ -137,4 +136,13 @@ impl Options {
     pub fn preallocate_ht(&mut self, preallocate_ht: bool) {
         self.preallocate_ht = preallocate_ht;
     }
+}
+
+/// Modes for panicking during sync.
+#[derive(Clone, Copy)]
+pub enum PanicOnSyncMode {
+    /// After the meta has been swapped, but before other points.
+    PostMeta,
+    /// Before the meta has been swapped, but after the WAL is written.
+    PostWal,
 }

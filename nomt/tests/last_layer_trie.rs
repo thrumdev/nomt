@@ -8,7 +8,7 @@ fn last_layer_trie() {
         "last_layer_trie", // name
         1,                 // commit_concurrency
         10_000,            // hashtable_buckets
-        false,             // panic_on_sync
+        None,              // panic_on_sync
         true,              // cleanup_dir
     );
 

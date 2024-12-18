@@ -30,7 +30,7 @@ fn fill_and_empty(commit_concurrency: usize) {
         format!("fill_and_empty_{}", commit_concurrency), // name
         commit_concurrency,
         15000, // hashtable_buckets
-        false, // panic_on_sync
+        None,  // panic_on_sync
         true,  //  cleanup_dir
     );
 

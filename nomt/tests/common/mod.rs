@@ -1,4 +1,7 @@
-use nomt::{KeyPath, KeyReadWrite, Node, Nomt, Options, Session, Witness, WitnessedOperations};
+use nomt::{
+    KeyPath, KeyReadWrite, Node, Nomt, Options, PanicOnSyncMode, Session, Witness,
+    WitnessedOperations,
+};
 use std::{
     collections::{hash_map::Entry, HashMap},
     mem,
@@ -42,16 +45,17 @@ pub struct Test {
     access: HashMap<KeyPath, KeyReadWrite>,
 }
 
+#[allow(dead_code)]
 impl Test {
     pub fn new(name: impl AsRef<Path>) -> Self {
-        Self::new_with_params(name, 1, 64_000, false, true)
+        Self::new_with_params(name, 1, 64_000, None, true)
     }
 
     pub fn new_with_params(
         name: impl AsRef<Path>,
         commit_concurrency: usize,
         hashtable_buckets: u32,
-        panic_on_sync: bool,
+        panic_on_sync: Option<PanicOnSyncMode>,
         cleanup_dir: bool,
     ) -> Self {
         let path = {
@@ -63,7 +67,9 @@ impl Test {
             let _ = std::fs::remove_dir_all(&path);
         }
         let mut o = opts(path);
-        o.panic_on_sync(panic_on_sync);
+        if let Some(mode) = panic_on_sync {
+            o.panic_on_sync(mode);
+        }
         o.bitbox_seed([0; 16]);
         o.hashtable_buckets(hashtable_buckets);
         o.commit_concurrency(commit_concurrency);
