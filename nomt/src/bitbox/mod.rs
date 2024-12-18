@@ -49,6 +49,7 @@ pub struct Shared {
     wal_fd: File,
     ht_fd: File,
     sync_tp: ThreadPool,
+    capacity: usize,
 }
 
 impl DB {
@@ -74,6 +75,7 @@ impl DB {
         let occupied_buckets = meta_map.full_count();
 
         let wal_blob_builder = WalBlobBuilder::new()?;
+        let capacity = meta_map.len();
         Ok(Self {
             shared: Arc::new(Shared {
                 page_pool,
@@ -85,6 +87,7 @@ impl DB {
                 wal_fd,
                 ht_fd,
                 sync_tp: ThreadPool::with_name("bitbox-sync".into(), 2),
+                capacity,
             }),
         })
     }
@@ -95,6 +98,14 @@ impl DB {
         BucketAllocator {
             shared: self.shared.clone(),
             changed_buckets: HashMap::new(),
+        }
+    }
+
+    /// Return space utilization counts.
+    pub fn utilization(&self) -> BucketUtilization {
+        BucketUtilization {
+            capacity: self.shared.capacity,
+            occupied: self.shared.occupied_buckets.load(Ordering::Relaxed),
         }
     }
 
@@ -454,6 +465,24 @@ impl PageLoad {
             self.state = PageLoadState::Pending;
             None
         }
+    }
+}
+
+/// Describes the utilization of buckets in the hash-table.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BucketUtilization {
+    /// The maximum number of buckets in the hash-table.
+    pub capacity: usize,
+    /// The number of occupied buckets in the hash-table.
+    pub occupied: usize,
+}
+
+impl BucketUtilization {
+    /// Compute the occupancy rate of the hash-table. This ranges between 0.0 and 1.0.
+    ///
+    /// Performance likely degrades beyond 0.9 and commits may fail as the occupancy approaches 1.0.
+    pub fn occupancy_rate(&self) -> f64 {
+        self.occupied as f64 / self.capacity as f64
     }
 }
 
