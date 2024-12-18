@@ -15,10 +15,12 @@ bitvec = { version = "1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 ruint = { version = "1.12.1", default-features = false }
 arrayvec = { version = "0.7", default-features = false }
+borsh = { version = "1.5.3", default-features = false, features = ["derive"], optional = true}
 
 [dev-dependencies]
 blake3 = "1.5.1"
 
 [features]
 default = ["std"]
-std = ["bitvec/std"]
+std = ["bitvec/std", "borsh/std"]
+borsh = ["dep:borsh"]

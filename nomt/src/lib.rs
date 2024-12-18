@@ -62,6 +62,10 @@ struct Shared {
 /// A witness that can be used to prove the correctness of state trie retrievals and updates.
 ///
 /// Expected to be serializable.
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
 pub struct Witness {
     /// Various paths down the trie used as part of this witness.
     pub path_proofs: Vec<WitnessedPath>,
@@ -69,6 +73,10 @@ pub struct Witness {
 
 /// Operations provable by a corresponding witness.
 // TODO: the format of this structure depends heavily on how it'd be used with the path proofs.
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
 pub struct WitnessedOperations {
     /// Read operations.
     pub reads: Vec<WitnessedRead>,
@@ -77,6 +85,10 @@ pub struct WitnessedOperations {
 }
 
 /// A path observed in the witness.
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
 pub struct WitnessedPath {
     /// Proof of a query path along the trie.
     pub inner: PathProof,
@@ -85,6 +97,10 @@ pub struct WitnessedPath {
 }
 
 /// A witness of a read value.
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
 pub struct WitnessedRead {
     /// The key of the read value.
     pub key: KeyPath,
@@ -95,6 +111,10 @@ pub struct WitnessedRead {
 }
 
 /// A witness of a write operation.
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
 pub struct WitnessedWrite {
     /// The key of the written value.
     pub key: KeyPath,
