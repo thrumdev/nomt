@@ -114,7 +114,14 @@ impl NomtDB {
     }
 
     pub fn print_metrics(&self) {
-        self.nomt.metrics().print()
+        self.nomt.metrics().print();
+        let ht_stats = self.nomt.hash_table_utilization();
+        println!(
+            "  buckets {}/{} ({})",
+            ht_stats.occupied,
+            ht_stats.capacity,
+            ht_stats.occupancy_rate()
+        );
     }
 }
 
