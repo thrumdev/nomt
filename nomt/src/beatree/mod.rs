@@ -651,7 +651,6 @@ impl AsyncLookup {
     /// Attempt to submit a continuation request along the handle.
     ///
     /// This should not be called unless `try_finish` has failed at least once.
-    #[allow(dead_code)]
     pub fn submit(&mut self, io_handle: &IoHandle, user_data: u64) -> Option<OverflowPageInfo> {
         match self.state {
             AsyncLookupState::Initial(_) => None,
