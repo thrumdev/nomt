@@ -47,6 +47,23 @@ pub fn finish_lookup_blocking(
     })
 }
 
+/// Finish looking up a key in a leaf node, starting an async fetch if overflowing.
+pub fn finish_lookup_async(
+    key: Key,
+    leaf: &LeafNode,
+    leaf_store: &StoreReader,
+) -> Result<Option<Vec<u8>>, overflow::AsyncReader> {
+    leaf.get(&key)
+        .map(|(v, is_overflow)| {
+            if is_overflow {
+                Err(overflow::AsyncReader::new(v, leaf_store.clone()))
+            } else {
+                Ok(v.to_vec())
+            }
+        })
+        .transpose()
+}
+
 /// Lookup a key in the btree using blocking I/O.
 pub fn lookup_blocking(
     key: Key,

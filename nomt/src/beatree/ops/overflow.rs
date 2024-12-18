@@ -194,7 +194,6 @@ pub fn read_blocking(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
 }
 
 /// A non-blocking reader for an overflow value.
-#[allow(dead_code)]
 pub struct AsyncReader {
     value: Vec<u8>,
     pages: Vec<(PageNumber, Option<FatPage>)>,
@@ -207,7 +206,6 @@ pub struct AsyncReader {
     total_pages: usize,
 }
 
-#[allow(dead_code)]
 impl AsyncReader {
     /// Create a new async reader.
     pub fn new(cell: &[u8], store_reader: StoreReader) -> Self {
