@@ -133,7 +133,7 @@ impl Tree {
         })
     }
 
-    /// Lookup a key in the btree.
+    /// Lookup a key in the btree. This blocks the current thread.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let shared = self.shared.read();
 
@@ -148,7 +148,7 @@ impl Tree {
         }
 
         // Finally, look up in the btree.
-        ops::lookup(
+        ops::lookup_blocking(
             key,
             &shared.bbn_index,
             &shared.leaf_cache,
@@ -574,7 +574,11 @@ impl ReadTransaction {
         };
 
         match self.load_leaf_async(leaf_pn, io_handle, user_data) {
-            Ok(leaf) => Ok(ops::finish_lookup(key, &leaf.inner, &self.inner.leaf_store)),
+            Ok(leaf) => Ok(ops::finish_lookup_blocking(
+                key,
+                &leaf.inner,
+                &self.inner.leaf_store,
+            )),
             Err(pending) => Err(AsyncLookup(key, pending)),
         }
     }
@@ -631,7 +635,7 @@ impl AsyncLookup {
     /// Calling this with the wrong page will likely lead to panics or bugs in the future.
     pub fn finish(self, page: FatPage) -> Option<Vec<u8>> {
         let leaf = self.1.finish_inner(page);
-        ops::finish_lookup(self.0, &leaf, &self.1.read_tx.leaf_store)
+        ops::finish_lookup_blocking(self.0, &leaf, &self.1.read_tx.leaf_store)
     }
 }
 
