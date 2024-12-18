@@ -7,10 +7,10 @@ use threadpool::ThreadPool;
 use crate::beatree::{
     allocator::{PageNumber, StoreReader, SyncAllocator},
     index::Index,
-    leaf::{node::LeafNode, overflow},
+    leaf::node::LeafNode,
     leaf_cache::LeafCache,
     ops::{
-        search_branch,
+        overflow, search_branch,
         update::{
             extend_range_protocol::{
                 request_range_extension, try_answer_left_neighbor, LeftNeighbor, RightNeighbor,
