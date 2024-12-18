@@ -32,19 +32,23 @@ pub fn partial_lookup(key: Key, bbn_index: &Index) -> Option<PageNumber> {
     search_branch(&branch, key.clone()).map(|(_, leaf_pn)| leaf_pn)
 }
 
-/// Finish looking up a key in a leaf node.
-pub fn finish_lookup(key: Key, leaf: &LeafNode, leaf_store: &StoreReader) -> Option<Vec<u8>> {
+/// Finish looking up a key in a leaf node using blocking I/O.
+pub fn finish_lookup_blocking(
+    key: Key,
+    leaf: &LeafNode,
+    leaf_store: &StoreReader,
+) -> Option<Vec<u8>> {
     leaf.get(&key).map(|(v, is_overflow)| {
         if is_overflow {
-            overflow::read(v, leaf_store)
+            overflow::read_blocking(v, leaf_store)
         } else {
             v.to_vec()
         }
     })
 }
 
-/// Lookup a key in the btree.
-pub fn lookup(
+/// Lookup a key in the btree using blocking I/O.
+pub fn lookup_blocking(
     key: Key,
     bbn_index: &Index,
     leaf_cache: &LeafCache,
@@ -66,7 +70,7 @@ pub fn lookup(
         }
     };
 
-    Ok(finish_lookup(key, &leaf, leaf_store))
+    Ok(finish_lookup_blocking(key, &leaf, leaf_store))
 }
 
 /// Binary search a branch node for the child node containing the key. This returns the last child
