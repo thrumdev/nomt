@@ -59,9 +59,20 @@ struct MockStoreAsync {
 
 struct MockPending;
 
-impl AsyncPending<Option<Vec<u8>>> for MockPending {
-    fn complete(self, completion: Option<Vec<u8>>) -> Option<Vec<u8>> {
-        completion
+impl AsyncPending for MockPending {
+    type Store = MockStoreAsync;
+    type OverflowMetadata = ();
+
+    fn submit(&mut self, _: &Self::Store, _: u64) -> Option<Self::OverflowMetadata> {
+        None
+    }
+
+    fn try_complete(
+        &mut self,
+        completion: Option<Vec<u8>>,
+        _: Option<()>,
+    ) -> Option<Option<Vec<u8>>> {
+        Some(completion)
     }
 }
 

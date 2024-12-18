@@ -24,7 +24,7 @@ use threadpool::ThreadPool;
 
 use self::delta::Delta;
 use crate::{
-    beatree::{AsyncLookup, ReadTransaction},
+    beatree::{self, AsyncLookup, OverflowMetadata, ReadTransaction},
     io::{FatPage, IoHandle},
     seglog::{self, RecordId, SegmentedLog},
     KeyReadWrite,
@@ -384,8 +384,8 @@ pub struct ReverseDeltaBuilder {
 /// This family of traits allows us to mock the store in tests.
 ///
 /// Dropping a value implementing this trait should end its corresponding completion stream.
-pub trait LoadValueAsync: Send + Sync + 'static {
-    type Pending: AsyncPending<Self::Completion>;
+pub trait LoadValueAsync: Send + Sync + Sized + 'static {
+    type Pending: AsyncPending<Store = Self>;
     type Completion: Send;
 
     /// Start a load. This may complete eagerly or return a pending result.
@@ -404,8 +404,16 @@ pub trait LoadValueAsync: Send + Sync + 'static {
 /// A trait for a pending asynchronous value load.
 ///
 /// This family of traits allows us to mock the store in tests.
-pub trait AsyncPending<Completion> {
-    fn complete(self, completion: Completion) -> Option<Vec<u8>>;
+pub trait AsyncPending {
+    type Store: LoadValueAsync;
+    type OverflowMetadata;
+
+    fn submit(&mut self, store: &Self::Store, user_data: u64) -> Option<Self::OverflowMetadata>;
+    fn try_complete(
+        &mut self,
+        completion: <Self::Store as LoadValueAsync>::Completion,
+        meta: Option<Self::OverflowMetadata>,
+    ) -> Option<Option<Vec<u8>>>;
 }
 
 struct LoadValueCompletion<T>(u64, anyhow::Result<T>);
@@ -425,9 +433,23 @@ fn reverse_delta_worker<Store: LoadValueAsync>(
     completion_rx: Receiver<LoadValueCompletion<Store::Completion>>,
     mut priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
 ) {
+    const TARGET_OVERFLOW_REQUESTS: usize = 128;
+
+    enum LiveRequest<Req: AsyncPending> {
+        Main(Req, KeyPath),
+        OverflowPage(u64, Req::OverflowMetadata),
+    }
+
     let mut requests = HashMap::new();
+
+    // regular request count starts at 0 and moves upwards.
     let mut request_index = 0u64;
+    // overflow requests start at max and move downwards.
+    let mut overflow_request_index = u64::MAX;
+
+    // INVARIANT: store is always `Some` until `joining` is true and requests are empty.
     let mut store = Some(store);
+    let mut joining = false;
 
     let mut handle_lookup = |key_path,
                              store: &mut Option<Store>,
@@ -440,31 +462,114 @@ fn reverse_delta_worker<Store: LoadValueAsync>(
                 priors.insert(key_path, val);
             }
             Err(pending) => {
-                requests.insert(request_index, (pending, key_path));
+                requests.insert(request_index, LiveRequest::Main(pending, key_path));
                 request_index += 1;
             }
         }
     };
 
-    let handle_completion = |user_data,
-                             maybe_completion: anyhow::Result<_>,
-                             priors: &DashMap<_, _>,
-                             requests: &mut HashMap<_, _>| {
-        // TODO handle error properly
-        let completion: Store::Completion = maybe_completion.unwrap();
+    // the number of requests which are "dormant", i.e. they are used only for dispatching
+    // overflow requests.
+    let mut dormant_request_count = 0;
 
-        // UNWRAP: completions always come for issued requests only.
-        let (request, key_path): (Store::Pending, _) = requests.remove(&user_data).unwrap();
-        let value = request.complete(completion);
-        priors.insert(key_path, value);
-    };
+    let mut handle_completion =
+        |user_data,
+         store: &mut Option<Store>,
+         joining: bool,
+         maybe_completion: anyhow::Result<_>,
+         priors: &DashMap<_, _>,
+         requests: &mut HashMap<_, LiveRequest<Store::Pending>>| {
+            // TODO handle error properly
+            let completion: Store::Completion = maybe_completion.unwrap();
+
+            // UNWRAP: completions come for occupied entries only.
+            let request = requests.remove(&user_data).unwrap();
+            let resubmit = match request {
+                LiveRequest::Main(mut request, key_path) => {
+                    match request.try_complete(completion, None) {
+                        Some(value) => {
+                            priors.insert(key_path, value);
+                            None
+                        }
+                        None => {
+                            // this is now an overflow request. count it as dormant and insert
+                            // back.
+                            dormant_request_count += 1;
+                            requests.insert(user_data, LiveRequest::Main(request, key_path));
+                            Some(user_data)
+                        }
+                    }
+                }
+                LiveRequest::OverflowPage(request_id, overflow_meta) => {
+                    // UNWRAP: initial request always exists
+                    let overflow_request = requests.get_mut(&request_id).unwrap();
+                    // PANIC: ...and has kind initial.
+                    let LiveRequest::Main(ref mut pending, ref key_path) = overflow_request else {
+                        unreachable!()
+                    };
+
+                    // If we get a value, insert it in priors and stop tracking the request.
+                    if let Some(value) = pending.try_complete(completion, Some(overflow_meta)) {
+                        dormant_request_count -= 1;
+                        priors.insert(*key_path, value);
+                        requests.remove(&request_id);
+                        None
+                    } else {
+                        Some(request_id)
+                    }
+                }
+            };
+
+            if joining && requests.is_empty() {
+                *store = None;
+            } else if let Some(resubmit_id) = resubmit {
+                // we received an overflow continuation. submit and continue.
+
+                let submitted = {
+                    let non_dormant_count = requests.len() - dormant_request_count;
+
+                    // UNWRAP: resubmit request always exists.
+                    let overflow_request = requests.get_mut(&resubmit_id).unwrap();
+                    // PANIC: ...and has kind initial.
+                    let LiveRequest::Main(ref mut pending, _) = overflow_request else {
+                        unreachable!()
+                    };
+                    // UNWRAP: ...and the `Store` must be live.
+                    let store = store.as_ref().unwrap();
+
+                    let mut submitted = Vec::new();
+
+                    // Always submit at least one, but never more than the maximum.
+                    let submit_count = std::cmp::max(
+                        1,
+                        TARGET_OVERFLOW_REQUESTS.saturating_sub(non_dormant_count),
+                    );
+                    for _ in 0..submit_count {
+                        let Some(meta) = pending.submit(store, overflow_request_index) else {
+                            break;
+                        };
+                        submitted.push((
+                            overflow_request_index,
+                            LiveRequest::OverflowPage(resubmit_id, meta),
+                        ));
+                        overflow_request_index -= 1;
+                    }
+
+                    submitted
+                };
+
+                requests.extend(submitted);
+            }
+        };
 
     loop {
         let join = crossbeam::select! {
             recv(command_rx) -> command => match command {
                 Err(RecvError) => {
-                    // drop the store, so completions stop as well.
-                    let _ = store.take();
+                    joining = true;
+                    if requests.is_empty() {
+                        store = None;
+                    }
                     break
                 }
                 Ok(DeltaBuilderCommand::Lookup(key_path)) => {
@@ -477,7 +582,7 @@ fn reverse_delta_worker<Store: LoadValueAsync>(
                 // PANIC: completions never disconnect before commands.
                 Err(RecvError) => unreachable!(),
                 Ok(LoadValueCompletion(user_data, completion)) => {
-                    handle_completion(user_data, completion, &priors, &mut requests);
+                    handle_completion(user_data, &mut store, joining, completion, &priors, &mut requests);
                     None
                 },
             },
@@ -487,7 +592,14 @@ fn reverse_delta_worker<Store: LoadValueAsync>(
             while !requests.is_empty() {
                 // UNWRAP: completions never disconnect before `commands` does.
                 let LoadValueCompletion(user_data, completion) = completion_rx.recv().unwrap();
-                handle_completion(user_data, completion, &priors, &mut requests);
+                handle_completion(
+                    user_data,
+                    &mut store,
+                    joining,
+                    completion,
+                    &priors,
+                    &mut requests,
+                );
             }
 
             priors = new_priors;
@@ -497,7 +609,14 @@ fn reverse_delta_worker<Store: LoadValueAsync>(
 
     // wait on outstanding completions.
     for LoadValueCompletion(user_data, completion) in completion_rx {
-        handle_completion(user_data, completion, &priors, &mut requests);
+        handle_completion(
+            user_data,
+            &mut store,
+            joining,
+            completion,
+            &priors,
+            &mut requests,
+        );
     }
 }
 
@@ -591,10 +710,24 @@ impl StoreLoadValueAsync {
     }
 }
 
-impl AsyncPending<FatPage> for AsyncLookup {
-    fn complete(mut self, completion: FatPage) -> Option<Vec<u8>> {
-        // UNWRAP: fixed in follow-up
-        self.try_finish(completion, None).unwrap()
+impl AsyncPending for AsyncLookup {
+    type Store = StoreLoadValueAsync;
+    type OverflowMetadata = beatree::OverflowMetadata;
+
+    fn submit(
+        &mut self,
+        store: &StoreLoadValueAsync,
+        user_data: u64,
+    ) -> Option<beatree::OverflowMetadata> {
+        AsyncLookup::submit(self, &store.io_handle, user_data)
+    }
+
+    fn try_complete(
+        &mut self,
+        completion: FatPage,
+        overflow_meta: Option<OverflowMetadata>,
+    ) -> Option<Option<Vec<u8>>> {
+        self.try_finish(completion, overflow_meta)
     }
 }
 
