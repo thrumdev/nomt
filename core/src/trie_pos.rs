@@ -248,7 +248,7 @@ impl TriePosition {
 
     /// Fast path for checking whether this is in the first layer in the page.
     pub fn is_first_layer_in_page(&self) -> bool {
-        self.node_index & 1 == 0
+        self.node_index & !1 == 0
     }
 
     /// Get the number of shared bits between this position and `other`.

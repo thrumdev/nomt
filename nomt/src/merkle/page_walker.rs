@@ -626,13 +626,13 @@ impl<H: NodeHasher> PageWalker<H> {
                 page,
                 diff: PageDiff::default(),
             });
-            cur_ancestor = cur_ancestor.parent_page_id();
             push_count += 1;
 
             // stop pushing once we reach the root page.
             if cur_ancestor == ROOT_PAGE_ID {
                 break;
             }
+            cur_ancestor = cur_ancestor.parent_page_id();
         }
 
         // we pushed onto the stack in descending, so now reverse everything we just pushed to
@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn compacts_and_updates_root() {
+    fn compacts_and_updates_root_single_page() {
         let root = trie::TERMINATOR;
         let page_cache = PageCache::new(None, &crate::Options::new(), None);
         let page_source = PageSource::PageCache(page_cache.clone());
@@ -802,6 +802,123 @@ mod tests {
                 );
                 assert_eq!(diffs.len(), 1);
                 assert_eq!(&diffs[0].0, &ROOT_PAGE_ID);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn compacts_and_updates_root_multiple_pages() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
+        let page_source = PageSource::PageCache(page_cache.clone());
+        let page_pool = PagePool::new();
+
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
+        let mut write_pass = page_cache.new_write_pass();
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::new(),
+            vec![
+                (key_path![0, 1, 0, 1, 1, 0], val(1)),
+                (key_path![0, 1, 0, 1, 1, 1], val(2)),
+            ],
+        );
+
+        walker.advance_and_replace(
+            &mut write_pass,
+            trie_pos![0, 1, 0, 1, 1, 0, 0, 1],
+            vec![
+                (key_path![0, 1, 0, 1, 1, 0, 0, 1, 0], val(3)),
+                (key_path![0, 1, 0, 1, 1, 0, 0, 1, 1], val(4)),
+            ],
+        );
+
+        match walker.conclude(&mut write_pass) {
+            Output::Root(new_root, diffs) => {
+                assert_eq!(
+                    new_root,
+                    nomt_core::update::build_trie::<Blake3Hasher>(
+                        0,
+                        vec![
+                            (key_path![0, 1, 0, 1, 1, 0], val(1)),
+                            (key_path![0, 1, 0, 1, 1, 1], val(2)),
+                            (key_path![0, 1, 0, 1, 1, 0, 0, 1, 0], val(3)),
+                            (key_path![0, 1, 0, 1, 1, 0, 0, 1, 1], val(4))
+                        ],
+                        |_| {}
+                    )
+                );
+                assert_eq!(diffs.len(), 3);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn multiple_pages_compacts_up_to_root() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
+        let page_source = PageSource::PageCache(page_cache.clone());
+        let page_pool = PagePool::new();
+
+        let mut write_pass = page_cache.new_write_pass();
+
+        let leaf_a_key_path = key_path![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let leaf_b_pos = trie_pos![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let leaf_b_key_path = key_path![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let leaf_c_pos = trie_pos![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0];
+        let leaf_c_key_path = key_path![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0];
+        let leaf_d_pos = trie_pos![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+        let leaf_d_key_path = key_path![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+        let leaf_e_pos = trie_pos![0, 1, 0, 1, 0, 1, 0, 0, 0, 0];
+        let leaf_e_key_path = key_path![0, 1, 0, 1, 0, 1, 0, 0, 0, 0];
+        let leaf_f_pos = trie_pos![0, 1, 0, 1, 0, 1, 0, 0, 0, 1];
+        let leaf_f_key_path = key_path![0, 1, 0, 1, 0, 1, 0, 0, 0, 1];
+
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
+        walker.advance_and_replace(
+            &mut write_pass,
+            TriePosition::new(),
+            vec![
+                (leaf_a_key_path, val(1)),
+                (leaf_b_key_path, val(2)),
+                (leaf_c_key_path, val(3)),
+                (leaf_d_key_path, val(4)),
+                (leaf_e_key_path, val(5)),
+                (leaf_f_key_path, val(6)),
+            ],
+        );
+
+        let new_root = match walker.conclude(&mut write_pass) {
+            Output::Root(new_root, _diffs) => new_root,
+            _ => unreachable!(),
+        };
+
+        let page_source = PageSource::PageCache(page_cache.clone());
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(new_root, page_source, page_pool.clone(), None);
+
+        walker.advance_and_replace(&mut write_pass, leaf_b_pos, vec![]);
+        walker.advance_and_replace(&mut write_pass, leaf_c_pos, vec![]);
+        walker.advance_and_replace(&mut write_pass, leaf_d_pos, vec![]);
+        walker.advance_and_replace(&mut write_pass, leaf_e_pos, vec![]);
+        walker.advance_and_replace(&mut write_pass, leaf_f_pos, vec![]);
+
+        match walker.conclude(&mut write_pass) {
+            Output::Root(new_root, diffs) => {
+                assert_eq!(
+                    new_root,
+                    nomt_core::update::build_trie::<Blake3Hasher>(
+                        0,
+                        vec![(leaf_a_key_path, val(1)),],
+                        |_| {}
+                    )
+                );
+                assert_eq!(diffs.len(), 7);
             }
             _ => unreachable!(),
         }
@@ -1107,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_bit_updated_correctly() {
+    fn clear_bit_set_on_erased_page() {
         let root = trie::TERMINATOR;
         let page_cache = PageCache::new(None, &crate::Options::new(), None);
         let page_source = PageSource::PageCache(page_cache.clone());
@@ -1122,7 +1239,7 @@ mod tests {
         let leaf_c_pos = trie_pos![0, 0, 1, 0, 0, 0, 0];
 
         let mut page_id_iter = PageIdsIterator::new(leaf_a_key_path);
-        page_id_iter.next(); // root
+        let root_page = page_id_iter.next().unwrap();
         let page_id_1 = page_id_iter.next().unwrap();
         let page_id_2 = page_id_iter.next().unwrap();
 
@@ -1140,10 +1257,7 @@ mod tests {
             );
 
             match walker.conclude(&mut write_pass) {
-                Output::Root(new_root, diffs) => {
-                    println!("{diffs:?}");
-                    new_root
-                }
+                Output::Root(new_root, _diffs) => new_root,
                 _ => unreachable!(),
             }
         };
@@ -1158,8 +1272,7 @@ mod tests {
         let root = match walker.conclude(&mut write_pass) {
             Output::Root(new_root, diffs) => {
                 let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
-                println!("{diffs:?}");
-                assert!(!diffs.get(&page_id_2).unwrap().cleared());
+                assert!(diffs.get(&page_id_2).unwrap().cleared());
                 new_root
             }
             _ => unreachable!(),
@@ -1169,16 +1282,89 @@ mod tests {
         let mut walker =
             PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
 
-        // Now removing leaf C will remove the previous page.
+        // Now removing leaf C will clear page 1 and the root page.
         walker.advance_and_replace(&mut write_pass, leaf_c_pos, vec![]);
 
         match walker.conclude(&mut write_pass) {
             Output::Root(_new_root, diffs) => {
-                // No page is expected to be cleared.
                 let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
-                assert!(!diffs.get(&page_id_1).unwrap().cleared());
+                assert!(diffs.get(&root_page).unwrap().cleared());
+                assert!(diffs.get(&page_id_1).unwrap().cleared());
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn clear_bit_updated_correctly_within_same_page_walker_pass() {
+        let root = trie::TERMINATOR;
+        let page_cache = PageCache::new(None, &crate::Options::new(), None);
+        let page_source = PageSource::PageCache(page_cache.clone());
+        let page_pool = PagePool::new();
+        let mut write_pass = page_cache.new_write_pass();
+
+        // Leaves a and b are siblings at positions 2 and 3 on page `page_id_1`.
+        // Upon deletion, the page walker will compact up, clearing the page diff
+        // at the top of the stack. The insertion of leaves c and d will populate
+        // page_id_1 with internal nodes, expecting to erase the clear bit.
+        // Finally, leaves will be placed on `page_id_2`.
+        let leaf_a_key_path = key_path![0, 0, 1, 0, 1, 0, 0, 0];
+        let leaf_b_key_path = key_path![0, 0, 1, 0, 1, 0, 0, 1];
+        let a_pos = trie_pos![0, 0, 1, 0, 1, 0, 0, 0];
+        let b_pos = trie_pos![0, 0, 1, 0, 1, 0, 0, 1];
+        let leaf_c_key_path = key_path![0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0];
+        let leaf_d_key_path = key_path![0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1];
+        let cd_pos = trie_pos![0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1];
+
+        let mut page_id_iter = PageIdsIterator::new(leaf_c_key_path);
+        page_id_iter.next(); // root
+        let page_id_1 = page_id_iter.next().unwrap();
+        let page_id_2 = page_id_iter.next().unwrap();
+
+        let root = {
+            let mut walker =
+                PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
+            walker.advance_and_replace(
+                &mut write_pass,
+                TriePosition::new(),
+                vec![(leaf_a_key_path, val(1)), (leaf_b_key_path, val(2))],
+            );
+
+            let Output::Root(new_root, diffs) = walker.conclude(&mut write_pass) else {
+                panic!();
+            };
+
+            let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
+            let diff = diffs.get(&page_id_1).unwrap().clone();
+            let mut expected_diff = PageDiff::default();
+            expected_diff.set_changed(0);
+            expected_diff.set_changed(1); // the sibling is zeroed
+            expected_diff.set_changed(2);
+            expected_diff.set_changed(3);
+            assert_eq!(diff, expected_diff);
+            new_root
+        };
+
+        let page_source = PageSource::PageCache(page_cache.clone());
+        let mut walker =
+            PageWalker::<Blake3Hasher>::new(root, page_source, page_pool.clone(), None);
+
+        walker.advance_and_replace(&mut write_pass, a_pos, vec![]);
+        walker.advance_and_replace(&mut write_pass, b_pos, vec![]);
+        // During this step, the clear bit is set during the first compaction
+        // and later it is expected to be removed.
+        walker.advance_and_replace(
+            &mut write_pass,
+            cd_pos,
+            vec![(leaf_c_key_path, val(3)), (leaf_d_key_path, val(4))],
+        );
+
+        let Output::Root(_new_root, diffs) = walker.conclude(&mut write_pass) else {
+            panic!();
+        };
+        // No page is expected to be cleared.
+        let diffs: HashMap<PageId, PageDiff> = diffs.into_iter().collect();
+        assert!(!diffs.get(&page_id_1).unwrap().cleared());
+        assert!(!diffs.get(&page_id_2).unwrap().cleared());
     }
 }
