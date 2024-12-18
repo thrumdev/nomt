@@ -1,14 +1,14 @@
-/// Overflow pages are used to store values which exceed the maximum size.
-///
-/// Large values are chunked into pages in a deterministic way, optimized for parallel fetching.
-///
-/// The format of an overflow page is:
-/// ```rust,ignore
-/// n_pointers: u16
-/// n_bytes: u16
-/// pointers: [PageNumber; n_pointers]
-/// bytes: [u8; n_bytes]
-/// ```
+//! Overflow pages are used to store values which exceed the maximum size.
+//!
+//! Large values are chunked into pages in a deterministic way, optimized for parallel fetching.
+//!
+//! The format of an overflow page is:
+//! ```rust,ignore
+//! n_pointers: u16
+//! n_bytes: u16
+//! pointers: [PageNumber; n_pointers]
+//! bytes: [u8; n_bytes]
+//! ```
 use crate::{
     beatree::{
         allocator::{StoreReader, SyncAllocator},
@@ -191,6 +191,106 @@ pub fn read_blocking(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
     assert_eq!(value.len(), value_size);
 
     value
+}
+
+/// A non-blocking reader for an overflow value.
+#[allow(dead_code)]
+pub struct AsyncReader {
+    value: Vec<u8>,
+    pages: Vec<(PageNumber, Option<FatPage>)>,
+    // the index of the next page to request
+    request_index: usize,
+    // the index of the next page to process.
+    process_index: usize,
+    store_reader: StoreReader,
+    value_size: usize,
+    total_pages: usize,
+}
+
+#[allow(dead_code)]
+impl AsyncReader {
+    /// Create a new async reader.
+    pub fn new(cell: &[u8], store_reader: StoreReader) -> Self {
+        let (value_size, _, cell_pages) = decode_cell(cell);
+        let total_pages = total_needed_pages(value_size);
+
+        let value = Vec::with_capacity(value_size);
+
+        let mut pages = Vec::with_capacity(total_pages);
+        pages.extend(cell_pages.into_iter().map(|pn| (pn, None)));
+
+        AsyncReader {
+            value,
+            pages,
+            request_index: 0,
+            process_index: 0,
+            store_reader,
+            value_size,
+            total_pages,
+        }
+    }
+
+    /// Submit a request over the I/O handle.
+    ///
+    /// Returns `Some` with an index if a request was submitted. Otherwise, `None`.
+    pub fn submit(&mut self, io_handle: &IoHandle, user_data: u64) -> Option<usize> {
+        if self.is_done_requesting() {
+            return None;
+        }
+
+        let page_index = self.request_index;
+        let next_page = self.pages[page_index].0;
+        self.request_index += 1;
+
+        let command = self.store_reader.io_command(next_page, user_data);
+        let _ = io_handle.send(command);
+
+        Some(page_index)
+    }
+
+    /// Provide a completion.
+    ///
+    /// This may panic if the index provided is out of range. Likewise, it may read garbage data.
+    ///
+    /// If this returns `Some`, then that is the value and this reader should no longer be used.
+    pub fn complete(&mut self, index: usize, page: FatPage) -> Option<Vec<u8>> {
+        self.pages[index].1 = Some(page);
+
+        if index == self.process_index {
+            self.continue_parse()
+        }
+
+        if self.is_done() {
+            assert_eq!(self.pages.len(), self.total_pages);
+            assert_eq!(self.value.len(), self.value_size);
+
+            Some(std::mem::take(&mut self.value))
+        } else {
+            None
+        }
+    }
+
+    fn is_done_requesting(&self) -> bool {
+        self.request_index == self.total_pages
+    }
+
+    fn is_done(&self) -> bool {
+        self.process_index == self.total_pages
+    }
+
+    fn continue_parse(&mut self) {
+        while self.process_index < self.total_pages {
+            let Some(page) = self.pages[self.process_index].1.take() else {
+                break;
+            };
+
+            let (page_pns, bytes) = parse_page(&page);
+            self.pages.extend(page_pns.into_iter().map(|pn| (pn, None)));
+            self.value.extend(bytes);
+
+            self.process_index += 1;
+        }
+    }
 }
 
 /// Iterate all pages related to an overflow cell and push onto a free-list.
