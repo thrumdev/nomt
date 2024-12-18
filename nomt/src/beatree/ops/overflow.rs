@@ -12,12 +12,11 @@
 use crate::{
     beatree::{
         allocator::{StoreReader, SyncAllocator},
+        leaf::node::MAX_OVERFLOW_CELL_NODE_POINTERS,
         PageNumber,
     },
     io::{page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
 };
-
-use super::node::MAX_OVERFLOW_CELL_NODE_POINTERS;
 
 const BODY_SIZE: usize = PAGE_SIZE - 4;
 const MAX_PNS: usize = BODY_SIZE / 4;
