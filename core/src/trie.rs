@@ -98,6 +98,10 @@ impl InternalData {
 
 /// The data of a leaf node.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
 pub struct LeafData {
     /// The total path to this value within the trie.
     ///

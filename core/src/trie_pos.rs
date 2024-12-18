@@ -8,6 +8,10 @@ use bitvec::prelude::*;
 
 /// Encapsulates logic for moving around in paged storage for a binary trie.
 #[derive(Clone)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
 pub struct TriePosition {
     // The bits after depth are irrelevant.
     path: [u8; 32],
