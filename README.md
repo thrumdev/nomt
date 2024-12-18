@@ -20,7 +20,9 @@ We have built a benchmarking tool, `benchtop`, which is located in the `benchtop
 
 ## Contributing
 
-See [CONTRIBUTING.md](docs/CONTRIBUTING.md)
+See [CONTRIBUTING.md](docs/CONTRIBUTING.md).
+
+If you would like to discuss the development of NOMT or follow along with contributor discussions, join the official [Telegram Channel](https://t.me/thrum_nomt).
 
 ## Acknowledgements
 
