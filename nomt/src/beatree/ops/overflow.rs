@@ -170,8 +170,8 @@ fn needed_pages(size: usize) -> usize {
     (size + BODY_SIZE - 1) / BODY_SIZE
 }
 
-/// Read a large value from pages referenced by an overflow cell.
-pub fn read(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
+/// Read a large value from pages referenced by an overflow cell using blocking I/O.
+pub fn read_blocking(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
     let (value_size, _, cell_pages) = decode_cell(cell);
     let total_pages = total_needed_pages(value_size);
 
@@ -182,7 +182,7 @@ pub fn read(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
 
     for i in 0..total_pages {
         let page = leaf_reader.query(page_numbers[i]);
-        let (page_pns, bytes) = read_page(&page);
+        let (page_pns, bytes) = parse_page(&page);
         page_numbers.extend(page_pns);
         value.extend(bytes);
     }
@@ -194,6 +194,8 @@ pub fn read(cell: &[u8], leaf_reader: &StoreReader) -> Vec<u8> {
 }
 
 /// Iterate all pages related to an overflow cell and push onto a free-list.
+///
+/// This only logically deletes the pages.
 pub fn delete(cell: &[u8], leaf_reader: &StoreReader, freed: &mut Vec<PageNumber>) {
     let (value_size, _, cell_pages) = decode_cell(cell);
     let total_pages = total_needed_pages(value_size);
@@ -203,7 +205,7 @@ pub fn delete(cell: &[u8], leaf_reader: &StoreReader, freed: &mut Vec<PageNumber
 
     for i in 0..total_pages {
         let page = leaf_reader.query(freed[start + i]);
-        let (page_pns, bytes) = read_page(&page);
+        let (page_pns, bytes) = parse_page(&page);
         freed.extend(page_pns);
 
         // stop at the first page containing value data. no more pages will have more
@@ -216,7 +218,7 @@ pub fn delete(cell: &[u8], leaf_reader: &StoreReader, freed: &mut Vec<PageNumber
     assert_eq!(freed.len() - start, total_pages);
 }
 
-fn read_page<'a>(page: &'a FatPage) -> (impl Iterator<Item = PageNumber> + 'a, &'a [u8]) {
+fn parse_page<'a>(page: &'a FatPage) -> (impl Iterator<Item = PageNumber> + 'a, &'a [u8]) {
     let n_pages = u16::from_le_bytes(page[0..2].try_into().unwrap()) as usize;
     let n_bytes = u16::from_le_bytes(page[2..4].try_into().unwrap()) as usize;
 
