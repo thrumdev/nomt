@@ -177,7 +177,7 @@ impl CurrentLeaf {
         let key = self.leaf.key(index);
         let (cell, overflow) = self.leaf.value(index);
         if overflow {
-            let (_, value_hash, _) = super::leaf::overflow::decode_cell(cell);
+            let (_, value_hash, _) = super::ops::overflow::decode_cell(cell);
             IterOutput::OverflowItem(key, value_hash, cell)
         } else {
             IterOutput::Item(key, cell)

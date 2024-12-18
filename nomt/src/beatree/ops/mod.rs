@@ -9,12 +9,13 @@ use super::{
     allocator::{PageNumber, StoreReader},
     branch::{node::get_key, BranchNode},
     index::Index,
-    leaf::{self, node::LeafNode},
+    leaf::node::LeafNode,
     leaf_cache::LeafCache,
     Key,
 };
 
 pub(crate) mod bit_ops;
+pub mod overflow;
 mod reconstruction;
 mod update;
 
@@ -35,7 +36,7 @@ pub fn partial_lookup(key: Key, bbn_index: &Index) -> Option<PageNumber> {
 pub fn finish_lookup(key: Key, leaf: &LeafNode, leaf_store: &StoreReader) -> Option<Vec<u8>> {
     leaf.get(&key).map(|(v, is_overflow)| {
         if is_overflow {
-            leaf::overflow::read(v, leaf_store)
+            overflow::read(v, leaf_store)
         } else {
             v.to_vec()
         }
