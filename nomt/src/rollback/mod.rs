@@ -592,8 +592,9 @@ impl StoreLoadValueAsync {
 }
 
 impl AsyncPending<FatPage> for AsyncLookup {
-    fn complete(self, completion: FatPage) -> Option<Vec<u8>> {
-        self.finish(completion)
+    fn complete(mut self, completion: FatPage) -> Option<Vec<u8>> {
+        // UNWRAP: fixed in follow-up
+        self.try_finish(completion, None).unwrap()
     }
 }
 

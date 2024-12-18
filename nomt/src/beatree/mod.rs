@@ -6,6 +6,7 @@ use imbl::OrdMap;
 
 use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
+use ops::overflow::AsyncReader as AsyncOverflowReader;
 use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
 use std::{fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
@@ -572,13 +573,23 @@ impl ReadTransaction {
             Some(pn) => pn,
         };
 
-        match self.load_leaf_async(leaf_pn, io_handle, user_data) {
-            Ok(leaf) => Ok(ops::finish_lookup_blocking(
+        match self
+            .load_leaf_async(leaf_pn, io_handle, user_data)
+            .map(|leaf| ops::finish_lookup_async(key, &leaf.inner, &self.inner.leaf_store))
+        {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(mut overflow)) => {
+                // UNWRAP: first overflow request always succeeds.
+                let meta = overflow.submit(io_handle, user_data).unwrap();
+                Err(AsyncLookup {
+                    key,
+                    state: AsyncLookupState::Overflow(overflow, Some(meta)),
+                })
+            }
+            Err(pending) => Err(AsyncLookup {
                 key,
-                &leaf.inner,
-                &self.inner.leaf_store,
-            )),
-            Err(pending) => Err(AsyncLookup(key, pending)),
+                state: AsyncLookupState::Initial(pending),
+            }),
         }
     }
 }
@@ -623,16 +634,80 @@ impl AsyncLeafLoad {
 
 /// A type representing a pending lookup. This keeps the associated read transaction alive
 /// throughout its lifetime.
-pub struct AsyncLookup(Key, AsyncLeafLoad);
+pub struct AsyncLookup {
+    key: Key,
+    state: AsyncLookupState,
+}
+
+enum AsyncLookupState {
+    Initial(AsyncLeafLoad),
+    Overflow(AsyncOverflowReader, Option<usize>),
+    Done,
+}
 
 impl AsyncLookup {
-    /// Finish the lookup.
-    /// Calling this with the wrong page will likely lead to panics or bugs in the future.
-    pub fn finish(self, page: FatPage) -> Option<Vec<u8>> {
-        let leaf = self.1.finish_inner(page);
-        ops::finish_lookup_blocking(self.0, &leaf, &self.1.read_tx.leaf_store)
+    /// Attempt to submit a continuation request along the handle.
+    ///
+    /// This should not be called unless `try_finish` has failed at least once.
+    pub fn submit(&mut self, io_handle: &IoHandle, user_data: u64) -> Option<OverflowMetadata> {
+        match self.state {
+            AsyncLookupState::Initial(_) => None,
+            AsyncLookupState::Overflow(ref mut overflow, _) => {
+                overflow.submit(io_handle, user_data).map(OverflowMetadata)
+            }
+            AsyncLookupState::Done => None,
+        }
+    }
+
+    /// Try to finish the lookup.
+    /// Calling this with the wrong page will lead to panics or silent errors.
+    ///
+    /// If calling for the first time, provide no metadata. Only provide metadata that has been
+    /// returned from `submit` from this lookup. Otherwise, this may panic or silently cause errors.
+    ///
+    /// This returns `None` if not finished, `Some` otherwise. After returning `Some` once, this
+    /// will return `None` forever.
+    ///
+    /// If more lookups are required to finish, this will return an `Err`.
+    pub fn try_finish(
+        &mut self,
+        page: FatPage,
+        meta: Option<OverflowMetadata>,
+    ) -> Option<Option<Vec<u8>>> {
+        match self.state {
+            AsyncLookupState::Done => return None,
+            AsyncLookupState::Initial(ref inner) => {
+                let leaf = inner.finish_inner(page);
+                match ops::finish_lookup_async(self.key, &leaf, &inner.read_tx.leaf_store) {
+                    Ok(val) => {
+                        self.state = AsyncLookupState::Done;
+                        return Some(val);
+                    }
+                    Err(overflow) => {
+                        self.state = AsyncLookupState::Overflow(overflow, None);
+                        return None;
+                    }
+                }
+            }
+            AsyncLookupState::Overflow(ref mut overflow, ref mut initial_meta) => {
+                // UNWRAP: part of function contract.
+                let index = meta
+                    .map(|m| m.0)
+                    .unwrap_or_else(|| initial_meta.take().unwrap());
+                let res = overflow.complete(index, page).map(Some);
+
+                if res.is_some() {
+                    self.state = AsyncLookupState::Done;
+                }
+
+                res
+            }
+        }
     }
 }
+
+/// Metadata related to an overflow page fetch.
+pub struct OverflowMetadata(usize);
 
 /// An opaque reference to a leaf node. These cannot be manipulated directly and instead must be
 /// passed to a struct which can make use of them, such as the [`BeatreeIterator`].
