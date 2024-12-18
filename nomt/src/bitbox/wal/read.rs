@@ -1,6 +1,6 @@
 //! The read-path for the WAL.
 
-use super::{WAL_ENTRY_TAG_CLEAR, WAL_ENTRY_TAG_END, WAL_ENTRY_TAG_UPDATE};
+use super::{WAL_ENTRY_TAG_CLEAR, WAL_ENTRY_TAG_END, WAL_ENTRY_TAG_START, WAL_ENTRY_TAG_UPDATE};
 use crate::{
     io::{self, PagePool, PAGE_SIZE},
     page_diff::PageDiff,
@@ -31,6 +31,7 @@ pub enum WalEntry {
 pub struct WalBlobReader {
     wal: Vec<u8>,
     offset: usize,
+    sync_seqn: u32,
 }
 
 impl WalBlobReader {
@@ -61,7 +62,19 @@ impl WalBlobReader {
             wal.extend_from_slice(&*page);
         }
 
-        Ok(Self { wal, offset: 0 })
+        let mut reader = Self {
+            wal,
+            offset: 0,
+            sync_seqn: 0,
+        };
+        reader.read_start()?;
+
+        Ok(reader)
+    }
+
+    /// Get the sync sequence number of the WAL file.
+    pub fn sync_seqn(&self) -> u32 {
+        self.sync_seqn
     }
 
     /// Reads the next entry from the WAL file.
@@ -101,6 +114,17 @@ impl WalBlobReader {
         }
     }
 
+    fn read_start(&mut self) -> anyhow::Result<()> {
+        let entry_tag = self.read_byte()?;
+        if entry_tag == WAL_ENTRY_TAG_START {
+            self.sync_seqn = self.read_u32()?;
+
+            Ok(())
+        } else {
+            bail!("unexpected WAL entry tag at start: {entry_tag}");
+        }
+    }
+
     /// Reads a single byte from the WAL file.
     fn read_byte(&mut self) -> anyhow::Result<u8> {
         if self.offset >= self.wal.len() {
@@ -127,5 +151,11 @@ impl WalBlobReader {
     fn read_u64(&mut self) -> anyhow::Result<u64> {
         let buf = self.read_buf::<8>()?;
         Ok(u64::from_le_bytes(buf))
+    }
+
+    /// Reads a u32 from the WAL file in little-endian format.
+    fn read_u32(&mut self) -> anyhow::Result<u32> {
+        let buf = self.read_buf::<4>()?;
+        Ok(u32::from_le_bytes(buf))
     }
 }

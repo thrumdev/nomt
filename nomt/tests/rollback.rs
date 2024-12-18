@@ -25,7 +25,6 @@ fn setup_nomt(
     let mut o = Options::new();
     o.path(path);
     o.commit_concurrency(commit_concurrency);
-    o.panic_on_sync(false);
     o.bitbox_seed([0; 16]);
     o.rollback(rollback_enabled);
     Nomt::open(o).unwrap()

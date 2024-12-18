@@ -1,6 +1,6 @@
 //! The write-path for the WAL.
 
-use super::{WAL_ENTRY_TAG_CLEAR, WAL_ENTRY_TAG_END, WAL_ENTRY_TAG_UPDATE};
+use super::{WAL_ENTRY_TAG_CLEAR, WAL_ENTRY_TAG_END, WAL_ENTRY_TAG_START, WAL_ENTRY_TAG_UPDATE};
 use crate::{io::PAGE_SIZE, page_diff::PageDiff};
 
 const MAX_SIZE: usize = 1 << 37; // 128 GiB
@@ -173,8 +173,15 @@ impl WalBlobBuilder {
     }
 
     /// Resets the builder preparing it for a new batch of writes.
-    pub fn reset(&mut self) {
+    ///
+    /// Provide the sync sequence number.
+    pub fn reset(&mut self, sync_seqn: u32) {
         self.cur = 0;
+
+        self.write_byte(WAL_ENTRY_TAG_START);
+
+        // SAFETY: these bytes live on the stack and do not overlap with the map.
+        unsafe { self.write(&sync_seqn.to_le_bytes()) }
     }
 
     /// Finalizes the builder.

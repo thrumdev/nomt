@@ -2,13 +2,13 @@ use super::{
     meta::{self, Meta},
     MerkleTransaction, Shared, ValueTransaction,
 };
-use crate::{beatree, bitbox, merkle, page_cache::PageCache, rollback};
+use crate::{beatree, bitbox, merkle, options::PanicOnSyncMode, page_cache::PageCache, rollback};
 
 pub struct Sync {
     pub(crate) sync_seqn: u32,
     pub(crate) bitbox_num_pages: u32,
     pub(crate) bitbox_seed: [u8; 16],
-    pub(crate) panic_on_sync: bool,
+    pub(crate) panic_on_sync: Option<PanicOnSyncMode>,
 }
 
 impl Sync {
@@ -16,7 +16,7 @@ impl Sync {
         sync_seqn: u32,
         bitbox_num_pages: u32,
         bitbox_seed: [u8; 16],
-        panic_on_sync: bool,
+        panic_on_sync: Option<PanicOnSyncMode>,
     ) -> Self {
         Self {
             sync_seqn,
@@ -48,7 +48,7 @@ impl Sync {
             bucket_allocator: bitbox.bucket_allocator(),
             new_pages: Vec::new(),
         };
-        bitbox_sync.begin_sync(page_cache, merkle_tx, page_diffs);
+        bitbox_sync.begin_sync(sync_seqn, page_cache, merkle_tx, page_diffs);
         beatree_sync.begin_sync(value_tx.batch);
         if let Some(ref mut rollback) = rollback_sync {
             rollback.begin_sync();
@@ -61,6 +61,10 @@ impl Sync {
             Some(ref rollback) => rollback.wait_pre_meta(),
             None => (0, 0),
         };
+
+        if let Some(PanicOnSyncMode::PostWal) = self.panic_on_sync {
+            panic!("panic_on_sync is true (post-wal)")
+        }
 
         let new_meta = Meta {
             magic: meta::MAGIC,
@@ -77,8 +81,8 @@ impl Sync {
         };
         Meta::write(&shared.io_pool.page_pool(), &shared.meta_fd, &new_meta)?;
 
-        if self.panic_on_sync {
-            panic!("panic_on_sync is true");
+        if let Some(PanicOnSyncMode::PostMeta) = self.panic_on_sync {
+            panic!("panic_on_sync is true (post-meta)");
         }
 
         if let Some(ref rollback) = rollback_sync {

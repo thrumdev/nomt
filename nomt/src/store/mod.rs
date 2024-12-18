@@ -150,6 +150,7 @@ impl Store {
             o.commit_concurrency,
         )?;
         let pages = bitbox::DB::open(
+            meta.sync_seqn,
             meta.bitbox_num_pages,
             meta.bitbox_seed,
             page_pool.clone(),

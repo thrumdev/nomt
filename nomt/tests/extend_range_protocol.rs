@@ -30,7 +30,7 @@ const KEYS_AND_VALUE_SIZES: [(u8, usize); 16] =[
 // and all the remaining keys to the next worker. This makes possible
 // to expect the type of communication between the two workers
 fn insert_delete_and_read(name: impl AsRef<Path>, to_delete: Vec<u8>) {
-    let mut t = Test::new_with_params(name, 2, 64_000, false, true);
+    let mut t = Test::new_with_params(name, 2, 64_000, None, true);
 
     // insert values
     for (k, value_size) in KEYS_AND_VALUE_SIZES.clone() {
