@@ -1,6 +1,8 @@
 use std::{collections::BTreeSet, fs::OpenOptions, sync::Arc};
 
-use super::{AsyncPending, BTreeMap, KeyPath, KeyReadWrite, LoadValueAsync, Rollback};
+use super::{
+    reverse_delta_worker::AsyncPending, BTreeMap, KeyPath, KeyReadWrite, LoadValueAsync, Rollback,
+};
 use crossbeam::channel::{Receiver, Sender};
 use hex_literal::hex;
 
@@ -59,9 +61,20 @@ struct MockStoreAsync {
 
 struct MockPending;
 
-impl AsyncPending<Option<Vec<u8>>> for MockPending {
-    fn complete(self, completion: Option<Vec<u8>>) -> Option<Vec<u8>> {
-        completion
+impl AsyncPending for MockPending {
+    type Store = MockStoreAsync;
+    type OverflowPageInfo = ();
+
+    fn submit(&mut self, _: &Self::Store, _: u64) -> Option<Self::OverflowPageInfo> {
+        None
+    }
+
+    fn try_complete(
+        &mut self,
+        completion: Option<Vec<u8>>,
+        _: Option<()>,
+    ) -> Option<Option<Vec<u8>>> {
+        Some(completion)
     }
 }
 

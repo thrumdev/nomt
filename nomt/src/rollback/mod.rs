@@ -16,21 +16,21 @@ use std::{
     sync::Arc,
 };
 
-use crossbeam::channel::{Receiver, RecvError, Sender};
+use crossbeam::channel::Sender;
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
 use parking_lot::{Condvar, Mutex};
 use threadpool::ThreadPool;
 
 use self::delta::Delta;
+use self::reverse_delta_worker::{DeltaBuilderCommand, LoadValueAsync, StoreLoadValueAsync};
 use crate::{
-    beatree::{AsyncLookup, ReadTransaction},
-    io::{FatPage, IoHandle},
     seglog::{self, RecordId, SegmentedLog},
     KeyReadWrite,
 };
 
 mod delta;
+mod reverse_delta_worker;
 #[cfg(test)]
 mod tests;
 
@@ -132,18 +132,8 @@ impl Rollback {
 
     // generality is primarily for testing.
     fn delta_builder_inner(&self, store: impl LoadValueAsync) -> ReverseDeltaBuilder {
-        let (command_tx, command_rx) = crossbeam::channel::unbounded();
-        let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
-
         let priors = Arc::new(DashMap::new());
-        let next_fn = store.build_next();
-        self.shared.worker_tp.execute({
-            let priors = priors.clone();
-            move || reverse_delta_worker(store, command_rx, completion_rx, priors)
-        });
-        self.shared
-            .worker_tp
-            .execute(move || reverse_delta_completion_worker(completion_tx, next_fn));
+        let command_tx = reverse_delta_worker::start(store, &self.shared.worker_tp, priors.clone());
         ReverseDeltaBuilder {
             command_tx,
             tp: self.shared.worker_tp.clone(),
@@ -379,137 +369,6 @@ pub struct ReverseDeltaBuilder {
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
 }
 
-/// A trait for asynchronously loading values from the store.
-///
-/// This family of traits allows us to mock the store in tests.
-///
-/// Dropping a value implementing this trait should end its corresponding completion stream.
-pub trait LoadValueAsync: Send + Sync + 'static {
-    type Pending: AsyncPending<Self::Completion>;
-    type Completion: Send;
-
-    /// Start a load. This may complete eagerly or return a pending result.
-    fn start_load(
-        &self,
-        key_path: KeyPath,
-        user_data: u64,
-    ) -> Result<Option<Vec<u8>>, Self::Pending>;
-
-    /// Create the completion function.
-    fn build_next(
-        &self,
-    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static;
-}
-
-/// A trait for a pending asynchronous value load.
-///
-/// This family of traits allows us to mock the store in tests.
-pub trait AsyncPending<Completion> {
-    fn complete(self, completion: Completion) -> Option<Vec<u8>>;
-}
-
-struct LoadValueCompletion<T>(u64, anyhow::Result<T>);
-
-enum DeltaBuilderCommand {
-    /// Start lookup on a key path.
-    Lookup(KeyPath),
-    /// Join all outstanding lookups, then send a signal over the channel.
-    /// Replace the priors with the given map.
-    Join(Sender<()>, Arc<DashMap<KeyPath, Option<Vec<u8>>>>),
-}
-
-// This worker manages all reverse value requests asynchronously.
-fn reverse_delta_worker<Store: LoadValueAsync>(
-    store: Store,
-    command_rx: Receiver<DeltaBuilderCommand>,
-    completion_rx: Receiver<LoadValueCompletion<Store::Completion>>,
-    mut priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
-) {
-    let mut requests = HashMap::new();
-    let mut request_index = 0u64;
-    let mut store = Some(store);
-
-    let mut handle_lookup = |key_path,
-                             store: &mut Option<Store>,
-                             priors: &DashMap<_, _>,
-                             requests: &mut HashMap<_, _>| {
-        // UNWRAP: `Load` commands never come after finish.
-        let store = store.as_ref().unwrap();
-        match store.start_load(key_path, request_index) {
-            Ok(val) => {
-                priors.insert(key_path, val);
-            }
-            Err(pending) => {
-                requests.insert(request_index, (pending, key_path));
-                request_index += 1;
-            }
-        }
-    };
-
-    let handle_completion = |user_data,
-                             maybe_completion: anyhow::Result<_>,
-                             priors: &DashMap<_, _>,
-                             requests: &mut HashMap<_, _>| {
-        // TODO handle error properly
-        let completion: Store::Completion = maybe_completion.unwrap();
-
-        // UNWRAP: completions always come for issued requests only.
-        let (request, key_path): (Store::Pending, _) = requests.remove(&user_data).unwrap();
-        let value = request.complete(completion);
-        priors.insert(key_path, value);
-    };
-
-    loop {
-        let join = crossbeam::select! {
-            recv(command_rx) -> command => match command {
-                Err(RecvError) => {
-                    // drop the store, so completions stop as well.
-                    let _ = store.take();
-                    break
-                }
-                Ok(DeltaBuilderCommand::Lookup(key_path)) => {
-                    handle_lookup(key_path, &mut store, &priors, &mut requests);
-                    None
-                },
-                Ok(DeltaBuilderCommand::Join(done_joining, new_priors)) => Some((done_joining, new_priors)),
-            },
-            recv(completion_rx) -> completion => match completion {
-                // PANIC: completions never disconnect before commands.
-                Err(RecvError) => unreachable!(),
-                Ok(LoadValueCompletion(user_data, completion)) => {
-                    handle_completion(user_data, completion, &priors, &mut requests);
-                    None
-                },
-            },
-        };
-
-        if let Some((done_joining, new_priors)) = join {
-            while !requests.is_empty() {
-                // UNWRAP: completions never disconnect before `commands` does.
-                let LoadValueCompletion(user_data, completion) = completion_rx.recv().unwrap();
-                handle_completion(user_data, completion, &priors, &mut requests);
-            }
-
-            priors = new_priors;
-            let _ = done_joining.send(());
-        }
-    }
-
-    // wait on outstanding completions.
-    for LoadValueCompletion(user_data, completion) in completion_rx {
-        handle_completion(user_data, completion, &priors, &mut requests);
-    }
-}
-
-fn reverse_delta_completion_worker<F, T>(completion_tx: Sender<LoadValueCompletion<T>>, mut next: F)
-where
-    F: FnMut() -> Option<(u64, anyhow::Result<T>)>,
-{
-    while let Some((user_data, result)) = next() {
-        let _ = completion_tx.send(LoadValueCompletion(user_data, result));
-    }
-}
-
 impl ReverseDeltaBuilder {
     /// Note that a write might be made to a key and that the rollback should preserve the prior
     /// value. This function is speculative; the rollback delta may later be committed with a
@@ -572,58 +431,6 @@ impl ReverseDeltaBuilder {
         final_priors.extend(fresh_priors);
         Delta {
             priors: final_priors,
-        }
-    }
-}
-
-pub struct StoreLoadValueAsync {
-    read_tx: ReadTransaction,
-    io_handle: IoHandle,
-}
-
-impl StoreLoadValueAsync {
-    /// Create a new asynchronous value loader from the store.
-    pub fn new(store: &crate::store::Store) -> Self {
-        let read_tx = store.read_transaction();
-        let io_handle = store.io_pool().make_handle();
-
-        StoreLoadValueAsync { read_tx, io_handle }
-    }
-}
-
-impl AsyncPending<FatPage> for AsyncLookup {
-    fn complete(mut self, completion: FatPage) -> Option<Vec<u8>> {
-        // UNWRAP: fixed in follow up
-        self.try_finish(completion, None).unwrap()
-    }
-}
-
-impl LoadValueAsync for StoreLoadValueAsync {
-    type Completion = FatPage;
-    type Pending = AsyncLookup;
-
-    fn start_load(
-        &self,
-        key_path: KeyPath,
-        user_data: u64,
-    ) -> Result<Option<Vec<u8>>, Self::Pending> {
-        self.read_tx
-            .lookup_async(key_path, &self.io_handle, user_data)
-    }
-
-    fn build_next(
-        &self,
-    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static {
-        // using just the receiver ensures that when `self` is dropped, the completion stream ends.
-        let mut receiver = self.io_handle.receiver().clone().into_iter();
-        move || {
-            receiver.next().map(|complete_io| {
-                let user_data = complete_io.command.user_data;
-                let res = complete_io
-                    .result
-                    .map(|()| complete_io.command.kind.unwrap_buf());
-                (user_data, res.map_err(Into::into))
-            })
         }
     }
 }
