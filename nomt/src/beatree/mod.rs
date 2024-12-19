@@ -6,7 +6,7 @@ use imbl::OrdMap;
 
 use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
-use ops::overflow::AsyncReader as AsyncOverflowReader;
+use ops::overflow;
 use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
 use std::{fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
@@ -613,6 +613,7 @@ pub struct AsyncLeafLoad {
 #[allow(dead_code)]
 impl AsyncLeafLoad {
     /// Finish the leaf load.
+    ///
     /// Calling this with the wrong page will likely lead to panics or bugs in the future.
     pub fn finish(self, page: FatPage) -> LeafNodeRef {
         LeafNodeRef {
@@ -645,7 +646,7 @@ pub struct AsyncLookup {
 
 enum AsyncLookupState {
     Initial(AsyncLeafLoad),
-    Overflow(AsyncOverflowReader, Option<usize>),
+    Overflow(overflow::AsyncReader, Option<usize>),
     Done,
 }
 
@@ -654,11 +655,11 @@ impl AsyncLookup {
     /// Attempt to submit a continuation request along the handle.
     ///
     /// This should not be called unless `try_finish` has failed at least once.
-    pub fn submit(&mut self, io_handle: &IoHandle, user_data: u64) -> Option<OverflowMetadata> {
+    pub fn submit(&mut self, io_handle: &IoHandle, user_data: u64) -> Option<OverflowPageInfo> {
         match self.state {
             AsyncLookupState::Initial(_) => None,
             AsyncLookupState::Overflow(ref mut overflow, _) => {
-                overflow.submit(io_handle, user_data).map(OverflowMetadata)
+                overflow.submit(io_handle, user_data).map(OverflowPageInfo)
             }
             AsyncLookupState::Done => None,
         }
@@ -667,7 +668,7 @@ impl AsyncLookup {
     /// Try to finish the lookup.
     /// Calling this with the wrong page will lead to panics or silent errors.
     ///
-    /// If calling for the first time, provide no metadata. Only provide metadata that has been
+    /// If calling for the first time, provide no load info. Only provide load info that has been
     /// returned from `submit` from this lookup. Otherwise, this may panic or silently cause errors.
     ///
     /// This returns `None` if not finished, `Some` otherwise. After returning `Some` once, this
@@ -677,7 +678,7 @@ impl AsyncLookup {
     pub fn try_finish(
         &mut self,
         page: FatPage,
-        meta: Option<OverflowMetadata>,
+        meta: Option<OverflowPageInfo>,
     ) -> Option<Option<Vec<u8>>> {
         match self.state {
             AsyncLookupState::Done => return None,
@@ -711,8 +712,10 @@ impl AsyncLookup {
     }
 }
 
-/// Metadata related to an overflow page fetch.
-pub struct OverflowMetadata(usize);
+/// Opaque info related to an overflow page load.
+///
+/// Used by [`AsyncLookup`] to handle the page appropriately.
+pub struct OverflowPageInfo(usize);
 
 /// An opaque reference to a leaf node. These cannot be manipulated directly and instead must be
 /// passed to a struct which can make use of them, such as the [`BeatreeIterator`].
