@@ -665,9 +665,19 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4114279215a005bc675e386011e594e1d9b800918cea18fcadadcce864a2046b"
 dependencies = [
- "borsh-derive",
+ "borsh-derive 0.10.3",
  "bytes",
  "hashbrown 0.13.2",
+]
+
+[[package]]
+name = "borsh"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6362ed55def622cddc70a4746a68554d7b687713770de539e59a739b249f8ed"
+dependencies = [
+ "borsh-derive 1.5.2",
+ "cfg_aliases",
 ]
 
 [[package]]
@@ -681,6 +691,19 @@ dependencies = [
  "proc-macro-crate 0.1.5",
  "proc-macro2",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "borsh-derive"
+version = "1.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10aedd8f1a81a8aafbfde924b0e3061cd6fedd6f6bbcfc6a76e6fd426d7bfe26"
+dependencies = [
+ "once_cell",
+ "proc-macro-crate 3.1.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.59",
 ]
 
 [[package]]
@@ -797,6 +820,12 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
@@ -1832,7 +1861,7 @@ version = "0.9.0"
 source = "git+https://github.com/penumbra-zone/jmt.git?rev=1d007e11cb68aa5ca13e9a5af4a12e6439d5f7b6#1d007e11cb68aa5ca13e9a5af4a12e6439d5f7b6"
 dependencies = [
  "anyhow",
- "borsh",
+ "borsh 0.10.3",
  "digest 0.10.7",
  "hashbrown 0.13.2",
  "hex",
@@ -2233,6 +2262,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "bitvec",
+ "borsh 1.5.1",
  "hex",
  "ruint",
 ]
@@ -3353,7 +3383,7 @@ source = "git+https://github.com/Sovereign-Labs/sovereign-sdk#2cc0656df3f12fca20
 dependencies = [
  "anyhow",
  "bincode",
- "borsh",
+ "borsh 0.10.3",
  "byteorder",
  "jmt",
  "rocksdb",
@@ -3370,7 +3400,7 @@ source = "git+https://github.com/Sovereign-Labs/sovereign-sdk#2cc0656df3f12fca20
 dependencies = [
  "anyhow",
  "bech32",
- "borsh",
+ "borsh 0.10.3",
  "derive_more",
  "digest 0.10.7",
  "hex",
@@ -3402,7 +3432,7 @@ source = "git+https://github.com/Sovereign-Labs/sovereign-sdk#2cc0656df3f12fca20
 dependencies = [
  "anyhow",
  "async-trait",
- "borsh",
+ "borsh 0.10.3",
  "bytes",
  "digest 0.10.7",
  "futures",
@@ -3434,7 +3464,7 @@ source = "git+https://github.com/Sovereign-Labs/sovereign-sdk#2cc0656df3f12fca20
 dependencies = [
  "anyhow",
  "bcs",
- "borsh",
+ "borsh 0.10.3",
  "hex",
  "jmt",
  "serde",
