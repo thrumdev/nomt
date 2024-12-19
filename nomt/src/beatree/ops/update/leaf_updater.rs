@@ -515,6 +515,12 @@ impl LeafGauge {
 
 #[cfg(test)]
 mod tests {
+    use crate::beatree::{
+        branch::BRANCH_NODE_SIZE,
+        leaf::node::{body_size, MAX_LEAF_VALUE_SIZE},
+        ops::update::{leaf_updater::LeafGauge, LEAF_MERGE_THRESHOLD},
+    };
+
     use super::{
         separate, BaseLeaf, DigestResult, HandleNewLeaf, Key, LeafBuilder, LeafNode, LeafOp,
         LeafUpdater, PagePool,
@@ -907,5 +913,297 @@ mod tests {
                 LeafOp::Insert(key(4), vec![1u8; 300], false),
             ]
         );
+    }
+
+    #[test]
+    fn split_left_node_below_target() {
+        let mut updater = LeafUpdater::new(PAGE_POOL.clone(), None, None);
+        let mut new_leaves = TestHandleNewLeaf::default();
+
+        updater.ingest(key(1), Some(vec![1; 1100]), false, |_| {});
+        updater.ingest(key(2), Some(vec![1; 1100]), false, |_| {});
+        updater.ingest(key(3), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(4), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(5), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(6), Some(vec![1; 1300]), false, |_| {});
+
+        let tot_body_size = updater.gauge.body_size();
+        let midpoint = tot_body_size / 2;
+
+        updater.try_build_leaves(&mut new_leaves, midpoint);
+
+        let leaf_1 = &new_leaves.inner.get(&[0; 32]).unwrap().0;
+        assert_eq!(leaf_1.n(), 3);
+        let leaf_body_size = body_size(leaf_1.n(), leaf_1.values_size(0, leaf_1.n()));
+        assert!(leaf_body_size < midpoint);
+        let leaf_2 = &new_leaves.inner.get(&separate(&key(3), &key(4))).unwrap().0;
+        assert_eq!(leaf_2.n(), 3);
+    }
+
+    #[test]
+    fn split_left_node_always_rightsized() {
+        let mut updater = LeafUpdater::new(PAGE_POOL.clone(), None, None);
+        let mut new_leaves = TestHandleNewLeaf::default();
+
+        updater.ingest(key(1), Some(vec![1; 1300]), false, |_| {});
+        updater.ingest(key(2), Some(vec![1; 650]), false, |_| {});
+        updater.ingest(key(3), Some(vec![1; MAX_LEAF_VALUE_SIZE]), false, |_| {});
+        updater.ingest(key(4), Some(vec![1; 678]), false, |_| {});
+
+        // The first two sum up to a body_size of 2018 which is less than
+        // LEAF_MERGE_THRESHOLD but even followd by the biggest leaf value possible
+        // it's not possible to end up in an  to overfull scenario on the first
+        // created leaf.
+
+        updater.try_build_leaves(&mut new_leaves, updater.gauge.body_size() / 2);
+        assert_eq!(new_leaves.inner.len(), 1);
+    }
+
+    #[test]
+    fn split_right_node_rightsized_but_below_target() {
+        let mut updater = LeafUpdater::new(PAGE_POOL.clone(), None, None);
+        let mut new_leaves = TestHandleNewLeaf::default();
+
+        updater.ingest(key(1), Some(vec![1; 1300]), false, |_| {});
+        updater.ingest(key(2), Some(vec![1; 1100]), false, |_| {});
+        updater.ingest(key(3), Some(vec![1; 600]), false, |_| {});
+        updater.ingest(key(4), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(5), Some(vec![1; 1000]), false, |_| {});
+
+        let tot_body_size = updater.gauge.body_size();
+        let midpoint = tot_body_size / 2;
+
+        updater.try_build_leaves(&mut new_leaves, midpoint);
+
+        // A leaf is perfectly created.
+        let leaf_1 = &new_leaves.inner.get(&[0; 32]).unwrap().0;
+        assert_eq!(leaf_1.n(), 3);
+        let leaf_body_size = body_size(3, leaf_1.values_size(0, 3));
+        assert!(leaf_body_size > midpoint);
+
+        // There is no second created leaf because the remaining ops
+        // do not exceed the target.
+        assert_eq!(new_leaves.inner.len(), 1);
+        assert_eq!(updater.ops.len(), 2);
+        // The last ops still represents a valid constructed leaf node.
+        assert!(updater.gauge.body_size() < midpoint);
+        assert!(updater.gauge.body_size() > LEAF_MERGE_THRESHOLD);
+    }
+
+    #[test]
+    fn consume_and_update_until_only_inserts() {
+        let mut updater = LeafUpdater::new(PAGE_POOL.clone(), None, None);
+
+        updater.ingest(key(1), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(2), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(3), Some(vec![1; 500]), false, |_| {});
+        updater.ingest(key(4), Some(vec![1; 1000]), false, |_| {});
+
+        assert_eq!(updater.consume_and_update_until(0, 2200), Some(3));
+
+        updater.ops.clear();
+        updater.gauge = LeafGauge::default();
+
+        updater.ingest(key(1), Some(vec![1; 1100]), false, |_| {});
+        updater.ingest(key(2), Some(vec![1; 1100]), false, |_| {});
+        updater.ingest(key(3), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(4), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(5), Some(vec![1; 1000]), false, |_| {});
+        updater.ingest(key(6), Some(vec![1; 1300]), false, |_| {});
+
+        // below target
+        assert_eq!(updater.consume_and_update_until(0, 3250), Some(3));
+    }
+
+    #[test]
+    fn consume_and_update_until_only_keeps() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1000], false),
+            (key(2), vec![1u8; 1000], false),
+            (key(3), vec![1u8; 500], false),
+            (key(4), vec![1u8; 1000], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf.clone(),
+                low: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        updater.ops = vec![
+            LeafOp::KeepChunk(0, 1, leaf.values_size(0, 1)),
+            LeafOp::KeepChunk(1, 2, leaf.values_size(1, 2)),
+            LeafOp::KeepChunk(2, 4, leaf.values_size(2, 4)),
+        ];
+
+        // one split exptected
+        assert_eq!(updater.consume_and_update_until(0, 2200), Some(3));
+        assert!(matches!(updater.ops[0], LeafOp::KeepChunk(0, 1, _)));
+        assert!(matches!(updater.ops[1], LeafOp::KeepChunk(1, 2, _)));
+        assert!(matches!(updater.ops[2], LeafOp::KeepChunk(2, 3, _)));
+        assert!(matches!(updater.ops[3], LeafOp::KeepChunk(3, 4, _)));
+
+        // below target
+        let leaf = make_leaf(vec![
+            (key(3), vec![1u8; 1000], false),
+            (key(4), vec![1u8; 1100], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf.clone(),
+                low: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        updater.ops = vec![
+            LeafOp::Insert(key(1), vec![1; 1100], false),
+            LeafOp::Insert(key(2), vec![1; 1100], false),
+            LeafOp::KeepChunk(0, 2, leaf.values_size(0, 2)),
+            LeafOp::Insert(key(5), vec![1; 900], false),
+            LeafOp::Insert(key(6), vec![1; 1300], false),
+        ];
+
+        // one split exptected
+        assert_eq!(updater.consume_and_update_until(0, 3250), Some(3));
+        assert!(matches!(updater.ops[0], LeafOp::Insert(_, _, _)));
+        assert!(matches!(updater.ops[1], LeafOp::Insert(_, _, _)));
+        assert!(matches!(updater.ops[2], LeafOp::KeepChunk(0, 1, _)));
+        assert!(matches!(updater.ops[3], LeafOp::KeepChunk(1, 2, _)));
+        assert!(matches!(updater.ops[4], LeafOp::Insert(_, _, _)));
+        assert!(matches!(updater.ops[5], LeafOp::Insert(_, _, _)));
+    }
+
+    #[test]
+    fn try_split_keep_chunk() {
+        let leaf = make_leaf(vec![
+            (key(1), vec![1u8; 1000], false),
+            (key(2), vec![1u8; 1000], false),
+            (key(3), vec![1u8; 500], false),
+            (key(4), vec![1u8; 1000], false),
+        ]);
+
+        let base = BaseLeaf {
+            node: leaf.clone(),
+            separator: [0; 32],
+            low: 0,
+        };
+
+        // standard split
+        let mut ops = vec![LeafOp::KeepChunk(0, 4, leaf.values_size(0, 4))];
+        super::try_split_keep_chunk(
+            &base,
+            &LeafGauge::default(),
+            &mut ops,
+            0,
+            2200,
+            BRANCH_NODE_SIZE,
+        );
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], LeafOp::KeepChunk(_,_ , size) if size > 2200));
+
+        // Perform a split which is not able to reach the target
+        let mut ops = vec![LeafOp::KeepChunk(0, 2, leaf.values_size(0, 2))];
+        super::try_split_keep_chunk(
+            &base,
+            &LeafGauge::default(),
+            &mut ops,
+            0,
+            2500,
+            BRANCH_NODE_SIZE,
+        );
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(ops[0], LeafOp::KeepChunk(_,_ , size) if size < 2500));
+
+        // Perform a split with a target too little,
+        // but something smaller than the limit will still be split.
+        let mut ops = vec![LeafOp::KeepChunk(0, 2, leaf.values_size(0, 2))];
+        super::try_split_keep_chunk(
+            &base,
+            &LeafGauge::default(),
+            &mut ops,
+            0,
+            500,
+            BRANCH_NODE_SIZE,
+        );
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], LeafOp::KeepChunk(_,_ , size) if size > 500));
+
+        // Perform a split with a limit too little,
+        // nothing will still be split.
+        let mut ops = vec![LeafOp::KeepChunk(0, 2, leaf.values_size(0, 2))];
+        super::try_split_keep_chunk(&base, &LeafGauge::default(), &mut ops, 0, 500, 500);
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(ops[0], LeafOp::KeepChunk(0,2 , size) if size == leaf.values_size(0, 2)));
+    }
+
+    #[test]
+    fn prepare_merge_ops() {
+        let leaf = make_leaf(vec![
+            (key(3), vec![1u8; 500], false),
+            (key(4), vec![1u8; 500], false),
+            (key(5), vec![1u8; 500], false),
+            (key(6), vec![1u8; 500], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf.clone(),
+                low: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        updater.ops = vec![
+            LeafOp::Insert(key(1), vec![1; 1100], false),
+            LeafOp::Insert(key(2), vec![1; 1100], false),
+            LeafOp::KeepChunk(0, 2, leaf.values_size(0, 2)),
+            LeafOp::KeepChunk(2, 4, leaf.values_size(2, 4)),
+            LeafOp::Insert(key(5), vec![1; 900], false),
+            LeafOp::Insert(key(6), vec![1; 1300], false),
+        ];
+
+        updater.prepare_merge_ops();
+        for op in updater.ops {
+            assert!(matches!(op, LeafOp::Insert(_, _, _)));
+        }
+    }
+
+    #[test]
+    fn extract_insert_from_keep_chunk() {
+        let leaf = make_leaf(vec![
+            (key(3), vec![1u8; 500], false),
+            (key(4), vec![1u8; 500], false),
+        ]);
+
+        let mut updater = LeafUpdater::new(
+            PAGE_POOL.clone(),
+            Some(BaseLeaf {
+                node: leaf.clone(),
+                low: 0,
+                separator: key(1),
+            }),
+            None,
+        );
+        updater.ops = vec![
+            LeafOp::Insert(key(2), vec![1; 1100], false),
+            LeafOp::KeepChunk(0, 2, leaf.values_size(0, 2)),
+            LeafOp::Insert(key(5), vec![1; 1100], false),
+        ];
+
+        updater.extract_insert_from_keep_chunk(1);
+        assert_eq!(updater.ops.len(), 4);
+        assert!(matches!(updater.ops[1], LeafOp::Insert(_, _, _)));
+        assert!(matches!(updater.ops[2], LeafOp::KeepChunk(1, 2, _)));
+        // 0-sized junk cannot exists
+        updater.extract_insert_from_keep_chunk(2);
+        assert_eq!(updater.ops.len(), 4);
+        assert!(matches!(updater.ops[2], LeafOp::Insert(_, _, _)));
     }
 }
