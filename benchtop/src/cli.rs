@@ -136,7 +136,7 @@ pub struct WorkloadParams {
     #[arg(long = "buckets")]
     pub hashtable_buckets: Option<u32>,
 
-    /// The size of the in-memory LRU cache to use, measured in items.
+    /// The size of the in-memory LRU cache used by the workload, measured in items.
     #[arg(long = "cache-size")]
     pub cache_size: Option<u64>,
 
@@ -144,6 +144,11 @@ pub struct WorkloadParams {
     #[arg(long = "distribution")]
     #[clap(default_value = "uniform")]
     pub distribution: StateItemDistribution,
+
+    /// The size of the page cache used in NOMT to store Bitbox pages, measured in MiB.
+    /// Only used with the Nomt backend.
+    #[arg(long = "page-cache-size")]
+    pub page_cache_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Args)]
