@@ -1,6 +1,9 @@
 //! The leaf cache stores recently accessed leaf nodes.
 
-use crate::beatree::{allocator::PageNumber, leaf::node::LeafNode};
+use crate::{
+    beatree::{allocator::PageNumber, leaf::node::LeafNode},
+    io::PAGE_SIZE,
+};
 use lru::LruCache;
 use parking_lot::{Mutex, MutexGuard};
 use std::{collections::hash_map::RandomState, hash::BuildHasher, sync::Arc};
@@ -16,7 +19,8 @@ pub struct LeafCache {
 impl LeafCache {
     /// Create a new cache with the given number of shards and the maximum number of items
     /// to hold. `shards` must be non-zero.
-    pub fn new(shards: usize, max_items: usize) -> Self {
+    pub fn new(shards: usize, leaf_cache_size: usize) -> Self {
+        let max_items = (leaf_cache_size * 1024 * 1024) / PAGE_SIZE;
         let items_per_shard = max_items / shards;
         LeafCache {
             inner: Arc::new(Shared {

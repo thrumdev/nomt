@@ -149,6 +149,11 @@ pub struct WorkloadParams {
     /// Only used with the Nomt backend.
     #[arg(long = "page-cache-size")]
     pub page_cache_size: Option<usize>,
+
+    /// The size of the leaf cache used in NOMT to store Beatree leaves, measured in MiB.
+    /// Only used with the Nomt backend.
+    #[arg(long = "leaf-cache-size")]
+    pub leaf_cache_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -24,6 +24,9 @@ pub struct Options {
     /// The maximum size of the page cache specified in MiB, rounded down
     /// to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
     pub(crate) page_cache_size: usize,
+    /// The maximum size of the leaf cache specified in MiB, rounded down
+    /// to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
+    pub(crate) leaf_cache_size: usize,
 }
 
 impl Options {
@@ -47,6 +50,7 @@ impl Options {
             rollback_tp_size: 4,
             preallocate_ht: true,
             page_cache_size: 256,
+            leaf_cache_size: 256,
         }
     }
 
@@ -148,6 +152,15 @@ impl Options {
     /// Default: 256MiB.
     pub fn page_cache_size(&mut self, page_cache_size: usize) {
         self.page_cache_size = page_cache_size;
+    }
+
+    /// Sets the size of the leaf cache in MiB.
+    ///
+    /// Rounded down to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
+    ///
+    /// Default: 256MiB.
+    pub fn leaf_cache_size(&mut self, leaf_cache_size: usize) {
+        self.leaf_cache_size = leaf_cache_size;
     }
 }
 
