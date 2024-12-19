@@ -16,6 +16,7 @@ impl NomtDB {
         commit_concurrency: usize,
         io_workers: usize,
         hashtable_buckets: Option<u32>,
+        page_cache_size: Option<usize>,
     ) -> Self {
         let nomt_db_folder =
             std::env::var("NOMT_DB_FOLDER").unwrap_or_else(|_| NOMT_DB_FOLDER.to_string());
@@ -30,6 +31,9 @@ impl NomtDB {
         opts.commit_concurrency(commit_concurrency);
         opts.io_workers(io_workers);
         opts.metrics(true);
+        if let Some(size) = page_cache_size {
+            opts.page_cache_size(size);
+        }
         if let Some(buckets) = hashtable_buckets {
             opts.hashtable_buckets(buckets);
         }
