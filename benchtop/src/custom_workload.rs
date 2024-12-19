@@ -13,7 +13,7 @@ pub struct RwInit {
 
 impl Workload for RwInit {
     fn run_step(&mut self, transaction: &mut dyn Transaction) {
-        const MAX_INIT_PER_ITERATION: u64 = 2 * 1024 * 1024;
+        const MAX_INIT_PER_ITERATION: u64 = 64 * 1024 * 1024;
 
         if self.num_vals == 0 {
             return;
