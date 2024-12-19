@@ -9,25 +9,28 @@
 //! The deltas are also persisted on disk in a [`seglog`].
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs::File,
     io::Cursor,
     path::PathBuf,
     sync::Arc,
 };
 
+use crossbeam::channel::Sender;
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
 use parking_lot::{Condvar, Mutex};
 use threadpool::ThreadPool;
 
 use self::delta::Delta;
+use self::reverse_delta_worker::{DeltaBuilderCommand, LoadValueAsync, StoreLoadValueAsync};
 use crate::{
     seglog::{self, RecordId, SegmentedLog},
     KeyReadWrite,
 };
 
 mod delta;
+mod reverse_delta_worker;
 #[cfg(test)]
 mod tests;
 
@@ -80,6 +83,8 @@ impl InMemory {
     }
 }
 
+const ROLLBACK_TP_SIZE: usize = 2;
+
 /// This structure manages the rollback log. Modifications to the rollback log are made using
 /// [`ReverseDeltaBuilder`] supplied to [`Rollback::commit`].
 #[derive(Clone)]
@@ -90,7 +95,6 @@ pub struct Rollback {
 impl Rollback {
     pub fn read(
         max_rollback_log_len: u32,
-        rollback_tp_size: usize,
         db_dir_path: PathBuf,
         db_dir_fd: Arc<File>,
         rollback_start_active: u64,
@@ -112,7 +116,7 @@ impl Rollback {
             },
         )?;
         let shared = Arc::new(Shared {
-            worker_tp: ThreadPool::new(rollback_tp_size),
+            worker_tp: ThreadPool::new(ROLLBACK_TP_SIZE),
             sync_tp: ThreadPool::new(1),
             in_memory: Mutex::new(in_memory),
             seglog: Mutex::new(seglog),
@@ -122,10 +126,18 @@ impl Rollback {
     }
 
     /// Begin a rollback delta.
-    pub fn delta_builder(&self) -> ReverseDeltaBuilder {
+    pub fn delta_builder(&self, store: &crate::Store) -> ReverseDeltaBuilder {
+        self.delta_builder_inner(StoreLoadValueAsync::new(store))
+    }
+
+    // generality is primarily for testing.
+    fn delta_builder_inner(&self, store: impl LoadValueAsync) -> ReverseDeltaBuilder {
+        let priors = Arc::new(DashMap::new());
+        let command_tx = reverse_delta_worker::start(store, &self.shared.worker_tp, priors.clone());
         ReverseDeltaBuilder {
+            command_tx,
             tp: self.shared.worker_tp.clone(),
-            priors: Arc::new(DashMap::new()),
+            priors,
         }
     }
 
@@ -135,11 +147,10 @@ impl Rollback {
     /// key paths in ascending order.
     pub fn commit(
         &self,
-        store: impl LoadValue,
         actuals: &[(KeyPath, KeyReadWrite)],
         delta: ReverseDeltaBuilder,
     ) -> anyhow::Result<()> {
-        let delta = delta.finalize(store, actuals);
+        let delta = delta.finalize(actuals);
         let delta_bytes = delta.encode();
 
         let mut in_memory = self.shared.in_memory.lock();
@@ -350,24 +361,12 @@ struct WriteoutData {
 }
 
 pub struct ReverseDeltaBuilder {
+    command_tx: Sender<DeltaBuilderCommand>,
     tp: ThreadPool,
     /// The values of the keys that should be preserved at commit time for this delta.
     ///
     /// Before the commit takes place, the set contains tentative values.
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
-}
-
-/// A trait for loading values from the store.
-///
-/// This seam allows us to mock the store in tests.
-pub trait LoadValue: Clone + Send + Sync + 'static {
-    fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>>;
-}
-
-impl LoadValue for crate::store::Store {
-    fn load_value(&self, key_path: KeyPath) -> anyhow::Result<Option<Vec<u8>>> {
-        self.load_value(key_path)
-    }
 }
 
 impl ReverseDeltaBuilder {
@@ -376,28 +375,26 @@ impl ReverseDeltaBuilder {
     /// different set of operations, and some of the tentative operations may be discarded.
     ///
     /// This function doesn't block.
-    pub fn tentative_preserve_prior(&self, store: impl LoadValue, key_path: KeyPath) {
-        self.tp.execute({
-            let priors = self.priors.clone();
-            move || {
-                let value = store.load_value(key_path).unwrap();
-                priors.insert(key_path, value);
-            }
-        });
+    pub fn tentative_preserve_prior(&self, key_path: KeyPath) {
+        let _ = self.command_tx.send(DeltaBuilderCommand::Lookup(key_path));
     }
 
     /// Finalize the delta.
     ///
     /// This function is expected to be called before the store is modified.
-    fn finalize(self, store: impl LoadValue, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
-        // Wait for all tentative writes issued so far to complete.
-        //
-        // NB: This doesn't take into account other users of `tp`. If there are any, we will be
-        // needlessly blocking on them.
-        self.tp.join();
+    fn finalize(self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
+        // wait for all submitted requests to finish.
+        let fresh_priors = Arc::new(DashMap::new());
+        let (join_tx, join_rx) = crossbeam::channel::bounded(1);
+        let _ = self
+            .command_tx
+            .send(DeltaBuilderCommand::Join(join_tx, fresh_priors.clone()));
+        let _ = join_rx.recv();
 
-        let tentative_priors = Arc::clone(&self.priors);
-        let final_priors = Arc::new(DashMap::with_capacity(tentative_priors.len() * 2));
+        // At this point, `tentative_priors` is unique, because the worker has swapped
+        // with `fresh_priors`.
+        let tentative_priors = self.priors;
+        let mut final_priors = HashMap::with_capacity(tentative_priors.len() * 2);
 
         for (path, read_write) in actuals {
             match read_write {
@@ -413,13 +410,7 @@ impl ReverseDeltaBuilder {
                     } else {
                         // The delta builder was not aware of this write. Initiate a fetch from the store
                         // and record the result as a prior.
-                        let store = store.clone();
-                        let path = path.clone();
-                        let final_priors = final_priors.clone();
-                        self.tp.execute(move || {
-                            let value = store.load_value(path).unwrap();
-                            final_priors.insert(path, value);
-                        });
+                        let _ = self.command_tx.send(DeltaBuilderCommand::Lookup(*path));
                     }
                 }
                 KeyReadWrite::ReadThenWrite(prior, _) => {
@@ -429,12 +420,17 @@ impl ReverseDeltaBuilder {
             }
         }
 
-        // Wait for all the fetches to complete. After this point, priors contains the final set of
+        // Wait for the load worker to join. After this point, priors contains the final set of
         // values to be preserved.
-        self.tp.join();
+        drop(self.command_tx);
+        let _ = self.tp.join();
 
+        // UNWRAP: At this point, `fresh_priors` is unique because the worker thread has joined.
+        // At this point, fresh_priors is fully populated with all lookups submitted in the loop.
+        let fresh_priors = Arc::into_inner(fresh_priors).unwrap().into_iter();
+        final_priors.extend(fresh_priors);
         Delta {
-            priors: Arc::into_inner(final_priors).unwrap().into_iter().collect(),
+            priors: final_priors,
         }
     }
 }
