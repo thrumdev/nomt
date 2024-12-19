@@ -144,6 +144,11 @@ pub struct WorkloadParams {
     #[arg(long = "distribution")]
     #[clap(default_value = "uniform")]
     pub distribution: StateItemDistribution,
+
+    /// The size of the leaf cache used in NOMT to store Beatree leaves, measured in MiB.
+    /// Only used with the Nomt backend.
+    #[arg(long = "leaf-cache-size")]
+    pub leaf_cache_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Args)]

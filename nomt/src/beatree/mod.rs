@@ -84,6 +84,7 @@ impl Tree {
         bbn_file: Arc<File>,
         ln_file: Arc<File>,
         commit_concurrency: usize,
+        leaf_cache_size: usize,
     ) -> Result<Tree> {
         let ln_freelist_pn = Some(ln_freelist_pn)
             .map(PageNumber)
@@ -116,7 +117,7 @@ impl Tree {
             bbn_store,
             primary_staging: OrdMap::new(),
             secondary_staging: None,
-            leaf_cache: leaf_cache::LeafCache::new(32, 1 << 16),
+            leaf_cache: leaf_cache::LeafCache::new(32, leaf_cache_size),
         };
 
         let sync = Sync {
