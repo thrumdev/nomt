@@ -31,6 +31,7 @@ pub fn init(params: InitParams) -> Result<()> {
         workload_params.commit_concurrency,
         workload_params.io_workers,
         workload_params.hashtable_buckets,
+        workload_params.page_cache_size,
     );
     db.execute(None, &mut *init, None);
 
@@ -49,6 +50,7 @@ pub fn run(params: RunParams) -> Result<()> {
         workload_params.commit_concurrency,
         workload_params.io_workers,
         workload_params.hashtable_buckets,
+        workload_params.page_cache_size,
     );
 
     if params.reset {

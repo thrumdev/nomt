@@ -1,6 +1,6 @@
 use crate::{
     bitbox::BucketIndex,
-    io::{page_pool::FatPage, PagePool},
+    io::{page_pool::FatPage, PagePool, PAGE_SIZE},
     metrics::{Metric, Metrics},
     page_diff::PageDiff,
     page_region::PageRegion,
@@ -22,10 +22,6 @@ use std::{fmt, num::NonZeroUsize, sync::Arc};
 // of the rootless sub-binary tree stored in a page following this formula:
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
-
-// Every 256 pages is 1MB.
-const CACHE_PAGE_LIMIT: usize = 256 * 256;
-const PAGE_LIMIT_PER_ROOT_CHILD: usize = CACHE_PAGE_LIMIT / 64;
 
 struct PageData {
     data: RwPassCell<Option<FatPage>, ShardIndex>,
@@ -205,7 +201,11 @@ fn shard_index_for(num_shards: usize, first_ancestor: usize) -> usize {
     }
 }
 
-fn make_shards(num_shards: usize) -> Vec<CacheShard> {
+fn make_shards(num_shards: usize, page_cache_size: usize) -> Vec<CacheShard> {
+    // page_cache_size is measured in MiB
+    let cache_page_limit = (page_cache_size * 1024 * 1024) / PAGE_SIZE;
+    let page_limit_per_root_child = cache_page_limit / 64;
+
     assert!(num_shards > 0);
     shard_regions(num_shards)
         .into_iter()
@@ -215,7 +215,7 @@ fn make_shards(num_shards: usize) -> Vec<CacheShard> {
                 cached: LruCache::unbounded_with_hasher(FxBuildHasher::default()),
             }),
             // UNWRAP: both factors are non-zero
-            page_limit: NonZeroUsize::new(PAGE_LIMIT_PER_ROOT_CHILD * count).unwrap(),
+            page_limit: NonZeroUsize::new(page_limit_per_root_child * count).unwrap(),
         })
         .collect()
 }
@@ -247,7 +247,7 @@ impl PageCache {
         let domain = RwPassDomain::new();
         Self {
             shared: Arc::new(Shared {
-                shards: make_shards(o.commit_concurrency),
+                shards: make_shards(o.commit_concurrency, o.page_cache_size),
                 root_page: RwLock::new(CacheEntry::init(&domain, ShardIndex::Root, root_page_data)),
                 page_rw_pass_domain: domain,
                 metrics: metrics.into().unwrap_or(Metrics::new(false)),
