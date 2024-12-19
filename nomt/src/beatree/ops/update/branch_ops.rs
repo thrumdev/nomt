@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn consume_and_update_stop_prefix_compression_on_updates() {
+    fn extract_ops_until_stop_prefix_compression_on_updates() {
         let compressed_key = |i| prefixed_key(0x00, 30, i);
         let uncompressed_key = |i| prefixed_key(0xFF, 30, i);
 
@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn consume_and_update_stop_prefix_compression_on_keeps() {
+    fn extract_ops_until_top_prefix_compression_on_keeps() {
         let compressed_key = |i| prefixed_key(0x00, 30, i);
         let uncompressed_key = |i| prefixed_key(0xFF, 30, i);
 
