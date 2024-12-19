@@ -22,6 +22,7 @@ impl Backend {
         io_workers: usize,
         hashtable_buckets: Option<u32>,
         page_cache_size: Option<usize>,
+        leaf_cache_size: Option<usize>,
     ) -> DB {
         match self {
             Backend::SovDB => DB::Sov(SovDB::open(reset)),
@@ -31,6 +32,7 @@ impl Backend {
                 io_workers,
                 hashtable_buckets,
                 page_cache_size,
+                leaf_cache_size,
             )),
             Backend::SpTrie => DB::SpTrie(SpTrieDB::open(reset)),
         }
