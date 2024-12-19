@@ -120,7 +120,7 @@ impl BranchUpdater {
         }
 
         if self.ops_tracker.body_size() > BRANCH_NODE_BODY_SIZE {
-            self.try_split(new_branches, BRANCH_MERGE_THRESHOLD);
+            self.try_split(new_branches, self.ops_tracker.body_size() / 2);
         }
 
         if self.ops_tracker.body_size() == 0 {
