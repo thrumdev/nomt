@@ -22,7 +22,10 @@ mod update;
 pub use reconstruction::reconstruct;
 pub use update::update;
 
-/// Partially look up a key in the btree. This will determine the leaf node page the leaf is within.
+/// Do a partial lookup of the key in the beatree.
+///
+/// This determines the leaf store page number which might store the associated value, or `None`
+/// if the value is definitely non-existent.
 pub fn partial_lookup(key: Key, bbn_index: &Index) -> Option<PageNumber> {
     let branch = match bbn_index.lookup(key) {
         None => return None,
@@ -32,7 +35,9 @@ pub fn partial_lookup(key: Key, bbn_index: &Index) -> Option<PageNumber> {
     search_branch(&branch, key.clone()).map(|(_, leaf_pn)| leaf_pn)
 }
 
-/// Finish looking up a key in a leaf node using blocking I/O.
+/// Find the associated value associated with the key in the given leaf node, if any.
+///
+/// If the value is an overflow, this function will load it with blocking I/O.
 pub fn finish_lookup_blocking(
     key: Key,
     leaf: &LeafNode,
@@ -47,7 +52,9 @@ pub fn finish_lookup_blocking(
     })
 }
 
-/// Finish looking up a key in a leaf node, starting an async fetch if overflowing.
+/// Find the associated value associated with the key in the given leaf node, if any.
+///
+/// If the value is an overflow, this function will create an asynchronous reader.
 pub fn finish_lookup_async(
     key: Key,
     leaf: &LeafNode,
