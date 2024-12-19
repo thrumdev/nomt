@@ -21,6 +21,8 @@ pub struct Options {
     pub(crate) rollback_tp_size: usize,
     /// Whether to preallocate the hashtable file.
     pub(crate) preallocate_ht: bool,
+    /// The maximum size of the page cache in MiB.
+    pub(crate) page_cache_size: usize,
 }
 
 impl Options {
@@ -43,6 +45,7 @@ impl Options {
             warm_up: false,
             rollback_tp_size: 4,
             preallocate_ht: true,
+            page_cache_size: 256,
         }
     }
 
@@ -135,6 +138,13 @@ impl Options {
     /// Default: `true`.
     pub fn preallocate_ht(&mut self, preallocate_ht: bool) {
         self.preallocate_ht = preallocate_ht;
+    }
+
+    /// Sets the size of the page cache in MiB.
+    ///
+    /// Default: 256MiB.
+    pub fn page_cache_size(&mut self, page_cache_size: usize) {
+        self.page_cache_size = page_cache_size;
     }
 }
 
