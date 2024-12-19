@@ -148,6 +148,7 @@ impl Store {
             bbn_fd,
             ln_fd,
             o.commit_concurrency,
+            o.leaf_cache_size,
         )?;
         let pages = bitbox::DB::open(
             meta.sync_seqn,
