@@ -148,7 +148,7 @@ impl LeafUpdater {
 
         if let Some(value) = value_change {
             self.ops.push(LeafOp::Insert(key, value, overflow));
-            self.bulk_split_step(self.ops.len() - 1);
+            self.bulk_split_step();
         }
     }
 
@@ -186,15 +186,16 @@ impl LeafUpdater {
             self.separator_override = None;
             DigestResult::Finished
         } else {
-            // UNWRAP: if cutoff exists, then base must too.
-            // merge is only performed when not at the rightmost leaf. this is protected by the
-            // check on self.cutoff above.
             if self.separator_override.is_none() {
+                // UNWRAP: if cutoff exists, then base must too.
+                // Merge is only performed when not at the rightmost leaf. this is protected by the
+                // check on self.cutoff above.
                 self.separator_override = Some(self.base.as_ref().unwrap().separator);
             }
 
             self.prepare_merge_ops(last_ops_start);
 
+            // UNWRAP: protected above.
             DigestResult::NeedsMerge(self.cutoff.unwrap())
         }
     }
@@ -236,92 +237,46 @@ impl LeafUpdater {
             }
         }
 
-        self.bulk_split_step(self.ops.len() - 1);
+        self.bulk_split_step();
     }
 
     // check whether bulk split needs to start, and if so, start it.
     // if ongoing, check if we need to cut off.
-    // returns the amount of operations consumed for the bulk creation
-    fn bulk_split_step(&mut self, op_index: usize) -> usize {
-        let (mut n_items, mut values_size) = match self.ops[op_index] {
-            LeafOp::Insert(_, ref val, _) => (1, val.len()),
-            LeafOp::KeepChunk(from, to, values_size) => (to - from, values_size),
+    fn bulk_split_step(&mut self) {
+        let Some(last_op) = self.ops.last() else {
+            panic!("Attempted bulk_split_step on no LeafOp available");
         };
 
+        let (n_items, values_size) = match last_op {
+            LeafOp::Insert(_, ref val, _) => (1, val.len()),
+            LeafOp::KeepChunk(from, to, values_size) => (to - from, *values_size),
+        };
         let body_size_after = self.gauge.body_size_after(n_items, values_size);
+
         match self.bulk_split {
             None if body_size_after >= LEAF_BULK_SPLIT_THRESHOLD => {
-                self.bulk_split = Some(LeafBulkSplitter::default());
-                self.gauge = LeafGauge::default();
-                let mut idx = 0;
-                while idx < self.ops.len() {
-                    let consumed = self.bulk_split_step(idx);
-                    idx += consumed;
-                }
-                idx
+                self.bulk_split = Some(LeafBulkSplitter::default())
             }
-            Some(ref mut bulk_splitter) if body_size_after >= LEAF_BULK_SPLIT_TARGET => {
-                let mut recursive_on_split = false;
-                let accept_item = body_size_after <= LEAF_NODE_BODY_SIZE || {
-                    // If we are here, it means that self.ops[op_index] goes from underefull to overfull.
-                    // If it is a KeepChunk, there is a chance to split it into two parts,
-                    // accept the previous one, and iterate recursively over the newly created one.
-
-                    match self.ops[op_index] {
-                        LeafOp::Insert(..) => false,
-                        LeafOp::KeepChunk(..) => {
-                            // UNWRAP: if the operation is a KeepChunk variant, then base must exist
-                            let (left_n_items, left_values_size) = split_keep_chunk(
-                                self.base.as_ref().unwrap(),
-                                &self.gauge,
-                                &mut self.ops,
-                                op_index,
-                                LEAF_NODE_BODY_SIZE,
-                                LEAF_NODE_BODY_SIZE,
-                            );
-
-                            if left_n_items > 0 {
-                                // KeepChunk has been successfully split, the left chunk is now able to fit
-                                n_items = left_n_items;
-                                values_size = left_values_size;
-                                recursive_on_split = true;
-                                true
-                            } else {
-                                // KeepChunk could not have been split,
-                                // thus we end up in the same scenario as with `LeafOp::Insert`
-                                if self.gauge.body_size() < LEAF_MERGE_THRESHOLD {
-                                    todo!()
-                                }
-                                false
-                            }
-                        }
-                    }
-                };
-
-                let n = if accept_item {
-                    self.gauge.ingest(n_items, values_size);
-                    op_index + 1 - bulk_splitter.total_count
-                } else {
-                    op_index - bulk_splitter.total_count
-                };
-
-                // push onto bulk splitter & restart gauge.
-                self.gauge = LeafGauge::default();
-                bulk_splitter.push(n);
-
-                if !accept_item {
-                    self.gauge.ingest(n_items, values_size);
-                }
-
-                if recursive_on_split {
-                    1 + self.bulk_split_step(op_index + 1)
-                } else {
-                    1
-                }
-            }
+            Some(_) if body_size_after >= LEAF_BULK_SPLIT_TARGET => (),
             _ => {
                 self.gauge.ingest(n_items, values_size);
-                1
+                return;
+            }
+        };
+
+        // continue or start the bulk split
+        // UNWRAPs: bulk_split has just been checked to be Some or has just been set to Some
+        let mut from = self.bulk_split.as_ref().unwrap().total_count;
+        loop {
+            match self.consume_and_update_until(from, LEAF_BULK_SPLIT_TARGET) {
+                Ok(item_count) => {
+                    self.bulk_split.as_mut().unwrap().push(item_count);
+                    from = from + item_count;
+                }
+                Err(gauge) => {
+                    self.gauge = gauge;
+                    break;
+                }
             }
         }
     }
@@ -372,66 +327,50 @@ impl LeafUpdater {
 
     fn split(&mut self, new_leaves: &mut impl HandleNewLeaf) -> DigestResult {
         let midpoint = self.gauge.body_size() / 2;
-        let mut split_point = 0;
 
-        let mut left_gauge = LeafGauge::default();
-        while left_gauge.body_size() < midpoint {
-            let (n_items, values_size) = match self.ops[split_point] {
-                LeafOp::Insert(_, ref val, _) => (1, val.len()),
-                LeafOp::KeepChunk(from, to, values_size)
-                    if left_gauge.body_size_after(to - from, values_size) <= midpoint =>
-                {
-                    (to - from, values_size)
-                }
-                LeafOp::KeepChunk(..) => {
-                    // UNWRAP: if the operation is a KeepChunk variant, then base must exist
-                    let (n_items, values_size) = split_keep_chunk(
-                        self.base.as_ref().unwrap(),
-                        &left_gauge,
-                        &mut self.ops,
-                        split_point,
-                        midpoint,
-                        LEAF_NODE_BODY_SIZE,
-                    );
-                    (n_items, values_size)
-                }
-            };
-
-            // stop using ops for the left leaf if no more item is able to fit
-            if n_items == 0
-                || left_gauge.body_size_after(n_items, values_size) > LEAF_NODE_BODY_SIZE
-            {
-                if left_gauge.body_size() < LEAF_MERGE_THRESHOLD {
-                    // super degenerate split! jumped from underfull to overfull in a single step.
-                    todo!()
-                }
-
-                break;
+        let split_point = match self.consume_and_update_until(0, midpoint) {
+            Ok(split_point) => split_point,
+            // If the current ops cannot reach the target and there is a cutoff
+            // return NeedsMerge with the relative cutoff.
+            Err(new_gauge) if self.cutoff.is_some() => {
+                self.gauge = new_gauge;
+                // UNWRAP: self.cutoff has just been checked to be Some.
+                return DigestResult::NeedsMerge(self.cutoff.unwrap());
             }
+            // If there is no cutoff, then construct the leaf with all the available ops.
+            Err(new_gauge) => {
+                self.gauge = new_gauge;
+                self.ops.len()
+            }
+        };
 
-            left_gauge.ingest(n_items, values_size);
-            split_point += 1;
-        }
-
+        let left_separator = self.separator();
         let left_ops = &self.ops[..split_point];
-        let right_ops = &self.ops[split_point..];
+        let left_node = self.build_leaf(left_ops);
+
+        if split_point == self.ops.len() {
+            // It could be possible due to prefix uncompression
+            // that after `consume_and_update_until` all ops fits in a single node.
+            new_leaves.handle_new_leaf(left_separator, left_node, self.cutoff);
+            self.ops.clear();
+            self.gauge = LeafGauge::default();
+
+            return DigestResult::Finished;
+        }
 
         let left_key = self.op_last_key(&self.ops[split_point - 1]);
         let right_key = self.op_first_key(&self.ops[split_point]);
-
-        let left_separator = self.separator();
         let right_separator = separate(&left_key, &right_key);
-
-        let left_leaf = self.build_leaf(left_ops);
-        new_leaves.handle_new_leaf(left_separator, left_leaf, Some(right_separator));
+        new_leaves.handle_new_leaf(left_separator, left_node, Some(right_separator));
 
         let mut right_gauge = LeafGauge::default();
-        for op in &self.ops[split_point..] {
+        let right_ops = &self.ops[split_point..];
+
+        for op in right_ops {
             let (n_items, values_size) = match op {
-                LeafOp::Insert(_, ref val, _) => (1, val.len()),
+                LeafOp::Insert(_, val, _) => (1, val.len()),
                 LeafOp::KeepChunk(from, to, values_size) => (to - from, *values_size),
             };
-
             right_gauge.ingest(n_items, values_size);
         }
 
@@ -466,12 +405,95 @@ impl LeafUpdater {
         }
     }
 
+    // Starting from the specified index `from` within `self.ops`, consume and possibly
+    // change the operations themselves to achieve a sequence of operations that are able to
+    // construct a Leaf node with the specified target size.
+    //
+    // If reaching the target is not possible, then the gauge reflecting the last operations
+    // will be returned as an error.
+    fn consume_and_update_until(&mut self, from: usize, target: usize) -> Result<usize, LeafGauge> {
+        let mut pos = from;
+        let mut gauge = LeafGauge::default();
+
+        let mut from_below_target_to_overfull = false;
+
+        while pos < self.ops.len() && gauge.body_size() < target {
+            let (n_items, values_size) = match &self.ops[pos] {
+                LeafOp::Insert(_, val, _) => {
+                    if gauge.body_size_after(1, val.len()) > LEAF_NODE_BODY_SIZE {
+                        from_below_target_to_overfull = true;
+                        break;
+                    }
+                    (1, val.len())
+                }
+                LeafOp::KeepChunk(from, to, values_size) => {
+                    if gauge.body_size_after(to - from, *values_size) > target {
+                        // Try to split the chunk to make it fit into the available space.
+                        // `try_split_keep_chunk` works on the gauge thus it accounts for a possible
+                        // stop of the prefix compression even if working on a KeepChunk operation
+                        //
+                        // UNWRAP: `KeepChunk` op only exists when base is Some.
+                        let (left_n_items, left_values_size) = try_split_keep_chunk(
+                            self.base.as_ref().unwrap(),
+                            &gauge,
+                            &mut self.ops,
+                            pos,
+                            target,
+                            LEAF_NODE_BODY_SIZE,
+                        );
+
+                        if left_n_items == 0 {
+                            // If no item from the chunk is capable of fitting,
+                            // then extract the first element from the chunk and repeat the loop
+                            // to see if `stop_prefix_compression` is activated
+                            self.extract_insert_from_keep_chunk(pos);
+                            continue;
+                        }
+                        (left_n_items, left_values_size)
+                    } else {
+                        (to - from, *values_size)
+                    }
+                }
+            };
+
+            gauge.ingest(n_items, values_size);
+            pos += 1;
+        }
+
+        if gauge.body_size() >= target || from_below_target_to_overfull {
+            Ok(pos - from)
+        } else {
+            Err(gauge)
+        }
+    }
+
+    fn extract_insert_from_keep_chunk(&mut self, index: usize) {
+        let LeafOp::KeepChunk(from, to, values_size) = self.ops[index] else {
+            panic!("Attempted to extract `LeafOp::Insert` from non `LeafOp::KeepChunk` operation");
+        };
+
+        // UNWRAP: `KeepChunk` exists only if base is Some.
+        let base = self.base.as_ref().unwrap();
+        let key = base.node.key(from);
+        let (value, overflow) = base.node.value(from);
+
+        if from == to - 1 {
+            // 0-sized chunks are not allowed,
+            // thus 1-Sized chunks become just an `LeafOp::Insert`.
+            self.ops[index] = LeafOp::Insert(key, value.to_vec(), overflow);
+        } else {
+            self.ops[index] = LeafOp::KeepChunk(from + 1, to, values_size - value.len());
+            self.ops
+                .insert(index, LeafOp::Insert(key, value.to_vec(), overflow));
+        }
+    }
+
     fn prepare_merge_ops(&mut self, split_point: usize) {
         self.ops.drain(..split_point);
 
         let Some(ref base) = self.base else { return };
 
-        // then replace `Keep` ops with pure key-value ops, preparing for the base to be changed.
+        // then replace `KeepChunk` ops with pure key-value ops, preparing for the base to be changed.
         let mut new_insert = 0;
         for i in 0..self.ops.len() {
             match self.ops[new_insert + i] {
@@ -491,7 +513,7 @@ impl LeafUpdater {
     }
 
     fn op_first_key(&self, leaf_op: &LeafOp) -> Key {
-        // UNWRAP: `Keep` leaf ops only exist when base is `Some`.
+        // UNWRAP: `KeepChunk` leaf ops only exist when base is `Some`.
         match leaf_op {
             LeafOp::Insert(k, _, _) => *k,
             LeafOp::KeepChunk(from, _, _) => self.base.as_ref().unwrap().key(*from),
@@ -499,7 +521,7 @@ impl LeafUpdater {
     }
 
     fn op_last_key(&self, leaf_op: &LeafOp) -> Key {
-        // UNWRAP: `Keep` leaf ops only exist when base is `Some`.
+        // UNWRAP: `KeepChunk` leaf ops only exist when base is `Some`.
         match leaf_op {
             LeafOp::Insert(k, _, _) => *k,
             LeafOp::KeepChunk(_, to, _) => self.base.as_ref().unwrap().key(to - 1),
@@ -542,7 +564,7 @@ impl LeafUpdater {
 // with a final size smaller than the target. Constraining the split to always
 // be bigger than the target causes the update algorithm to frequently
 // fall into underfull to overfull scenarios.
-fn split_keep_chunk(
+fn try_split_keep_chunk(
     base: &BaseLeaf,
     gauge: &LeafGauge,
     ops: &mut Vec<LeafOp>,
