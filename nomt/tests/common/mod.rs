@@ -119,7 +119,10 @@ impl Test {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        let x = self.nomt.commit_and_prove(session, actual_access).unwrap();
+        let x = self
+            .nomt
+            .update_commit_and_prove(session, actual_access)
+            .unwrap();
         self.session = Some(self.nomt.begin_session());
         x
     }

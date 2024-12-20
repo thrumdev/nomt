@@ -205,7 +205,7 @@ impl Agent {
                 }
             }
         }
-        self.nomt.commit(session, actuals)?;
+        self.nomt.update_and_commit(session, actuals)?;
         Ok(())
     }
 
