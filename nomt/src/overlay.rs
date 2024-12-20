@@ -20,22 +20,91 @@
 #![allow(dead_code)]
 
 use crate::{beatree::ValueChange, page_cache::Page, page_diff::PageDiff};
-use nomt_core::{page_id::PageId, trie::KeyPath};
+use nomt_core::{
+    page_id::PageId,
+    trie::{KeyPath, Node},
+};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Weak,
+};
 
 /// An in-memory overlay of merkle tree and b-tree changes.
 pub struct Overlay {
     inner: Arc<OverlayInner>,
 }
 
+impl Overlay {
+    /// Get the merkle root at this overlay.
+    pub fn root(&self) -> Node {
+        self.inner.root
+    }
+
+    /// Check whether the parent of this overlay matches the provided marker.
+    /// If the provided marker is `None`, then this checks that this overlay doesn't have a parent.
+    pub(super) fn parent_matches_marker(&self, marker: Option<&OverlayMarker>) -> bool {
+        match (self.inner.data.parent_status.as_ref(), marker) {
+            (None, None) => true,
+            (Some(parent), Some(marker)) => parent.ptr_eq(&marker.0),
+            _ => false,
+        }
+    }
+
+    /// Mark the overlay as committed and return a marker.
+    pub(super) fn commit(self) -> OverlayMarker {
+        let status = self.inner.data.status.clone();
+        status.commit();
+        OverlayMarker(status)
+    }
+}
+
 struct OverlayInner {
+    root: Node,
     index: Index,
     data: Arc<Data>,
     seqn: u64,
     // ordered by recency.
     ancestor_data: Vec<Weak<Data>>,
+}
+
+/// A marker indicating the overlay uniquely, until dropped. Used to enforce commit order.
+pub(super) struct OverlayMarker(OverlayStatus);
+
+#[derive(Clone)]
+struct OverlayStatus(Arc<AtomicUsize>);
+
+impl OverlayStatus {
+    const LIVE: usize = 0;
+    const DROPPED: usize = 1;
+    const COMMITTED: usize = 2;
+
+    fn new_live() -> Self {
+        OverlayStatus(Arc::new(AtomicUsize::new(Self::LIVE)))
+    }
+
+    fn commit(&self) {
+        self.0.store(Self::COMMITTED, Ordering::Relaxed);
+    }
+
+    fn drop(&self) {
+        // If the overlay has not been committed, then we will mark it as dead.
+        let _ = self.0.compare_exchange(
+            Self::LIVE,
+            Self::DROPPED,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn is_committed(&self) -> bool {
+        self.0.load(Ordering::Relaxed) == Self::COMMITTED
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 // Maps changes to sequence number.
@@ -119,11 +188,24 @@ impl Index {
 struct Data {
     pages: HashMap<PageId, (Page, PageDiff)>,
     values: HashMap<KeyPath, ValueChange>,
+    status: OverlayStatus,
+    parent_status: Option<OverlayStatus>,
+}
+
+impl Drop for Data {
+    fn drop(&mut self) {
+        self.status.drop();
+    }
 }
 
 /// An error type indicating that the ancestors provided did not match.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InvalidAncestors;
+pub enum InvalidAncestors {
+    /// One of the provided ancestors was not actually an ancestor.
+    NotAncestor,
+    /// The ancestor chain is incomplete.
+    Incomplete,
+}
 
 /// A live overlay which is being used as a child. This can be queried for all value/page changes in
 /// any of the relevant ancestors.
@@ -151,14 +233,24 @@ impl LiveOverlay {
         for (supposed_ancestor, actual_ancestor) in live_ancestors.zip(parent.ancestor_data.iter())
         {
             let Some(actual_ancestor) = actual_ancestor.upgrade() else {
-                return Err(InvalidAncestors);
+                return Err(InvalidAncestors::Incomplete);
             };
 
             if !Arc::ptr_eq(&supposed_ancestor.inner.data, &actual_ancestor) {
-                return Err(InvalidAncestors);
+                return Err(InvalidAncestors::NotAncestor);
             }
 
             ancestor_data.push(actual_ancestor);
+        }
+
+        // verify that the chain is complete. The last ancestor's parent must either be `None` or
+        // committed.
+        if ancestor_data
+            .last()
+            .and_then(|a| a.parent_status.as_ref())
+            .map_or(false, |status| !status.is_committed())
+        {
+            return Err(InvalidAncestors::Incomplete);
         }
 
         let min_seqn = parent.seqn - ancestor_data.len() as u64;
@@ -168,6 +260,11 @@ impl LiveOverlay {
             ancestor_data,
             min_seqn,
         })
+    }
+
+    /// Whether the overlay is empty.
+    pub(super) fn is_empty(&self) -> bool {
+        self.parent.is_none()
     }
 
     /// Get a page by ID.
@@ -226,6 +323,7 @@ impl LiveOverlay {
     /// Finish this overlay and transform it into a frozen [`Overlay`].
     pub(super) fn finish(
         self,
+        root: Node,
         page_changes: HashMap<PageId, (Page, PageDiff)>,
         value_changes: HashMap<KeyPath, ValueChange>,
     ) -> Overlay {
@@ -241,6 +339,7 @@ impl LiveOverlay {
         index.insert_pages(new_seqn, page_changes.keys().cloned());
         index.insert_values(new_seqn, value_changes.keys().cloned());
 
+        let parent_status = self.parent.as_ref().map(|p| p.data.status.clone());
         let ancestor_data = self
             .parent
             .map(|parent| {
@@ -253,9 +352,12 @@ impl LiveOverlay {
         Overlay {
             inner: Arc::new(OverlayInner {
                 index,
+                root,
                 data: Arc::new(Data {
                     pages: page_changes,
                     values: value_changes,
+                    status: OverlayStatus::new_live(),
+                    parent_status,
                 }),
                 seqn: new_seqn,
                 ancestor_data,
