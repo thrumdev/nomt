@@ -17,6 +17,7 @@ use nomt_core::{
     trie::{InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
 };
+use overlay::{LiveOverlay, OverlayMarker};
 use page_cache::PageCache;
 use parking_lot::Mutex;
 use store::Store;
@@ -26,7 +27,9 @@ use store::Store;
 pub use nomt_core::proof;
 pub use nomt_core::trie::{KeyPath, LeafData, Node, NodePreimage};
 pub use options::{Options, PanicOnSyncMode};
+pub use overlay::{InvalidAncestors, Overlay};
 pub use store::HashTableUtilization;
+
 // beatree module needs to be exposed to be benchmarked
 #[cfg(feature = "benchmarks")]
 #[allow(missing_docs)]
@@ -58,6 +61,8 @@ pub type Value = Vec<u8>;
 struct Shared {
     /// The current root of the trie.
     root: Node,
+    /// The marker of the last committed overlay. `None` if the last commit was not an overlay.
+    last_commit_marker: Option<OverlayMarker>,
 }
 
 /// A witness that can be used to prove the correctness of state trie retrievals and updates.
@@ -232,7 +237,10 @@ impl<T: HashAlgorithm> Nomt<T> {
             page_cache,
             page_pool,
             store,
-            shared: Arc::new(Mutex::new(Shared { root })),
+            shared: Arc::new(Mutex::new(Shared {
+                root,
+                last_commit_marker: None,
+            })),
             session_cnt: Arc::new(AtomicUsize::new(0)),
             metrics,
             _marker: std::marker::PhantomData,
@@ -272,10 +280,33 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// Only a single session may be created at a time. Creating a new session without dropping or
     /// committing an existing open session will lead to a panic.
     pub fn begin_session(&self) -> Session {
-        self.begin_session_inner(/* allow_rollback */ true)
+        // UNWRAP: empty ancestors are always valid.
+        self.begin_session_inner(/* allow_rollback */ true, None)
+            .unwrap()
     }
 
-    fn begin_session_inner(&self, allow_rollback: bool) -> Session {
+    /// Creates a new [`Session`] object on top of a series of in-memory overlays.
+    ///
+    /// This will fail if the first overlay was not created on top of the previous overlays.
+    /// Providing an empty iterator will give the same result as `begin_session`.
+    ///
+    /// It is the user's responsibility to ensure that all uncommitted overlays are provided.
+    /// Failing to provide all uncommitted overlays or providing overlays which do not form a
+    /// sequence will lead to an error.
+    pub fn begin_session_with_overlay<'a>(
+        &self,
+        overlays: impl IntoIterator<Item = &'a Overlay>,
+    ) -> Result<Session, InvalidAncestors> {
+        self.begin_session_inner(/* allow_rollback */ true, overlays)
+    }
+
+    fn begin_session_inner<'a>(
+        &self,
+        allow_rollback: bool,
+        overlays: impl IntoIterator<Item = &'a Overlay>,
+    ) -> Result<Session, InvalidAncestors> {
+        let _live_overlay = LiveOverlay::new(overlays)?;
+
         let prev = self
             .session_cnt
             .swap(1, std::sync::atomic::Ordering::Relaxed);
@@ -286,7 +317,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         } else {
             None
         };
-        Session {
+        Ok(Session {
             store,
             merkle_updater: Some(self.merkle_update_pool.begin::<T>(
                 self.page_cache.clone(),
@@ -297,19 +328,59 @@ impl<T: HashAlgorithm> Nomt<T> {
             session_cnt: self.session_cnt.clone(),
             metrics: self.metrics.clone(),
             rollback_delta,
-        }
+        })
     }
 
-    /// Commit the transaction and returns the new root.
+    /// Update the merkle tree and commit the changes to an in-memory [`Overlay`].
     ///
     /// The actuals are a list of key paths and the corresponding read/write operations. The list
     /// must be sorted by the key paths in ascending order. The key paths must be unique.
-    pub fn commit(
+    pub fn update(
+        &self,
+        _session: Session,
+        _actuals: Vec<(KeyPath, KeyReadWrite)>,
+    ) -> anyhow::Result<Overlay> {
+        unimplemented!()
+    }
+
+    /// Update the merkle tree and commit the changes to an in-memory [`Overlay`] and create a
+    /// proof of all updated values.
+    ///
+    /// The actuals are a list of key paths and the corresponding read/write operations. The list
+    /// must be sorted by the key paths in ascending order. The key paths must be unique.
+    pub fn update_and_prove(
+        &self,
+        _session: Session,
+        _actuals: Vec<(KeyPath, KeyReadWrite)>,
+    ) -> anyhow::Result<(Overlay, Witness, WitnessedOperations)> {
+        unimplemented!()
+    }
+
+    /// Commit the changes from this overlay to the underlying database.
+    ///
+    /// This assumes no sessions are active and will panic otherwise.
+    ///
+    /// This call will fail if the overlay has a parent which has not been committed.
+    pub fn commit_overlay(&self, overlay: Overlay) -> anyhow::Result<()> {
+        if !overlay.parent_matches_marker(self.shared.lock().last_commit_marker.as_ref()) {
+            anyhow::bail!("Overlay parent not committed");
+        }
+
+        let _marker = overlay.commit();
+
+        unimplemented!()
+    }
+
+    /// Update the merkle tree and commit the changes to the underlying database.
+    ///
+    /// The actuals are a list of key paths and the corresponding read/write operations. The list
+    /// must be sorted by the key paths in ascending order. The key paths must be unique.
+    pub fn update_and_commit(
         &self,
         session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<Node> {
-        match self.commit_inner(session, actuals, false)? {
+        match self.commit_inner(session, actuals, false, None)? {
             (node, None, None) => Ok(node),
             // UNWRAP: witness specified to false
             _ => unreachable!(),
@@ -320,12 +391,12 @@ impl<T: HashAlgorithm> Nomt<T> {
     ///
     /// The actuals are a list of key paths and the corresponding read/write operations. The list
     /// must be sorted by the key paths in ascending order. The key paths must be unique.
-    pub fn commit_and_prove(
+    pub fn update_commit_and_prove(
         &self,
         session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
-        match self.commit_inner(session, actuals, true)? {
+        match self.commit_inner(session, actuals, true, None)? {
             (node, Some(witness), Some(witnessed_ops)) => Ok((node, witness, witnessed_ops)),
             // UNWRAP: witness specified to true
             _ => unreachable!(),
@@ -342,6 +413,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
+        overlay_marker: Option<OverlayMarker>,
     ) -> anyhow::Result<(Node, Option<Witness>, Option<WitnessedOperations>)> {
         if cfg!(debug_assertions) {
             // Check that the actuals are sorted by key path.
@@ -381,7 +453,11 @@ impl<T: HashAlgorithm> Nomt<T> {
         let merkle_update = merkle_update_handle.join();
 
         let new_root = merkle_update.root;
-        self.shared.lock().root = new_root;
+        {
+            let mut shared = self.shared.lock();
+            shared.root = new_root;
+            shared.last_commit_marker = overlay_marker;
+        }
         self.store
             .commit(tx, self.page_cache.clone(), merkle_update.updated_pages)?;
 
@@ -409,7 +485,10 @@ impl<T: HashAlgorithm> Nomt<T> {
         // Begin a new session. We do not allow rollback for this operation because that would
         // interfere with the rollback log: if another rollback were to be issued, it must rollback
         // the changes in the rollback log and not the changes performed by the current rollback.
-        let sess = self.begin_session_inner(/* allow_rollback */ false);
+        // UNWRAP: `None` ancestors are always valid.
+        let sess = self
+            .begin_session_inner(/* allow_rollback */ false, None)
+            .unwrap();
 
         // Convert the traceback into a series of write commands.
         let mut actuals = Vec::new();
@@ -419,7 +498,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        self.commit_inner(sess, actuals, /* witness */ false)?;
+        self.commit_inner(sess, actuals, /* witness */ false, None)?;
 
         Ok(())
     }
@@ -438,8 +517,9 @@ impl<T: HashAlgorithm> Nomt<T> {
 
 /// A session presents a way of interaction with the trie.
 ///
-/// During a session the application is assumed to perform a zero or more reads and writes. When
-/// the session is finished, the application can [commit][`Nomt::commit_and_prove`] the changes
+/// The session enables the application to perform reads and prepare writes.
+///
+/// When the session is finished, the application can [commit][`Nomt::commit_and_prove`] the changes
 /// and create a [`Witness`] that can be used to prove the correctness of replaying the same
 /// operations.
 pub struct Session {
