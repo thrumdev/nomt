@@ -38,6 +38,7 @@ mod bitbox;
 mod merkle;
 mod metrics;
 mod options;
+mod overlay;
 mod page_cache;
 mod page_diff;
 mod page_region;
