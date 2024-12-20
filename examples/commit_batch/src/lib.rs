@@ -55,7 +55,7 @@ impl NomtDB {
         // The final step in handling a session involves committing all changes
         // to update the trie structure and obtaining the new root of the trie,
         // along with a witness and the witnessed operations.
-        let (root, witness, witnessed) = nomt.commit_and_prove(session, actual_access)?;
+        let (root, witness, witnessed) = nomt.update_commit_and_prove(session, actual_access)?;
 
         Ok((prev_root, root, witness, witnessed))
     }

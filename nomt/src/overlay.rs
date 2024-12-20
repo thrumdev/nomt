@@ -20,7 +20,10 @@
 #![allow(dead_code)]
 
 use crate::{beatree::ValueChange, page_cache::Page, page_diff::PageDiff};
-use nomt_core::{page_id::PageId, trie::KeyPath};
+use nomt_core::{
+    page_id::PageId,
+    trie::{KeyPath, Node},
+};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -30,7 +33,15 @@ pub struct Overlay {
     inner: Arc<OverlayInner>,
 }
 
+impl Overlay {
+    /// Get the merkle root at this overlay.
+    pub fn root(&self) -> Node {
+        self.inner.root
+    }
+}
+
 struct OverlayInner {
+    root: Node,
     index: Index,
     data: Arc<Data>,
     seqn: u64,
@@ -169,6 +180,11 @@ impl LiveOverlay {
         })
     }
 
+    /// Whether the overlay is empty.
+    pub(super) fn is_empty(&self) -> bool {
+        self.parent.is_none()
+    }
+
     /// Get a page by ID.
     ///
     /// `None` indicates that the page is not present in the overlay, not that the page doesn't
@@ -225,6 +241,7 @@ impl LiveOverlay {
     /// Finish this overlay and transform it into a frozen [`Overlay`].
     pub(super) fn finish(
         self,
+        root: Node,
         page_changes: HashMap<PageId, (Page, PageDiff)>,
         value_changes: HashMap<KeyPath, ValueChange>,
     ) -> Overlay {
@@ -252,6 +269,7 @@ impl LiveOverlay {
         Overlay {
             inner: Arc::new(OverlayInner {
                 index,
+                root,
                 data: Arc::new(Data {
                     pages: page_changes,
                     values: value_changes,
