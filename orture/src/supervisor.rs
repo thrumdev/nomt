@@ -1,19 +1,18 @@
 //! The supervisor part. Spawns and manages agents. Assigns work to agents.
 
-use std::process::exit;
+use std::{path::PathBuf, process::exit};
 
+use crate::spawn::{self, Child};
 use anyhow::{bail, Result};
 use tempfile::TempDir;
 use tokio::{
-    net::UnixStream,
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::spawn::{self, Child};
-
 mod comms;
+mod controller;
 
 /// The entrypoint for the supervisor part of the program.
 ///
@@ -135,117 +134,100 @@ async fn join_interruptable(
     }
 }
 
-/// A controller is responsible for overseeing a single agent process and handle its lifecycle.
-struct Controller {
-    /// Working directory for the agent.
-    workdir: TempDir,
+#[derive(Debug)]
+pub enum FlagReason {
+    Timeout,
 }
 
-impl Controller {
-    async fn run(&self, stream: UnixStream) -> Result<()> {
-        let rr = comms::start_comms(stream).await;
-        let mut workload = Workload { rr };
-        workload.run().await?;
-        // TODO: watch notification stream.
-        Ok(())
-    }
+pub struct InvestigationFlag {
+    /// The directory the agent was working in.
+    workdir: PathBuf,
+    /// The reason for flagging.
+    reason: FlagReason,
 }
 
-/// Wait for the child process to exit.
+/// This is a struct that controls workload execution.
 ///
-/// Reaps the child process and returns its exit status. Under the hood this uses `waitpid(2)`.
-///
-/// # Cancel safety
-///
-/// This is cancel safe.
-///
-/// Dropping the future returned by this function will not cause `waitpid` to
-/// be interrupted. Instead, it will be allowed to finish. We cannot cancel `waitpid` because it
-/// blocks the thread neither we want to do that because we want to reap the child process. In case
-/// we fail to do so, the child process will become a zombie and too many zombies will exhaust the
-/// system resources.
-async fn wait_for_exit(child: Child) -> Result<i32> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    task::spawn_blocking(move || {
-        let result = child.wait();
-        let _ = tx.send(result);
-    });
-    // UNWRAP: the channel should never panic.
-    let Ok(exit_status) = rx.await else {
-        bail!("unexpected hungup of waitpid");
-    };
-    Ok(exit_status)
-}
-
-/// `cancel_token` is used to gracefully shutdown the supervisor.
-async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
-    if true {
-        Err::<(), anyhow::Error>(anyhow::anyhow!("this is a test error")).unwrap();
-    }
-
-    let (child, sock) = spawn::spawn_child()?;
-    let stream = UnixStream::from_std(sock)?;
-    let workdir = TempDir::new()?;
-    let controller = Controller { workdir };
-    let ctrl_c = tokio::signal::ctrl_c();
-
-    // cancel_token
-    //     .run_until_cancelled(controller.run())
-    //     .await
-    //     .unwrap();
-    //
-    // TODO: initiate graceful shutdown.
-    //
-    // Graceful shutdown should involve:
-    //
-    // 1. waiting until the agent was killed.
-    // 2. it's working directory was removed.
-    //
-    // In the future, we should be ready to handle multiple ^C signals. The second one
-    // means that the user is really impatient and wants to exit immediately and we
-    // should comply.
-    //
-    // Well, actually, I think the first signal should be handled via the cancellation token and
-    // the second ctrl-c should be handled by the higher level logic.
-
-    // loop {
-    //     tokio::select! {
-    //         ctrl_c = ctrl_c => {
-    //             let () = ctrl_c?;
-    //             break;
-    //         }
-    //         exit_status = wait_for_exit(child) => {
-    //             // TODO: this is not cancel safe.
-    //             println!("Child exited with status: {}", exit_status.unwrap());
-    //             break;
-    //         }
-    //         // TODO: assign workload.
-    //     }
-    // }
-    Ok(())
-}
-
-struct SpawnedAgentController {}
-
-/// This is a struct that controls the workload execution for a particular agent.
+/// A workload is a set of tasks that the agents should perform. We say agents, plural, because
+/// the same workload can be executed by multiple agents. Howeever, it's always sequential. This
+/// arises from the fact that as part of the workload we need to crash the agent to check how
+/// it behaves.
 struct Workload {
     // TODO: state of the workload.
     //
     // The stuff that helps to generate the workload. For example, the keys that were inserted.
-    rr: comms::RequestResponse,
+    /// Working directory for this particular workload.
+    workdir: TempDir,
 }
 
 impl Workload {
+    fn new(workdir: TempDir) -> Self {
+        Self { workdir }
+    }
+
     /// Run the workload.
-    async fn run(&mut self) -> Result<()> {
-        // TODO: send the init message.
-        // self.rr.send_request(ToAgent::Init()).await?;
+    async fn run(&mut self, cancel_token: CancellationToken) -> Result<()> {
+        // TODO: we will need to spawn an agent here for workload execution.
+
         loop {
-            // TODO: do one iteration of the work.
+            // TODO: do one iteration of the work. Perhaps respawning the agent in a controlled
+            // crash.
             if true {
                 break;
             }
         }
         Ok(())
     }
+}
+
+/// Run the workload until either it either finishes, errors or gets cancelled.
+///
+/// Returns `None` if the investigation is not required (i.e. cancelled or succeeded), otherwise,
+/// returns the investigation report.
+async fn run_workload(cancel_token: CancellationToken) -> Result<Option<InvestigationFlag>> {
+    // This creates a temp dir for the working dir of the workload.
+    let workdir = TempDir::new()?;
+    let mut workload = Workload::new(workdir);
+    let result = workload.run(cancel_token).await;
+
+    // match result {
+    //     None => {
+    //         // The task was cancelled. Send SIGKILL to the process.
+    //         child.send_sigkill();
+    //         drop(controller.workdir);
+    //         return Ok(None);
+    //     }
+    //     Some(result) => {
+    //         // Either there was an error or the task finished successfully.
+    //         // If there was an error, we should flag for investigation.
+    //     }
+    // }
+    Ok(None)
+}
+
+/// Run the control loop creating and tearing down the agents.
+///
+/// `cancel_token` is used to gracefully shutdown the supervisor.
+async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
+    const FLAG_NUMBER_LIMIT: usize = 10;
+    let mut flags = Vec::new();
+    loop {
+        // TODO:
+        let maybe_flag = run_workload(cancel_token.clone()).await?;
+        if let Some(flag) = maybe_flag {
+            println!(
+                "Flagged for investigation\nreason={reason:?}\nworkdir={workdir}",
+                reason = flag.reason,
+                workdir = flag.workdir.display()
+            );
+            flags.push(flag);
+        }
+        if cancel_token.is_cancelled() {
+            break;
+        }
+        if flags.len() >= FLAG_NUMBER_LIMIT {
+            break;
+        }
+    }
+    Ok(())
 }

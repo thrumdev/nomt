@@ -39,6 +39,19 @@ pub struct CommitPayload {
     ///
     /// There must be no duplicate keys in the set.
     pub changset: Vec<KeyValueChange>,
+    /// Whether the supervisor expects the child to crash during the commit.
+    pub should_crash: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Envelope<T> {
+    /// The request number. This is used to match responses to requests.
+    ///
+    /// The request number is unique for each request. The response should have the same request
+    /// number as the request that caused it.
+    pub reqno: u64,
+    /// The message itself.
+    pub message: T,
 }
 
 /// Messages sent from the supervisor to the agent process.

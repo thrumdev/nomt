@@ -87,12 +87,15 @@ pub fn spawn_child() -> Result<(Child, UnixStream)> {
     Ok((Child { pid: child_pid }, sock1))
 }
 
+#[derive(Clone)]
 pub struct Child {
     pub pid: libc::pid_t,
 }
 
 impl Child {
     /// Wait an event from the child.
+    ///
+    /// Blocking.
     pub fn wait(&self) -> i32 {
         let mut status = 0;
         unsafe {
@@ -101,6 +104,20 @@ impl Child {
             println!("Child finished");
         }
         status
+    }
+
+    /// Sends a SIGKILL signal to the child process.
+    ///
+    /// One signal is usually enough.
+    ///
+    /// NB: This construction is prone to races. The child process may have already exited by the
+    /// time the signal is sent, and the PID may have been reused by another process. There is a way
+    /// to avoid that with pidfd but nobody cares really, because the probability of that happening
+    /// is extremely low.
+    pub fn send_sigkill(&self) {
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+        }
     }
 }
 
