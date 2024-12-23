@@ -20,7 +20,7 @@ use nomt_core::{
 use overlay::LiveOverlay;
 use page_cache::PageCache;
 use parking_lot::Mutex;
-use store::Store;
+use store::{Store, ValueTransaction};
 
 // CARGO HACK: silence lint; this is used in integration tests
 
@@ -355,14 +355,12 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// must be sorted by the key paths in ascending order. The key paths must be unique.
     pub fn update_and_commit(
         &self,
-        session: Session,
+        mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<Node> {
-        match self.commit_inner(session, actuals, false)? {
-            (node, None, None) => Ok(node),
-            // UNWRAP: witness specified to false
-            _ => unreachable!(),
-        }
+        let (value_tx, merkle_update) = self.update_inner(&mut session, actuals, false)?;
+        self.commit_inner(merkle_update.root, merkle_update.page_diffs, value_tx)?;
+        Ok(merkle_update.root)
     }
 
     /// Commit the transaction and create a proof for the given session. Also, returns the new root.
@@ -371,27 +369,24 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// must be sorted by the key paths in ascending order. The key paths must be unique.
     pub fn update_commit_and_prove(
         &self,
-        session: Session,
-        actuals: Vec<(KeyPath, KeyReadWrite)>,
-    ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
-        match self.commit_inner(session, actuals, true)? {
-            (node, Some(witness), Some(witnessed_ops)) => Ok((node, witness, witnessed_ops)),
-            // UNWRAP: witness specified to true
-            _ => unreachable!(),
-        }
-    }
-
-    // Effectively commit the transaction.
-    // If 'witness' is set to true, it collects the witness and
-    // returns `(Node, Some(Witness), Some(WitnessedOperations))`
-    // Otherwise, it solely returns the new root node, returning
-    // `(Node, None, None)`
-    fn commit_inner(
-        &self,
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
+    ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
+        let (value_tx, merkle_update) = self.update_inner(&mut session, actuals, true)?;
+
+        // UNWRAP: witness specified as true.
+        let witness = merkle_update.witness.unwrap();
+        let witnessed_ops = merkle_update.witnessed_operations.unwrap();
+        self.commit_inner(merkle_update.root, merkle_update.page_diffs, value_tx)?;
+        Ok((merkle_update.root, witness, witnessed_ops))
+    }
+
+    fn update_inner(
+        &self,
+        session: &mut Session,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
-    ) -> anyhow::Result<(Node, Option<Witness>, Option<WitnessedOperations>)> {
+    ) -> anyhow::Result<(ValueTransaction, merkle::Output)> {
         if cfg!(debug_assertions) {
             // Check that the actuals are sorted by key path.
             for i in 1..actuals.len() {
@@ -421,6 +416,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             .update_and_prove::<T>(compact_actuals, witness);
 
         let mut tx = self.store.new_value_tx();
+
         for (path, read_write) in actuals {
             if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
                 tx.write_value::<T>(path, value);
@@ -428,17 +424,25 @@ impl<T: HashAlgorithm> Nomt<T> {
         }
 
         let merkle_update = merkle_update_handle.join();
+        Ok((tx, merkle_update))
+    }
 
-        let new_root = merkle_update.root;
+    // Effectively commit the transaction.
+    // If 'witness' is set to true, it collects the witness and
+    // returns `(Node, Some(Witness), Some(WitnessedOperations))`
+    // Otherwise, it solely returns the new root node, returning
+    // `(Node, None, None)`
+    fn commit_inner(
+        &self,
+        new_root: Node,
+        page_diffs: merkle::PageDiffs,
+        value_tx: ValueTransaction,
+    ) -> anyhow::Result<()> {
         self.shared.lock().root = new_root;
         self.store
-            .commit(tx, self.page_cache.clone(), merkle_update.page_diffs)?;
+            .commit(value_tx, self.page_cache.clone(), page_diffs)?;
 
-        Ok((
-            new_root,
-            merkle_update.witness,
-            merkle_update.witnessed_operations,
-        ))
+        Ok(())
     }
 
     /// Perform a rollback of the last `n` commits.
@@ -459,7 +463,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         // interfere with the rollback log: if another rollback were to be issued, it must rollback
         // the changes in the rollback log and not the changes performed by the current rollback.
         // UNWRAP: `None` ancestors are always valid.
-        let sess = self
+        let mut sess = self
             .begin_session_inner(/* allow_rollback */ false, None)
             .unwrap();
 
@@ -471,7 +475,9 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        self.commit_inner(sess, actuals, /* witness */ false)?;
+        let (value_tx, merkle_update) =
+            self.update_inner(&mut sess, actuals, /* witness */ false)?;
+        self.commit_inner(merkle_update.root, merkle_update.page_diffs, value_tx)?;
 
         Ok(())
     }
