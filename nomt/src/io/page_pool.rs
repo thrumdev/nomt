@@ -60,7 +60,7 @@ impl Page {
 ///
 /// Unlike [`Page`], this type handles deallocation for you upon dropping. It also provides a safe
 /// way to access the contents of the page. However, the price for this convenience is that it is
-/// heavier than the bare page type and it doesn't allow cloning.
+/// heavier than the bare page type and cloning performs a deep copy.
 pub struct FatPage {
     page_pool: PagePool,
     page: Page,
@@ -83,6 +83,14 @@ impl FatPage {
     /// failing to do so will not cause safety bugs.
     pub fn page(&self) -> Page {
         self.page.clone()
+    }
+}
+
+impl Clone for FatPage {
+    fn clone(&self) -> Self {
+        let mut new_page = self.page_pool.alloc_fat_page();
+        new_page.copy_from_slice(&*self);
+        new_page
     }
 }
 
