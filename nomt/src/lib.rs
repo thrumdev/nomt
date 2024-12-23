@@ -535,17 +535,16 @@ fn compute_root_node<H: NodeHasher>(page_cache: &PageCache) -> Node {
     let Some(root_page) = page_cache.get(ROOT_PAGE_ID) else {
         return TERMINATOR;
     };
-    let read_pass = page_cache.new_read_pass();
 
     // 3 cases.
     // 1: root page is empty. in this case, root is the TERMINATOR.
     // 2: root page has top two slots filled, but _their_ children are empty. root is a leaf.
     //    this is because internal nodes and leaf nodes would have items below.
     // 3: root is an internal node.
-    let is_empty = |node_index| root_page.node(&read_pass, node_index) == TERMINATOR;
+    let is_empty = |node_index| root_page.node(node_index) == TERMINATOR;
 
-    let left = root_page.node(&read_pass, 0);
-    let right = root_page.node(&read_pass, 1);
+    let left = root_page.node(0);
+    let right = root_page.node(1);
 
     if is_empty(0) && is_empty(1) {
         TERMINATOR
