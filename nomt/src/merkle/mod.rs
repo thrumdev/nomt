@@ -7,7 +7,6 @@ use crossbeam::channel::{self, Receiver, Sender};
 use parking_lot::Mutex;
 
 use nomt_core::{
-    page_id::PageId,
     trie::{self, KeyPath, Node, ValueHash},
     trie_pos::TriePosition,
 };
@@ -18,7 +17,6 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     io::PagePool,
     page_cache::{PageCache, ShardIndex},
-    page_diff::PageDiff,
     rw_pass_cell::WritePassEnvelope,
     store::Store,
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
@@ -29,11 +27,13 @@ mod page_walker;
 mod seek;
 mod worker;
 
-/// Page diffs produced by update workers.
-pub struct PageDiffs(Vec<Vec<(PageId, PageDiff)>>);
+pub use page_walker::UpdatedPage;
 
-impl IntoIterator for PageDiffs {
-    type Item = (PageId, PageDiff);
+/// Updated pages produced by update workers.
+pub struct UpdatedPages(Vec<Vec<UpdatedPage>>);
+
+impl IntoIterator for UpdatedPages {
+    type Item = UpdatedPage;
     type IntoIter = std::iter::Flatten<<Vec<Vec<Self::Item>> as IntoIterator>::IntoIter>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -238,7 +238,7 @@ impl UpdateHandle {
             writes: Vec::new(),
         });
 
-        let mut page_diffs = Vec::new();
+        let mut updated_pages = Vec::new();
 
         let mut path_proof_offset = 0;
         let mut witnessed_start = 0;
@@ -254,7 +254,7 @@ impl UpdateHandle {
                 new_root = Some(root);
             }
 
-            page_diffs.push(output.page_diffs);
+            updated_pages.push(output.updated_pages);
 
             // if the Commit worker collected the witnessed paths
             // then we need to aggregate them
@@ -310,7 +310,7 @@ impl UpdateHandle {
         // UNWRAP: one thread always produces the root.
         Output {
             root: new_root.unwrap(),
-            page_diffs: PageDiffs(page_diffs),
+            updated_pages: UpdatedPages(updated_pages),
             witness: maybe_witness,
             witnessed_operations: maybe_witnessed_ops,
         }
@@ -321,8 +321,8 @@ impl UpdateHandle {
 pub struct Output {
     /// The new root.
     pub root: Node,
-    /// All page-diffs from all worker threads. The covered sets of pages are disjoint.
-    pub page_diffs: PageDiffs,
+    /// All updated pages from all worker threads. The covered sets of pages are disjoint.
+    pub updated_pages: UpdatedPages,
     /// Optional witness
     pub witness: Option<Witness>,
     /// Optional list of all witnessed operations.
@@ -350,7 +350,7 @@ enum RootPagePending {
 struct WorkerOutput {
     root: Option<Node>,
     witnessed_paths: Option<Vec<(WitnessedPath, Option<trie::LeafData>, usize)>>,
-    page_diffs: Vec<(PageId, PageDiff)>,
+    updated_pages: Vec<UpdatedPage>,
 }
 
 impl WorkerOutput {
@@ -358,7 +358,7 @@ impl WorkerOutput {
         WorkerOutput {
             root: None,
             witnessed_paths: if witness { Some(Vec::new()) } else { None },
-            page_diffs: Vec::new(),
+            updated_pages: Vec::new(),
         }
     }
 }

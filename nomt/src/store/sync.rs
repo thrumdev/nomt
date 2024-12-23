@@ -34,7 +34,7 @@ impl Sync {
         beatree: beatree::Tree,
         rollback: Option<rollback::Rollback>,
         page_cache: PageCache,
-        page_diffs: merkle::PageDiffs,
+        updated_pages: merkle::UpdatedPages,
     ) -> anyhow::Result<()> {
         self.sync_seqn += 1;
         let sync_seqn = self.sync_seqn;
@@ -48,7 +48,7 @@ impl Sync {
             bucket_allocator: bitbox.bucket_allocator(),
             new_pages: Vec::new(),
         };
-        bitbox_sync.begin_sync(sync_seqn, page_cache, merkle_tx, page_diffs);
+        bitbox_sync.begin_sync(sync_seqn, page_cache, merkle_tx, updated_pages);
         beatree_sync.begin_sync(value_tx.batch);
         if let Some(ref mut rollback) = rollback_sync {
             rollback.begin_sync();

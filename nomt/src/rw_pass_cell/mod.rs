@@ -23,6 +23,8 @@
 //! assert_eq!(cell.read(&read_pass).get(), 42);
 //! ```
 
+#![allow(dead_code)]
+
 #[cfg(loom)]
 mod loom_tests;
 

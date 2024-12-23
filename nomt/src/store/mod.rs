@@ -257,7 +257,7 @@ impl Store {
         &self,
         value_tx: ValueTransaction,
         page_cache: PageCache,
-        page_diffs: merkle::PageDiffs,
+        updated_pages: merkle::UpdatedPages,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -268,7 +268,7 @@ impl Store {
             self.shared.values.clone(),
             self.shared.rollback.clone(),
             page_cache,
-            page_diffs,
+            updated_pages,
         )
         .unwrap();
         Ok(())

@@ -33,7 +33,7 @@ use crate::{
     io::PagePool,
     page_cache::{PageCache, ShardIndex},
     page_region::PageRegion,
-    rw_pass_cell::{ReadPass, WritePass},
+    rw_pass_cell::WritePass,
     store::Store,
     HashAlgorithm, PathProof, WitnessedPath,
 };
@@ -60,7 +60,6 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     finish_rx: Receiver<()>,
     output_tx: Sender<HashMap<KeyPath, Seek>>,
 ) {
-    let read_pass = params.page_cache.new_read_pass();
     let page_loader = params.store.page_loader();
     let io_handle = params.store.io_pool().make_handle();
     let page_io_receiver = io_handle.receiver().clone();
@@ -73,7 +72,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
         true,
     );
 
-    let result = warm_up_phase(read_pass, page_io_receiver, seeker, warmup_rx, finish_rx);
+    let result = warm_up_phase(page_io_receiver, seeker, warmup_rx, finish_rx);
 
     match result {
         Err(_) => return,
@@ -107,7 +106,6 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Resu
 }
 
 fn warm_up_phase<H: HashAlgorithm>(
-    read_pass: ReadPass<ShardIndex>,
     page_io_receiver: Receiver<crate::io::CompleteIo>,
     mut seeker: Seeker<H>,
     warmup_rx: Receiver<WarmUpCommand>,
@@ -130,7 +128,7 @@ fn warm_up_phase<H: HashAlgorithm>(
             continue;
         }
 
-        seeker.submit_all(&read_pass)?;
+        seeker.submit_all()?;
         if !seeker.has_room() {
             // block on interrupt or next page ready.
             let index = select_no_work.ready();
@@ -141,7 +139,7 @@ fn warm_up_phase<H: HashAlgorithm>(
                     Ok(()) => break,
                 }
             } else if index == page_no_work_idx {
-                seeker.try_recv_page(&read_pass)?;
+                seeker.try_recv_page()?;
             } else {
                 unreachable!()
             }
@@ -163,7 +161,7 @@ fn warm_up_phase<H: HashAlgorithm>(
 
                 seeker.push(warm_up_command.key_path);
             } else if index == page_idx {
-                seeker.try_recv_page(&read_pass)?;
+                seeker.try_recv_page()?;
             } else {
                 unreachable!()
             }
@@ -175,9 +173,9 @@ fn warm_up_phase<H: HashAlgorithm>(
             warm_ups.insert(result.key, result);
             continue;
         }
-        seeker.submit_all(&read_pass)?;
+        seeker.submit_all()?;
         if seeker.has_live_requests() {
-            seeker.recv_page(&read_pass)?;
+            seeker.recv_page()?;
         }
     }
 
@@ -200,7 +198,7 @@ fn update<H: HashAlgorithm>(
     let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache, &page_pool);
 
     // one lucky thread gets the master write pass.
-    let mut write_pass = match updater.update(&mut seeker, &mut output, warm_ups)? {
+    match updater.update(&mut seeker, &mut output, warm_ups)? {
         None => return Ok(output),
         Some(write_pass) => write_pass,
     };
@@ -216,7 +214,7 @@ fn update<H: HashAlgorithm>(
     for (trie_pos, pending_op) in pending_ops {
         match pending_op {
             RootPagePending::Node(node) => {
-                root_page_updater.advance_and_place_node(&mut write_pass, trie_pos.clone(), node)
+                root_page_updater.advance_and_place_node(trie_pos.clone(), node)
             }
             RootPagePending::SubTrie {
                 range_start,
@@ -225,19 +223,15 @@ fn update<H: HashAlgorithm>(
             } => {
                 let ops = subtrie_ops(&shared.read_write[range_start..range_end]);
                 let ops = nomt_core::update::leaf_ops_spliced(prev_terminal, &ops);
-                root_page_updater.advance_and_replace(
-                    &mut write_pass,
-                    trie_pos.clone(),
-                    ops.clone(),
-                );
+                root_page_updater.advance_and_replace(trie_pos.clone(), ops.clone());
             }
         }
     }
 
     // PANIC: output is always root when no parent page is specified.
-    match root_page_updater.conclude(&mut write_pass) {
-        Output::Root(new_root, diffs) => {
-            output.page_diffs.extend(diffs);
+    match root_page_updater.conclude() {
+        Output::Root(new_root, updates) => {
+            output.updated_pages.extend(updates);
             output.root = Some(new_root);
         }
         Output::ChildPageRoots(_, _) => unreachable!(),
@@ -399,16 +393,11 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         batch_size: usize,
     ) {
         match ops {
-            None => self
-                .page_walker
-                .advance(&mut self.write_pass, seek_result.position.clone()),
+            None => self.page_walker.advance(seek_result.position.clone()),
             Some(ref ops) => {
                 let ops = nomt_core::update::leaf_ops_spliced(seek_result.terminal.clone(), &ops);
-                self.page_walker.advance_and_replace(
-                    &mut self.write_pass,
-                    seek_result.position.clone(),
-                    ops,
-                )
+                self.page_walker
+                    .advance_and_replace(seek_result.position.clone(), ops)
             }
         };
 
@@ -485,10 +474,10 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                 }
             }
 
-            seeker.submit_all(self.write_pass.downgrade())?;
+            seeker.submit_all()?;
             if !seeker.has_room() && seeker.has_live_requests() {
                 // no way to push work until at least one page fetch has concluded.
-                seeker.recv_page(self.write_pass.downgrade())?;
+                seeker.recv_page()?;
                 continue;
             }
 
@@ -504,22 +493,22 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                     }
                 } else {
                     seeker.push(self.shared.read_write[next_push].0);
-                    seeker.submit_all(self.write_pass.downgrade())?;
+                    seeker.submit_all()?;
                 }
             }
 
-            seeker.try_recv_page(self.write_pass.downgrade())?;
+            seeker.try_recv_page()?;
         }
 
         // 2. conclude.
         // PANIC: walker was configured with a parent page.
-        let (new_nodes, diffs) = match self.page_walker.conclude(&mut self.write_pass) {
+        let (new_nodes, updates) = match self.page_walker.conclude() {
             Output::Root(_, _) => unreachable!(),
-            Output::ChildPageRoots(new_nodes, diffs) => (new_nodes, diffs),
+            Output::ChildPageRoots(new_nodes, updates) => (new_nodes, updates),
         };
 
-        assert!(!diffs.iter().any(|item| item.0 == ROOT_PAGE_ID));
-        output.page_diffs = diffs;
+        debug_assert!(!updates.iter().any(|item| item.page_id == ROOT_PAGE_ID));
+        output.updated_pages = updates;
 
         self.shared.push_pending_root_nodes(new_nodes);
 

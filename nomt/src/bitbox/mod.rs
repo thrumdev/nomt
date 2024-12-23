@@ -231,7 +231,7 @@ impl SyncController {
         sync_seqn: u32,
         page_cache: PageCache,
         mut merkle_tx: MerkleTransaction,
-        page_diffs: merkle::PageDiffs,
+        updated_pages: merkle::UpdatedPages,
     ) {
         let page_pool = self.db.shared.page_pool.clone();
         let bitbox = self.db.clone();
@@ -240,7 +240,7 @@ impl SyncController {
         // UNWRAP: safe because begin_sync is called only once.
         let wal_result_tx = self.wal_result_tx.take().unwrap();
         self.db.shared.sync_tp.execute(move || {
-            page_cache.prepare_transaction(page_diffs.into_iter(), &mut merkle_tx);
+            page_cache.absorb_and_populate_transaction(updated_pages, &mut merkle_tx);
 
             let mut wal_blob_builder = wal_blob_builder.lock();
             let ht_pages = bitbox.prepare_sync(
