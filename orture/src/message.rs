@@ -38,7 +38,7 @@ pub struct CommitPayload {
     /// The set of changes that the child should commit.
     ///
     /// There must be no duplicate keys in the set.
-    pub changset: Vec<KeyValueChange>,
+    pub changeset: Vec<KeyValueChange>,
     /// Whether the supervisor expects the child to crash during the commit.
     pub should_crash: bool,
 }
@@ -64,10 +64,15 @@ pub enum ToAgent {
     /// commit.
     Commit(CommitPayload),
     /// The supervisor sends this message to the child process to indicate that the child should
+    /// return the value of the given key.
+    Query(Key),
+    /// The supervisor sends this message to the child process to indicate that the child should
     /// do a clean shutdown.
     GracefulShutdown,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub enum ToSupervisor {
     Ack,
+    QueryResponse(Option<Value>),
 }

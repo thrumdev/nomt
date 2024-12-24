@@ -2,8 +2,7 @@
 
 use std::{path::PathBuf, process::exit};
 
-use crate::spawn::{self, Child};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use tempfile::TempDir;
 use tokio::{
     signal::unix::{signal, SignalKind},
@@ -11,8 +10,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use workload::Workload;
+
 mod comms;
 mod controller;
+mod workload;
 
 /// The entrypoint for the supervisor part of the program.
 ///
@@ -146,40 +148,6 @@ pub struct InvestigationFlag {
     reason: FlagReason,
 }
 
-/// This is a struct that controls workload execution.
-///
-/// A workload is a set of tasks that the agents should perform. We say agents, plural, because
-/// the same workload can be executed by multiple agents. Howeever, it's always sequential. This
-/// arises from the fact that as part of the workload we need to crash the agent to check how
-/// it behaves.
-struct Workload {
-    // TODO: state of the workload.
-    //
-    // The stuff that helps to generate the workload. For example, the keys that were inserted.
-    /// Working directory for this particular workload.
-    workdir: TempDir,
-}
-
-impl Workload {
-    fn new(workdir: TempDir) -> Self {
-        Self { workdir }
-    }
-
-    /// Run the workload.
-    async fn run(&mut self, cancel_token: CancellationToken) -> Result<()> {
-        // TODO: we will need to spawn an agent here for workload execution.
-
-        loop {
-            // TODO: do one iteration of the work. Perhaps respawning the agent in a controlled
-            // crash.
-            if true {
-                break;
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Run the workload until either it either finishes, errors or gets cancelled.
 ///
 /// Returns `None` if the investigation is not required (i.e. cancelled or succeeded), otherwise,
@@ -189,20 +157,7 @@ async fn run_workload(cancel_token: CancellationToken) -> Result<Option<Investig
     let workdir = TempDir::new()?;
     let mut workload = Workload::new(workdir);
     let result = workload.run(cancel_token).await;
-
-    // match result {
-    //     None => {
-    //         // The task was cancelled. Send SIGKILL to the process.
-    //         child.send_sigkill();
-    //         drop(controller.workdir);
-    //         return Ok(None);
-    //     }
-    //     Some(result) => {
-    //         // Either there was an error or the task finished successfully.
-    //         // If there was an error, we should flag for investigation.
-    //     }
-    // }
-    Ok(None)
+    todo!()
 }
 
 /// Run the control loop creating and tearing down the agents.
@@ -212,7 +167,6 @@ async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
     const FLAG_NUMBER_LIMIT: usize = 10;
     let mut flags = Vec::new();
     loop {
-        // TODO:
         let maybe_flag = run_workload(cancel_token.clone()).await?;
         if let Some(flag) = maybe_flag {
             println!(

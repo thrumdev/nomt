@@ -1,9 +1,16 @@
 use anyhow::{bail, Result};
+use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt};
 use std::path::PathBuf;
-use tokio::{io::BufStream, net::UnixStream};
+use tokio::{
+    io::{BufReader, BufStream, BufWriter},
+    net::{
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+        UnixStream,
+    },
+};
 use tokio_stream::StreamExt as _;
-use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::message;
 
@@ -20,6 +27,11 @@ pub async fn run(input: UnixStream) -> Result<()> {
         match message {
             message::ToAgent::Init(init) => bail!("unexpected init message, id={}", init.id),
             message::ToAgent::Commit(commit) => agent.commit(commit)?,
+            message::ToAgent::Query(key) => {
+                let value = agent.query(key)?;
+                let response = message::ToSupervisor::QueryResponse(value);
+                stream.send(response).await?;
+            }
             message::ToAgent::GracefulShutdown => {
                 println!("Received GracefulShutdown message");
                 break;
@@ -49,8 +61,11 @@ impl Agent {
 
     fn commit(&mut self, commit: message::CommitPayload) -> Result<()> {
         let session = self.nomt.begin_session();
-        let mut actuals = Vec::with_capacity(commit.changset.len());
-        for change in commit.changset {
+        let mut actuals = Vec::with_capacity(commit.changeset.len());
+        if commit.should_crash {
+            todo!()
+        }
+        for change in commit.changeset {
             match change {
                 message::KeyValueChange::Insert(key, value) => {
                     actuals.push((key, nomt::KeyReadWrite::Write(Some(value))));
@@ -65,18 +80,29 @@ impl Agent {
         self.nomt.commit(session, actuals)?;
         Ok(())
     }
+
+    fn query(&mut self, key: message::Key) -> Result<Option<message::Value>> {
+        let value = self.nomt.read(key)?;
+        Ok(value)
+    }
 }
 
 /// Abstraction over the stream of messages from the supervisor.
 struct Stream {
-    framed: FramedRead<BufStream<UnixStream>, LengthDelimitedCodec>,
+    rd_stream: FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>,
+    wr_stream: FramedWrite<BufWriter<OwnedWriteHalf>, LengthDelimitedCodec>,
 }
 
 impl Stream {
     /// Creates a stream wrapper for the given unix stream.
     fn new(command_stream: UnixStream) -> Self {
-        let framed = FramedRead::new(BufStream::new(command_stream), LengthDelimitedCodec::new());
-        Self { framed }
+        let (rd, wr) = command_stream.into_split();
+        let rd_stream = FramedRead::new(BufReader::new(rd), LengthDelimitedCodec::new());
+        let wr_stream = FramedWrite::new(BufWriter::new(wr), LengthDelimitedCodec::new());
+        Self {
+            rd_stream,
+            wr_stream,
+        }
     }
 
     /// Receives the [`message::Init`] message from the supervisor. If the message is not an Init
@@ -90,10 +116,16 @@ impl Stream {
 
     async fn recv(&mut self) -> Result<message::ToAgent> {
         let bytes = self
-            .framed
+            .rd_stream
             .next()
             .await
             .ok_or_else(|| anyhow::anyhow!("EOF"))??;
         Ok(bincode::deserialize(&bytes)?)
+    }
+
+    async fn send(&mut self, message: message::ToSupervisor) -> Result<()> {
+        let bytes = bincode::serialize(&message)?;
+        self.wr_stream.send(bytes.into()).await?;
+        Ok(())
     }
 }

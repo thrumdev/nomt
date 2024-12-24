@@ -10,30 +10,6 @@ pub struct SpawnedAgentController {
 }
 
 impl SpawnedAgentController {
-    // async fn run(&self) -> Result<()> {
-    //     // TODO: implement controller duties.
-    //     //
-    //     // More specifically,
-    //     // - it should wait for the child exit code.
-    //     // - run communication stream.
-    //     // - run workload.
-    //     //
-    //     // If the exit code arrives, then the controller should flag for investigation.
-    //     // If the workload fails, then the controller should flag for investigation.
-    //     // Timeout.
-
-    //     // TODO: implement the timeout.
-
-    //     tokio::select! {
-    //         exit_code = wait_for_exit(self.child) => {
-    //             // The child process finished.
-    //             // Flag for investigation.
-    //         }
-    //     }
-
-    //     Ok(())
-    // }
-
     pub fn send_sigkill(&self) {
         self.child.send_sigkill();
     }
@@ -42,6 +18,15 @@ impl SpawnedAgentController {
     pub async fn current_vm_rss(&self) -> Result<usize> {
         let path = format!("/proc/{}/status", self.child.pid);
         let status = tokio::fs::read(path).await?;
+        todo!()
+    }
+
+    pub fn rr(&self) -> &comms::RequestResponse {
+        &self.rr
+    }
+
+    /// Resolves when the agent died, the stream is closed, or otherwise the agent is unhealthy.
+    pub async fn resolve_when_unhealthy(&self) {
         todo!()
     }
 }
@@ -72,12 +57,20 @@ async fn wait_for_exit(child: Child) -> Result<i32> {
     Ok(exit_status)
 }
 
-pub async fn spawn_agent() -> Result<SpawnedAgentController> {
-    // TODO: create an agent.
+/// Spawns an agent process and returns a controller for it.
+pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
     let (child, sock) = spawn::spawn_child()?;
     let stream = UnixStream::from_std(sock)?;
 
     let (rr, task) = comms::run(stream);
+    // TODO: decide how to drive the `task`.
 
-    todo!()
+    rr.send_request(crate::message::ToAgent::Init(crate::message::InitPayload {
+        id: "1".to_string(),
+        workdir,
+        bitbox_seed: [0; 16],
+    }))
+    .await?;
+
+    Ok(SpawnedAgentController { child, rr })
 }
