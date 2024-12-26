@@ -43,6 +43,7 @@ pub struct CommitPayload {
     pub should_crash: bool,
 }
 
+/// A wrapper around a message that adds a request number.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Envelope<T> {
     /// The request number. This is used to match responses to requests.
@@ -71,6 +72,7 @@ pub enum ToAgent {
     GracefulShutdown,
 }
 
+/// Messages sent from the agent to the supervisor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ToSupervisor {
     Ack,

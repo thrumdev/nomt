@@ -17,13 +17,34 @@ use tokio::{
     },
     sync::{oneshot, Mutex},
 };
+use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use crate::message::{Envelope, ToAgent, ToSupervisor};
 
-type WrStream = FramedWrite<BufWriter<OwnedWriteHalf>, LengthDelimitedCodec>;
-type RdStream = FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>;
+/// The type definition of a sink which is built:
+///
+/// - bincode serializer using [`Envelope<ToAgent>`].
+/// - length-delimited codec.
+/// - buf writer.
+/// - unix stream (write half).
+type WrStream = SymmetricallyFramed<
+    FramedWrite<BufWriter<OwnedWriteHalf>, LengthDelimitedCodec>,
+    Envelope<ToAgent>,
+    SymmetricalBincode<Envelope<ToAgent>>,
+>;
+/// The type definition of a stream which is built:
+///
+/// - unix stream (read half).
+/// - buf reader.
+/// - length-delimited codec.
+/// - bincode deserializer using [`Envelope<ToSupervisor>`].
+type RdStream = SymmetricallyFramed<
+    FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>,
+    Envelope<ToSupervisor>,
+    SymmetricalBincode<Envelope<ToSupervisor>>,
+>;
 
 /// A means to communicate with an agent.
 ///
@@ -45,7 +66,6 @@ impl RequestResponse {
     ///
     /// Returns a response.
     pub async fn send_request(&self, message: ToAgent) -> anyhow::Result<ToSupervisor> {
-        // TODO: return an error.
         let reqno = self.shared.reqno.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
@@ -53,9 +73,8 @@ impl RequestResponse {
         pending.insert(reqno, tx);
         drop(pending);
 
-        let buf = bincode::serialize(&Envelope { reqno, message }).unwrap();
         let mut wr_stream = self.shared.wr_stream.lock().await;
-        wr_stream.send(buf.into()).await.unwrap();
+        wr_stream.send(Envelope { reqno, message }).await.unwrap();
         drop(wr_stream);
 
         rx.await.unwrap();
@@ -70,14 +89,13 @@ impl RequestResponse {
 /// malformed.
 async fn handle_inbound(shared: Arc<Shared>, mut rd_stream: RdStream) -> anyhow::Result<()> {
     loop {
-        let buf = match rd_stream.next().await {
-            Some(result) => match result {
-                Ok(buf) => buf,
-                Err(err) => return Err(err.into()),
-            },
-            None => bail!("agent unixstream read half finished"),
+        let envelope = match rd_stream.try_next().await {
+            Ok(None) => {
+                bail!("agent unixstream read half finished");
+            }
+            Ok(Some(envelope)) => envelope,
+            Err(e) => bail!(e),
         };
-        let envelope = bincode::deserialize::<Envelope<ToSupervisor>>(&buf)?;
         let Envelope { reqno, message } = envelope;
         let mut pending = shared.pending.lock().await;
         if let Some(tx) = pending.remove(&reqno) {
@@ -96,19 +114,25 @@ async fn handle_inbound(shared: Arc<Shared>, mut rd_stream: RdStream) -> anyhow:
 pub fn run(stream: UnixStream) -> (RequestResponse, impl Future<Output = anyhow::Result<()>>) {
     let (rd, wr) = stream.into_split();
 
-    let framed_writer = FramedWrite::new(BufWriter::new(wr), LengthDelimitedCodec::new());
-    let framed_reader = FramedRead::new(BufReader::new(rd), LengthDelimitedCodec::new());
+    let wr_stream = SymmetricallyFramed::new(
+        FramedWrite::new(BufWriter::new(wr), LengthDelimitedCodec::new()),
+        SymmetricalBincode::default(),
+    );
+    let rd_stream = SymmetricallyFramed::new(
+        FramedRead::new(BufReader::new(rd), LengthDelimitedCodec::new()),
+        SymmetricalBincode::default(),
+    );
 
     let shared = Arc::new(Shared {
         reqno: AtomicU64::new(0),
-        wr_stream: Mutex::new(framed_writer),
+        wr_stream: Mutex::new(wr_stream),
         pending: Mutex::new(HashMap::new()),
     });
     let rr = RequestResponse {
         shared: shared.clone(),
     };
 
-    let inbound = handle_inbound(shared, framed_reader);
+    let inbound = handle_inbound(shared, rd_stream);
 
     (rr, inbound)
 }

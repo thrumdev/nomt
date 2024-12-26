@@ -1,4 +1,4 @@
-use std::{future::Future, mem, time::Duration};
+use std::{future::Future, time::Duration};
 
 use anyhow::Result;
 use imbl::OrdMap;
@@ -191,7 +191,7 @@ impl Workload {
         //
         // - commits should be much more frequent.
         // - crashes should be less frequent.
-        // - rollbacks should be very frequent.
+        // - rollbacks should be less frequent.
         let exercise_ix = self.state.rng.gen_range(0..2);
         let s = &mut self.state;
         match exercise_ix {

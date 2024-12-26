@@ -1,44 +1,104 @@
 use anyhow::{bail, Result};
 use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt};
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 use tokio::{
-    io::{BufReader, BufStream, BufWriter},
+    io::{BufReader, BufWriter},
     net::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
         UnixStream,
     },
+    time::{error::Elapsed, timeout},
 };
+use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt as _;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::message;
+use crate::message::{
+    self, CommitPayload, Envelope, InitPayload, KeyValueChange, ToAgent, ToSupervisor,
+};
 
 /// The entrypoint for the agent.
 ///
 /// `input` is the UnixStream that the agent should use to communicate with its supervisor.
 pub async fn run(input: UnixStream) -> Result<()> {
+    // Make the process non-dumpable.
+    //
+    // We expect this process to abort on a crash, so we don't want to leave lots of core dumps
+    // behind.
+    #[cfg(target_os = "linux")]
+    nix::sys::prctl::set_dumpable(false)?;
+
     let mut stream = Stream::new(input);
-    // TODO: bail after on a timeout.
-    let init = stream.recv_init().await?;
-    let mut agent = Agent::new(init)?;
+    let mut agent = recv_init(&mut stream).await?;
     loop {
-        let message = stream.recv().await?;
+        // TODO: make the message processing non-blocking.
+        //
+        // That being said, I should probably note, that it doesn't necessarily mean we should allow
+        // concurrent access to NOMT (only one session could be created at once anyway).
+        let Envelope { reqno, message } = stream.recv().await?;
         match message {
-            message::ToAgent::Init(init) => bail!("unexpected init message, id={}", init.id),
-            message::ToAgent::Commit(commit) => agent.commit(commit)?,
-            message::ToAgent::Query(key) => {
-                let value = agent.query(key)?;
-                let response = message::ToSupervisor::QueryResponse(value);
-                stream.send(response).await?;
+            ToAgent::Commit(commit) => {
+                agent.commit(commit)?;
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Ack,
+                    })
+                    .await?;
             }
-            message::ToAgent::GracefulShutdown => {
+            ToAgent::Query(key) => {
+                let value = agent.query(key)?;
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::QueryResponse(value),
+                    })
+                    .await?;
+            }
+            ToAgent::GracefulShutdown => {
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Ack,
+                    })
+                    .await?;
                 println!("Received GracefulShutdown message");
+                drop(agent);
                 break;
             }
+            ToAgent::Init(init) => bail!("unexpected init message, id={}", init.id),
         }
     }
     Ok(())
+}
+
+/// Receives the [`Init`] message from the supervisor and returns the initialized agent. Sends
+/// an Ack message back to the supervisor.
+///
+/// # Errors
+///
+/// Returns an error if the message is not an Init message or if the message is not received
+/// within a certain time limit.
+async fn recv_init(stream: &mut Stream) -> Result<Agent> {
+    const DEADLINE: Duration = Duration::from_secs(1);
+    let Envelope { reqno, message } = match timeout(DEADLINE, stream.recv()).await {
+        Ok(envelope) => envelope?,
+        Err(Elapsed { .. }) => {
+            anyhow::bail!("Timed out waiting for Init message");
+        }
+    };
+    let ToAgent::Init(init) = message else {
+        anyhow::bail!("Expected Init message");
+    };
+    let agent = Agent::new(init)?;
+    stream
+        .send(Envelope {
+            reqno,
+            message: ToSupervisor::Ack,
+        })
+        .await?;
+    Ok(agent)
 }
 
 struct Agent {
@@ -47,7 +107,7 @@ struct Agent {
 }
 
 impl Agent {
-    fn new(init: message::InitPayload) -> Result<Self> {
+    fn new(init: InitPayload) -> Result<Self> {
         let workdir = PathBuf::from(&init.workdir);
         if !workdir.exists() {
             bail!("workdir does not exist: {:?}", workdir);
@@ -59,18 +119,27 @@ impl Agent {
         Ok(Self { workdir, nomt })
     }
 
-    fn commit(&mut self, commit: message::CommitPayload) -> Result<()> {
+    fn commit(&mut self, commit: CommitPayload) -> Result<()> {
         let session = self.nomt.begin_session();
         let mut actuals = Vec::with_capacity(commit.changeset.len());
         if commit.should_crash {
+            // TODO: implement this in the future.
+            //
+            // This seems to be a big feature. As of now, I envision it, as we either:
+            //
+            // 1. Launch a concurrent process that brings down the process (e.g. via `abort`) at
+            //    some non-deterministic time in the future.
+            // 2. Adjust the VFS settings so that it will crash at a specific moment. This might
+            //    be some specific moment like writing to Meta or maybe writing to some part of HT.
+            // 3. Introduce fail point to do the same.
             todo!()
         }
         for change in commit.changeset {
             match change {
-                message::KeyValueChange::Insert(key, value) => {
+                KeyValueChange::Insert(key, value) => {
                     actuals.push((key, nomt::KeyReadWrite::Write(Some(value))));
                 }
-                message::KeyValueChange::Delete(key) => {
+                KeyValueChange::Delete(key) => {
                     actuals.push((key, nomt::KeyReadWrite::Write(None)));
                 }
             }
@@ -89,43 +158,49 @@ impl Agent {
 
 /// Abstraction over the stream of messages from the supervisor.
 struct Stream {
-    rd_stream: FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>,
-    wr_stream: FramedWrite<BufWriter<OwnedWriteHalf>, LengthDelimitedCodec>,
+    rd_stream: SymmetricallyFramed<
+        FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>,
+        Envelope<ToAgent>,
+        SymmetricalBincode<Envelope<ToAgent>>,
+    >,
+    wr_stream: SymmetricallyFramed<
+        FramedWrite<BufWriter<OwnedWriteHalf>, LengthDelimitedCodec>,
+        Envelope<ToSupervisor>,
+        SymmetricalBincode<Envelope<ToSupervisor>>,
+    >,
 }
 
 impl Stream {
     /// Creates a stream wrapper for the given unix stream.
     fn new(command_stream: UnixStream) -> Self {
         let (rd, wr) = command_stream.into_split();
-        let rd_stream = FramedRead::new(BufReader::new(rd), LengthDelimitedCodec::new());
-        let wr_stream = FramedWrite::new(BufWriter::new(wr), LengthDelimitedCodec::new());
+        let rd_stream = SymmetricallyFramed::new(
+            FramedRead::new(BufReader::new(rd), LengthDelimitedCodec::new()),
+            SymmetricalBincode::default(),
+        );
+        let wr_stream = SymmetricallyFramed::new(
+            FramedWrite::new(BufWriter::new(wr), LengthDelimitedCodec::new()),
+            SymmetricalBincode::default(),
+        );
         Self {
             rd_stream,
             wr_stream,
         }
     }
 
-    /// Receives the [`message::Init`] message from the supervisor. If the message is not an Init
-    /// message, returns an error.
-    async fn recv_init(&mut self) -> Result<message::InitPayload> {
-        match self.recv().await? {
-            message::ToAgent::Init(init) => Ok(init),
-            _ => Err(anyhow::anyhow!("Expected Init message")),
-        }
-    }
-
-    async fn recv(&mut self) -> Result<message::ToAgent> {
-        let bytes = self
+    async fn recv(&mut self) -> Result<Envelope<ToAgent>> {
+        let envelope = self
             .rd_stream
-            .next()
+            .try_next()
             .await
-            .ok_or_else(|| anyhow::anyhow!("EOF"))??;
-        Ok(bincode::deserialize(&bytes)?)
+            .map_err(|e| anyhow::anyhow!(e))
+            .transpose()
+            .unwrap_or_else(|| Err(anyhow::anyhow!("EOF")))?;
+        Ok(envelope)
     }
 
-    async fn send(&mut self, message: message::ToSupervisor) -> Result<()> {
-        let bytes = bincode::serialize(&message)?;
-        self.wr_stream.send(bytes.into()).await?;
+    async fn send(&mut self, message: Envelope<ToSupervisor>) -> Result<()> {
+        self.wr_stream.send(message).await?;
         Ok(())
     }
 }
