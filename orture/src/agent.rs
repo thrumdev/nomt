@@ -73,7 +73,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
     Ok(())
 }
 
-/// Receives the [`Init`] message from the supervisor and returns the initialized agent. Sends
+/// Receives the [`ToAgent::Init`] message from the supervisor and returns the initialized agent. Sends
 /// an Ack message back to the supervisor.
 ///
 /// # Errors

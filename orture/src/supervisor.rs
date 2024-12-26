@@ -145,7 +145,7 @@ pub struct InvestigationFlag {
     /// The directory the agent was working in.
     workdir: PathBuf,
     /// The reason for flagging.
-    reason: FlagReason,
+    reason: anyhow::Error,
 }
 
 /// Run the workload until either it either finishes, errors or gets cancelled.
@@ -157,7 +157,13 @@ async fn run_workload(cancel_token: CancellationToken) -> Result<Option<Investig
     let workdir = TempDir::new()?;
     let mut workload = Workload::new(workdir);
     let result = workload.run(cancel_token).await;
-    todo!()
+    match result {
+        Ok(()) => Ok(None),
+        Err(err) => Ok(Some(InvestigationFlag {
+            workdir: workload.into_workdir().into_path(),
+            reason: err,
+        })),
+    }
 }
 
 /// Run the control loop creating and tearing down the agents.

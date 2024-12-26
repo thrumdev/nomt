@@ -140,6 +140,8 @@ pub struct Workload {
     /// Working directory for this particular workload.
     workdir: TempDir,
     /// The currently spawned agent.
+    ///
+    /// Initially `None`.
     agent: Option<SpawnedAgentController>,
     /// How many iterations the workload should perform.
     workload_size: usize,
@@ -149,8 +151,12 @@ pub struct Workload {
 
 impl Workload {
     pub fn new(workdir: TempDir) -> Self {
-        // Self { workdir }
-        todo!()
+        Self {
+            workdir,
+            agent: None,
+            workload_size: 1000,
+            state: WorkloadState::new(0xFAD0),
+        }
     }
 
     /// Run the workload.
@@ -205,6 +211,10 @@ impl Workload {
             _ => unreachable!(),
         }
         Ok(())
+    }
+
+    pub fn into_workdir(self) -> TempDir {
+        self.workdir
     }
 }
 

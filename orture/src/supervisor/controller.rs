@@ -1,12 +1,59 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use super::comms;
 use crate::spawn::{self, Child};
 use anyhow::{bail, Result};
-use tokio::{net::UnixStream, sync::oneshot, task};
+use tokio::{
+    net::UnixStream,
+    sync::{oneshot, Notify},
+    task,
+};
+
+/// A one-off alarm.
+struct Alarm {
+    notify: Notify,
+    triggered: AtomicBool,
+}
+
+impl Alarm {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            triggered: AtomicBool::new(false),
+        }
+    }
+
+    /// Trigger the alarm.
+    ///
+    /// Makes any tasks waiting on [`Self::triggered`] are unblocked.
+    ///
+    /// If the alarm has been triggered already does nothing.
+    fn trigger(&self) {
+        if self.triggered.swap(true, Ordering::Release) {
+            return;
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until the alarm is triggered.
+    ///
+    /// If the [`Self::trigger`] has been called already returns immediately.
+    async fn triggered(&self) {
+        if self.triggered.load(Ordering::Acquire) {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
 
 /// A controller is responsible for overseeing a single agent process and handle its lifecycle.
 pub struct SpawnedAgentController {
     child: Child,
     rr: comms::RequestResponse,
+    unhealthy: Arc<Alarm>,
 }
 
 impl SpawnedAgentController {
@@ -18,6 +65,7 @@ impl SpawnedAgentController {
     pub async fn current_vm_rss(&self) -> Result<usize> {
         let path = format!("/proc/{}/status", self.child.pid);
         let status = tokio::fs::read(path).await?;
+        drop(status);
         todo!()
     }
 
@@ -27,7 +75,7 @@ impl SpawnedAgentController {
 
     /// Resolves when the agent died, the stream is closed, or otherwise the agent is unhealthy.
     pub async fn resolve_when_unhealthy(&self) {
-        todo!()
+        self.unhealthy.triggered().await;
     }
 }
 
@@ -61,10 +109,33 @@ async fn wait_for_exit(child: Child) -> Result<i32> {
 pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
     let (child, sock) = spawn::spawn_child()?;
     let stream = UnixStream::from_std(sock)?;
+    let unhealthy = Arc::new(Alarm::new());
 
     let (rr, task) = comms::run(stream);
-    // TODO: decide how to drive the `task`.
+    tokio::spawn({
+        // Spawn a task that drives the comms logic.
+        //
+        // This triggers the unhealthy alarm when finishes (irregardless whether Ok or Err).
+        let unhealthy = unhealthy.clone();
+        async move {
+            let _ = task.await;
+            unhealthy.trigger();
+        }
+    });
 
+    tokio::spawn({
+        // Spawn a task that monitors the exit code of the process.
+        let unhealthy = unhealthy.clone();
+        let child = child.clone();
+        async move {
+            let _ = wait_for_exit(child).await;
+            unhealthy.trigger();
+        }
+    });
+
+    // TODO: a proper init.
+    //
+    // id, bitbox_seed, etc.
     rr.send_request(crate::message::ToAgent::Init(crate::message::InitPayload {
         id: "1".to_string(),
         workdir,
@@ -72,5 +143,9 @@ pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
     }))
     .await?;
 
-    Ok(SpawnedAgentController { child, rr })
+    Ok(SpawnedAgentController {
+        child,
+        rr,
+        unhealthy,
+    })
 }

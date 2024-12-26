@@ -77,9 +77,8 @@ impl RequestResponse {
         wr_stream.send(Envelope { reqno, message }).await.unwrap();
         drop(wr_stream);
 
-        rx.await.unwrap();
-
-        todo!()
+        let message = rx.await?;
+        Ok(message)
     }
 }
 
