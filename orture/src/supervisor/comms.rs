@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use anyhow::bail;
@@ -16,6 +17,7 @@ use tokio::{
         UnixStream,
     },
     sync::{oneshot, Mutex},
+    time::timeout,
 };
 use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt;
@@ -59,6 +61,7 @@ struct Shared {
     reqno: AtomicU64,
     wr_stream: Mutex<WrStream>,
     pending: Mutex<HashMap<u64, oneshot::Sender<ToSupervisor>>>,
+    timeout: Duration,
 }
 
 impl RequestResponse {
@@ -74,10 +77,10 @@ impl RequestResponse {
         drop(pending);
 
         let mut wr_stream = self.shared.wr_stream.lock().await;
-        wr_stream.send(Envelope { reqno, message }).await.unwrap();
+        wr_stream.send(Envelope { reqno, message }).await?;
         drop(wr_stream);
 
-        let message = rx.await?;
+        let message = timeout(self.shared.timeout, rx).await??;
         Ok(message)
     }
 }
@@ -126,6 +129,7 @@ pub fn run(stream: UnixStream) -> (RequestResponse, impl Future<Output = anyhow:
         reqno: AtomicU64::new(0),
         wr_stream: Mutex::new(wr_stream),
         pending: Mutex::new(HashMap::new()),
+        timeout: Duration::from_secs(5),
     });
     let rr = RequestResponse {
         shared: shared.clone(),

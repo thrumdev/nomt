@@ -4,6 +4,7 @@ use anyhow::Result;
 use tokio::net::UnixStream;
 
 mod agent;
+mod logging;
 mod message;
 mod spawn;
 mod supervisor;

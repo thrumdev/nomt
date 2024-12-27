@@ -99,9 +99,7 @@ impl Child {
     pub fn wait(&self) -> i32 {
         let mut status = 0;
         unsafe {
-            println!("Waiting for child to finish");
             libc::waitpid(self.pid, &mut status, 0);
-            println!("Child finished");
         }
         status
     }

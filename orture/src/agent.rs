@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt};
+use rand::Rng;
 use std::{path::PathBuf, time::Duration};
 use tokio::{
     io::{BufReader, BufWriter},
@@ -13,6 +14,7 @@ use tokio::{
 use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt as _;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tracing::info;
 
 use crate::message::{
     self, CommitPayload, Envelope, InitPayload, KeyValueChange, ToAgent, ToSupervisor,
@@ -31,6 +33,10 @@ pub async fn run(input: UnixStream) -> Result<()> {
 
     let mut stream = Stream::new(input);
     let mut agent = recv_init(&mut stream).await?;
+
+    crate::logging::init_agent(&agent.id, &agent.workdir);
+    info!("Child process started");
+
     loop {
         // TODO: make the message processing non-blocking.
         //
@@ -39,13 +45,40 @@ pub async fn run(input: UnixStream) -> Result<()> {
         let Envelope { reqno, message } = stream.recv().await?;
         match message {
             ToAgent::Commit(commit) => {
-                agent.commit(commit)?;
-                stream
-                    .send(Envelope {
-                        reqno,
-                        message: ToSupervisor::Ack,
+                if commit.should_crash {
+                    // TODO: implement this in the future.
+                    //
+                    // This seems to be a big feature. As of now, I envision it, as we either:
+                    //
+                    // 1. Launch a concurrent process that brings down the process (e.g. via `abort`) at
+                    //    some non-deterministic time in the future.
+                    // 2. Adjust the VFS settings so that it will crash at a specific moment. This might
+                    //    be some specific moment like writing to Meta or maybe writing to some part of HT.
+                    // 3. Introduce fail point to do the same.
+
+                    // Ack first.
+                    stream
+                        .send(Envelope {
+                            reqno,
+                            message: ToSupervisor::Ack,
+                        })
+                        .await?;
+                    tokio::spawn(async move {
+                        let _ = agent.commit(commit);
                     })
                     .await?;
+                    let millis = rand::thread_rng().gen_range(0..400);
+                    tokio::time::sleep(Duration::from_millis(millis)).await;
+                    std::process::abort();
+                } else {
+                    agent.commit(commit)?;
+                    stream
+                        .send(Envelope {
+                            reqno,
+                            message: ToSupervisor::Ack,
+                        })
+                        .await?;
+                }
             }
             ToAgent::Query(key) => {
                 let value = agent.query(key)?;
@@ -104,6 +137,7 @@ async fn recv_init(stream: &mut Stream) -> Result<Agent> {
 struct Agent {
     workdir: PathBuf,
     nomt: Nomt<Blake3Hasher>,
+    id: String,
 }
 
 impl Agent {
@@ -116,24 +150,16 @@ impl Agent {
         o.path(workdir.join("nomt_db"));
         o.bitbox_seed(init.bitbox_seed);
         let nomt = Nomt::open(o)?;
-        Ok(Self { workdir, nomt })
+        Ok(Self {
+            workdir,
+            nomt,
+            id: init.id,
+        })
     }
 
     fn commit(&mut self, commit: CommitPayload) -> Result<()> {
         let session = self.nomt.begin_session();
         let mut actuals = Vec::with_capacity(commit.changeset.len());
-        if commit.should_crash {
-            // TODO: implement this in the future.
-            //
-            // This seems to be a big feature. As of now, I envision it, as we either:
-            //
-            // 1. Launch a concurrent process that brings down the process (e.g. via `abort`) at
-            //    some non-deterministic time in the future.
-            // 2. Adjust the VFS settings so that it will crash at a specific moment. This might
-            //    be some specific moment like writing to Meta or maybe writing to some part of HT.
-            // 3. Introduce fail point to do the same.
-            todo!()
-        }
         for change in commit.changeset {
             match change {
                 KeyValueChange::Insert(key, value) => {

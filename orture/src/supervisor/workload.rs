@@ -1,11 +1,12 @@
 use std::{future::Future, time::Duration};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use imbl::OrdMap;
 use rand::prelude::*;
 use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
+use tracing::{trace, trace_span, Instrument as _};
 
 use crate::message::KeyValueChange;
 
@@ -169,7 +170,7 @@ impl Workload {
             None => {
                 // Cancelled. Send SIGKILL to the agent.
                 if let Some(agent) = self.agent.take() {
-                    agent.send_sigkill();
+                    agent.teardown();
                 }
             }
         }
@@ -184,8 +185,10 @@ impl Workload {
             })
             .await?,
         );
-        for _ in 0..self.workload_size {
-            self.run_iteration().await?;
+        for iterno in 0..self.workload_size {
+            self.run_iteration()
+                .instrument(trace_span!("iteration", iterno))
+                .await?;
         }
         Ok(())
     }
@@ -200,8 +203,10 @@ impl Workload {
         // - rollbacks should be less frequent.
         let exercise_ix = self.state.rng.gen_range(0..2);
         let s = &mut self.state;
+        trace!("run_iteration: {}", exercise_ix);
         match exercise_ix {
             0 => {
+                println!("exercise_commit");
                 assert_healthy_agent(agent, exercise_commit(&rr, s)).await?;
             }
             1 => {
@@ -213,6 +218,14 @@ impl Workload {
         Ok(())
     }
 
+    /// Release potentially held resources.
+    pub fn teardown(&mut self) {
+        if let Some(ref mut agent) = self.agent {
+            agent.teardown();
+        }
+    }
+
+    /// Return the working directory.
     pub fn into_workdir(self) -> TempDir {
         self.workdir
     }
@@ -222,14 +235,18 @@ async fn assert_healthy_agent<F>(agent: &SpawnedAgentController, future: F) -> a
 where
     F: Future<Output = anyhow::Result<()>>,
 {
+    let future = future.instrument(trace_span!("assert_healthy_agent"));
     tokio::select! {
-        result = future => result,
+        result = future => {
+            result
+        },
         _ = agent.resolve_when_unhealthy() => {
             panic!("agent is unhealthy");
         }
     }
 }
 
+#[tracing::instrument(level = "trace", skip(rr, s))]
 async fn exercise_commit(rr: &comms::RequestResponse, s: &mut WorkloadState) -> anyhow::Result<()> {
     let (snapshot, changeset) = s.gen_commit();
     rr.send_request(crate::message::ToAgent::Commit(
@@ -243,6 +260,7 @@ async fn exercise_commit(rr: &comms::RequestResponse, s: &mut WorkloadState) -> 
     Ok(())
 }
 
+#[tracing::instrument(level = "trace", skip(rr, s, workload_agent, workdir))]
 async fn exercise_crashing_commit(
     rr: &comms::RequestResponse,
     s: &mut WorkloadState,
@@ -263,12 +281,13 @@ async fn exercise_crashing_commit(
     match timeout(TOLERANCE, agent.resolve_when_unhealthy()).await {
         Ok(()) => (),
         Err(Elapsed { .. }) => {
-            agent.send_sigkill();
+            agent.teardown();
             // TODO: flag for investigation.
             return Err(anyhow::anyhow!("agent did not die"));
         }
     }
-    agent.send_sigkill();
+    trace!("agent died");
+    agent.teardown();
     drop(agent);
     let agent = controller::spawn_agent(workdir).await?;
     *workload_agent = Some(agent);
@@ -283,10 +302,13 @@ async fn exercise_crashing_commit(
             buf.copy_from_slice(&vec.unwrap());
             u64::from_le_bytes(buf)
         }
-        _ => unreachable!(),
+        resp => bail!("unexpected response: {:?}", resp),
     };
     if seqno == snapshot.seqno {
+        trace!("commit successful");
         s.commit(snapshot);
+    } else {
+        trace!("commit failed");
     }
     Ok(())
 }

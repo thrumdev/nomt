@@ -3,12 +3,12 @@
 use std::{path::PathBuf, process::exit};
 
 use anyhow::Result;
-use tempfile::TempDir;
 use tokio::{
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::{error, info, trace_span, warn, Instrument};
 
 use workload::Workload;
 
@@ -20,6 +20,8 @@ mod workload;
 ///
 /// This is not expected to return explicitly unless there was an error.
 pub async fn run() -> Result<()> {
+    crate::logging::init_supervisor();
+
     // TODO: this is the main entrypoint of the program and as such should handle a few things:
     //
     // 1. Parse command line arguments.
@@ -34,7 +36,7 @@ pub async fn run() -> Result<()> {
             exit(0);
         }
         ExitReason::Error(error) => {
-            eprintln!("Error occured: {:?}", error);
+            error!("Error occured: {:?}", error);
             exit(1);
         }
         ExitReason::Panic(panic_box) => {
@@ -47,13 +49,14 @@ pub async fn run() -> Result<()> {
                 None
             };
             if let Some(s) = panic_string {
-                eprintln!("Panic occured: {}", s);
+                error!("Panic occured: {}", s);
             } else {
-                eprintln!("Panic occured (no message)");
+                error!("Panic occured (no message)");
             }
             exit(2);
         }
         ExitReason::Interrupted => {
+            info!("Interrupted by the user");
             // The exit code is 128 + 2 because in UNIX, signals are mapped to exit codes by adding
             // 128 to the signal number. SIGINT is signal number 2, so the exit code is:
             //
@@ -141,7 +144,9 @@ pub enum FlagReason {
     Timeout,
 }
 
+#[derive(Debug)]
 pub struct InvestigationFlag {
+    workload_id: u64,
     /// The directory the agent was working in.
     workdir: PathBuf,
     /// The reason for flagging.
@@ -152,14 +157,23 @@ pub struct InvestigationFlag {
 ///
 /// Returns `None` if the investigation is not required (i.e. cancelled or succeeded), otherwise,
 /// returns the investigation report.
-async fn run_workload(cancel_token: CancellationToken) -> Result<Option<InvestigationFlag>> {
+async fn run_workload(
+    cancel_token: CancellationToken,
+    workload_id: u64,
+) -> Result<Option<InvestigationFlag>> {
     // This creates a temp dir for the working dir of the workload.
-    let workdir = TempDir::new()?;
+    let workdir = tempfile::Builder::new()
+        .prefix("orture-")
+        .suffix(format!("-workload-{}", workload_id).as_str())
+        .tempdir()
+        .expect("Failed to create a temp dir");
     let mut workload = Workload::new(workdir);
     let result = workload.run(cancel_token).await;
+    workload.teardown();
     match result {
         Ok(()) => Ok(None),
         Err(err) => Ok(Some(InvestigationFlag {
+            workload_id,
             workdir: workload.into_workdir().into_path(),
             reason: err,
         })),
@@ -170,22 +184,24 @@ async fn run_workload(cancel_token: CancellationToken) -> Result<Option<Investig
 ///
 /// `cancel_token` is used to gracefully shutdown the supervisor.
 async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
-    const FLAG_NUMBER_LIMIT: usize = 10;
+    const FLAG_NUMBER_LIMIT: usize = 1;
     let mut flags = Vec::new();
+    let mut workload_cnt = 0;
     loop {
-        let maybe_flag = run_workload(cancel_token.clone()).await?;
+        let workload_id = workload_cnt;
+        workload_cnt += 1;
+        let maybe_flag = run_workload(cancel_token.clone(), workload_id)
+            .instrument(trace_span!("workload", workload_id))
+            .await?;
         if let Some(flag) = maybe_flag {
-            println!(
-                "Flagged for investigation\nreason={reason:?}\nworkdir={workdir}",
-                reason = flag.reason,
-                workdir = flag.workdir.display()
-            );
+            warn!("Flagged for investigation: {:#?}", flag);
             flags.push(flag);
         }
         if cancel_token.is_cancelled() {
             break;
         }
         if flags.len() >= FLAG_NUMBER_LIMIT {
+            info!("Flag limit reached. Exiting.");
             break;
         }
     }

@@ -11,6 +11,7 @@ use tokio::{
     sync::{oneshot, Notify},
     task,
 };
+use tracing::trace;
 
 /// A one-off alarm.
 struct Alarm {
@@ -54,11 +55,27 @@ pub struct SpawnedAgentController {
     child: Child,
     rr: comms::RequestResponse,
     unhealthy: Arc<Alarm>,
+    comms_ah: task::AbortHandle,
+    waitpid_ah: task::AbortHandle,
+    torn_down: AtomicBool,
+}
+
+// This is a safe-guard to ensure that the controller is torn down properly.
+impl Drop for SpawnedAgentController {
+    fn drop(&mut self) {
+        if !self.torn_down.load(Ordering::Relaxed) {
+            panic!("the controller was dropped without being torn down");
+        }
+    }
 }
 
 impl SpawnedAgentController {
-    pub fn send_sigkill(&self) {
+    /// Kills the process, shuts down the comms, and cleans up the resources.
+    pub fn teardown(&self) {
+        self.torn_down.store(true, Ordering::Relaxed);
         self.child.send_sigkill();
+        self.comms_ah.abort();
+        self.waitpid_ah.abort();
     }
 
     /// Reads and returns the current virtual memory size of the agent process.
@@ -112,26 +129,30 @@ pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
     let unhealthy = Arc::new(Alarm::new());
 
     let (rr, task) = comms::run(stream);
-    tokio::spawn({
+    let comms_ah = tokio::spawn({
         // Spawn a task that drives the comms logic.
         //
         // This triggers the unhealthy alarm when finishes (irregardless whether Ok or Err).
         let unhealthy = unhealthy.clone();
         async move {
-            let _ = task.await;
+            let result = task.await;
+            trace!("comms finished: {:?}", result);
             unhealthy.trigger();
         }
-    });
+    })
+    .abort_handle();
 
-    tokio::spawn({
+    let waitpid_ah = tokio::spawn({
         // Spawn a task that monitors the exit code of the process.
         let unhealthy = unhealthy.clone();
         let child = child.clone();
         async move {
-            let _ = wait_for_exit(child).await;
+            let e = wait_for_exit(child).await;
+            trace!("child exit code: {:?}", e);
             unhealthy.trigger();
         }
-    });
+    })
+    .abort_handle();
 
     // TODO: a proper init.
     //
@@ -147,5 +168,8 @@ pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
         child,
         rr,
         unhealthy,
+        comms_ah,
+        waitpid_ah,
+        torn_down: false.into(),
     })
 }
