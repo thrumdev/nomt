@@ -292,6 +292,7 @@ async fn exercise_crashing_commit(
     let agent = controller::spawn_agent(workdir).await?;
     *workload_agent = Some(agent);
 
+    trace!("sending seqno query");
     let seqno = match rr
         .send_request(crate::message::ToAgent::Query(SEQNO_KEY))
         .await?

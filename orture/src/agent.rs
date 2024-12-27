@@ -14,7 +14,7 @@ use tokio::{
 use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt as _;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tracing::info;
+use tracing::{info, trace};
 
 use crate::message::{
     self, CommitPayload, Envelope, InitPayload, KeyValueChange, ToAgent, ToSupervisor,
@@ -35,7 +35,8 @@ pub async fn run(input: UnixStream) -> Result<()> {
     let mut agent = recv_init(&mut stream).await?;
 
     crate::logging::init_agent(&agent.id, &agent.workdir);
-    info!("Child process started");
+    let pid = std::process::id();
+    info!(pid, "Child process started");
 
     loop {
         // TODO: make the message processing non-blocking.
@@ -81,6 +82,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 }
             }
             ToAgent::Query(key) => {
+                trace!("query: {}", hex::encode(key));
                 let value = agent.query(key)?;
                 stream
                     .send(Envelope {

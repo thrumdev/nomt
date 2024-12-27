@@ -125,6 +125,7 @@ async fn wait_for_exit(child: Child) -> Result<i32> {
 /// Spawns an agent process and returns a controller for it.
 pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
     let (child, sock) = spawn::spawn_child()?;
+    trace!("spawned agent, pid={}", child.pid);
     let stream = UnixStream::from_std(sock)?;
     let unhealthy = Arc::new(Alarm::new());
 
@@ -147,8 +148,9 @@ pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
         let unhealthy = unhealthy.clone();
         let child = child.clone();
         async move {
+            let pid = child.pid;
             let e = wait_for_exit(child).await;
-            trace!("child exit code: {:?}", e);
+            trace!(pid, "child exit code: {:?}", e);
             unhealthy.trigger();
         }
     })

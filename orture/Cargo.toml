@@ -22,6 +22,7 @@ imbl = "3.0.0"
 tokio-serde = { version = "0.9.0", features = ["bincode"] }
 tracing = { version = "0.1.41", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+hex = "0.4.3"
 
 [[bin]]
 name = "orture"

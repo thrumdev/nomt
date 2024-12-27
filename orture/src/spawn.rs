@@ -25,6 +25,7 @@ use std::{
     ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
+use tracing::trace;
 
 /// A special file descriptor that is used to pass a socket to the child process.
 ///
@@ -113,6 +114,7 @@ impl Child {
     /// to avoid that with pidfd but nobody cares really, because the probability of that happening
     /// is extremely low.
     pub fn send_sigkill(&self) {
+        trace!("sending SIGKILL to the agent, pid={}", self.pid);
         unsafe {
             libc::kill(self.pid, libc::SIGKILL);
         }
@@ -161,6 +163,7 @@ fn spawn_child_with_sock(socket_fd: RawFd) -> Result<libc::pid_t> {
         bail!("Failed to spawn child process");
     }
 
+    trace!("spawned child process, pid={}", pid);
     Ok(pid)
 }
 

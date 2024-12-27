@@ -1006,6 +1006,7 @@ dependencies = [
  "bincode",
  "cfg-if",
  "futures",
+ "hex",
  "imbl",
  "libc",
  "nix",
