@@ -190,10 +190,12 @@ impl Workload {
     }
 
     async fn run_inner(&mut self) -> Result<()> {
-        self.agent = Some(
-            controller::spawn_agent(self.workdir.path().display().to_string(), self.workload_id)
-                .await?,
-        );
+        controller::spawn_agent_into(
+            &mut self.agent,
+            self.workdir.path().display().to_string(),
+            self.workload_id,
+        )
+        .await?;
         for iterno in 0..self.workload_size {
             self.run_iteration()
                 .instrument(trace_span!("iteration", iterno))
@@ -229,7 +231,7 @@ impl Workload {
 
     /// Release potentially held resources.
     pub fn teardown(&mut self) {
-        if let Some(ref mut agent) = self.agent {
+        if let Some(agent) = self.agent.take() {
             agent.teardown();
         }
     }
@@ -276,7 +278,6 @@ async fn exercise_commit(rr: &comms::RequestResponse, s: &mut WorkloadState) -> 
 ///
 /// `workload_agent` is the agent that should be crashed. It is assumed that the agent is healthy.
 /// After the crash, the agent is respawned and saved into the `workload_agent`.
-#[tracing::instrument(level = "trace", skip(rr, s, workload_agent, workdir))]
 async fn exercise_commit_crashing(
     rr: &comms::RequestResponse,
     s: &mut WorkloadState,
@@ -297,19 +298,21 @@ async fn exercise_commit_crashing(
     .await?;
 
     // Wait until the agent dies. We give it a grace period of 5 seconds.
-    let agent = workload_agent.take().unwrap();
+    //
+    // Note that we don't "take" the agent from the `workload_agent` place. This is because there is
+    // always a looming possibility of SIGINT arriving.
     const TOLERANCE: Duration = Duration::from_secs(5);
-    if let Err(Elapsed { .. }) = timeout(TOLERANCE, agent.resolve_when_unhealthy()).await {
-        agent.teardown();
+    let agent = workload_agent.as_ref().unwrap();
+    let agent_died_or_timeout = timeout(TOLERANCE, agent.resolve_when_unhealthy()).await;
+    workload_agent.take().unwrap().teardown();
+    if let Err(Elapsed { .. }) = agent_died_or_timeout {
         // TODO: flag for investigation.
         return Err(anyhow::anyhow!("agent did not die"));
     }
-    agent.teardown();
-    drop(agent);
 
     // Spawns a new agent and checks whether the commit was applied to the database and if so
     // we commit the snapshot to the state.
-    controller::spawn_agent(workload_agent, workdir, workload_id).await?;
+    controller::spawn_agent_into(workload_agent, workdir, workload_id).await?;
     let rr = workload_agent.as_ref().unwrap().rr();
     let seqno = request_seqno(rr).await?;
     trace!("commit. seqno ours: {}, theirs: {}", snapshot.seqno, seqno);

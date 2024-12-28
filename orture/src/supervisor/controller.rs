@@ -26,14 +26,14 @@ pub struct SpawnedAgentController {
 impl Drop for SpawnedAgentController {
     fn drop(&mut self) {
         if !self.torn_down.load(Ordering::Relaxed) {
-            self.child.send_sigkill();
+            panic!("controller was not torn down properly");
         }
     }
 }
 
 impl SpawnedAgentController {
     /// Kills the process, shuts down the comms, and cleans up the resources.
-    pub fn teardown(&self) {
+    pub fn teardown(self) {
         self.torn_down.store(true, Ordering::Relaxed);
         self.child.send_sigkill();
         self.comms_ah.abort();
@@ -86,8 +86,9 @@ async fn wait_for_exit(child: Child) -> Result<i32> {
 
 /// Spawns an agent process creating a controller.
 ///
-/// The controller is placed in the `place` argument.
-pub async fn spawn_agent(
+/// The controller is placed in the `place` argument. `place` must be `None` when calling this
+/// function.
+pub async fn spawn_agent_into(
     place: &mut Option<SpawnedAgentController>,
     workdir: String,
     workload_id: u64,
@@ -96,6 +97,7 @@ pub async fn spawn_agent(
 
     let (child, sock) = spawn::spawn_child()?;
     trace!("spawned agent, pid={}", child.pid);
+
     let stream = UnixStream::from_std(sock)?;
     let unhealthy = Arc::new(Alarm::new());
 
