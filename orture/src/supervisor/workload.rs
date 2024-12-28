@@ -219,7 +219,7 @@ impl Workload {
             }
             1 => {
                 let workdir = self.workdir.path().display().to_string();
-                exercise_crashing_commit(&rr, s, &mut self.agent, workdir, self.workload_id)
+                exercise_commit_crashing(&rr, s, &mut self.agent, workdir, self.workload_id)
                     .await?;
             }
             _ => unreachable!(),
@@ -257,6 +257,7 @@ where
 
 // TODO: Exercise should sample the values from the state.
 
+/// Commit a changeset.
 #[tracing::instrument(level = "trace", skip(rr, s))]
 async fn exercise_commit(rr: &comms::RequestResponse, s: &mut WorkloadState) -> anyhow::Result<()> {
     let (snapshot, changeset) = s.gen_commit();
@@ -271,14 +272,21 @@ async fn exercise_commit(rr: &comms::RequestResponse, s: &mut WorkloadState) -> 
     Ok(())
 }
 
+/// Commit a changeset and induce a crash.
+///
+/// `workload_agent` is the agent that should be crashed. It is assumed that the agent is healthy.
+/// After the crash, the agent is respawned and saved into the `workload_agent`.
 #[tracing::instrument(level = "trace", skip(rr, s, workload_agent, workdir))]
-async fn exercise_crashing_commit(
+async fn exercise_commit_crashing(
     rr: &comms::RequestResponse,
     s: &mut WorkloadState,
     workload_agent: &mut Option<SpawnedAgentController>,
     workdir: String,
     workload_id: u64,
 ) -> anyhow::Result<()> {
+    // Generate a changeset and the associated snapshot. Ask the agent to commit the changeset.
+    //
+    // The agent should crash before or after the commit.
     let (snapshot, changeset) = s.gen_commit();
     rr.send_request(crate::message::ToAgent::Commit(
         crate::message::CommitPayload {
@@ -287,22 +295,21 @@ async fn exercise_crashing_commit(
         },
     ))
     .await?;
-    // Wait until the agent dies, kill it to make sure.
-    const TOLERANCE: Duration = Duration::from_secs(5);
+
+    // Wait until the agent dies. We give it a grace period of 5 seconds.
     let agent = workload_agent.take().unwrap();
-    match timeout(TOLERANCE, agent.resolve_when_unhealthy()).await {
-        Ok(()) => (),
-        Err(Elapsed { .. }) => {
-            agent.teardown();
-            // TODO: flag for investigation.
-            return Err(anyhow::anyhow!("agent did not die"));
-        }
+    const TOLERANCE: Duration = Duration::from_secs(5);
+    if let Err(Elapsed { .. }) = timeout(TOLERANCE, agent.resolve_when_unhealthy()).await {
+        agent.teardown();
+        // TODO: flag for investigation.
+        return Err(anyhow::anyhow!("agent did not die"));
     }
-    trace!("agent died");
     agent.teardown();
     drop(agent);
-    let agent = controller::spawn_agent(workdir, workload_id).await?;
-    *workload_agent = Some(agent);
+
+    // Spawns a new agent and checks whether the commit was applied to the database and if so
+    // we commit the snapshot to the state.
+    controller::spawn_agent(workload_agent, workdir, workload_id).await?;
     let rr = workload_agent.as_ref().unwrap().rr();
     let seqno = request_seqno(rr).await?;
     trace!("commit. seqno ours: {}, theirs: {}", snapshot.seqno, seqno);
@@ -312,6 +319,7 @@ async fn exercise_crashing_commit(
     Ok(())
 }
 
+/// Request the current sequence number from the agent.
 async fn request_seqno(rr: &comms::RequestResponse) -> anyhow::Result<u64> {
     trace!("sending seqno query");
     let value = match request_query(rr, SEQNO_KEY).await? {
@@ -322,6 +330,7 @@ async fn request_seqno(rr: &comms::RequestResponse) -> anyhow::Result<u64> {
     Ok(seqno)
 }
 
+// Requests the value of the key from the agent.
 async fn request_query(
     rr: &comms::RequestResponse,
     key: message::Key,

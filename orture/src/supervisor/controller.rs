@@ -26,7 +26,7 @@ pub struct SpawnedAgentController {
 impl Drop for SpawnedAgentController {
     fn drop(&mut self) {
         if !self.torn_down.load(Ordering::Relaxed) {
-            panic!("the controller was dropped without being torn down");
+            self.child.send_sigkill();
         }
     }
 }
@@ -84,8 +84,16 @@ async fn wait_for_exit(child: Child) -> Result<i32> {
     Ok(exit_status)
 }
 
-/// Spawns an agent process and returns a controller for it.
-pub async fn spawn_agent(workdir: String, workload_id: u64) -> Result<SpawnedAgentController> {
+/// Spawns an agent process creating a controller.
+///
+/// The controller is placed in the `place` argument.
+pub async fn spawn_agent(
+    place: &mut Option<SpawnedAgentController>,
+    workdir: String,
+    workload_id: u64,
+) -> Result<()> {
+    assert!(place.is_none(), "the controller must be empty");
+
     let (child, sock) = spawn::spawn_child()?;
     trace!("spawned agent, pid={}", child.pid);
     let stream = UnixStream::from_std(sock)?;
@@ -133,12 +141,13 @@ pub async fn spawn_agent(workdir: String, workload_id: u64) -> Result<SpawnedAge
     }))
     .await?;
 
-    Ok(SpawnedAgentController {
+    *place = Some(SpawnedAgentController {
         child,
         rr,
         unhealthy,
         comms_ah,
         waitpid_ah,
-        torn_down: false.into(),
-    })
+        torn_down: AtomicBool::new(false),
+    });
+    Ok(())
 }
