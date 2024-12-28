@@ -190,6 +190,10 @@ impl Store {
         })
     }
 
+    pub fn sync_seqn(&self) -> u32 {
+        self.sync.lock().sync_seqn
+    }
+
     /// Returns a handle to the rollback object. `None` if the rollback feature is not enabled.
     pub fn rollback(&self) -> Option<&Rollback> {
         self.shared.rollback.as_ref()

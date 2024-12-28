@@ -258,6 +258,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         self.store.load_value(path)
     }
 
+    /// Returns the current sync sequence number.
+    #[doc(hidden)]
+    pub fn sync_seqn(&self) -> u32 {
+        self.store.sync_seqn()
+    }
+
     /// Creates a new [`Session`] object, that serves a purpose of capturing the reads and writes
     /// performed by the application, updating the trie and creating a [`Witness`], allowing to
     /// re-execute the same operations without having access to the full trie.
