@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt};
 use rand::Rng;
@@ -217,14 +217,11 @@ impl Stream {
     }
 
     async fn recv(&mut self) -> Result<Envelope<ToAgent>> {
-        let envelope = self
-            .rd_stream
-            .try_next()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-            .transpose()
-            .unwrap_or_else(|| Err(anyhow::anyhow!("EOF")))?;
-        Ok(envelope)
+        match self.rd_stream.try_next().await {
+            Ok(Some(envelope)) => Ok(envelope),
+            Ok(None) => bail!("EOF"),
+            Err(e) => Err(anyhow!(e)),
+        }
     }
 
     async fn send(&mut self, message: Envelope<ToSupervisor>) -> Result<()> {

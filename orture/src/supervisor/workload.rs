@@ -8,7 +8,7 @@ use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, trace_span, Instrument as _};
 
-use crate::message::KeyValueChange;
+use crate::message::{self, KeyValueChange};
 
 use super::{
     comms,
@@ -148,15 +148,18 @@ pub struct Workload {
     workload_size: usize,
     /// The current state of the workload.
     state: WorkloadState,
+    /// The identifier of the workload. Useful for debugging.
+    workload_id: u64,
 }
 
 impl Workload {
-    pub fn new(workdir: TempDir) -> Self {
+    pub fn new(workdir: TempDir, workload_id: u64) -> Self {
         Self {
             workdir,
             agent: None,
             workload_size: 1000,
             state: WorkloadState::new(0xFAD0),
+            workload_id,
         }
     }
 
@@ -179,11 +182,8 @@ impl Workload {
 
     async fn run_inner(&mut self) -> Result<()> {
         self.agent = Some(
-            controller::spawn_agent({
-                let this = &self;
-                this.workdir.path().display().to_string()
-            })
-            .await?,
+            controller::spawn_agent(self.workdir.path().display().to_string(), self.workload_id)
+                .await?,
         );
         for iterno in 0..self.workload_size {
             self.run_iteration()
@@ -203,7 +203,7 @@ impl Workload {
         // - rollbacks should be less frequent.
         let exercise_ix = self.state.rng.gen_range(0..2);
         let s = &mut self.state;
-        trace!("run_iteration: {}", exercise_ix);
+        trace!("run_iteration: choice {}", exercise_ix);
         match exercise_ix {
             0 => {
                 println!("exercise_commit");
@@ -211,7 +211,8 @@ impl Workload {
             }
             1 => {
                 let workdir = self.workdir.path().display().to_string();
-                exercise_crashing_commit(&rr, s, &mut self.agent, workdir).await?;
+                exercise_crashing_commit(&rr, s, &mut self.agent, workdir, self.workload_id)
+                    .await?;
             }
             _ => unreachable!(),
         }
@@ -266,6 +267,7 @@ async fn exercise_crashing_commit(
     s: &mut WorkloadState,
     workload_agent: &mut Option<SpawnedAgentController>,
     workdir: String,
+    workload_id: u64,
 ) -> anyhow::Result<()> {
     let (snapshot, changeset) = s.gen_commit();
     rr.send_request(crate::message::ToAgent::Commit(
@@ -289,22 +291,10 @@ async fn exercise_crashing_commit(
     trace!("agent died");
     agent.teardown();
     drop(agent);
-    let agent = controller::spawn_agent(workdir).await?;
+    let agent = controller::spawn_agent(workdir, workload_id).await?;
     *workload_agent = Some(agent);
 
-    trace!("sending seqno query");
-    let seqno = match rr
-        .send_request(crate::message::ToAgent::Query(SEQNO_KEY))
-        .await?
-    {
-        crate::message::ToSupervisor::QueryResponse(vec) => {
-            // TODO: clean this up.
-            let mut buf = [0; 8];
-            buf.copy_from_slice(&vec.unwrap());
-            u64::from_le_bytes(buf)
-        }
-        resp => bail!("unexpected response: {:?}", resp),
-    };
+    let seqno = request_seqno(rr).await?;
     if seqno == snapshot.seqno {
         trace!("commit successful");
         s.commit(snapshot);
@@ -312,4 +302,25 @@ async fn exercise_crashing_commit(
         trace!("commit failed");
     }
     Ok(())
+}
+
+async fn request_seqno(rr: &comms::RequestResponse) -> anyhow::Result<u64> {
+    trace!("sending seqno query");
+    let value = match request_query(rr, SEQNO_KEY).await? {
+        Some(vec) => vec,
+        None => bail!("seqno key not found"),
+    };
+    let seqno = u64::from_le_bytes(value.try_into().unwrap());
+    Ok(seqno)
+}
+
+async fn request_query(
+    rr: &comms::RequestResponse,
+    key: message::Key,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    trace!(key = hex::encode(&key), "sending storage query");
+    match rr.send_request(crate::message::ToAgent::Query(key)).await? {
+        crate::message::ToSupervisor::QueryResponse(vec) => Ok(vec),
+        resp => bail!("unexpected response: {:?}", resp),
+    }
 }

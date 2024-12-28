@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -123,7 +123,7 @@ async fn wait_for_exit(child: Child) -> Result<i32> {
 }
 
 /// Spawns an agent process and returns a controller for it.
-pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
+pub async fn spawn_agent(workdir: String, workload_id: u64) -> Result<SpawnedAgentController> {
     let (child, sock) = spawn::spawn_child()?;
     trace!("spawned agent, pid={}", child.pid);
     let stream = UnixStream::from_std(sock)?;
@@ -156,11 +156,16 @@ pub async fn spawn_agent(workdir: String) -> Result<SpawnedAgentController> {
     })
     .abort_handle();
 
+    // Assign a unique ID to the agent.
+    static AGENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let agent_number = AGENT_COUNT.fetch_add(1, Ordering::Relaxed);
+    let id = format!("agent-{}-{}", workload_id, agent_number);
+
     // TODO: a proper init.
     //
     // id, bitbox_seed, etc.
     rr.send_request(crate::message::ToAgent::Init(crate::message::InitPayload {
-        id: "1".to_string(),
+        id,
         workdir,
         bitbox_seed: [0; 16],
     }))

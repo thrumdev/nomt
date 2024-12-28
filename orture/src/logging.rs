@@ -93,6 +93,8 @@ pub fn init_agent(agent_id: &str, workdir: &Path) {
         .with_filter(env_filter(Kind::Agent));
 
     // File layer with ANSI disabled
+    // TODO: this has an issue currently. While the ANSI is false the colors are not disabled
+    // everywhere.
     let file = std::fs::File::options()
         .create(true)
         .append(true)
@@ -121,7 +123,8 @@ pub fn init_agent(agent_id: &str, workdir: &Path) {
     // Set the global subscriber
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set agent subscriber");
 
-    let span = span!(Level::INFO, "agent", id = agent_id);
+    let pid = std::process::id();
+    let span = span!(Level::INFO, "agent", agent_id, pid);
     let _enter = span.enter();
     // We intentionally `forget` the guard so the span remains open
     // for the lifetime of the entire agent process if desired.

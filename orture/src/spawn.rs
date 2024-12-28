@@ -11,19 +11,18 @@
 // The main goal of this module is to tuck away the low-level machinery like working with libc and
 // nix into a single place.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use cfg_if::cfg_if;
-use libc::posix_spawn_file_actions_t;
 use std::{
-    ffi::CString,
-    mem,
     os::{
         fd::{AsRawFd as _, FromRawFd as _, RawFd},
-        raw::c_char,
-        unix::net::UnixStream,
+        unix::{net::UnixStream, process::CommandExt},
     },
-    ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tracing::trace;
 
@@ -82,15 +81,60 @@ pub fn am_spawned() -> Option<UnixStream> {
 pub fn spawn_child() -> Result<(Child, UnixStream)> {
     let (sock1, sock2) = UnixStream::pair()?;
 
-    let child_pid = spawn_child_with_sock(sock2.as_raw_fd())?;
-    drop(sock2); // Close parent's end in child
+    let child = spawn_child_with_sock(sock2.as_raw_fd())?;
+    // drop(sock2); // Close parent's end in child
 
-    Ok((Child { pid: child_pid }, sock1))
+    let pid = child.id() as i32;
+    let shared = Shared { child, sock2 };
+
+    Ok((
+        Child {
+            pid,
+            shared: Arc::new(shared),
+        },
+        sock1,
+    ))
+}
+
+fn spawn_child_with_sock(socket_fd: RawFd) -> Result<std::process::Child> {
+    trace!(?socket_fd, "Spawning child process");
+
+    // Prepare argv for the child process.
+    //
+    // Contains only the program binary path and a null terminator.
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            // Nothing beats the simplicity of /proc/self/exe on Linux.
+            let program = std::ffi::OsString::from("/proc/self/exe");
+        } else {
+            let program = std::env::current_exe()?;
+        }
+    }
+
+    let mut cmd = Command::new(program);
+    unsafe {
+        cmd.pre_exec(move || {
+            // Duplicate the socket_fd to the CANARY_SOCKET_FD
+            libc::dup2(socket_fd, CANARY_SOCKET_FD);
+            libc::close(socket_fd);
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+
+    trace!("spawned child process, pid={}", child.id());
+    Ok(child)
+}
+
+struct Shared {
+    child: std::process::Child,
+    sock2: UnixStream,
 }
 
 #[derive(Clone)]
 pub struct Child {
-    pub pid: libc::pid_t,
+    pub pid: i32,
+    shared: Arc<Shared>,
 }
 
 impl Child {
@@ -117,95 +161,6 @@ impl Child {
         trace!("sending SIGKILL to the agent, pid={}", self.pid);
         unsafe {
             libc::kill(self.pid, libc::SIGKILL);
-        }
-    }
-}
-
-fn spawn_child_with_sock(socket_fd: RawFd) -> Result<libc::pid_t> {
-    let mut file_actions = SpawnFileActions::new()?;
-    file_actions.add_dup2(socket_fd, CANARY_SOCKET_FD)?;
-
-    // Prepare argv for the child process.
-    //
-    // Contains only the program binary path and a null terminator.
-    cfg_if! {
-        if #[cfg(target_os = "linux")] {
-            // Nothing beats the simplicity of /proc/self/exe on Linux.
-            let program_c = CString::new("/proc/self/exe")?;
-        } else {
-            let program_c = CString::new(std::env::current_exe()?.to_string_lossy().as_bytes())?;
-        }
-    }
-    let args = &mut [program_c.as_ptr(), ptr::null_mut()];
-
-    let mut pid: libc::pid_t = 0;
-    let ret = unsafe {
-        // Spawn the child process
-        //
-        // SAFETY:
-        // - `program_c` is freed after calling `posix_spawn`.
-        // - `args_raw` is freed after calling `posix_spawn`.
-        libc::posix_spawn(
-            &mut pid,
-            program_c.as_ptr(),
-            file_actions.as_inner_ptr(),
-            ptr::null(),
-            args.as_mut_ptr() as *mut *mut c_char,
-            std::ptr::null(),
-        )
-    };
-
-    // Explicit drop here after `posix_spawn` to avoid dangling pointer.
-    drop(program_c);
-    drop(file_actions);
-
-    if ret != 0 {
-        bail!("Failed to spawn child process");
-    }
-
-    trace!("spawned child process, pid={}", pid);
-    Ok(pid)
-}
-
-/// A wrapper around `posix_spawn_file_actions_t` that ensures the file actions are destroyed when
-/// the wrapper is dropped.
-struct SpawnFileActions {
-    file_actions: posix_spawn_file_actions_t,
-}
-
-impl SpawnFileActions {
-    fn new() -> anyhow::Result<Self> {
-        let mut file_actions: posix_spawn_file_actions_t = unsafe { mem::zeroed() };
-        unsafe {
-            if libc::posix_spawn_file_actions_init(&mut file_actions) != 0 {
-                bail!("Failed to init file actions");
-            }
-        }
-        Ok(Self { file_actions })
-    }
-
-    /// Adds a dup2 action to the file actions.
-    ///
-    /// This duplicates the `src` file descriptor from the current process to the `dst` file
-    /// descriptor into the child process.
-    fn add_dup2(&mut self, src: RawFd, dst: RawFd) -> Result<()> {
-        unsafe {
-            if libc::posix_spawn_file_actions_adddup2(&mut self.file_actions, src, dst) != 0 {
-                bail!("Failed to add dup2 action");
-            }
-        }
-        Ok(())
-    }
-
-    fn as_inner_ptr(&self) -> *const posix_spawn_file_actions_t {
-        &self.file_actions
-    }
-}
-
-impl Drop for SpawnFileActions {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = libc::posix_spawn_file_actions_destroy(&mut self.file_actions);
         }
     }
 }
