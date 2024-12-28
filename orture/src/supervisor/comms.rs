@@ -22,8 +22,9 @@ use tokio::{
 use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tracing::trace;
 
-use crate::message::{Envelope, ToAgent, ToSupervisor};
+use crate::message::{self, Envelope, ToAgent, ToSupervisor};
 
 /// The type definition of a sink which is built:
 ///
@@ -82,6 +83,18 @@ impl RequestResponse {
 
         let message = timeout(self.shared.timeout, rx).await??;
         Ok(message)
+    }
+
+    // Requests the value of the key from the agent.
+    pub async fn send_request_query(&self, key: message::Key) -> anyhow::Result<Option<Vec<u8>>> {
+        trace!(key = hex::encode(&key), "sending storage query");
+        match self
+            .send_request(crate::message::ToAgent::Query(key))
+            .await?
+        {
+            crate::message::ToSupervisor::QueryResponse(vec) => Ok(vec),
+            resp => bail!("unexpected response: {:?}", resp),
+        }
     }
 }
 

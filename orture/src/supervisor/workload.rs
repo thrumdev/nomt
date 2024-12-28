@@ -260,7 +260,6 @@ where
 // TODO: Exercise should sample the values from the state.
 
 /// Commit a changeset.
-#[tracing::instrument(level = "trace", skip(rr, s))]
 async fn exercise_commit(rr: &comms::RequestResponse, s: &mut WorkloadState) -> anyhow::Result<()> {
     let (snapshot, changeset) = s.gen_commit();
     rr.send_request(crate::message::ToAgent::Commit(
@@ -325,22 +324,10 @@ async fn exercise_commit_crashing(
 /// Request the current sequence number from the agent.
 async fn request_seqno(rr: &comms::RequestResponse) -> anyhow::Result<u64> {
     trace!("sending seqno query");
-    let value = match request_query(rr, SEQNO_KEY).await? {
+    let value = match rr.send_request_query(SEQNO_KEY).await? {
         Some(vec) => vec,
         None => bail!("seqno key not found"),
     };
     let seqno = u64::from_le_bytes(value.try_into().unwrap());
     Ok(seqno)
-}
-
-// Requests the value of the key from the agent.
-async fn request_query(
-    rr: &comms::RequestResponse,
-    key: message::Key,
-) -> anyhow::Result<Option<Vec<u8>>> {
-    trace!(key = hex::encode(&key), "sending storage query");
-    match rr.send_request(crate::message::ToAgent::Query(key)).await? {
-        crate::message::ToSupervisor::QueryResponse(vec) => Ok(vec),
-        resp => bail!("unexpected response: {:?}", resp),
-    }
 }
