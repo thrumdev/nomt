@@ -187,6 +187,7 @@ async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
     const FLAG_NUMBER_LIMIT: usize = 1;
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
+    // TODO: Run workloads in parallel. Make the concurrency factor configurable.
     loop {
         let workload_id = workload_cnt;
         workload_cnt += 1;

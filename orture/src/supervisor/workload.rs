@@ -78,6 +78,7 @@ impl WorkloadState {
             };
             changes.push(kvc);
         }
+        // TODO: Consider other ways of detecting whether the commit was applied or not.
         changes.push(KeyValueChange::Insert(
             SEQNO_KEY,
             new_seqno.to_le_bytes().to_vec(),
@@ -154,10 +155,18 @@ pub struct Workload {
 
 impl Workload {
     pub fn new(workdir: TempDir, workload_id: u64) -> Self {
+        // TODO: Make the workload size configurable and more sophisticated.
+        //
+        // Right now the workload size is a synonym for the number of iterations. We probably
+        // want to make it more about the number of keys inserted. Potentially, we might consider
+        // testing the "edging" scenario where the supervisor tries to stay below the maximum
+        // number of items in the database occasionally going over the limit expecting proper
+        // handling of the situation.
+        let workload_size = 50;
         Self {
             workdir,
             agent: None,
-            workload_size: 1000,
+            workload_size,
             state: WorkloadState::new(0xFAD0),
             workload_id,
         }
@@ -206,7 +215,6 @@ impl Workload {
         trace!("run_iteration: choice {}", exercise_ix);
         match exercise_ix {
             0 => {
-                println!("exercise_commit");
                 assert_healthy_agent(agent, exercise_commit(&rr, s)).await?;
             }
             1 => {
@@ -246,6 +254,8 @@ where
         }
     }
 }
+
+// TODO: Exercise should sample the values from the state.
 
 #[tracing::instrument(level = "trace", skip(rr, s))]
 async fn exercise_commit(rr: &comms::RequestResponse, s: &mut WorkloadState) -> anyhow::Result<()> {
@@ -293,13 +303,11 @@ async fn exercise_crashing_commit(
     drop(agent);
     let agent = controller::spawn_agent(workdir, workload_id).await?;
     *workload_agent = Some(agent);
-
+    let rr = workload_agent.as_ref().unwrap().rr();
     let seqno = request_seqno(rr).await?;
+    trace!("commit. seqno ours: {}, theirs: {}", snapshot.seqno, seqno);
     if seqno == snapshot.seqno {
-        trace!("commit successful");
         s.commit(snapshot);
-    } else {
-        trace!("commit failed");
     }
     Ok(())
 }

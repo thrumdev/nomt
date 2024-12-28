@@ -9,12 +9,12 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
         UnixStream,
     },
-    time::{error::Elapsed, timeout},
+    time::{error::Elapsed, sleep, timeout},
 };
 use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt as _;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tracing::{info, trace};
+use tracing::trace;
 
 use crate::message::{
     self, CommitPayload, Envelope, InitPayload, KeyValueChange, ToAgent, ToSupervisor,
@@ -36,7 +36,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
 
     crate::logging::init_agent(&agent.id, &agent.workdir);
     let pid = std::process::id();
-    info!(pid, "Child process started");
+    trace!(pid, "Child process started");
 
     loop {
         // TODO: make the message processing non-blocking.
@@ -68,8 +68,9 @@ pub async fn run(input: UnixStream) -> Result<()> {
                         let _ = agent.commit(commit);
                     })
                     .await?;
+                    // Wait for a random time and then abort.
                     let millis = rand::thread_rng().gen_range(0..400);
-                    tokio::time::sleep(Duration::from_millis(millis)).await;
+                    sleep(Duration::from_millis(millis)).await;
                     std::process::abort();
                 } else {
                     agent.commit(commit)?;
@@ -98,7 +99,6 @@ pub async fn run(input: UnixStream) -> Result<()> {
                         message: ToSupervisor::Ack,
                     })
                     .await?;
-                println!("Received GracefulShutdown message");
                 drop(agent);
                 break;
             }
