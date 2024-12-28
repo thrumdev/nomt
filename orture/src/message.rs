@@ -64,9 +64,11 @@ pub enum ToAgent {
     /// The supervisor sends this message to the child process to indicate that the child should
     /// commit.
     Commit(CommitPayload),
-    /// The supervisor sends this message to the child process to indicate that the child should
-    /// return the value of the given key.
+    /// The supervisor sends this message to the child process to query the value of a given key.
     Query(Key),
+    /// The supervisor sends this message to the child process to query the current sequence number
+    /// of the database.
+    QuerySyncSeqn,
     /// The supervisor sends this message to the child process to indicate that the child should
     /// do a clean shutdown.
     GracefulShutdown,
@@ -75,6 +77,10 @@ pub enum ToAgent {
 /// Messages sent from the agent to the supervisor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ToSupervisor {
+    /// A generic acknowledgment message.
     Ack,
-    QueryResponse(Option<Value>),
+    /// The response to a query for a key-value pair.
+    QueryValue(Option<Value>),
+    /// The response to a query for the current sequence number of the database.
+    SyncSeqn(u32),
 }

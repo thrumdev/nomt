@@ -15,8 +15,6 @@ use super::{
     controller::{self, SpawnedAgentController},
 };
 
-const SEQNO_KEY: [u8; 32] = [0xAA; 32];
-
 #[derive(Clone)]
 struct Biases {
     delete: f64,
@@ -35,14 +33,14 @@ impl Biases {
 /// Represents a snapshot of the state of the database.
 #[derive(Clone)]
 struct Snapshot {
-    seqno: u64,
+    sync_seqn: u32,
     state: OrdMap<[u8; 32], Option<Vec<u8>>>,
 }
 
 impl Snapshot {
     fn empty() -> Self {
         Self {
-            seqno: 0,
+            sync_seqn: 0,
             state: OrdMap::new(),
         }
     }
@@ -65,7 +63,7 @@ impl WorkloadState {
     }
 
     fn gen_commit(&mut self) -> (Snapshot, Vec<KeyValueChange>) {
-        let new_seqno = self.committed.seqno + 1;
+        let new_sync_seqn = self.committed.sync_seqn + 1;
         let size = self.rng.gen_range(0..10000);
         let mut changes = Vec::with_capacity(size);
         for _ in 0..size {
@@ -78,13 +76,8 @@ impl WorkloadState {
             };
             changes.push(kvc);
         }
-        // TODO: Consider other ways of detecting whether the commit was applied or not.
-        changes.push(KeyValueChange::Insert(
-            SEQNO_KEY,
-            new_seqno.to_le_bytes().to_vec(),
-        ));
         let mut snapshot = self.committed.clone();
-        snapshot.seqno = new_seqno;
+        snapshot.sync_seqn = new_sync_seqn;
         for change in &changes {
             match change {
                 KeyValueChange::Insert(key, value) => {
@@ -313,21 +306,14 @@ async fn exercise_commit_crashing(
     // we commit the snapshot to the state.
     controller::spawn_agent_into(workload_agent, workdir, workload_id).await?;
     let rr = workload_agent.as_ref().unwrap().rr();
-    let seqno = request_seqno(rr).await?;
-    trace!("commit. seqno ours: {}, theirs: {}", snapshot.seqno, seqno);
-    if seqno == snapshot.seqno {
+    let seqno = rr.send_query_sync_seqn().await?;
+    trace!(
+        "commit. seqno ours: {}, theirs: {}",
+        snapshot.sync_seqn,
+        seqno
+    );
+    if seqno == snapshot.sync_seqn {
         s.commit(snapshot);
     }
     Ok(())
-}
-
-/// Request the current sequence number from the agent.
-async fn request_seqno(rr: &comms::RequestResponse) -> anyhow::Result<u64> {
-    trace!("sending seqno query");
-    let value = match rr.send_request_query(SEQNO_KEY).await? {
-        Some(vec) => vec,
-        None => bail!("seqno key not found"),
-    };
-    let seqno = u64::from_le_bytes(value.try_into().unwrap());
-    Ok(seqno)
 }

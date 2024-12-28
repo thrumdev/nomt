@@ -88,7 +88,16 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 stream
                     .send(Envelope {
                         reqno,
-                        message: ToSupervisor::QueryResponse(value),
+                        message: ToSupervisor::QueryValue(value),
+                    })
+                    .await?;
+            }
+            ToAgent::QuerySyncSeqn => {
+                let sync_seqn = agent.query_sync_seqn();
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::SyncSeqn(sync_seqn),
                     })
                     .await?;
             }
@@ -181,6 +190,10 @@ impl Agent {
     fn query(&mut self, key: message::Key) -> Result<Option<message::Value>> {
         let value = self.nomt.read(key)?;
         Ok(value)
+    }
+
+    fn query_sync_seqn(&mut self) -> u32 {
+        self.nomt.sync_seqn()
     }
 }
 

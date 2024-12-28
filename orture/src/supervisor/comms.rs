@@ -92,7 +92,18 @@ impl RequestResponse {
             .send_request(crate::message::ToAgent::Query(key))
             .await?
         {
-            crate::message::ToSupervisor::QueryResponse(vec) => Ok(vec),
+            crate::message::ToSupervisor::QueryValue(vec) => Ok(vec),
+            resp => bail!("unexpected response: {:?}", resp),
+        }
+    }
+
+    /// Requests the current sync sequence number from the agent.
+    pub async fn send_query_sync_seqn(&self) -> anyhow::Result<u32> {
+        match self
+            .send_request(crate::message::ToAgent::QuerySyncSeqn)
+            .await?
+        {
+            crate::message::ToSupervisor::SyncSeqn(seqn) => Ok(seqn),
             resp => bail!("unexpected response: {:?}", resp),
         }
     }
