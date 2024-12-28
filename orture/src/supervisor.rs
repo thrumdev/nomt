@@ -159,6 +159,7 @@ pub struct InvestigationFlag {
 /// returns the investigation report.
 async fn run_workload(
     cancel_token: CancellationToken,
+    seed: u64,
     workload_id: u64,
 ) -> Result<Option<InvestigationFlag>> {
     // This creates a temp dir for the working dir of the workload.
@@ -167,7 +168,7 @@ async fn run_workload(
         .suffix(format!("-workload-{}", workload_id).as_str())
         .tempdir()
         .expect("Failed to create a temp dir");
-    let mut workload = Workload::new(workdir, workload_id);
+    let mut workload = Workload::new(seed, workdir, workload_id);
     let result = workload.run(cancel_token).await;
     workload.teardown();
     match result {
@@ -188,10 +189,13 @@ async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
     // TODO: Run workloads in parallel. Make the concurrency factor configurable.
+    // TODO: make seed configurable.
+    let mut seed = 0xdeadbeef;
     loop {
         let workload_id = workload_cnt;
         workload_cnt += 1;
-        let maybe_flag = run_workload(cancel_token.clone(), workload_id)
+        seed += 1;
+        let maybe_flag = run_workload(cancel_token.clone(), seed, workload_id)
             .instrument(trace_span!("workload", workload_id))
             .await?;
         if let Some(flag) = maybe_flag {

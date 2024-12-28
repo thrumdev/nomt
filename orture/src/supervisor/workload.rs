@@ -154,7 +154,7 @@ pub struct Workload {
 }
 
 impl Workload {
-    pub fn new(workdir: TempDir, workload_id: u64) -> Self {
+    pub fn new(seed: u64, workdir: TempDir, workload_id: u64) -> Self {
         // TODO: Make the workload size configurable and more sophisticated.
         //
         // Right now the workload size is a synonym for the number of iterations. We probably
@@ -167,7 +167,7 @@ impl Workload {
             workdir,
             agent: None,
             workload_size,
-            state: WorkloadState::new(0xFAD0),
+            state: WorkloadState::new(seed),
             workload_id,
         }
     }
