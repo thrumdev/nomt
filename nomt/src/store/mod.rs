@@ -303,6 +303,11 @@ pub struct MerkleTransaction {
 }
 
 impl MerkleTransaction {
+    /// Reserve space for the given number of written pages.
+    pub fn reserve(&mut self, n: usize) {
+        self.new_pages.reserve(n);
+    }
+
     /// Write a page to storage in its entirety.
     pub fn write_page(
         &mut self,
