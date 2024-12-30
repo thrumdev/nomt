@@ -238,7 +238,8 @@ impl SyncController {
         // UNWRAP: safe because begin_sync is called only once.
         let wal_result_tx = self.wal_result_tx.take().unwrap();
         self.db.shared.sync_tp.execute(move || {
-            page_cache.absorb_and_populate_transaction(updated_pages, &mut merkle_tx);
+            let deferred_old_pages =
+                page_cache.absorb_and_populate_transaction(updated_pages, &mut merkle_tx);
 
             let mut wal_blob_builder = wal_blob_builder.lock();
             let ht_pages = bitbox.prepare_sync(
@@ -249,13 +250,13 @@ impl SyncController {
             );
             drop(wal_blob_builder);
 
+            // Set the hash-table pages before spawning WAL writeout so they don't race with it.
+            *ht_to_write.lock() = Some(ht_pages);
             Self::spawn_wal_writeout(wal_result_tx, bitbox);
 
-            let mut ht_to_write = ht_to_write.lock();
-            *ht_to_write = Some(ht_pages);
-
-            // evict outside of the critical path.
+            // evict and drop old pages outside of the critical path.
             page_cache.evict();
+            drop(deferred_old_pages);
         });
     }
 
