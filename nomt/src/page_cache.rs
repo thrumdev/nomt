@@ -24,78 +24,66 @@ use std::{fmt, num::NonZeroUsize, sync::Arc};
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
-struct PageData {
-    data: Option<FatPage>,
+fn read_node(data: &FatPage, index: usize) -> Node {
+    assert!(index < NODES_PER_PAGE, "index out of bounds");
+    let start = index * 32;
+    let end = start + 32;
+    let mut node = [0; 32];
+    node.copy_from_slice(&data[start..end]);
+    node
 }
 
-impl PageData {
-    /// Creates a page with the given data.
-    fn pristine_with_data(data: FatPage) -> Self {
-        Self { data: Some(data) }
-    }
-
-    /// Creates an empty page.
-    fn pristine_empty() -> Self {
-        Self { data: None }
-    }
-
-    fn node(&self, index: usize) -> Node {
-        assert!(index < NODES_PER_PAGE, "index out of bounds");
-        if let Some(data) = self.data.as_ref() {
-            let start = index * 32;
-            let end = start + 32;
-            let mut node = [0; 32];
-            node.copy_from_slice(&data[start..end]);
-            node
-        } else {
-            Node::default()
-        }
-    }
-
-    fn set_node(&mut self, page_pool: &PagePool, index: usize, node: Node) {
-        assert!(index < NODES_PER_PAGE, "index out of bounds");
-        let data = self.data.get_or_insert_with(|| page_pool.alloc_fat_page());
-        let start = index * 32;
-        let end = start + 32;
-        data[start..end].copy_from_slice(&node);
-    }
+fn set_node(data: &mut FatPage, index: usize, node: Node) {
+    assert!(index < NODES_PER_PAGE, "index out of bounds");
+    let start = index * 32;
+    let end = start + 32;
+    data[start..end].copy_from_slice(&node);
 }
 
 /// A mutable page.
 pub struct PageMut {
-    inner: PageData,
+    inner: Option<FatPage>,
 }
 
 impl PageMut {
     /// Freeze the page.
     pub fn freeze(self) -> Page {
         Page {
-            inner: Arc::new(self.inner),
+            inner: self.inner.map(Arc::new),
         }
     }
 
     /// Create a pristine (i.e. blank) `PageMut`.
     pub fn pristine_empty() -> PageMut {
-        PageMut {
-            inner: PageData::pristine_empty(),
-        }
+        PageMut { inner: None }
     }
 
     /// Create a mutable page from raw page data.
     pub fn pristine_with_data(data: FatPage) -> PageMut {
-        PageMut {
-            inner: PageData::pristine_with_data(data),
-        }
+        PageMut { inner: Some(data) }
     }
 
     /// Read out the node at the given index.
     pub fn node(&self, index: usize) -> Node {
-        self.inner.node(index)
+        self.inner
+            .as_ref()
+            .map(|d| read_node(d, index))
+            .unwrap_or_default()
     }
 
     /// Write the node at the given index.
     pub fn set_node(&mut self, page_pool: &PagePool, index: usize, node: Node) {
-        self.inner.set_node(page_pool, index, node);
+        let data = self.inner.get_or_insert_with(|| page_pool.alloc_fat_page());
+
+        set_node(data, index, node);
+    }
+
+    /// Set the page ID metadata within the raw buffer, if there is one. No-op if this is a pristine
+    /// empty page.
+    fn set_page_id(&mut self, page_id: &PageId) {
+        if let Some(ref mut data) = self.inner {
+            data[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
+        }
     }
 }
 
@@ -110,21 +98,22 @@ impl From<FatPage> for PageMut {
 /// Can be cloned cheaply.
 #[derive(Clone)]
 pub struct Page {
-    inner: Arc<PageData>,
+    inner: Option<Arc<FatPage>>,
 }
 
 impl Page {
     /// Read out the node at the given index.
     pub fn node(&self, index: usize) -> Node {
-        self.inner.node(index)
+        self.inner
+            .as_ref()
+            .map(|d| read_node(d, index))
+            .unwrap_or_default()
     }
 
     /// Create a mutable deep copy of this page.
     pub fn deep_copy(&self) -> PageMut {
         PageMut {
-            inner: PageData {
-                data: self.inner.data.clone(),
-            },
+            inner: self.inner.as_ref().map(|x| FatPage::clone(x)),
         }
     }
 }
@@ -136,15 +125,15 @@ impl fmt::Debug for Page {
 }
 
 struct CacheEntry {
-    page_data: Arc<PageData>,
+    page_data: Option<Arc<FatPage>>,
     // the bucket index where this page is stored. `None` if it's a fresh page.
     bucket_index: Option<BucketIndex>,
 }
 
 impl CacheEntry {
-    fn init(page_data: PageData, bucket_index: Option<BucketIndex>) -> Self {
+    fn init(page_data: Option<FatPage>, bucket_index: Option<BucketIndex>) -> Self {
         CacheEntry {
-            page_data: Arc::new(page_data),
+            page_data: page_data.map(Arc::new),
             bucket_index,
         }
     }
@@ -264,9 +253,9 @@ impl PageCache {
         let domain = RwPassDomain::new();
 
         let (root_page, root_page_bucket) = if let Some((page, bucket)) = root_page_data {
-            (PageData::pristine_with_data(page), Some(bucket))
+            (Some(page), Some(bucket))
         } else {
-            (PageData::pristine_empty(), None)
+            (None, None)
         };
 
         Self {
@@ -437,19 +426,22 @@ impl PageCache {
             .map(|s| s.locked.lock())
             .collect::<Vec<_>>();
 
-        for updated_page in updated_pages {
+        for mut updated_page in updated_pages {
+            // Pages must store their ID before being written out. Set it here.
+            updated_page.page.set_page_id(&updated_page.page_id);
+
             if updated_page.page_id == ROOT_PAGE_ID {
                 let mut root_page = self.shared.root_page.write();
                 let root_page = &mut *root_page;
                 // update the cached page data.
                 root_page.page_data = updated_page.page.freeze().inner;
 
-                let page_data = &root_page.page_data.data;
+                let page_data = &root_page.page_data;
                 let bucket = &mut root_page.bucket_index;
                 apply_page(
                     updated_page.page_id,
                     bucket,
-                    page_data.as_ref(),
+                    page_data.as_ref().map(|x| &**x),
                     updated_page.diff,
                 );
                 continue;
@@ -461,18 +453,16 @@ impl PageCache {
             let cache_entry = shard_guards[shard_index]
                 .cached
                 .get_or_insert_mut(updated_page.page_id.clone(), || {
-                    CacheEntry::init(PageData::pristine_empty(), None)
+                    CacheEntry::init(None, None)
                 });
 
-            // update the cached page data.
             cache_entry.page_data = updated_page.page.freeze().inner;
 
-            let page_data = &cache_entry.page_data.data;
             let bucket = &mut cache_entry.bucket_index;
             apply_page(
                 updated_page.page_id,
                 bucket,
-                page_data.as_ref(),
+                cache_entry.page_data.as_ref().map(|x| &**x),
                 updated_page.diff,
             );
         }

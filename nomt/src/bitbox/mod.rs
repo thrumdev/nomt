@@ -140,9 +140,7 @@ impl DB {
         for (page_id, BucketIndex(bucket), page_info) in changes {
             // let's extract its bucket
             match page_info {
-                Some((mut page, page_diff)) => {
-                    page[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
-
+                Some((page, page_diff)) => {
                     // update meta map with new info
                     let hash = hash_page_id(&page_id, &self.shared.seed);
                     let meta_map_changed = meta_map.hint_not_match(bucket as usize, hash);
