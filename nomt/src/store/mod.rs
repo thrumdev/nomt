@@ -42,7 +42,6 @@ struct Shared {
     values: beatree::Tree,
     pages: bitbox::DB,
     rollback: Option<Rollback>,
-    page_pool: PagePool,
     io_pool: IoPool,
     meta_fd: File,
     #[allow(unused)]
@@ -179,7 +178,6 @@ impl Store {
             ))),
             shared: Arc::new(Shared {
                 rollback,
-                page_pool,
                 values,
                 pages,
                 io_pool,
@@ -292,9 +290,8 @@ impl ValueTransaction {
 /// An atomic transaction on merkle tree pages to be applied against the store
 /// with [`Store::commit`].
 pub struct MerkleTransaction {
-    pub(crate) page_pool: PagePool,
     pub(crate) bucket_allocator: bitbox::BucketAllocator,
-    pub(crate) new_pages: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
+    pub(crate) new_pages: Vec<(PageId, BucketIndex, Option<(Arc<FatPage>, PageDiff)>)>,
 }
 
 impl MerkleTransaction {
@@ -303,20 +300,14 @@ impl MerkleTransaction {
         &mut self,
         page_id: PageId,
         bucket: Option<BucketIndex>,
-        page: &FatPage,
+        page: Arc<FatPage>,
         page_diff: PageDiff,
     ) -> BucketIndex {
         let bucket_index =
             bucket.unwrap_or_else(|| self.bucket_allocator.allocate(page_id.clone()));
 
-        // Perform a deep clone of the page. For that allocate a new page and copy the data over.
-        //
-        // TODO: get rid of this copy.
-        let mut new_page = self.page_pool.alloc_fat_page();
-        new_page.copy_from_slice(page);
-
         self.new_pages
-            .push((page_id, bucket_index, Some((new_page, page_diff))));
+            .push((page_id, bucket_index, Some((page, page_diff))));
         bucket_index
     }
 

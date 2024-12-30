@@ -126,9 +126,9 @@ impl DB {
         &self,
         sync_seqn: u32,
         page_pool: &PagePool,
-        changes: Vec<(PageId, BucketIndex, Option<(FatPage, PageDiff)>)>,
+        changes: Vec<(PageId, BucketIndex, Option<(Arc<FatPage>, PageDiff)>)>,
         wal_blob_builder: &mut WalBlobBuilder,
-    ) -> Vec<(u64, FatPage)> {
+    ) -> Vec<(u64, Arc<FatPage>)> {
         wal_blob_builder.reset(sync_seqn);
 
         let mut meta_map = self.shared.meta_map.write();
@@ -173,7 +173,7 @@ impl DB {
             let mut buf = page_pool.alloc_fat_page();
             buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
             let pn = self.shared.store.meta_bytes_index(changed_meta_page as u64);
-            ht_pages.push((pn, buf));
+            ht_pages.push((pn, Arc::new(buf)));
         }
 
         if cfg!(debug_assertions) {
@@ -207,7 +207,7 @@ pub struct SyncController {
     /// The channel to receive the result of the WAL writeout.
     wal_result_rx: Receiver<anyhow::Result<()>>,
     /// The pages along with their page numbers to write out to the HT file.
-    ht_to_write: Arc<Mutex<Option<Vec<(u64, FatPage)>>>>,
+    ht_to_write: Arc<Mutex<Option<Vec<(u64, Arc<FatPage>)>>>>,
 }
 
 impl SyncController {

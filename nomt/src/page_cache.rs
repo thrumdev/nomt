@@ -398,7 +398,7 @@ impl PageCache {
     ) {
         let mut apply_page = |page_id,
                               bucket: &mut Option<BucketIndex>,
-                              page_data: Option<&FatPage>,
+                              page_data: Option<&Arc<FatPage>>,
                               page_diff: PageDiff| {
             match (page_data, *bucket) {
                 (None, Some(known_bucket)) => {
@@ -410,7 +410,7 @@ impl PageCache {
                     *bucket = None;
                 }
                 (Some(page), maybe_bucket) if !page_diff.cleared() => {
-                    let new_bucket = tx.write_page(page_id, maybe_bucket, page, page_diff);
+                    let new_bucket = tx.write_page(page_id, maybe_bucket, page.clone(), page_diff);
                     *bucket = Some(new_bucket);
                 }
                 _ => {} // empty pages which had no known bucket. don't write or delete.
@@ -441,7 +441,7 @@ impl PageCache {
                 apply_page(
                     updated_page.page_id,
                     bucket,
-                    page_data.as_ref().map(|x| &**x),
+                    page_data.as_ref(),
                     updated_page.diff,
                 );
                 continue;
@@ -462,7 +462,7 @@ impl PageCache {
             apply_page(
                 updated_page.page_id,
                 bucket,
-                cache_entry.page_data.as_ref().map(|x| &**x),
+                cache_entry.page_data.as_ref(),
                 updated_page.diff,
             );
         }
