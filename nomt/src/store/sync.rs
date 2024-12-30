@@ -44,7 +44,6 @@ impl Sync {
         let mut rollback_sync = rollback.map(|rollback| rollback.sync());
 
         let merkle_tx = MerkleTransaction {
-            page_pool: shared.page_pool.clone(),
             bucket_allocator: bitbox.bucket_allocator(),
             new_pages: Vec::new(),
         };

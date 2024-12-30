@@ -23,7 +23,6 @@ pub use page_pool::{FatPage, PagePool};
 pub enum IoKind {
     Read(RawFd, u64, FatPage),
     Write(RawFd, u64, FatPage),
-    #[allow(dead_code)]
     WriteArc(RawFd, u64, Arc<FatPage>),
     WriteRaw(RawFd, u64, Page),
 }
