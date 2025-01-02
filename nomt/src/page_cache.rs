@@ -1,7 +1,7 @@
 use crate::{
     bitbox::BucketIndex,
     io::{page_pool::FatPage, PagePool, PAGE_SIZE},
-    merkle::UpdatedPage,
+    merkle::UpdatedPages,
     metrics::{Metric, Metrics},
     page_diff::PageDiff,
     page_region::PageRegion,
@@ -395,9 +395,12 @@ impl PageCache {
     /// This returns a set of outdated pages which can be dropped outside of the critical path.
     pub fn absorb_and_populate_transaction(
         &self,
-        updated_pages: impl IntoIterator<Item = UpdatedPage>,
+        updated_pages: UpdatedPages,
         tx: &mut MerkleTransaction,
     ) -> Vec<Option<Arc<FatPage>>> {
+        let n_pages = updated_pages.count();
+        tx.reserve(n_pages);
+
         let mut apply_page = |page_id,
                               bucket: &mut Option<BucketIndex>,
                               page_data: Option<&Arc<FatPage>>,
@@ -428,7 +431,7 @@ impl PageCache {
             .map(|s| s.locked.lock())
             .collect::<Vec<_>>();
 
-        let mut deferred_drop = Vec::new();
+        let mut deferred_drop = Vec::with_capacity(n_pages);
 
         for mut updated_page in updated_pages {
             // Pages must store their ID before being written out. Set it here.

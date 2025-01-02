@@ -32,6 +32,12 @@ pub use page_walker::UpdatedPage;
 /// Updated pages produced by update workers.
 pub struct UpdatedPages(Vec<Vec<UpdatedPage>>);
 
+impl UpdatedPages {
+    pub fn count(&self) -> usize {
+        self.0.iter().map(|set| set.len()).sum()
+    }
+}
+
 impl IntoIterator for UpdatedPages {
     type Item = UpdatedPage;
     type IntoIter = std::iter::Flatten<<Vec<Vec<Self::Item>> as IntoIterator>::IntoIter>;
