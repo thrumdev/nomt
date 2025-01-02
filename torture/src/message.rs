@@ -16,6 +16,16 @@ pub enum KeyValueChange {
     /// A key-value pair was deleted.
     Delete(Key),
 }
+
+impl KeyValueChange {
+    /// Returns the key that this changes pertains to.
+    pub fn key(&self) -> &Key {
+        match *self {
+            KeyValueChange::Insert(ref key, _) | KeyValueChange::Delete(ref key) => key,
+        }
+    }
+}
+
 /// The parameters for the [`ToAgent::Init`] message.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitPayload {
