@@ -1,6 +1,6 @@
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use imbl::OrdMap;
 use rand::prelude::*;
 use tempfile::TempDir;
@@ -8,7 +8,7 @@ use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
 
-use crate::message::{self, KeyValueChange};
+use crate::message::KeyValueChange;
 
 use super::{
     comms,
@@ -24,6 +24,9 @@ struct Biases {
     /// When generating a value, the probability of generating a value that will spill into the
     /// overflow pages.
     overflow: f64,
+    /// When generating a key, whether it should be one that was appeared somewhere or a brand new
+    /// key.
+    new_key: f64,
 }
 
 impl Biases {
@@ -31,6 +34,7 @@ impl Biases {
         Self {
             delete: 0.1,
             overflow: 0.1,
+            new_key: 0.5,
         }
     }
 }
@@ -56,6 +60,11 @@ struct WorkloadState {
     biases: Biases,
     /// The values that were committed.
     committed: Snapshot,
+    /// All keys that were generated during this run.
+    ///
+    /// It's extremely unlikely to find any duplicates in there. Each key is very likely to store
+    /// a value.
+    mentions: Vec<[u8; 32]>,
 }
 
 impl WorkloadState {
@@ -64,6 +73,7 @@ impl WorkloadState {
             rng: rand_pcg::Pcg64::seed_from_u64(seed),
             biases: Biases::new(),
             committed: Snapshot::empty(),
+            mentions: Vec::with_capacity(32 * 1024),
         }
     }
 
@@ -87,6 +97,8 @@ impl WorkloadState {
             };
             changes.push(kvc);
         }
+        changes.sort_by(|a, b| a.key().cmp(b.key()));
+        changes.dedup_by(|a, b| a.key() == b.key());
         let mut snapshot = self.committed.clone();
         snapshot.sync_seqn = new_sync_seqn;
         for change in &changes {
@@ -105,11 +117,16 @@ impl WorkloadState {
     fn gen_key(&mut self) -> [u8; 32] {
         // TODO: sophisticated key generation.
         //
-        // - Return a key that was already generated before.
         // - Pick a key that was already generated before, but generate a key that shares some bits.
-        let mut key = [0; 32];
-        self.rng.fill_bytes(&mut key);
-        key
+        if self.mentions.is_empty() || self.rng.gen_bool(self.biases.new_key) {
+            let mut key = [0; 32];
+            self.rng.fill_bytes(&mut key);
+            self.mentions.push(key.clone());
+            key
+        } else {
+            let ix = self.rng.gen_range(0..self.mentions.len());
+            self.mentions[ix].clone()
+        }
     }
 
     fn gen_value(&mut self) -> Vec<u8> {

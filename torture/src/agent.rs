@@ -203,8 +203,6 @@ impl Agent {
                 }
             }
         }
-        // sort by ascending key
-        actuals.sort_by(|(a, _), (b, _)| a.cmp(b));
         self.nomt.commit(session, actuals)?;
         Ok(())
     }
