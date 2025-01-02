@@ -65,7 +65,9 @@ impl NomtDB {
         let _timer_guard_commit = timer.as_mut().map(|t| t.record_span("commit_and_prove"));
         let mut actual_access: Vec<_> = access.into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        self.nomt.commit_and_prove(session, actual_access).unwrap();
+        self.nomt
+            .update_commit_and_prove(session, actual_access)
+            .unwrap();
     }
 
     // note: this is only intended to be used with workloads which are disjoint, i.e. no workload
@@ -118,7 +120,9 @@ impl NomtDB {
             .flatten()
             .collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        self.nomt.commit_and_prove(session, actual_access).unwrap();
+        self.nomt
+            .update_commit_and_prove(session, actual_access)
+            .unwrap();
     }
 
     pub fn print_metrics(&self) {

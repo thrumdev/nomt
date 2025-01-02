@@ -40,7 +40,7 @@ fn test_rollback_disabled() {
     );
 
     let session = nomt.begin_session();
-    nomt.commit(
+    nomt.update_and_commit(
         session,
         vec![(
             hex!("0000000000000000000000000000000000000000000000000000000000000001"),
@@ -64,7 +64,7 @@ fn test_rollback_to_initial() {
     );
 
     let session = nomt.begin_session();
-    nomt.commit(
+    nomt.update_and_commit(
         session,
         vec![(
             hex!("0000000000000000000000000000000000000000000000000000000000000001"),
@@ -189,7 +189,7 @@ impl TestPlan {
                 operations.push((key.clone(), KeyReadWrite::Write(None)));
             }
             operations.sort_by_key(|(key, _)| key.clone());
-            nomt.commit(session, operations).unwrap();
+            nomt.update_and_commit(session, operations).unwrap();
             let post_root = nomt.root();
             expected_roots.push(post_root);
         }
@@ -214,7 +214,7 @@ impl TestPlan {
                 operations.push((key.clone(), KeyReadWrite::Write(None)));
             }
             operations.sort_by_key(|(key, _)| key.clone());
-            nomt.commit(session, operations).unwrap();
+            nomt.update_and_commit(session, operations).unwrap();
         }
     }
 
@@ -429,7 +429,7 @@ fn test_rollback_change_history() {
     let session = nomt.begin_session();
     let new_key = KeyPath::from([0xAA; 32]);
     let new_value = vec![0xBB; 32];
-    nomt.commit(
+    nomt.update_and_commit(
         session,
         vec![(new_key, KeyReadWrite::Write(Some(new_value.clone())))],
     )
@@ -462,7 +462,7 @@ fn test_rollback_read_then_write() {
     let session = nomt.begin_session();
     let key = KeyPath::from([0xAA; 32]);
     let original_value = vec![0xBB; 32];
-    nomt.commit(
+    nomt.update_and_commit(
         session,
         vec![(key, KeyReadWrite::Write(Some(original_value.clone())))],
     )
@@ -475,7 +475,7 @@ fn test_rollback_read_then_write() {
     let session = nomt.begin_session();
     assert_eq!(session.read(key).unwrap(), Some(original_value.clone()));
     let new_value = vec![0xCC; 32];
-    nomt.commit(
+    nomt.update_and_commit(
         session,
         vec![(
             key,
