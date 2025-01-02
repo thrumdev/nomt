@@ -25,9 +25,16 @@ pub struct SpawnedAgentController {
 // This is a safe-guard to ensure that the controller is torn down properly.
 impl Drop for SpawnedAgentController {
     fn drop(&mut self) {
-        if !self.torn_down.load(Ordering::Relaxed) {
-            panic!("controller was not torn down properly");
+        if self.torn_down.load(Ordering::Relaxed) {
+            // The controller was torn down properly, disarm.
+            return;
         }
+        if std::thread::panicking() {
+            // The controller was not torn down properly, but we are panicking.
+            eprintln!("controller was not torn down properly");
+            return;
+        }
+        panic!("controller was not torn down properly");
     }
 }
 

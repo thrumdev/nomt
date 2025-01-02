@@ -15,9 +15,14 @@ use super::{
     controller::{self, SpawnedAgentController},
 };
 
+/// Biases is configuration for the workload generator. Its values are used to bias the probability
+/// of certain events happening.
 #[derive(Clone)]
 struct Biases {
+    /// The probability of a delete operation as opposed to an insert operation.
     delete: f64,
+    /// When generating a value, the probability of generating a value that will spill into the
+    /// overflow pages.
     overflow: f64,
 }
 
@@ -307,13 +312,14 @@ async fn exercise_commit_crashing(
     controller::spawn_agent_into(workload_agent, workdir, workload_id).await?;
     let rr = workload_agent.as_ref().unwrap().rr();
     let seqno = rr.send_query_sync_seqn().await?;
-    trace!(
-        "commit. seqno ours: {}, theirs: {}",
-        snapshot.sync_seqn,
-        seqno
-    );
     if seqno == snapshot.sync_seqn {
         s.commit(snapshot);
+    } else {
+        trace!(
+            "commit. seqno ours: {}, theirs: {}",
+            snapshot.sync_seqn,
+            seqno
+        );
     }
     Ok(())
 }

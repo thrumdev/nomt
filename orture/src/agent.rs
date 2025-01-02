@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt};
 use rand::Rng;
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{BufReader, BufWriter},
     net::{
@@ -64,14 +64,29 @@ pub async fn run(input: UnixStream) -> Result<()> {
                             message: ToSupervisor::Ack,
                         })
                         .await?;
-                    tokio::spawn(async move {
+
+                    let barrier_1 = Arc::new(tokio::sync::Barrier::new(2));
+                    let barrier_2 = barrier_1.clone();
+                    let task_1 = tokio::spawn(async move {
+                        barrier_1.wait().await;
+                        // Wait for a random time and then abort.
+                        let millis = rand::thread_rng().gen_range(0..400);
+                        sleep(Duration::from_millis(millis)).await;
+                        tracing::info!("aborting after {}ms", millis);
+                        std::process::abort();
+                    });
+                    let task_2 = tokio::spawn(async move {
+                        barrier_2.wait().await;
+                        let start = std::time::Instant::now();
                         let _ = agent.commit(commit);
-                    })
-                    .await?;
-                    // Wait for a random time and then abort.
-                    let millis = rand::thread_rng().gen_range(0..400);
-                    sleep(Duration::from_millis(millis)).await;
-                    std::process::abort();
+                        let elapsed = start.elapsed();
+                        tracing::info!("commit took {:?}", elapsed);
+                        std::process::abort();
+                    });
+                    let _ = tokio::join!(task_1, task_2);
+                    // This is unreachable because either the process will abort due to a timed
+                    // abort or due to the commit finishing successfully (and then aborting).
+                    unreachable!();
                 } else {
                     agent.commit(commit)?;
                     stream
@@ -160,6 +175,7 @@ impl Agent {
         let mut o = nomt::Options::new();
         o.path(workdir.join("nomt_db"));
         o.bitbox_seed(init.bitbox_seed);
+        o.hashtable_buckets(500_000);
         let nomt = Nomt::open(o)?;
         Ok(Self {
             workdir,
