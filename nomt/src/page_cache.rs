@@ -391,11 +391,13 @@ impl PageCache {
     }
 
     /// Absorb a set of altered pages into the cache and populates the given disk transaction.
+    ///
+    /// This returns a set of outdated pages which can be dropped outside of the critical path.
     pub fn absorb_and_populate_transaction(
         &self,
         updated_pages: impl IntoIterator<Item = UpdatedPage>,
         tx: &mut MerkleTransaction,
-    ) {
+    ) -> Vec<Option<Arc<FatPage>>> {
         let mut apply_page = |page_id,
                               bucket: &mut Option<BucketIndex>,
                               page_data: Option<&Arc<FatPage>>,
@@ -426,6 +428,8 @@ impl PageCache {
             .map(|s| s.locked.lock())
             .collect::<Vec<_>>();
 
+        let mut deferred_drop = Vec::new();
+
         for mut updated_page in updated_pages {
             // Pages must store their ID before being written out. Set it here.
             updated_page.page.set_page_id(&updated_page.page_id);
@@ -434,7 +438,9 @@ impl PageCache {
                 let mut root_page = self.shared.root_page.write();
                 let root_page = &mut *root_page;
                 // update the cached page data.
-                root_page.page_data = updated_page.page.freeze().inner;
+                let old =
+                    std::mem::replace(&mut root_page.page_data, updated_page.page.freeze().inner);
+                deferred_drop.push(old);
 
                 let page_data = &root_page.page_data;
                 let bucket = &mut root_page.bucket_index;
@@ -456,7 +462,9 @@ impl PageCache {
                     CacheEntry::init(None, None)
                 });
 
-            cache_entry.page_data = updated_page.page.freeze().inner;
+            let old =
+                std::mem::replace(&mut cache_entry.page_data, updated_page.page.freeze().inner);
+            deferred_drop.push(old);
 
             let bucket = &mut cache_entry.bucket_index;
             apply_page(
@@ -466,6 +474,8 @@ impl PageCache {
                 updated_page.diff,
             );
         }
+
+        deferred_drop
     }
 
     /// Evict stale pages for the cache. This should only be used after all dirty pages have been
