@@ -48,6 +48,7 @@ impl SpawnedAgentController {
     }
 
     /// Reads and returns the current virtual memory size of the agent process.
+    #[allow(dead_code)] // placeholder
     pub async fn current_vm_rss(&self) -> Result<usize> {
         let path = format!("/proc/{}/status", self.child.pid);
         let status = tokio::fs::read(path).await?;

@@ -92,8 +92,7 @@ impl WorkloadState {
             let kvc = if self.rng.gen_bool(self.biases.delete) {
                 KeyValueChange::Delete(key)
             } else {
-                let value = self.rng.gen::<[u8; 32]>().to_vec();
-                KeyValueChange::Insert(key, value.clone())
+                KeyValueChange::Insert(key, self.gen_value())
             };
             changes.push(kvc);
         }
@@ -146,10 +145,6 @@ impl WorkloadState {
 
     fn commit(&mut self, snapshot: Snapshot) {
         self.committed = snapshot;
-    }
-
-    fn snapshot(&self) -> &Snapshot {
-        &self.committed
     }
 }
 

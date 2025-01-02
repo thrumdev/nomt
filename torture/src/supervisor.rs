@@ -139,11 +139,6 @@ async fn join_interruptable(
 }
 
 #[derive(Debug)]
-pub enum FlagReason {
-    Timeout,
-}
-
-#[derive(Debug)]
 pub struct InvestigationFlag {
     workload_id: u64,
     /// The directory the agent was working in.
@@ -198,7 +193,12 @@ async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
             .instrument(trace_span!("workload", workload_id))
             .await?;
         if let Some(flag) = maybe_flag {
-            warn!("Flagged for investigation: {:#?}", flag);
+            warn!(
+                "Flagged for investigation:\n workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
+                workload_id = flag.workload_id,
+                workdir = flag.workdir.display(),
+                reason = flag.reason,
+            );
             flags.push(flag);
         }
         if cancel_token.is_cancelled() {
