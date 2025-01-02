@@ -102,6 +102,10 @@ fn spawn_child_with_sock(socket_fd: RawFd) -> Result<std::process::Child> {
     }
 
     let mut cmd = Command::new(program);
+    // Override the PGID of the spawned process. The motivation for this is ^C handling. To handle
+    // ^C the shell will send the SIGINT to all processes in the process group. We are handling
+    // SIGINT manually in the supervisor process.
+    cmd.process_group(0);
     unsafe {
         cmd.pre_exec(move || {
             // Duplicate the socket_fd to the CANARY_SOCKET_FD.
