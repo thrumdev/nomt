@@ -19,10 +19,7 @@ use std::{
         unix::{net::UnixStream, process::CommandExt},
     },
     process::Command,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 use tracing::trace;
 
@@ -82,18 +79,11 @@ pub fn spawn_child() -> Result<(Child, UnixStream)> {
     let (sock1, sock2) = UnixStream::pair()?;
 
     let child = spawn_child_with_sock(sock2.as_raw_fd())?;
-    // drop(sock2); // Close parent's end in child
+    drop(sock2); // Close parent's end in child
 
     let pid = child.id() as i32;
-    let shared = Shared { child, sock2 };
 
-    Ok((
-        Child {
-            pid,
-            shared: Arc::new(shared),
-        },
-        sock1,
-    ))
+    Ok((Child { pid }, sock1))
 }
 
 fn spawn_child_with_sock(socket_fd: RawFd) -> Result<std::process::Child> {
@@ -114,7 +104,8 @@ fn spawn_child_with_sock(socket_fd: RawFd) -> Result<std::process::Child> {
     let mut cmd = Command::new(program);
     unsafe {
         cmd.pre_exec(move || {
-            // Duplicate the socket_fd to the CANARY_SOCKET_FD
+            // Duplicate the socket_fd to the CANARY_SOCKET_FD.
+            // Close the original socket_fd in the child process.
             libc::dup2(socket_fd, CANARY_SOCKET_FD);
             libc::close(socket_fd);
             Ok(())
@@ -126,15 +117,9 @@ fn spawn_child_with_sock(socket_fd: RawFd) -> Result<std::process::Child> {
     Ok(child)
 }
 
-struct Shared {
-    child: std::process::Child,
-    sock2: UnixStream,
-}
-
 #[derive(Clone)]
 pub struct Child {
     pub pid: i32,
-    shared: Arc<Shared>,
 }
 
 impl Child {
