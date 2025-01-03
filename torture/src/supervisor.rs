@@ -164,7 +164,6 @@ async fn run_workload(
         .expect("Failed to create a temp dir");
     let mut workload = Workload::new(seed, workdir, workload_id);
     let result = workload.run(cancel_token).await;
-    workload.teardown();
     match result {
         Ok(()) => Ok(None),
         Err(err) => Ok(Some(InvestigationFlag {
