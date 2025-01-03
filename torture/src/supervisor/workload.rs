@@ -198,16 +198,14 @@ impl Workload {
     /// Pass the cancellation token to the workload. The workload will run until the token is
     /// cancelled or the workload finishes.
     pub async fn run(&mut self, cancel_token: CancellationToken) -> Result<()> {
-        match cancel_token.run_until_cancelled(self.run_inner()).await {
-            Some(r) => return r,
-            None => {
-                // Cancelled. Send SIGKILL to the agent.
-                if let Some(agent) = self.agent.take() {
-                    agent.teardown();
-                }
-            }
-        }
-        Ok(())
+        let result = match cancel_token.run_until_cancelled(self.run_inner()).await {
+            Some(r) => r,
+            None => Ok(()),
+        };
+        // Irregardless of the result or if the workload was cancelled, we need to release the
+        // resources.
+        self.teardown();
+        result
     }
 
     async fn run_inner(&mut self) -> Result<()> {
@@ -320,7 +318,7 @@ impl Workload {
     }
 
     /// Release potentially held resources.
-    pub fn teardown(&mut self) {
+    fn teardown(&mut self) {
         if let Some(agent) = self.agent.take() {
             agent.teardown();
         }
