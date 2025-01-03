@@ -83,6 +83,8 @@ async fn wait_for_exit(child: Child) -> Result<i32> {
     let (tx, rx) = oneshot::channel();
     task::spawn_blocking(move || {
         let result = child.wait();
+        let pid = child.pid;
+        trace!(pid, "child exit code: {:?}", result);
         let _ = tx.send(result);
     });
     // UNWRAP: the channel should never panic.
@@ -117,8 +119,7 @@ pub async fn spawn_agent_into(
         // This triggers the unhealthy alarm when finishes (irregardless whether Ok or Err).
         let unhealthy = unhealthy.clone();
         async move {
-            let result = task.await;
-            trace!("comms finished: {:?}", result);
+            let _result = task.await;
             unhealthy.trigger();
         }
     })
@@ -129,9 +130,7 @@ pub async fn spawn_agent_into(
         let unhealthy = unhealthy.clone();
         let child = child.clone();
         async move {
-            let pid = child.pid;
-            let e = wait_for_exit(child).await;
-            trace!(pid, "child exit code: {:?}", e);
+            let _e = wait_for_exit(child).await;
             unhealthy.trigger();
         }
     })

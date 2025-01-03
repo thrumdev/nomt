@@ -74,6 +74,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     let task_1 = tokio::spawn(async move {
                         barrier_1.wait().await;
                         // Wait for a random time and then abort.
+                        // TODO: reduce non-determinism by using the supervisor generated seed.
                         let millis = rand::thread_rng().gen_range(0..400);
                         sleep(Duration::from_millis(millis)).await;
                         tracing::info!("aborting after {}ms", millis);

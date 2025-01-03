@@ -183,7 +183,7 @@ async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
     // TODO: Run workloads in parallel. Make the concurrency factor configurable.
-    // TODO: make seed configurable.
+    // TODO: make seed configurable and dynamic.
     let mut seed = 0xdeadbeef;
     loop {
         let workload_id = workload_cnt;
