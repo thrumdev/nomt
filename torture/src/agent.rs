@@ -18,6 +18,7 @@ use tracing::trace;
 
 use crate::message::{
     self, CommitPayload, Envelope, InitPayload, KeyValueChange, ToAgent, ToSupervisor,
+    MAX_ENVELOPE_SIZE,
 };
 
 /// The entrypoint for the agent.
@@ -237,11 +238,23 @@ impl Stream {
     fn new(command_stream: UnixStream) -> Self {
         let (rd, wr) = command_stream.into_split();
         let rd_stream = SymmetricallyFramed::new(
-            FramedRead::new(BufReader::new(rd), LengthDelimitedCodec::new()),
+            FramedRead::new(
+                BufReader::new(rd),
+                LengthDelimitedCodec::builder()
+                    .length_field_length(8)
+                    .max_frame_length(MAX_ENVELOPE_SIZE)
+                    .new_codec(),
+            ),
             SymmetricalBincode::default(),
         );
         let wr_stream = SymmetricallyFramed::new(
-            FramedWrite::new(BufWriter::new(wr), LengthDelimitedCodec::new()),
+            FramedWrite::new(
+                BufWriter::new(wr),
+                LengthDelimitedCodec::builder()
+                    .length_field_length(8)
+                    .max_frame_length(MAX_ENVELOPE_SIZE)
+                    .new_codec(),
+            ),
             SymmetricalBincode::default(),
         );
         Self {

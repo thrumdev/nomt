@@ -53,6 +53,9 @@ pub struct CommitPayload {
     pub should_crash: bool,
 }
 
+/// The maximum size of an envelope, in the serialized form.
+pub const MAX_ENVELOPE_SIZE: usize = 128 * 1024 * 1024;
+
 /// A wrapper around a message that adds a request number.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Envelope<T> {

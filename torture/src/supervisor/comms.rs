@@ -24,7 +24,7 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
 
-use crate::message::{self, Envelope, ToAgent, ToSupervisor};
+use crate::message::{self, Envelope, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE};
 
 /// The type definition of a sink which is built:
 ///
@@ -142,11 +142,23 @@ pub fn run(stream: UnixStream) -> (RequestResponse, impl Future<Output = anyhow:
     let (rd, wr) = stream.into_split();
 
     let wr_stream = SymmetricallyFramed::new(
-        FramedWrite::new(BufWriter::new(wr), LengthDelimitedCodec::new()),
+        FramedWrite::new(
+            BufWriter::new(wr),
+            LengthDelimitedCodec::builder()
+                .length_field_length(8)
+                .max_frame_length(MAX_ENVELOPE_SIZE)
+                .new_codec(),
+        ),
         SymmetricalBincode::default(),
     );
     let rd_stream = SymmetricallyFramed::new(
-        FramedRead::new(BufReader::new(rd), LengthDelimitedCodec::new()),
+        FramedRead::new(
+            BufReader::new(rd),
+            LengthDelimitedCodec::builder()
+                .length_field_length(8)
+                .max_frame_length(MAX_ENVELOPE_SIZE)
+                .new_codec(),
+        ),
         SymmetricalBincode::default(),
     );
 
