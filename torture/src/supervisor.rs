@@ -31,7 +31,7 @@ pub async fn run() -> Result<()> {
     // Create a cancellation token and spawn the control loop task passing the token to it and
     // wait until the control loop task finishes or the user interrupts it.
     let ct = CancellationToken::new();
-    let control_loop_jh = task::spawn(control_loop(ct.clone(), seed));
+    let control_loop_jh = task::spawn(control_loop(ct.clone(), seed, cli.flag_limit));
     match join_interruptable(control_loop_jh, ct).await {
         ExitReason::Finished => {
             exit(0);
@@ -179,8 +179,11 @@ async fn run_workload(
 /// Run the control loop creating and tearing down the agents.
 ///
 /// `cancel_token` is used to gracefully shutdown the supervisor.
-async fn control_loop(cancel_token: CancellationToken, mut seed: u64) -> Result<()> {
-    const FLAG_NUMBER_LIMIT: usize = 1;
+async fn control_loop(
+    cancel_token: CancellationToken,
+    mut seed: u64,
+    flag_num_limit: usize,
+) -> Result<()> {
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
     // TODO: Run workloads in parallel. Make the concurrency factor configurable.
@@ -204,7 +207,7 @@ async fn control_loop(cancel_token: CancellationToken, mut seed: u64) -> Result<
         if cancel_token.is_cancelled() {
             break;
         }
-        if flags.len() >= FLAG_NUMBER_LIMIT {
+        if flags.len() >= flag_num_limit {
             info!("Flag limit reached. Exiting.");
             break;
         }
