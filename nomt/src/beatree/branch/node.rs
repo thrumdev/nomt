@@ -122,6 +122,11 @@ impl BranchNode {
     }
 
     fn cells_mut(&mut self) -> &mut [[u8; 2]] {
+        let cells_end = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        assert!(cells_end < BRANCH_NODE_BODY_SIZE);
+
+        // SAFETY: This creates a slice of length 2 * N starting at index BRANCH_NODE_HEADER_SIZE.
+        // This is ensured to be within the bounds of the page by the assertion above.
         unsafe {
             std::slice::from_raw_parts_mut(
                 self.page[BRANCH_NODE_HEADER_SIZE..BRANCH_NODE_HEADER_SIZE + 2].as_ptr()
@@ -176,7 +181,12 @@ impl BranchNode {
     }
 
     pub fn node_pointers_mut(&mut self) -> &mut [[u8; 4]] {
-        let node_pointers_init = BRANCH_NODE_SIZE - self.n() as usize * 4;
+        let node_pointers_byte_len = self.n() as usize * 4;
+        assert!(node_pointers_byte_len < BRANCH_NODE_SIZE);
+
+        let node_pointers_init = BRANCH_NODE_SIZE - node_pointers_byte_len;
+        // SAFETY: This creates a slice of length 4 * N aligned with the end of the node.
+        // This is ensured to be within the bounds of the page by the assertion above.
         unsafe {
             std::slice::from_raw_parts_mut(
                 self.page[node_pointers_init..].as_mut_ptr() as *mut [u8; 4],
@@ -223,6 +233,11 @@ impl<'a> BranchNodeView<'a> {
     }
 
     fn cells(&self) -> &[[u8; 2]] {
+        let cells_end = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
+        assert!(cells_end < BRANCH_NODE_BODY_SIZE);
+
+        // SAFETY: This creates a slice of length 2 * N starting at index BRANCH_NODE_HEADER_SIZE.
+        // This is ensured to be within the bounds of the page by the assertion above.
         unsafe {
             std::slice::from_raw_parts(
                 self.inner[BRANCH_NODE_HEADER_SIZE..BRANCH_NODE_HEADER_SIZE + 2].as_ptr()
@@ -308,7 +323,12 @@ impl<'a> BranchNodeView<'a> {
     }
 
     pub fn node_pointers(&self) -> &[[u8; 4]] {
-        let node_pointers_init = BRANCH_NODE_SIZE - self.n() as usize * 4;
+        let node_pointers_byte_len = self.n() as usize * 4;
+        assert!(node_pointers_byte_len < BRANCH_NODE_SIZE);
+
+        let node_pointers_init = BRANCH_NODE_SIZE - node_pointers_byte_len;
+        // SAFETY: This creates a slice of length 4 * N aligned with the end of the node.
+        // This is ensured to be within the bounds of the page by the assertion above.
         unsafe {
             std::slice::from_raw_parts(
                 self.inner[node_pointers_init..].as_ptr() as *const [u8; 4],
