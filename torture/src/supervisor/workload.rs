@@ -43,7 +43,11 @@ impl Biases {
 #[derive(Clone)]
 struct Snapshot {
     sync_seqn: u32,
-    state: OrdMap<[u8; 32], Option<Vec<u8>>>,
+    /// The state of the database at this snapshot.
+    ///
+    /// The key is the key of the key-value pair. Instead of using the 32 bytes of the key, we
+    /// save the index of the key in the `WorkloadState::mentions` vector.
+    state: OrdMap<u32, Option<Vec<u8>>>,
 }
 
 impl Snapshot {
@@ -84,47 +88,56 @@ impl WorkloadState {
     }
 
     fn gen_commit(&mut self) -> (Snapshot, Vec<KeyValueChange>) {
-        let new_sync_seqn = self.committed.sync_seqn + 1;
-        let size = self.rng.gen_range(0..10000);
-        let mut changes = Vec::with_capacity(size);
-        for _ in 0..size {
-            let key = self.gen_key();
-            let kvc = if self.rng.gen_bool(self.biases.delete) {
-                KeyValueChange::Delete(key)
-            } else {
-                KeyValueChange::Insert(key, self.gen_value())
-            };
-            changes.push(kvc);
-        }
-        changes.sort_by(|a, b| a.key().cmp(b.key()));
-        changes.dedup_by(|a, b| a.key() == b.key());
         let mut snapshot = self.committed.clone();
-        snapshot.sync_seqn = new_sync_seqn;
-        for change in &changes {
-            match change {
-                KeyValueChange::Insert(key, value) => {
-                    snapshot.state.insert(*key, Some(value.clone()));
+        snapshot.sync_seqn += 1;
+
+        let num_changes = self.rng.gen_range(0..10000);
+        let mut changes = Vec::with_capacity(num_changes);
+
+        // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
+        // using a hash set.
+        let mut used_keys = std::collections::HashSet::with_capacity(num_changes);
+        for _ in 0..num_changes {
+            // Generate a key until unique.
+            let key_index = loop {
+                let ki = self.gen_key();
+                if used_keys.insert(ki) {
+                    break ki;
                 }
-                KeyValueChange::Delete(key) => {
-                    snapshot.state.remove(key);
-                }
-            }
+            };
+
+            if self.rng.gen_bool(self.biases.delete) {
+                snapshot.state.insert(key_index, None);
+                let key = self.mentions[key_index as usize];
+                changes.push(KeyValueChange::Delete(key));
+            } else {
+                let value = self.gen_value();
+                snapshot.state.insert(key_index, Some(value.clone()));
+                let key = self.mentions[key_index as usize];
+                changes.push(KeyValueChange::Insert(key, value));
+            };
         }
+
+        changes.sort_by(|a, b| a.key().cmp(&b.key()));
+
         (snapshot, changes)
     }
 
-    fn gen_key(&mut self) -> [u8; 32] {
+    /// Returns a key that was generated before or a new key. The returned value is an index in the
+    /// `mentions` vector.
+    fn gen_key(&mut self) -> u32 {
         // TODO: sophisticated key generation.
         //
         // - Pick a key that was already generated before, but generate a key that shares some bits.
         if self.mentions.is_empty() || self.rng.gen_bool(self.biases.new_key) {
             let mut key = [0; 32];
             self.rng.fill_bytes(&mut key);
+            let ix = self.mentions.len() as u32;
             self.mentions.push(key.clone());
-            key
+            ix
         } else {
             let ix = self.rng.gen_range(0..self.mentions.len());
-            self.mentions[ix].clone()
+            ix as u32
         }
     }
 
