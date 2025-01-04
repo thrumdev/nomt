@@ -24,4 +24,5 @@ tracing = { version = "0.1.41", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 hex = "0.4.3"
 futures-util = "0.3.31"
+clap = { version = "4.5.23", features = ["derive"] }
 

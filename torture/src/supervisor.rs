@@ -3,6 +3,8 @@
 use std::{path::PathBuf, process::exit};
 
 use anyhow::Result;
+use clap::Parser;
+use cli::Cli;
 use tokio::{
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle},
@@ -12,6 +14,7 @@ use tracing::{error, info, trace_span, warn, Instrument};
 
 use workload::Workload;
 
+mod cli;
 mod comms;
 mod controller;
 mod workload;
@@ -22,14 +25,13 @@ mod workload;
 pub async fn run() -> Result<()> {
     crate::logging::init_supervisor();
 
-    // TODO: this is the main entrypoint of the program and as such should handle a few things:
-    //
-    // 1. Parse command line arguments.
+    let cli = Cli::parse();
+    let seed = cli.seed.unwrap_or_else(rand::random);
 
     // Create a cancellation token and spawn the control loop task passing the token to it and
     // wait until the control loop task finishes or the user interrupts it.
     let ct = CancellationToken::new();
-    let control_loop_jh = task::spawn(control_loop(ct.clone()));
+    let control_loop_jh = task::spawn(control_loop(ct.clone(), seed));
     match join_interruptable(control_loop_jh, ct).await {
         ExitReason::Finished => {
             exit(0);
@@ -177,13 +179,12 @@ async fn run_workload(
 /// Run the control loop creating and tearing down the agents.
 ///
 /// `cancel_token` is used to gracefully shutdown the supervisor.
-async fn control_loop(cancel_token: CancellationToken) -> Result<()> {
+async fn control_loop(cancel_token: CancellationToken, mut seed: u64) -> Result<()> {
     const FLAG_NUMBER_LIMIT: usize = 1;
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
     // TODO: Run workloads in parallel. Make the concurrency factor configurable.
-    // TODO: make seed configurable and dynamic.
-    let mut seed = 0xdeadbeef;
+    info!("Starting control loop, seed={seed}");
     loop {
         let workload_id = workload_cnt;
         workload_cnt += 1;
