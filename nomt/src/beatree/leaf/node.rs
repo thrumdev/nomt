@@ -43,6 +43,9 @@ pub const MAX_LEAF_VALUE_SIZE: usize = (LEAF_NODE_BODY_SIZE / 3) - 32;
 /// Note that this gives an overflow value cell maximum size of 100 bytes.
 pub const MAX_OVERFLOW_CELL_NODE_POINTERS: usize = 15;
 
+/// The maximum value size supported by overflow pages, 512MiB.
+pub const MAX_OVERFLOW_VALUE_SIZE: usize = 1 << 29;
+
 /// We use the high bit to encode whether a cell is an overflow cell.
 const OVERFLOW_BIT: u16 = 1 << 15;
 

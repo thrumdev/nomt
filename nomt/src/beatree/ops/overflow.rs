@@ -12,7 +12,7 @@
 use crate::{
     beatree::{
         allocator::{StoreReader, SyncAllocator},
-        leaf::node::MAX_OVERFLOW_CELL_NODE_POINTERS,
+        leaf::node::{MAX_OVERFLOW_CELL_NODE_POINTERS, MAX_OVERFLOW_VALUE_SIZE},
         PageNumber,
     },
     io::{page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
@@ -93,18 +93,25 @@ pub fn decode_cell<'a>(raw: &'a [u8]) -> (usize, [u8; 32], impl Iterator<Item = 
     assert!(raw.len() >= 8 + 4 + 32);
     assert_eq!(raw.len() % 4, 0);
 
-    let value_size = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+    let value_size = u64::from_le_bytes(raw[0..8].try_into().unwrap()) as usize;
+    // values bigger than MAX_OVERFLOW_VALUE_SIZE are not allowed.
+    assert!(value_size <= MAX_OVERFLOW_VALUE_SIZE);
+
     let value_hash: [u8; 32] = raw[8..40].try_into().unwrap();
 
     let iter = raw[40..]
         .chunks(4)
         .map(|slice| PageNumber(u32::from_le_bytes(slice.try_into().unwrap())));
 
-    (value_size as usize, value_hash, iter)
+    (value_size, value_hash, iter)
 }
 
 /// Encode a list of page numbers into an overflow cell.
 pub fn encode_cell(value_size: usize, value_hash: [u8; 32], pages: &[PageNumber]) -> Vec<u8> {
+    if value_size > MAX_OVERFLOW_VALUE_SIZE {
+        panic!("Value size exceeded MAX_OVERFLOW_VALUE_SIZE");
+    }
+
     let mut v = vec![0u8; 8 + 32 + pages.len() * 4];
     v[0..8].copy_from_slice(&(value_size as u64).to_le_bytes());
     v[8..40].copy_from_slice(&value_hash);
@@ -330,11 +337,13 @@ fn parse_page<'a>(page: &'a FatPage) -> (impl Iterator<Item = PageNumber> + 'a, 
 
 #[cfg(test)]
 mod tests {
+    use crate::beatree::leaf::node::MAX_OVERFLOW_VALUE_SIZE;
+
     use super::{
         decode_cell, encode_cell, needed_pages, total_needed_pages, PageNumber, BODY_SIZE,
         MAX_OVERFLOW_CELL_NODE_POINTERS, MAX_PNS,
     };
-    use quickcheck::{Arbitrary, Gen, QuickCheck};
+    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 
     #[test]
     fn total_needed_pages_all_in_cell() {
@@ -413,7 +422,7 @@ mod tests {
 
     impl Arbitrary for ValidOverflowCell {
         fn arbitrary(g: &mut Gen) -> Self {
-            let value_size = usize::arbitrary(g) & 0x7FFFFFFF; // Keep sizes reasonable
+            let value_size = (usize::arbitrary(g) % MAX_OVERFLOW_VALUE_SIZE) + 1;
             let mut value_hash = [0u8; 32];
             for b in value_hash.iter_mut() {
                 *b = u8::arbitrary(g);
@@ -449,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_decode_cell_safety() {
-        fn prop(mut bytes: Vec<u8>) -> bool {
+        fn prop(mut bytes: Vec<u8>) -> TestResult {
             // Only test vectors that could potentially be valid cells
             // (must be at least 44 bytes and a multiple of 4)
             let len = std::cmp::max(bytes.len(), 44);
@@ -457,16 +466,22 @@ mod tests {
             let len = (len + 3) & !3;
             bytes.resize(len, 0);
 
+            // make sure value size is smaller than MAX_OVERFLOW_VALUE_SIZE
+            let value_size = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
+            if value_size > MAX_OVERFLOW_VALUE_SIZE {
+                return TestResult::discard();
+            }
+
             // decode_cell should not panic
             let result = std::panic::catch_unwind(|| {
                 let _ = decode_cell(&bytes);
             });
 
-            result.is_ok()
+            TestResult::from_bool(result.is_ok())
         }
 
         QuickCheck::new()
             .tests(5000000)
-            .quickcheck(prop as fn(Vec<u8>) -> bool);
+            .quickcheck(prop as fn(Vec<u8>) -> TestResult);
     }
 }
