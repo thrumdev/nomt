@@ -55,7 +55,6 @@ pub async fn run() -> Result<()> {
             exit(2);
         }
         ExitReason::Interrupted => {
-            info!("Interrupted by the user");
             // The exit code is 128 + 2 because in UNIX, signals are mapped to exit codes by adding
             // 128 to the signal number. SIGINT is signal number 2, so the exit code is:
             //
@@ -96,6 +95,7 @@ async fn join_interruptable(
     // Either catch the first ^C signal or wait until the succesful completion of the control loop.
     tokio::select! {
         _ = sigint.recv() => {
+            info!("Received ^C...");
             ct.cancel();
         }
         res = &mut control_loop_jh => {
