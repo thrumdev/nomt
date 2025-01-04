@@ -6,7 +6,6 @@ mod logging;
 mod message;
 mod spawn;
 mod supervisor;
-mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -1624,6 +1624,7 @@ dependencies = [
  "bincode",
  "cfg-if",
  "futures",
+ "futures-util",
  "hex",
  "imbl",
  "libc",

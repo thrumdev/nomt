@@ -204,7 +204,7 @@ impl Workload {
         };
         // Irregardless of the result or if the workload was cancelled, we need to release the
         // resources.
-        self.teardown();
+        self.teardown().await;
         result
     }
 
@@ -278,9 +278,9 @@ impl Workload {
         // Note that we don't "take" the agent from the `workload_agent` place. This is because there is
         // always a looming possibility of SIGINT arriving.
         const TOLERANCE: Duration = Duration::from_secs(5);
-        let agent = self.agent.as_ref().unwrap();
-        let agent_died_or_timeout = timeout(TOLERANCE, agent.resolve_when_unhealthy()).await;
-        self.agent.take().unwrap().teardown();
+        let agent = self.agent.as_mut().unwrap();
+        let agent_died_or_timeout = timeout(TOLERANCE, agent.died()).await;
+        self.agent.take().unwrap().teardown().await;
         if let Err(Elapsed { .. }) = agent_died_or_timeout {
             // TODO: flag for investigation.
             return Err(anyhow::anyhow!("agent did not die"));
@@ -307,20 +307,20 @@ impl Workload {
 
     async fn spawn_new_agent(&mut self) -> anyhow::Result<()> {
         assert!(self.agent.is_none());
-        controller::spawn_agent_into(
-            &mut self.agent,
-            self.workdir.path().display().to_string(),
-            self.workload_id,
-            self.bitbox_seed,
-        )
-        .await?;
+        controller::spawn_agent_into(&mut self.agent).await?;
+        let workdir = self.workdir.path().display().to_string();
+        self.agent
+            .as_mut()
+            .unwrap()
+            .init(workdir, self.workload_id, self.bitbox_seed)
+            .await?;
         Ok(())
     }
 
     /// Release potentially held resources.
-    fn teardown(&mut self) {
+    async fn teardown(&mut self) {
         if let Some(agent) = self.agent.take() {
-            agent.teardown();
+            agent.teardown().await;
         }
     }
 
