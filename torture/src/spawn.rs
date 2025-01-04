@@ -16,11 +16,11 @@ use cfg_if::cfg_if;
 use std::{
     os::{
         fd::{AsRawFd as _, FromRawFd as _, RawFd},
-        unix::{net::UnixStream, process::CommandExt},
+        unix::net::UnixStream,
     },
-    process::Command,
     sync::atomic::{AtomicBool, Ordering},
 };
+use tokio::process::{Child, Command};
 use tracing::trace;
 
 /// A special file descriptor that is used to pass a socket to the child process.
@@ -81,12 +81,10 @@ pub fn spawn_child() -> Result<(Child, UnixStream)> {
     let child = spawn_child_with_sock(sock2.as_raw_fd())?;
     drop(sock2); // Close parent's end in child
 
-    let pid = child.id() as i32;
-
-    Ok((Child { pid }, sock1))
+    Ok((child, sock1))
 }
 
-fn spawn_child_with_sock(socket_fd: RawFd) -> Result<std::process::Child> {
+fn spawn_child_with_sock(socket_fd: RawFd) -> Result<Child> {
     trace!(?socket_fd, "Spawning child process");
 
     // Prepare argv for the child process.
@@ -117,39 +115,10 @@ fn spawn_child_with_sock(socket_fd: RawFd) -> Result<std::process::Child> {
     }
     let child = cmd.spawn()?;
 
-    trace!("spawned child process, pid={}", child.id());
+    let pid = child
+        .id()
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "<killed?>".to_string());
+    trace!("spawned child process, pid={pid}");
     Ok(child)
-}
-
-#[derive(Clone)]
-pub struct Child {
-    pub pid: i32,
-}
-
-impl Child {
-    /// Wait an event from the child.
-    ///
-    /// Blocking.
-    pub fn wait(&self) -> i32 {
-        let mut status = 0;
-        unsafe {
-            libc::waitpid(self.pid, &mut status, 0);
-        }
-        status
-    }
-
-    /// Sends a SIGKILL signal to the child process.
-    ///
-    /// One signal is usually enough.
-    ///
-    /// NB: This construction is prone to races. The child process may have already exited by the
-    /// time the signal is sent, and the PID may have been reused by another process. There is a way
-    /// to avoid that with pidfd but nobody cares really, because the probability of that happening
-    /// is extremely low.
-    pub fn send_sigkill(&self) {
-        trace!("sending SIGKILL to the agent, pid={}", self.pid);
-        unsafe {
-            libc::kill(self.pid, libc::SIGKILL);
-        }
-    }
 }
