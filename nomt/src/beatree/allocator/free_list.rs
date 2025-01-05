@@ -43,6 +43,7 @@ impl FreeList {
         };
 
         // restore free list from file
+        let max_pn = (store_file.metadata()?.len() as usize / PAGE_SIZE) as u32;
         let mut free_list_portions = vec![];
         loop {
             if free_list_pn.is_nil() {
@@ -51,7 +52,7 @@ impl FreeList {
 
             let page = io::read_page(page_pool, store_file, free_list_pn.0 as u64)?;
 
-            let (prev, free_list) = decode_free_list_page(page);
+            let (prev, free_list) = decode_free_list_page(page, max_pn);
             free_list_portions.push((free_list_pn, free_list));
             free_list_pn = prev;
         }
@@ -396,7 +397,7 @@ fn len_and_fragmented(portions: &[(PageNumber, Vec<PageNumber>)]) -> (usize, boo
 }
 
 // returns the previous PageNumber and all the PageNumbers stored in the free list page
-fn decode_free_list_page(page: FatPage) -> (PageNumber, Vec<PageNumber>) {
+fn decode_free_list_page(page: FatPage, max_pn: u32) -> (PageNumber, Vec<PageNumber>) {
     let free_list_page_view = FreeListPageRef(&page[..]);
 
     let prev = free_list_page_view.prev_pn();
@@ -404,6 +405,8 @@ fn decode_free_list_page(page: FatPage) -> (PageNumber, Vec<PageNumber>) {
     let mut free_list = vec![];
     for i in 0..item_count as usize {
         let pn = free_list_page_view.item(i);
+        // Ensure each PageNumber falls within the file bounds.
+        assert!(pn.0 < max_pn);
         free_list.push(pn);
     }
 
