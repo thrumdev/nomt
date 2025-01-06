@@ -135,7 +135,7 @@ impl Options {
 
     /// Sets the size of the page cache in MiB.
     ///
-    /// Rounded down to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
+    /// Rounded down to the nearest byte multiple of 4096.
     ///
     /// Default: 256MiB.
     pub fn page_cache_size(&mut self, page_cache_size: usize) {
@@ -144,12 +144,18 @@ impl Options {
 
     /// Sets the size of the leaf cache in MiB.
     ///
-    /// Rounded down to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
+    /// Rounded down to the nearest byte multiple of 4096.
     ///
     /// Default: 256MiB.
     pub fn leaf_cache_size(&mut self, leaf_cache_size: usize) {
         self.leaf_cache_size = leaf_cache_size;
     }
+}
+
+#[test]
+fn page_size_is_4096() {
+    // Update the docs above if this fails.
+    assert_eq!(crate::io::PAGE_SIZE, 4096);
 }
 
 /// Modes for panicking during sync.
