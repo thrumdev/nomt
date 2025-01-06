@@ -78,8 +78,6 @@ impl IoKind {
     }
 }
 
-unsafe impl Send for IoKind {}
-
 pub struct IoCommand {
     pub kind: IoKind,
     // note: this isn't passed to io_uring, it's higher-level userdata.
