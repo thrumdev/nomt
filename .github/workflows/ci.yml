@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: RUSTFLAGS="--cfg loom" cargo test rw_pass_cell --release --workspace
+      - run: RUSTFLAGS="--cfg loom" cargo test -p nomt --release --lib rw_pass_cell
   doc:
     name: NOMT - doc
     runs-on: ubuntu-latest
@@ -60,4 +60,3 @@ jobs:
           targets: x86_64-apple-darwin
       # Build only the NOMT crate. Not everything builds cleanly under this configuration.
       - run: cargo check --verbose -p nomt --locked --target x86_64-apple-darwin
-
