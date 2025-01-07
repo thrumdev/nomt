@@ -491,7 +491,7 @@ impl PageLoad {
     }
 }
 
-/// Describes the utilization of buckets in the hash-table.
+/// Describes the utilization of buckets in the hash-table at a point in time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HashTableUtilization {
     /// The maximum number of buckets in the hash-table.
