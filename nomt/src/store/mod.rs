@@ -241,7 +241,7 @@ impl Store {
         &self.shared.io_pool
     }
 
-    /// Get the hash-table bucket counts.
+    /// Get the current hash-table bucket counts.
     pub fn hash_table_utilization(&self) -> HashTableUtilization {
         self.shared.pages.utilization()
     }
