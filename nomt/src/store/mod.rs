@@ -12,6 +12,7 @@ use crate::{
     rollback::Rollback,
     ValueHasher,
 };
+use flock::Flock;
 use meta::Meta;
 use nomt_core::{page_id::PageId, trie::KeyPath};
 use parking_lot::Mutex;
@@ -54,16 +55,19 @@ struct Shared {
 impl Store {
     /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options, page_pool: PagePool) -> anyhow::Result<Self> {
-        let db_dir_fd = if !o.path.exists() {
+        let db_dir_fd;
+        let flock;
+
+        if !o.path.exists() {
             // NB: note TOCTOU here. Deemed acceptable for this case.
-            create(&page_pool, &o)?
+            (db_dir_fd, flock) = create(&page_pool, &o)?;
         } else {
             let mut options = OpenOptions::new();
             options.read(true);
-            options.open(&o.path)?
-        };
+            db_dir_fd = options.open(&o.path)?;
+            flock = flock::Flock::lock(&o.path, ".lock")?;
+        }
         let db_dir_fd = Arc::new(db_dir_fd);
-        let flock = flock::Flock::lock(&o.path, ".lock")?;
 
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
@@ -326,14 +330,19 @@ impl MerkleTransaction {
 ///
 /// This function:
 /// - Creates all necessary directories along the path
+/// - Locks the directory
 /// - Initializes required database files
-/// - Returns a file descriptor for the database directory
+/// - Returns a file descriptor for the database directory along with a lock handle.
 ///
 /// The database directory must not exist when calling this function.
-fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<File> {
+fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<(File, Flock)> {
     // Create the directory and its parent directories.
     std::fs::create_dir_all(&o.path)?;
     let db_dir_fd = std::fs::File::open(&o.path)?;
+
+    // It's important that the lock is taken before creating modifying the directory contents.
+    // Because otherwise different instances could fight for changes.
+    let flock = Flock::lock(&o.path, ".lock")?;
 
     let meta_fd = std::fs::File::create(o.path.join("meta"))?;
     let meta = Meta::create_new(o.bitbox_seed, o.bitbox_num_pages);
@@ -346,5 +355,5 @@ fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<File> {
     // As the last step, sync the directory. This makes sure that the directory is properly
     // written to disk.
     db_dir_fd.sync_all()?;
-    Ok(db_dir_fd)
+    Ok((db_dir_fd, flock))
 }
