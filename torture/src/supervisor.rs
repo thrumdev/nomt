@@ -176,6 +176,15 @@ async fn run_workload(
     }
 }
 
+fn print_flag(flag: &InvestigationFlag) {
+    warn!(
+        "Flagged for investigation:\n workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
+        workload_id = flag.workload_id,
+        workdir = flag.workdir.display(),
+        reason = flag.reason,
+    );
+}
+
 /// Run the control loop creating and tearing down the agents.
 ///
 /// `cancel_token` is used to gracefully shutdown the supervisor.
@@ -196,12 +205,7 @@ async fn control_loop(
             .instrument(trace_span!("workload", workload_id))
             .await?;
         if let Some(flag) = maybe_flag {
-            warn!(
-                "Flagged for investigation:\n workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
-                workload_id = flag.workload_id,
-                workdir = flag.workdir.display(),
-                reason = flag.reason,
-            );
+            print_flag(&flag);
             flags.push(flag);
         }
         if cancel_token.is_cancelled() {
@@ -211,6 +215,9 @@ async fn control_loop(
             info!("Flag limit reached. Exiting.");
             break;
         }
+    }
+    for flag in flags {
+        print_flag(&flag);
     }
     Ok(())
 }
