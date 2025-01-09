@@ -286,8 +286,23 @@ impl SyncController {
     /// thread. Blocking.
     pub fn post_meta(&self, io_handle: IoHandle) -> anyhow::Result<()> {
         let ht_pages = self.ht_to_write.lock().take().unwrap();
+        // Writeout the HT pages and truncate the WAL file.
+        //
+        // Why don't we fsync the truncation of the WAL file? Because it should not be necessary.
+        // To see why, recall that we write WAL at pre-meta stage, truncate it here and we only
+        // read from it at recovery. Leaving the truncation unfsynced introduces some uncertainty
+        // regarding the length of the file.
+        //
+        // However,
+        //
+        // 1. if we reach the commit after this one we are going to fsync the WAL with the
+        //    new contents.
+        // 2. if we crash before the next commit and if the WAL ended up not truncated, we just
+        //    reapply the changes from the WAL which must be a noop.
+        //
+        // Therefore, we can safely avoid blocking on the truncation here.
         writeout::write_ht(io_handle, &self.db.shared.ht_fd, ht_pages)?;
-        writeout::truncate_wal(&self.db.shared.wal_fd)?;
+        writeout::truncate_wal(&self.db.shared.wal_fd, false)?;
         Ok(())
     }
 }
@@ -313,7 +328,8 @@ fn recover(
     //   1. the WAL holds data for a sync that never concluded. Safe to discard.
     //   2. the WAL holds data for a sync that fully concluded. (somehow). Safe to discard.
     if wal_reader.sync_seqn() != sync_seqn {
-        wal_fd.set_len(0)?;
+        // fsync generously here since it's a one-time operation.
+        writeout::truncate_wal(wal_fd, true)?;
         return Ok(());
     }
 
@@ -385,8 +401,8 @@ fn recover(
         }
     }
 
-    // Finally, we collapse the WAL file.
-    wal_fd.set_len(0)?;
+    // Finally, we collapse the WAL file and fsync.
+    writeout::truncate_wal(wal_fd, true)?;
 
     Ok(())
 }

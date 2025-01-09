@@ -22,9 +22,15 @@ pub(super) fn write_wal(mut wal_fd: &File, wal_blob: &[u8]) -> anyhow::Result<()
     Ok(())
 }
 
-pub(super) fn truncate_wal(mut wal_fd: &File) -> anyhow::Result<()> {
+/// Truncates the WAL file to zero length.
+///
+/// Conditionally syncs the file to disk.
+pub(super) fn truncate_wal(mut wal_fd: &File, do_sync: bool) -> anyhow::Result<()> {
     wal_fd.set_len(0)?;
     wal_fd.seek(SeekFrom::Start(0))?;
+    if do_sync {
+        wal_fd.sync_all()?;
+    }
     Ok(())
 }
 
