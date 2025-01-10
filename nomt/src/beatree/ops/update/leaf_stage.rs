@@ -175,6 +175,7 @@ pub fn run(
     }
 
     output.leaf_changeset.sort_by_key(|(k, _)| *k);
+    enforce_first_leaf_separator(&mut output.leaf_changeset, bbn_index);
     Ok(output)
 }
 
@@ -206,6 +207,96 @@ fn apply_worker_changes(
         .extend(worker_output.leaves_tracker.extra_freed.drain(..));
 
     output.post_io_work.worker_changes.push(worker_output);
+}
+
+// The first leaf always have a separator of all 0.
+// This needs to be enforced sometimes, for example it could happen
+// that the first leaf is freed and this leads to the
+// previous second leaf to become the new first one, but we need to ensure that
+// the new first leaf will be associated to a separator of all 0.
+//
+// What this function does is to take the final leaf_changeset,
+// which is the outcome of the leaf stage and enforce, if not already,
+// the resulting first leaf to be associated with a separator of all 0.
+//
+// NOTE: leaf_changeset is expected to be in order by separators.
+pub fn enforce_first_leaf_separator(
+    leaf_changeset: &mut Vec<([u8; 32], Option<PageNumber>)>,
+    bbn_index: &Index,
+) {
+    // Check if the first changed leaf corresponds to the deletion of the first leaf.
+    match leaf_changeset.first() {
+        Some((first_key, None)) if *first_key == [0; 32] => (),
+        _ => return,
+    };
+
+    // The new first leaf could be an unchanged leaf, not touched by the leaf stage,
+    // or a new leaf, part of `leaf_changeset`. Leaves following the old first leaf
+    // could also be eliminated.
+
+    // Initially set `maybe_new_first` to be the second leaf in the previous state.
+    // It is an option because there may have been only one leaf in the previous state.
+    // `maybe_new_first` always refers to leaves that were present previously.
+    let mut separator = [0; 32];
+    let mut maybe_new_first: Option<([u8; 32], PageNumber)>;
+
+    // Iterate over `leaf_changeset` until a non deleted item with a separator
+    // smaller than `maybe_new_first` is found. Meanwhile, if we find `maybe_new_first`
+    // to be deleted, update it with the following one in the previous state.
+    let mut idx = 1;
+    loop {
+        // `separator` is being eliminated, so it must exist in the previous state
+        maybe_new_first = indexed_leaf(bbn_index, separator)
+            .map(|(_, maybe_next_separator, _)| maybe_next_separator)
+            .flatten()
+            .map(|next_separator| {
+                // UNWRAP: the leaf_pn of a just indexed leaf. It must exist.
+                indexed_leaf(bbn_index, next_separator)
+                    .map(|(s, _, leaf_pn)| {
+                        // `next_separator` and `s` are the same
+                        separator = next_separator;
+                        (s, leaf_pn)
+                    })
+                    .unwrap()
+            });
+
+        if idx >= leaf_changeset.len() {
+            break;
+        }
+
+        match &leaf_changeset[idx] {
+            // The previous leaf, candidate to be the new first one has been eliminated.
+            (separator, None) if maybe_new_first.map_or(false, |(s, _)| s == *separator) => {
+                idx += 1;
+            }
+            // The candidate will be the new first leaf or a new leaf with a smaller
+            // separator that has been created.
+            _ => break,
+        }
+    }
+
+    if let Some((separator, Some(_))) = leaf_changeset.get(idx).copied() {
+        // New leaf with a separator smaller or equal to the candidate.
+        if maybe_new_first.map_or(true, |(s, _)| s >= separator) {
+            leaf_changeset[0].1 = leaf_changeset[idx].1;
+            // If the new leaf corresponds to an update of the candidate,
+            // remove the older separator.
+            // Otherwise just remove the new first leaf entry.
+            if maybe_new_first.map_or(false, |(s, _)| s == separator) {
+                leaf_changeset[idx].1 = None;
+            } else {
+                leaf_changeset.remove(idx);
+            }
+            return;
+        }
+    }
+
+    // Now if `maybe_new_first` is Some, it must be the new first key.
+    // We found an item with a separator bigger than the candidate.
+    if let Some((separator_to_delete, new_first_leaf)) = maybe_new_first {
+        leaf_changeset[0].1 = Some(new_first_leaf);
+        leaf_changeset.insert(idx, (separator_to_delete, None));
+    }
 }
 
 fn prepare_workers(
