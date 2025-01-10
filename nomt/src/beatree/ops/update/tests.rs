@@ -11,8 +11,11 @@ use crate::{
             self,
             bit_ops::separate,
             update::{
-                branch_stage::BranchStageOutput, branch_updater::tests::make_branch_until, get_key,
-                leaf_stage::LeafStageOutput, LEAF_MERGE_THRESHOLD,
+                branch_stage::BranchStageOutput,
+                branch_updater::tests::make_branch_until,
+                get_key,
+                leaf_stage::{self, LeafStageOutput},
+                BRANCH_MERGE_THRESHOLD, LEAF_MERGE_THRESHOLD,
             },
         },
         Index, ValueChange,
@@ -27,8 +30,6 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::sync::Arc;
 use threadpool::ThreadPool;
-
-use super::BRANCH_MERGE_THRESHOLD;
 
 const LEAF_STAGE_INITIAL_CAPACITY: usize = 700;
 const BRANCH_STAGE_INITIAL_CAPACITY: usize = 50_000;
@@ -60,7 +61,7 @@ lazy_static! {
     static ref PAGE_POOL: PagePool = PagePool::new();
     static ref IO_POOL: IoPool = start_test_io_pool(3, PAGE_POOL.clone());
     static ref TREE_DATA: TreeData = init_beatree();
-    static ref BBN_INDEX: Index = init_bbn_index();
+    static ref BBN_INDEX: Index = init_bbn_index(&SEPARATORS);
     static ref THREAD_POOL: ThreadPool =
         ThreadPool::with_name("beatree-update-test".to_string(), 64);
 }
@@ -402,20 +403,21 @@ fn leaf_stage() {
     }
 }
 
-// Initialize a bbn_index using the separators present in SEPARATORS.
+// Initialize a bbn_index using the provided separators.
 // The reasons why this initialization is required are the same as those for `init_beatree`
-fn init_bbn_index() -> Index {
+// It is also used by `enforce_first_leaf_separator` to avoid initializing the entire beatree.
+fn init_bbn_index(separators: &[[u8; 32]]) -> Index {
     let mut rng = rand_pcg::Lcg64Xsh32::from_seed(*SEED);
 
     let mut bbn_index = Index::default();
     let mut used_separators = 0;
     let mut bbn_pn = 0;
 
-    while used_separators < SEPARATORS.len() {
+    while used_separators < separators.len() {
         let body_size_target = rng.gen_range(BRANCH_MERGE_THRESHOLD..BRANCH_NODE_BODY_SIZE);
 
         let branch_node = make_branch_until(
-            &mut SEPARATORS[used_separators..].iter().cloned(),
+            &mut separators[used_separators..].iter().cloned(),
             body_size_target,
             bbn_pn,
         );
@@ -595,4 +597,100 @@ fn branch_stage() {
         eprintln!("branch_stage failed with seed: {:?}", *SEED);
         std::panic::resume_unwind(cause);
     }
+}
+
+#[test]
+fn enforce_first_leaf_separator() {
+    let mut separators = vec![[0; 32]];
+    let keys = rand_keys(9);
+    separators.extend(keys.windows(2).map(|w| separate(&w[0], &w[1])));
+    // NOTE: The test relies entirely on the fact that `init_bbn_index`
+    // uses `make_branch_until`, which assigns page numbers in ascending order starting from 0.
+    let bbn_index = init_bbn_index(&separators);
+
+    // nothing changes, first leaf not deleted
+    let mut leaf_changeset = vec![([1; 32], Some(PageNumber(1))), ([2; 32], None)];
+    let prev_stage = leaf_changeset.clone();
+    leaf_stage::enforce_first_leaf_separator(&mut leaf_changeset, &bbn_index);
+    assert_eq!(leaf_changeset, prev_stage);
+
+    // nothing changes, all leaves deleted
+    let mut leaf_changeset = separators.iter().map(|s| (*s, None)).collect::<Vec<_>>();
+    let prev_stage = leaf_changeset.clone();
+    leaf_stage::enforce_first_leaf_separator(&mut leaf_changeset, &bbn_index);
+    assert_eq!(leaf_changeset, prev_stage);
+
+    // The new first leaf is within the previous leaves, all deleted in changeset
+    let n_take = 5;
+    let mut leaf_changeset = separators
+        .iter()
+        .map(|s| (*s, None))
+        .take(n_take)
+        .collect::<Vec<_>>();
+    leaf_stage::enforce_first_leaf_separator(&mut leaf_changeset, &bbn_index);
+
+    // new first leaf
+    assert_eq!(leaf_changeset[0].0, [0; 32]);
+    assert_eq!(leaf_changeset[0].1, Some(PageNumber(n_take as u32)));
+    // All others are expected to be deleted leaves,
+    // in particular, the previous separator associated with the new first leaf is deleted.
+    for (_, leaf_pn) in &leaf_changeset[1..] {
+        assert!(leaf_pn.is_none());
+    }
+    assert_eq!(leaf_changeset.len(), n_take + 1);
+
+    // The new first leaf is within the previous leaves,
+    // some deleted before finding it
+    let n_take = 5;
+    let mut leaf_changeset = separators
+        .iter()
+        .map(|s| (*s, None))
+        .take(n_take)
+        .collect::<Vec<_>>();
+    // this is the new leaf with a bigger separator than one of the previous
+    leaf_changeset.push((keys[n_take + 1], Some(PageNumber(15))));
+    leaf_stage::enforce_first_leaf_separator(&mut leaf_changeset, &bbn_index);
+
+    // new first leaf
+    assert_eq!(leaf_changeset[0].0, [0; 32]);
+    assert_eq!(leaf_changeset[0].1, Some(PageNumber(n_take as u32)));
+    // + 1 = the leaf we pushed
+    // + 1 = deletion of the separator of the new first leaf
+    assert_eq!(leaf_changeset.len(), n_take + 2);
+
+    // The new first leaf is a new leaf, some deleted before finding it
+    let n_take = 5;
+    let mut leaf_changeset = separators
+        .iter()
+        .map(|s| (*s, None))
+        .take(n_take)
+        .collect::<Vec<_>>();
+    // this is the new leaf with a smaller separator than one of the previous
+    leaf_changeset.push((keys[n_take - 1], Some(PageNumber(15))));
+    leaf_stage::enforce_first_leaf_separator(&mut leaf_changeset, &bbn_index);
+
+    // new first leaf
+    assert_eq!(leaf_changeset[0].0, [0; 32]);
+    assert_eq!(leaf_changeset[0].1, Some(PageNumber(15)));
+    //  leaf_changeset len in n_take + 1, but the item associated
+    //  to the new first leaf is removed
+    assert_eq!(leaf_changeset.len(), n_take);
+
+    // The new first leaf is an updated version of a previous leaf,
+    // something deleted before finding it
+    let n_take = 5;
+    let mut leaf_changeset = separators
+        .iter()
+        .map(|s| (*s, None))
+        .take(n_take)
+        .collect::<Vec<_>>();
+    // this is the new leaf with a smaller separator than one of the previous
+    leaf_changeset.push((separators[n_take], Some(PageNumber(15))));
+    leaf_stage::enforce_first_leaf_separator(&mut leaf_changeset, &bbn_index);
+
+    // new first leaf
+    assert_eq!(leaf_changeset[0].0, [0; 32]);
+    assert_eq!(leaf_changeset[0].1, Some(PageNumber(15)));
+    assert_eq!(leaf_changeset[n_take].1, None);
+    assert_eq!(leaf_changeset.len(), n_take + 1);
 }
