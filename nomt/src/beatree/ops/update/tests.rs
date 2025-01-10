@@ -288,7 +288,12 @@ fn is_valid_leaf_stage_output(
     expected_values.retain(|k, _| !deletions.contains(k));
 
     let mut found_underfull_leaf = false;
-    for (_, new_pn) in output.leaf_changeset.into_iter() {
+    for (separator, new_pn) in output.leaf_changeset.into_iter() {
+        if separator == [0; 32] && new_pn.is_none() {
+            // First leaf with separator of all 0 cannot be eliminated.
+            return false;
+        }
+
         let Some(new_pn) = new_pn else { continue };
         let page = leaf_reader.query(new_pn);
         let leaf_node = LeafNode { inner: page };
