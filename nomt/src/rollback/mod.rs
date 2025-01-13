@@ -22,12 +22,13 @@ use nomt_core::trie::KeyPath;
 use parking_lot::{Condvar, Mutex};
 use threadpool::ThreadPool;
 
-use self::delta::Delta;
 use self::reverse_delta_worker::{DeltaBuilderCommand, LoadValueAsync, StoreLoadValueAsync};
 use crate::{
     seglog::{self, RecordId, SegmentedLog},
     KeyReadWrite,
 };
+
+pub use self::delta::Delta;
 
 mod delta;
 mod reverse_delta_worker;
@@ -145,12 +146,7 @@ impl Rollback {
     ///
     /// This function accepts the final list of operations that should be performed sorted by the
     /// key paths in ascending order.
-    pub fn commit(
-        &self,
-        actuals: &[(KeyPath, KeyReadWrite)],
-        delta: ReverseDeltaBuilder,
-    ) -> anyhow::Result<()> {
-        let delta = delta.finalize(actuals);
+    pub fn commit(&self, delta: Delta) -> anyhow::Result<()> {
         let delta_bytes = delta.encode();
 
         let mut in_memory = self.shared.in_memory.lock();
@@ -382,7 +378,7 @@ impl ReverseDeltaBuilder {
     /// Finalize the delta.
     ///
     /// This function is expected to be called before the store is modified.
-    fn finalize(self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
+    pub fn finalize(self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
         // wait for all submitted requests to finish.
         let fresh_priors = Arc::new(DashMap::new());
         let (join_tx, join_rx) = crossbeam::channel::bounded(1);

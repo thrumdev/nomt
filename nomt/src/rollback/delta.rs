@@ -23,7 +23,7 @@ impl Delta {
     /// Encode the delta into a buffer.
     ///
     /// Returns the number of bytes written.
-    pub fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         // The serialization format has the following layout.
         //
         // The keys are split into two groups and written as separate arrays. Those groups are:
@@ -69,7 +69,7 @@ impl Delta {
     }
 
     /// Decodes the delta from a buffer.
-    pub fn decode(reader: &mut Cursor<impl AsRef<[u8]>>) -> anyhow::Result<Self> {
+    pub(super) fn decode(reader: &mut Cursor<impl AsRef<[u8]>>) -> anyhow::Result<Self> {
         let mut priors = HashMap::new();
 
         // Read the number of keys to erase.
