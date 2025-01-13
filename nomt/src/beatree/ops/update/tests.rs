@@ -170,6 +170,45 @@ impl Arbitrary for Key {
     }
 }
 
+#[derive(Clone, Debug)]
+struct StageInputs {
+    insertions: BTreeMap<Key, u16>,
+    deletions: Vec<u16>,
+    no_shrinking: bool,
+}
+
+impl Arbitrary for StageInputs {
+    fn arbitrary(g: &mut Gen) -> Self {
+        // If NO_STAGES_SHRINKING is specified as true,
+        // it stops the shrinking process from occurring,
+        // returning immediately if an error is found.
+        let no_shrinking = std::env::var("NO_STAGES_SHRINKING")
+            .ok()
+            .map(|no_shrinking| no_shrinking.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        Self {
+            insertions: BTreeMap::<Key, u16>::arbitrary(g),
+            deletions: Vec::<u16>::arbitrary(g),
+            no_shrinking,
+        }
+    }
+
+    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+        if self.no_shrinking {
+            return quickcheck::empty_shrinker();
+        }
+
+        Box::new(self.insertions.shrink().zip(self.deletions.shrink()).map(
+            |(insertions, deletions)| Self {
+                insertions,
+                deletions,
+                no_shrinking: false,
+            },
+        ))
+    }
+}
+
 fn leaf_page_numbers(
     bbn_index: &Index,
     keys: impl IntoIterator<Item = [u8; 32]>,
@@ -310,15 +349,17 @@ fn rescale(init: u16, lower_bound: usize, upper_bound: usize) -> usize {
 
 // insertions is a map of arbitrary keys associated with value sizes, while deletions
 // is a vector of numbers that will be used to index the vector of already present keys
-fn leaf_stage_inner(insertions: BTreeMap<Key, u16>, deletions: Vec<u16>) -> TestResult {
-    let deletions: BTreeMap<_, _> = deletions
+fn leaf_stage_inner(input: StageInputs) -> TestResult {
+    let deletions: BTreeMap<_, _> = input
+        .deletions
         .into_iter()
         // rescale deletions to contain indexes over only alredy present items in the db
         .map(|d| rescale(d, 0, KEYS.len()))
         .map(|index| (KEYS[index], ValueChange::Delete))
         .collect();
 
-    let insertions: BTreeMap<_, _> = insertions
+    let insertions: BTreeMap<_, _> = input
+        .insertions
         .into_iter()
         // rescale raw_size to be between 0 and MAX_LEAF_VALUE_SIZE
         .map(|(k, raw_size)| (k, rescale(raw_size, 1, MAX_LEAF_VALUE_SIZE)))
@@ -347,7 +388,7 @@ fn leaf_stage() {
         QuickCheck::new()
             .gen(Gen::new(LEAF_STAGE_CHANGESET_AVG_SIZE))
             .max_tests(MAX_TESTS)
-            .quickcheck(leaf_stage_inner as fn(_, _) -> TestResult)
+            .quickcheck(leaf_stage_inner as fn(_) -> TestResult)
     });
 
     if let Err(cause) = test_result {
@@ -451,19 +492,21 @@ fn is_valid_branch_stage_output(
 
 // insertions is a map of arbitrary keys associated with a PageNumber, while deletions
 // is a vector of numbers that will be used to index the vector of already present SEPARATORS
-fn branch_stage_inner(insertions: BTreeMap<Key, u32>, deletions: Vec<u16>) -> TestResult {
+fn branch_stage_inner(input: StageInputs) -> TestResult {
     let bbn_index = BBN_INDEX.clone();
 
-    let deletions: BTreeMap<_, _> = deletions
+    let deletions: BTreeMap<_, _> = input
+        .deletions
         .into_iter()
         // rescale deletions to contain indexes over only alredy present items in the db
         .map(|d| rescale(d, 0, SEPARATORS.len()))
         .map(|index| (SEPARATORS[index], None))
         .collect();
 
-    let insertions: BTreeMap<_, _> = insertions
+    let insertions: BTreeMap<_, _> = input
+        .insertions
         .into_iter()
-        .map(|(k, raw_pn)| (k.inner, Some(PageNumber(raw_pn))))
+        .map(|(k, raw_pn)| (k.inner, Some(PageNumber(raw_pn as u32))))
         .collect();
 
     let bbn_fd = tempfile::tempfile().unwrap();
@@ -540,7 +583,7 @@ fn branch_stage() {
         QuickCheck::new()
             .gen(Gen::new(BRANCH_STAGE_CHANGESET_AVG_SIZE))
             .max_tests(MAX_TESTS)
-            .quickcheck(branch_stage_inner as fn(_, _) -> TestResult)
+            .quickcheck(branch_stage_inner as fn(_) -> TestResult)
     });
 
     if let Err(cause) = test_result {

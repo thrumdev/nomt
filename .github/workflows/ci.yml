@@ -13,6 +13,9 @@ jobs:
   nomt_test:
     name: NOMT - test
     runs-on: ubuntu-latest
+    env:
+      # Avoid shrinking the inputs when an error is found in the leaf/branch stage tests.
+      NO_STAGES_SHRINKING: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
