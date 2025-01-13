@@ -139,21 +139,17 @@ fn truncate_works() {
     builder.tentative_preserve_prior([1; 32]);
     builder.tentative_preserve_prior([2; 32]);
     builder.tentative_preserve_prior([3; 32]);
-    rollback
-        .commit(
-            &[
-                (
-                    hex!("0101010101010101010101010101010101010101010101010101010101010101"),
-                    KeyReadWrite::Write(Some(b"new_value1".to_vec())),
-                ),
-                (
-                    hex!("0202020202020202020202020202020202020202020202020202020202020202"),
-                    KeyReadWrite::Write(Some(b"new_value2".to_vec())),
-                ),
-            ],
-            builder,
-        )
-        .unwrap();
+    let delta = builder.finalize(&[
+        (
+            hex!("0101010101010101010101010101010101010101010101010101010101010101"),
+            KeyReadWrite::Write(Some(b"new_value1".to_vec())),
+        ),
+        (
+            hex!("0202020202020202020202020202020202020202020202020202020202020202"),
+            KeyReadWrite::Write(Some(b"new_value2".to_vec())),
+        ),
+    ]);
+    rollback.commit(delta).unwrap();
 
     // We want to see the old values for all the keys that have been changed during the commit.
     let traceback = rollback.truncate(1).unwrap().unwrap();
@@ -207,21 +203,17 @@ fn without_tentative_preserve_prior() {
     let rollback =
         Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, Arc::new(db_dir_fd), 0, 0).unwrap();
     let builder = rollback.delta_builder_inner(store.async_reader());
-    rollback
-        .commit(
-            &[
-                (
-                    hex!("0101010101010101010101010101010101010101010101010101010101010101"),
-                    KeyReadWrite::Write(Some(b"new_value1".to_vec())),
-                ),
-                (
-                    hex!("0202020202020202020202020202020202020202020202020202020202020202"),
-                    KeyReadWrite::Write(Some(b"new_value2".to_vec())),
-                ),
-            ],
-            builder,
-        )
-        .unwrap();
+    let delta = builder.finalize(&[
+        (
+            hex!("0101010101010101010101010101010101010101010101010101010101010101"),
+            KeyReadWrite::Write(Some(b"new_value1".to_vec())),
+        ),
+        (
+            hex!("0202020202020202020202020202020202020202020202020202020202020202"),
+            KeyReadWrite::Write(Some(b"new_value2".to_vec())),
+        ),
+    ]);
+    rollback.commit(delta).unwrap();
 
     // We want to see the old values for all the keys that have been changed during the commit.
     let traceback = rollback.truncate(1).unwrap().unwrap();
@@ -267,17 +259,13 @@ fn delta_builder_doesnt_load_read_then_write_priors() {
     let rollback =
         Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, Arc::new(db_dir_fd), 0, 0).unwrap();
     let builder = rollback.delta_builder_inner(store.async_reader());
+    let delta = builder.finalize(&[(
+        key_1,
+        KeyReadWrite::ReadThenWrite(Some(b"prior_value".to_vec()), Some(b"new_value1".to_vec())),
+    )]);
+
     rollback
-        .commit(
-            &[(
-                key_1,
-                KeyReadWrite::ReadThenWrite(
-                    Some(b"prior_value".to_vec()),
-                    Some(b"new_value1".to_vec()),
-                ),
-            )],
-            builder,
-        )
+        .commit(delta)
         // This will panic if the delta builder attempts to load from store the prior value for
         // key_1.
         .unwrap();
