@@ -123,6 +123,10 @@ impl Test {
         self.session = Some(self.nomt.begin_session());
         x
     }
+
+    pub fn root(&self) -> Node {
+        self.nomt.root()
+    }
 }
 
 pub fn read_balance(t: &mut Test, id: u64) -> Option<u64> {

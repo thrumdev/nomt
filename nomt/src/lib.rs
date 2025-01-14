@@ -24,7 +24,7 @@ use store::Store;
 // CARGO HACK: silence lint; this is used in integration tests
 
 pub use nomt_core::proof;
-pub use nomt_core::trie::{KeyPath, LeafData, Node, NodePreimage};
+pub use nomt_core::trie::{KeyPath, LeafData, Node, NodeKind, NodePreimage};
 pub use options::{Options, PanicOnSyncMode};
 pub use store::HashTableUtilization;
 // beatree module needs to be exposed to be benchmarked
@@ -226,7 +226,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         let store = Store::open(&o, page_pool.clone())?;
         let root_page = store.load_page(ROOT_PAGE_ID)?;
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
-        let root = compute_root_node::<T>(&page_cache);
+        let root = compute_root_node::<T>(&page_cache, &store);
         Ok(Self {
             merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
             page_cache,
@@ -538,30 +538,65 @@ pub trait HashAlgorithm: ValueHasher + NodeHasher {}
 
 impl<T: ValueHasher + NodeHasher> HashAlgorithm for T {}
 
-fn compute_root_node<H: NodeHasher>(page_cache: &PageCache) -> Node {
-    let Some(root_page) = page_cache.get(ROOT_PAGE_ID) else {
-        return TERMINATOR;
-    };
-
+fn compute_root_node<H: HashAlgorithm>(page_cache: &PageCache, store: &Store) -> Node {
     // 3 cases.
-    // 1: root page is empty. in this case, root is the TERMINATOR.
-    // 2: root page has top two slots filled, but _their_ children are empty. root is a leaf.
-    //    this is because internal nodes and leaf nodes would have items below.
+    // 1: root page is empty and beatree is empty. in this case, root is the TERMINATOR.
+    // 2: root page is empty and beatree has a single item. in this case, root is a leaf.
     // 3: root is an internal node.
-    let is_empty = |node_index| root_page.node(node_index) == TERMINATOR;
 
-    let left = root_page.node(0);
-    let right = root_page.node(1);
+    if let Some(root_page) = page_cache.get(ROOT_PAGE_ID) {
+        let left = root_page.node(0);
+        let right = root_page.node(1);
 
-    if is_empty(0) && is_empty(1) {
-        TERMINATOR
-    } else if (2..6usize).all(is_empty) {
-        H::hash_leaf(&LeafData {
-            key_path: left,
-            value_hash: right,
-        })
-    } else {
-        H::hash_internal(&InternalData { left, right })
+        if left != TERMINATOR || right != TERMINATOR {
+            // case 3
+            return H::hash_internal(&InternalData { left, right });
+        }
+    }
+
+    // cases 1/2
+    let read_tx = store.read_transaction();
+    let mut iterator = read_tx.iterator(beatree::Key::default(), None);
+
+    let io_handle = store.io_pool().make_handle();
+
+    loop {
+        match iterator.next() {
+            None => return TERMINATOR, // case 1
+            Some(beatree::iterator::IterOutput::Blocked) => {
+                // UNWRAP: when blocked, needed leaf always exists.
+                let leaf = match read_tx.load_leaf_async(
+                    iterator.needed_leaves().next().unwrap(),
+                    &io_handle,
+                    0,
+                ) {
+                    Ok(leaf_node) => leaf_node,
+                    Err(leaf_load) => {
+                        // UNWRAP: `Err` indicates a request was sent.
+                        let complete_io = io_handle.recv().unwrap();
+
+                        // UNWRAP: the I/O command submitted by `load_leaf_async` is always a `Read`
+                        leaf_load.finish(complete_io.command.kind.unwrap_buf())
+                    }
+                };
+
+                iterator.provide_leaf(leaf);
+            }
+            Some(beatree::iterator::IterOutput::Item(key_path, value)) => {
+                // case 2
+                return H::hash_leaf(&LeafData {
+                    key_path,
+                    value_hash: H::hash_value(value),
+                });
+            }
+            Some(beatree::iterator::IterOutput::OverflowItem(key_path, value_hash, _)) => {
+                // case 2
+                return H::hash_leaf(&LeafData {
+                    key_path,
+                    value_hash,
+                });
+            }
+        }
     }
 }
 
