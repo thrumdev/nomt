@@ -225,6 +225,7 @@ pub enum InvalidAncestors {
 
 /// A live overlay which is being used as a child. This can be queried for all value/page changes in
 /// any of the relevant ancestors.
+#[derive(Clone)]
 pub(super) struct LiveOverlay {
     parent: Option<Arc<OverlayInner>>,
     ancestor_data: Vec<Arc<Data>>,

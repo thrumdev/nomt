@@ -8,6 +8,7 @@ use threadpool::ThreadPool;
 use crate::{
     beatree::{self, AsyncLookup, OverflowPageInfo, ReadTransaction},
     io::{FatPage, IoHandle},
+    overlay::LiveOverlay,
 };
 
 /// A trait for asynchronously loading values from the store.
@@ -303,15 +304,20 @@ where
 pub(super) struct StoreLoadValueAsync {
     read_tx: ReadTransaction,
     io_handle: IoHandle,
+    overlay: LiveOverlay,
 }
 
 impl StoreLoadValueAsync {
     /// Create a new asynchronous value loader from the store.
-    pub fn new(store: &crate::store::Store) -> Self {
+    pub fn new(store: &crate::store::Store, overlay: LiveOverlay) -> Self {
         let read_tx = store.read_transaction();
         let io_handle = store.io_pool().make_handle();
 
-        StoreLoadValueAsync { read_tx, io_handle }
+        StoreLoadValueAsync {
+            read_tx,
+            io_handle,
+            overlay,
+        }
     }
 }
 
@@ -341,6 +347,10 @@ impl LoadValueAsync for StoreLoadValueAsync {
         key_path: KeyPath,
         user_data: u64,
     ) -> Result<Option<Vec<u8>>, Self::Pending> {
+        if let Some(change) = self.overlay.value(&key_path) {
+            return Ok(change.as_option().map(|v| v.to_vec()));
+        }
+
         self.read_tx
             .lookup_async(key_path, &self.io_handle, user_data)
     }

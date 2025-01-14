@@ -314,7 +314,9 @@ impl<T: HashAlgorithm> Nomt<T> {
         assert_eq!(prev, 0, "only one session could be active at a time");
         let store = self.store.clone();
         let rollback_delta = if allow_rollback {
-            self.store.rollback().map(|r| r.delta_builder(&store))
+            self.store
+                .rollback()
+                .map(|r| r.delta_builder(&store, &live_overlay))
         } else {
             None
         };
