@@ -24,6 +24,7 @@ NOMT: Project Root.
 │   ├── <a href="./examples/witness_verification">witness_verification</a>: Demonstration of how to verify a witness in a light-client setting.
 |--<a href="./nomt">nomt</a>: Implementation of the NOMT database.
 |──<a href="./torture">torture</a>: Extensive testing suite for NOMT.
+|--<a href="./trickfs">trickfs</a>: A FUSE filesystem aiding deeper testing. Experimental.
 </pre>
 
 ## Architecture
