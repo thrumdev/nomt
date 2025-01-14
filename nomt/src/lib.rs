@@ -5,6 +5,7 @@
 use bitvec::prelude::*;
 use io::PagePool;
 use metrics::{Metric, Metrics};
+use page_diff::PageDiff;
 use std::{
     mem,
     sync::{atomic::AtomicUsize, Arc},
@@ -12,13 +13,13 @@ use std::{
 
 use merkle::{UpdatePool, Updater};
 use nomt_core::{
-    page_id::ROOT_PAGE_ID,
+    page_id::{PageId, ROOT_PAGE_ID},
     proof::PathProof,
     trie::{InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
 };
 use overlay::{LiveOverlay, OverlayMarker};
-use page_cache::PageCache;
+use page_cache::{Page, PageCache};
 use parking_lot::Mutex;
 use store::{Store, ValueTransaction};
 
@@ -305,7 +306,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         allow_rollback: bool,
         overlays: impl IntoIterator<Item = &'a Overlay>,
     ) -> Result<Session, InvalidAncestors> {
-        let _live_overlay = LiveOverlay::new(overlays)?;
+        let live_overlay = LiveOverlay::new(overlays)?;
 
         let prev = self
             .session_cnt
@@ -328,6 +329,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             session_cnt: self.session_cnt.clone(),
             metrics: self.metrics.clone(),
             rollback_delta,
+            overlay: Some(live_overlay),
         })
     }
 
@@ -337,10 +339,22 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// must be sorted by the key paths in ascending order. The key paths must be unique.
     pub fn update(
         &self,
-        _session: Session,
-        _actuals: Vec<(KeyPath, KeyReadWrite)>,
+        mut session: Session,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<Overlay> {
-        unimplemented!()
+        let (value_tx, merkle_update, rollback_delta) =
+            self.update_inner(&mut session, actuals, false)?;
+        let updated_pages = merkle_update.updated_pages.into_frozen_iter().collect();
+
+        let values = value_tx.into_iter().collect();
+
+        // UNWRAP: overlay is always some during session lifecycle.
+        Ok(session.overlay.take().unwrap().finish(
+            merkle_update.root,
+            updated_pages,
+            values,
+            rollback_delta,
+        ))
     }
 
     /// Update the merkle tree and commit the changes to an in-memory [`Overlay`] and create a
@@ -350,10 +364,27 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// must be sorted by the key paths in ascending order. The key paths must be unique.
     pub fn update_and_prove(
         &self,
-        _session: Session,
-        _actuals: Vec<(KeyPath, KeyReadWrite)>,
+        mut session: Session,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Overlay, Witness, WitnessedOperations)> {
-        unimplemented!()
+        let (value_tx, merkle_update, rollback_delta) =
+            self.update_inner(&mut session, actuals, true)?;
+        let updated_pages = merkle_update.updated_pages.into_frozen_iter().collect();
+
+        let values = value_tx.into_iter().collect();
+
+        // UNWRAP: overlay is always some during session lifecycle.
+        let overlay = session.overlay.take().unwrap().finish(
+            merkle_update.root,
+            updated_pages,
+            values,
+            rollback_delta,
+        );
+
+        // UNWRAP: witness specified as true.
+        let witness = merkle_update.witness.unwrap();
+        let witnessed_ops = merkle_update.witnessed_operations.unwrap();
+        Ok((overlay, witness, witnessed_ops))
     }
 
     /// Commit the changes from this overlay to the underlying database.
@@ -366,9 +397,22 @@ impl<T: HashAlgorithm> Nomt<T> {
             anyhow::bail!("Overlay parent not committed");
         }
 
-        let _marker = overlay.commit();
+        let root = overlay.root();
+        let page_changes: Vec<_> = overlay
+            .page_changes()
+            .into_iter()
+            .map(|(page_id, (ref page, ref diff))| (page_id.clone(), (page.clone(), diff.clone())))
+            .collect();
+        let values: Vec<_> = overlay
+            .value_changes()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let rollback_delta = overlay.rollback_delta().map(|delta| delta.clone());
 
-        unimplemented!()
+        let marker = overlay.commit();
+
+        self.commit_inner(root, page_changes, values, rollback_delta, Some(marker))
     }
 
     /// Update the merkle tree and commit the changes to the underlying database.
@@ -384,8 +428,8 @@ impl<T: HashAlgorithm> Nomt<T> {
             self.update_inner(&mut session, actuals, false)?;
         self.commit_inner(
             merkle_update.root,
-            merkle_update.updated_pages,
-            value_tx,
+            merkle_update.updated_pages.into_frozen_iter(),
+            value_tx.into_iter(),
             rollback_delta,
             None,
         )?;
@@ -409,8 +453,8 @@ impl<T: HashAlgorithm> Nomt<T> {
         let witnessed_ops = merkle_update.witnessed_operations.unwrap();
         self.commit_inner(
             merkle_update.root,
-            merkle_update.updated_pages,
-            value_tx,
+            merkle_update.updated_pages.into_frozen_iter(),
+            value_tx.into_iter(),
             rollback_delta,
             None,
         )?;
@@ -467,8 +511,8 @@ impl<T: HashAlgorithm> Nomt<T> {
     fn commit_inner(
         &self,
         new_root: Node,
-        updated_pages: merkle::UpdatedPages,
-        value_tx: ValueTransaction,
+        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))> + Send + 'static,
+        value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         rollback_delta: Option<rollback::Delta>,
         overlay_marker: Option<OverlayMarker>,
     ) -> anyhow::Result<()> {
@@ -524,8 +568,8 @@ impl<T: HashAlgorithm> Nomt<T> {
             self.update_inner(&mut sess, actuals, /* witness */ false)?;
         self.commit_inner(
             merkle_update.root,
-            merkle_update.updated_pages,
-            value_tx,
+            merkle_update.updated_pages.into_frozen_iter(),
+            value_tx.into_iter(),
             rollback_delta,
             None,
         )?;
@@ -558,6 +602,7 @@ pub struct Session {
     session_cnt: Arc<AtomicUsize>,
     metrics: Metrics,
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
+    overlay: Option<LiveOverlay>, // always `Some` during lifecycle.
 }
 
 impl Session {

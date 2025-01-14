@@ -7,6 +7,7 @@ use crossbeam::channel::{self, Receiver, Sender};
 use parking_lot::Mutex;
 
 use nomt_core::{
+    page_id::PageId,
     trie::{self, KeyPath, Node, ValueHash},
     trie_pos::TriePosition,
 };
@@ -16,7 +17,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     io::PagePool,
-    page_cache::{PageCache, ShardIndex},
+    page_cache::{Page, PageCache, ShardIndex},
+    page_diff::PageDiff,
     rw_pass_cell::WritePassEnvelope,
     store::Store,
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
@@ -33,17 +35,14 @@ pub use page_walker::UpdatedPage;
 pub struct UpdatedPages(Vec<Vec<UpdatedPage>>);
 
 impl UpdatedPages {
-    pub fn count(&self) -> usize {
-        self.0.iter().map(|set| set.len()).sum()
-    }
-}
-
-impl IntoIterator for UpdatedPages {
-    type Item = UpdatedPage;
-    type IntoIter = std::iter::Flatten<<Vec<Vec<Self::Item>> as IntoIterator>::IntoIter>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter().flatten()
+    /// Freeze, label, and iterate all the pages.
+    ///
+    /// Pages are 'labeled' by placing the page ID into the page data itself prior to freezing.
+    pub fn into_frozen_iter(self) -> impl Iterator<Item = (PageId, (Page, PageDiff))> {
+        self.0.into_iter().flatten().map(|updated_page| {
+            let page = updated_page.page.freeze(&updated_page.page_id);
+            (updated_page.page_id, (page, updated_page.diff))
+        })
     }
 }
 

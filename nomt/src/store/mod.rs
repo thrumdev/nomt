@@ -6,8 +6,7 @@
 use crate::{
     beatree, bitbox,
     io::{self, page_pool::FatPage, IoPool, PagePool},
-    merkle,
-    page_cache::PageCache,
+    page_cache::{Page, PageCache},
     page_diff::PageDiff,
     rollback::Rollback,
     ValueHasher,
@@ -273,9 +272,9 @@ impl Store {
     /// updated values.
     pub fn commit(
         &self,
-        value_tx: ValueTransaction,
+        value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
-        updated_pages: merkle::UpdatedPages,
+        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))> + Send + 'static,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -296,14 +295,19 @@ impl Store {
 /// An atomic transaction on raw key/value pairs to be applied against the store
 /// with [`Store::commit`].
 pub struct ValueTransaction {
-    batch: Vec<(KeyPath, beatree::ValueChange)>,
+    batch: Vec<(beatree::Key, beatree::ValueChange)>,
 }
 
 impl ValueTransaction {
     /// Write a value to flat storage.
-    pub fn write_value<T: ValueHasher>(&mut self, path: KeyPath, value: Option<Vec<u8>>) {
+    pub fn write_value<T: ValueHasher>(&mut self, path: beatree::Key, value: Option<Vec<u8>>) {
         self.batch
             .push((path, beatree::ValueChange::from_option::<T>(value)))
+    }
+
+    /// Iterate all the changed values.
+    pub fn into_iter(self) -> impl Iterator<Item = (beatree::Key, beatree::ValueChange)> {
+        self.batch.into_iter()
     }
 }
 
@@ -315,11 +319,6 @@ pub struct MerkleTransaction {
 }
 
 impl MerkleTransaction {
-    /// Reserve space for the given number of written pages.
-    pub fn reserve(&mut self, n: usize) {
-        self.new_pages.reserve(n);
-    }
-
     /// Write a page to storage in its entirety.
     pub fn write_page(
         &mut self,

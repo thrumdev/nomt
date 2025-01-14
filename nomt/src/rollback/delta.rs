@@ -5,7 +5,7 @@ use std::{
 };
 
 /// A delta that should be applied to reverse a commit.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Delta {
     /// This map contains the prior value for each key that was written by the commit this delta
     /// reverses. `None` indicates that the key did not exist before the commit.
