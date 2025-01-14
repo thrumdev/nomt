@@ -16,6 +16,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::overlay::LiveOverlay;
 use crossbeam::channel::Sender;
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
@@ -127,8 +128,12 @@ impl Rollback {
     }
 
     /// Begin a rollback delta.
-    pub fn delta_builder(&self, store: &crate::Store) -> ReverseDeltaBuilder {
-        self.delta_builder_inner(StoreLoadValueAsync::new(store))
+    pub fn delta_builder(
+        &self,
+        store: &crate::Store,
+        overlay: &LiveOverlay,
+    ) -> ReverseDeltaBuilder {
+        self.delta_builder_inner(StoreLoadValueAsync::new(store, overlay.clone()))
     }
 
     // generality is primarily for testing.
