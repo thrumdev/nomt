@@ -627,6 +627,13 @@ impl Session {
     /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
     pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
+        if let Some(value_change) = self
+            .overlay
+            .as_ref()
+            .and_then(|overlay| overlay.value(&path))
+        {
+            return Ok(value_change.as_option().map(|v| v.to_vec()));
+        }
         self.store.load_value(path)
     }
 
