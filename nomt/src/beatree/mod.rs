@@ -203,10 +203,10 @@ impl Tree {
     /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
     // There might be some temptation to unify this with prepare_sync, but this should not be done
     // because in the future sync and commit will be called on different threads at different times.
-    fn commit(shared: &Arc<RwLock<Shared>>, changeset: Vec<(Key, ValueChange)>) {
-        if changeset.is_empty() {
-            return;
-        }
+    fn commit(
+        shared: &Arc<RwLock<Shared>>,
+        changeset: impl IntoIterator<Item = (Key, ValueChange)>,
+    ) {
         let mut inner = shared.write();
         let staging = &mut inner.primary_staging;
         for (key, value) in changeset {
@@ -423,7 +423,10 @@ impl SyncController {
     /// Accepts a list of changes to be committed to the btree.
     ///
     /// Non-blocking.
-    pub fn begin_sync(&mut self, changeset: Vec<(Key, ValueChange)>) {
+    pub fn begin_sync(
+        &mut self,
+        changeset: impl IntoIterator<Item = (Key, ValueChange)> + Send + 'static,
+    ) {
         let inner = self.inner.clone();
         self.inner.sync.tp.execute(move || {
             Tree::commit(&inner.shared, changeset);

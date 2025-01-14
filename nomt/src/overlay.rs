@@ -52,8 +52,23 @@ impl Overlay {
         }
     }
 
+    /// Get the merkle page changes associated uniquely with this overlay.
+    pub(super) fn page_changes(&self) -> &HashMap<PageId, (Page, PageDiff)> {
+        &self.inner.data.pages
+    }
+
+    /// Get the merkle page changes associated uniquely with this overlay.
+    pub(super) fn value_changes(&self) -> &HashMap<KeyPath, ValueChange> {
+        &self.inner.data.values
+    }
+
+    /// Get the rollback delta associated uniquely with this overlay.
+    pub(super) fn rollback_delta(&self) -> Option<&crate::rollback::Delta> {
+        self.inner.rollback_delta.as_ref()
+    }
+
     /// Mark the overlay as committed and return a marker.
-    pub(super) fn commit(self) -> OverlayMarker {
+    pub(super) fn commit(&self) -> OverlayMarker {
         let status = self.inner.data.status.clone();
         status.commit();
         OverlayMarker(status)
@@ -67,6 +82,7 @@ struct OverlayInner {
     seqn: u64,
     // ordered by recency.
     ancestor_data: Vec<Weak<Data>>,
+    rollback_delta: Option<crate::rollback::Delta>,
 }
 
 /// A marker indicating the overlay uniquely, until dropped. Used to enforce commit order.
@@ -326,6 +342,7 @@ impl LiveOverlay {
         root: Node,
         page_changes: HashMap<PageId, (Page, PageDiff)>,
         value_changes: HashMap<KeyPath, ValueChange>,
+        rollback_delta: Option<crate::rollback::Delta>,
     ) -> Overlay {
         let new_seqn = self.parent.as_ref().map_or(0, |p| p.seqn + 1);
 
@@ -361,6 +378,7 @@ impl LiveOverlay {
                 }),
                 seqn: new_seqn,
                 ancestor_data,
+                rollback_delta,
             }),
         }
     }

@@ -1,7 +1,6 @@
 use crate::{
     bitbox::BucketIndex,
     io::{page_pool::FatPage, PagePool, PAGE_SIZE},
-    merkle::UpdatedPages,
     metrics::{Metric, Metrics},
     page_diff::PageDiff,
     page_region::PageRegion,
@@ -46,8 +45,9 @@ pub struct PageMut {
 }
 
 impl PageMut {
-    /// Freeze the page.
-    pub fn freeze(self) -> Page {
+    /// Freeze the page. Provide the page ID it will be labeled with.
+    pub fn freeze(mut self, page_id: &PageId) -> Page {
+        self.set_page_id(page_id);
         Page {
             inner: self.inner.map(Arc::new),
         }
@@ -347,7 +347,7 @@ impl PageCache {
     ) {
         let shard_index = match self.shard_index_for(&page_id) {
             None => {
-                self.shared.root_page.write().page_data = page.freeze().inner;
+                self.shared.root_page.write().page_data = page.freeze(&ROOT_PAGE_ID).inner;
                 return;
             }
             Some(i) => i,
@@ -395,12 +395,9 @@ impl PageCache {
     /// This returns a set of outdated pages which can be dropped outside of the critical path.
     pub fn absorb_and_populate_transaction(
         &self,
-        updated_pages: UpdatedPages,
+        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))>,
         tx: &mut MerkleTransaction,
     ) -> Vec<Option<Arc<FatPage>>> {
-        let n_pages = updated_pages.count();
-        tx.reserve(n_pages);
-
         let mut apply_page = |page_id,
                               bucket: &mut Option<BucketIndex>,
                               page_data: Option<&Arc<FatPage>>,
@@ -431,51 +428,34 @@ impl PageCache {
             .map(|s| s.locked.lock())
             .collect::<Vec<_>>();
 
-        let mut deferred_drop = Vec::with_capacity(n_pages);
+        let mut deferred_drop = Vec::new();
 
-        for mut updated_page in updated_pages {
-            // Pages must store their ID before being written out. Set it here.
-            updated_page.page.set_page_id(&updated_page.page_id);
-
-            if updated_page.page_id == ROOT_PAGE_ID {
+        for (page_id, (page, page_diff)) in updated_pages {
+            if page_id == ROOT_PAGE_ID {
                 let mut root_page = self.shared.root_page.write();
                 let root_page = &mut *root_page;
                 // update the cached page data.
-                let old =
-                    std::mem::replace(&mut root_page.page_data, updated_page.page.freeze().inner);
+                let old = std::mem::replace(&mut root_page.page_data, page.inner);
                 deferred_drop.push(old);
 
                 let page_data = &root_page.page_data;
                 let bucket = &mut root_page.bucket_index;
-                apply_page(
-                    updated_page.page_id,
-                    bucket,
-                    page_data.as_ref(),
-                    updated_page.diff,
-                );
+                apply_page(page_id, bucket, page_data.as_ref(), page_diff);
                 continue;
             }
 
             // UNWRAP: all pages which are not the root page are in a shard.
-            let shard_index = self.shard_index_for(&updated_page.page_id).unwrap();
+            let shard_index = self.shard_index_for(&page_id).unwrap();
 
             let cache_entry = shard_guards[shard_index]
                 .cached
-                .get_or_insert_mut(updated_page.page_id.clone(), || {
-                    CacheEntry::init(None, None)
-                });
+                .get_or_insert_mut(page_id.clone(), || CacheEntry::init(None, None));
 
-            let old =
-                std::mem::replace(&mut cache_entry.page_data, updated_page.page.freeze().inner);
+            let old = std::mem::replace(&mut cache_entry.page_data, page.inner);
             deferred_drop.push(old);
 
             let bucket = &mut cache_entry.bucket_index;
-            apply_page(
-                updated_page.page_id,
-                bucket,
-                cache_entry.page_data.as_ref(),
-                updated_page.diff,
-            );
+            apply_page(page_id, bucket, cache_entry.page_data.as_ref(), page_diff);
         }
 
         deferred_drop

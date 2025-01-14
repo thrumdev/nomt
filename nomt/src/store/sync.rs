@@ -1,8 +1,16 @@
+use nomt_core::page_id::PageId;
+
 use super::{
     meta::{self, Meta},
-    MerkleTransaction, Shared, ValueTransaction,
+    MerkleTransaction, Shared,
 };
-use crate::{beatree, bitbox, merkle, options::PanicOnSyncMode, page_cache::PageCache, rollback};
+use crate::{
+    beatree, bitbox,
+    options::PanicOnSyncMode,
+    page_cache::{Page, PageCache},
+    page_diff::PageDiff,
+    rollback,
+};
 
 pub struct Sync {
     pub(crate) sync_seqn: u32,
@@ -29,12 +37,12 @@ impl Sync {
     pub fn sync(
         &mut self,
         shared: &Shared,
-        value_tx: ValueTransaction,
+        value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
         rollback: Option<rollback::Rollback>,
         page_cache: PageCache,
-        updated_pages: merkle::UpdatedPages,
+        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))> + Send + 'static,
     ) -> anyhow::Result<()> {
         self.sync_seqn += 1;
         let sync_seqn = self.sync_seqn;
@@ -48,7 +56,7 @@ impl Sync {
             new_pages: Vec::new(),
         };
         bitbox_sync.begin_sync(sync_seqn, page_cache, merkle_tx, updated_pages);
-        beatree_sync.begin_sync(value_tx.batch);
+        beatree_sync.begin_sync(value_tx);
         if let Some(ref mut rollback) = rollback_sync {
             rollback.begin_sync();
         }

@@ -14,8 +14,7 @@ use threadpool::ThreadPool;
 
 use crate::{
     io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
-    merkle,
-    page_cache::PageCache,
+    page_cache::{Page, PageCache},
     page_diff::PageDiff,
     store::MerkleTransaction,
 };
@@ -229,7 +228,7 @@ impl SyncController {
         sync_seqn: u32,
         page_cache: PageCache,
         mut merkle_tx: MerkleTransaction,
-        updated_pages: merkle::UpdatedPages,
+        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))> + Send + 'static,
     ) {
         let page_pool = self.db.shared.page_pool.clone();
         let bitbox = self.db.clone();
