@@ -25,6 +25,8 @@ pub struct Options {
     /// The maximum size of the leaf cache specified in MiB, rounded down
     /// to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
     pub(crate) leaf_cache_size: usize,
+    /// TODO: docs
+    pub(crate) iopoll: bool,
 }
 
 impl Options {
@@ -48,6 +50,7 @@ impl Options {
             preallocate_ht: true,
             page_cache_size: 256,
             leaf_cache_size: 256,
+            iopoll: false,
         }
     }
 

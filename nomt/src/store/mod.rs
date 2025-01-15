@@ -65,12 +65,11 @@ impl Store {
         let db_dir_fd = Arc::new(db_dir_fd);
         let flock = flock::Flock::lock(&o.path, ".lock")?;
 
+        let mut iopoll = o.iopoll;
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
                 let is_tmpfs = crate::sys::linux::tmpfs_check(&db_dir_fd);
-                let iopoll = !is_tmpfs;
-            } else {
-                let iopoll = true;
+                iopoll = iopoll && !is_tmpfs;
             }
         }
 

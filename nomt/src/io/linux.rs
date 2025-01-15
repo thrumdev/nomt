@@ -41,6 +41,7 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
         ring_builder.setup_iopoll();
     }
     let mut ring = ring_builder
+        .setup_sqpoll(50)
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 
