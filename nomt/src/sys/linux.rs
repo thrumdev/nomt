@@ -4,17 +4,32 @@ use super::unix::cvt_r;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 
-/// Returns true if the file is on a tmpfs filesystem.
-/// False if it's not or the check fails.
-pub fn tmpfs_check(file: &File) -> bool {
+/// Returns an instance of `FsCheck` for the given file.
+pub fn fs_check(file: &File) -> std::io::Result<FsCheck> {
     unsafe {
         // SAFETY: unsafe because ffi call. This should be IO-safe because the file is passed
         //         by reference. This should be memory-safe because the `statfs` struct is
         //         zeroed and the `f_type` field should be set by the ffi call.
         let mut stat: libc::statfs = std::mem::zeroed();
-        cvt_r(|| libc::fstatfs(file.as_raw_fd(), &mut stat))
-            .map(|_| stat.f_type == libc::TMPFS_MAGIC)
-            .unwrap_or(false)
+        cvt_r(|| libc::fstatfs(file.as_raw_fd(), &mut stat))?;
+        Ok(FsCheck { stat })
+    }
+}
+
+/// A utility struct to get filesystem information at a given path.
+pub struct FsCheck {
+    stat: libc::statfs,
+}
+
+impl FsCheck {
+    /// Returns true if the filesystem is tmpfs.
+    pub fn is_tmpfs(&self) -> bool {
+        self.stat.f_type == libc::TMPFS_MAGIC
+    }
+
+    /// Returns true if the filesystem is backed by FUSE.
+    pub fn is_fuse(&self) -> bool {
+        self.stat.f_type == libc::FUSE_SUPER_MAGIC
     }
 }
 

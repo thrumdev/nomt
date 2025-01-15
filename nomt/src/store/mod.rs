@@ -71,8 +71,20 @@ impl Store {
 
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
-                let is_tmpfs = crate::sys::linux::tmpfs_check(&db_dir_fd);
-                let iopoll = !is_tmpfs;
+                // iopoll does not play nice with FUSE and tmpfs. A symptom is ENOSUPP.
+                // O_DIRECT is not supported on tmpfs.
+                let iopoll: bool;
+                let o_direct: bool;
+                match crate::sys::linux::fs_check(&db_dir_fd) {
+                    Ok(fsck) => {
+                        iopoll = !(fsck.is_fuse() || fsck.is_tmpfs());
+                        o_direct = !fsck.is_tmpfs();
+                    },
+                    Err(_) => {
+                        iopoll = false;
+                        o_direct = false;
+                    },
+                }
             } else {
                 let iopoll = true;
             }
@@ -84,7 +96,7 @@ impl Store {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            if !is_tmpfs {
+            if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
             options.open(&o.path.join("meta"))?
@@ -94,7 +106,7 @@ impl Store {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            if !is_tmpfs {
+            if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
             Arc::new(options.open(&o.path.join("ln"))?)
@@ -103,7 +115,7 @@ impl Store {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            if !is_tmpfs {
+            if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
             Arc::new(options.open(&o.path.join("bbn"))?)
@@ -112,7 +124,7 @@ impl Store {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            if !is_tmpfs {
+            if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
             options.open(&o.path.join("ht"))?
@@ -121,7 +133,7 @@ impl Store {
             let options = &mut OpenOptions::new();
             options.read(true).write(true);
             #[cfg(target_os = "linux")]
-            if !is_tmpfs {
+            if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
             options.open(&o.path.join("wal"))?

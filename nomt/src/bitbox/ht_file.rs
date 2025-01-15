@@ -108,7 +108,7 @@ fn resize_and_prealloc(ht_file: &File, len: u64, preallocate: bool) -> std::io::
             // To preallocate on Linux systems, try using fallocate with ZERO_RANGE first as it's more
             // efficient. fallocate sets the file size as well, so ftruncate (aka file.set_len()) is
             // not needed.
-            if crate::sys::linux::tmpfs_check(ht_file) {
+            if crate::sys::linux::fs_check(ht_file).map_or(false, |fsck| fsck.is_tmpfs()) {
                 // Skip preallocation for tmpfs. It doesn't support fallocate and it's
                 // memory-backed anyway. ftruncate and bail.
                 ht_file.set_len(len)?;
