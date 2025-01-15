@@ -77,7 +77,12 @@ pub fn chunk(
 
         // write the page.
         let command = IoCommand {
-            kind: IoKind::Write(leaf_writer.store_fd(), pn.0 as u64, page),
+            kind: IoKind::Write(
+                crate::io::FileId::Ln,
+                leaf_writer.store_fd(),
+                pn.0 as u64,
+                page,
+            ),
             user_data: 0,
         };
         io_handle.send(command).expect("I/O Pool Down");

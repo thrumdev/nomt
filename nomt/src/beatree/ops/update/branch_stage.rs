@@ -419,7 +419,7 @@ impl super::branch_updater::HandleNewBranch for NewBranchHandler {
         let page = bbn.page();
         self.io_handle
             .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
+                kind: IoKind::WriteRaw(crate::io::FileId::Bbn, fd, page_number.0 as u64, page),
                 user_data: 0,
             })
             .expect("I/O Pool Down");

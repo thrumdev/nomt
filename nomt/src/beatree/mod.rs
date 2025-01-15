@@ -96,9 +96,21 @@ impl Tree {
         let ln_bump = PageNumber(ln_bump);
         let bbn_bump = PageNumber(bbn_bump);
 
-        let leaf_store = Store::open(&page_pool, ln_file.clone(), ln_bump, ln_freelist_pn)?;
+        let leaf_store = Store::open(
+            &page_pool,
+            ln_file.clone(),
+            crate::io::FileId::Ln,
+            ln_bump,
+            ln_freelist_pn,
+        )?;
 
-        let bbn_store = Store::open(&page_pool, bbn_file.clone(), bbn_bump, bbn_freelist_pn)?;
+        let bbn_store = Store::open(
+            &page_pool,
+            bbn_file.clone(),
+            crate::io::FileId::Bbn,
+            bbn_bump,
+            bbn_freelist_pn,
+        )?;
 
         let bbn_freelist_tracked = bbn_store.all_tracked_freelist_pages();
         let index = ops::reconstruct(

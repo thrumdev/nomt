@@ -21,19 +21,28 @@ pub const PAGE_SIZE: usize = 4096;
 pub use page_pool::{FatPage, PagePool};
 
 pub enum IoKind {
-    Read(RawFd, u64, FatPage),
-    Write(RawFd, u64, FatPage),
-    WriteArc(RawFd, u64, Arc<FatPage>),
-    WriteRaw(RawFd, u64, Page),
+    Read(FileId, RawFd, u64, FatPage),
+    Write(FileId, RawFd, u64, FatPage),
+    WriteArc(FileId, RawFd, u64, Arc<FatPage>),
+    WriteRaw(FileId, RawFd, u64, Page),
+}
+
+#[derive(Clone, Copy)]
+pub enum FileId {
+    Meta = 0,
+    Wal = 1,
+    Ht = 2,
+    Bbn = 3,
+    Ln = 4,
 }
 
 impl fmt::Debug for IoKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IoKind::Read(fd, pn, _) => write!(f, "Read(fd={}, pn={})", fd, pn),
-            IoKind::Write(fd, pn, _) => write!(f, "Write(fd={}, pn={})", fd, pn),
-            IoKind::WriteArc(fd, pn, _) => write!(f, "WriteArc(fd={}, pn={})", fd, pn),
-            IoKind::WriteRaw(fd, pn, _) => write!(f, "WriteRaw(fd={}, pn={})", fd, pn),
+            IoKind::Read(_, fd, pn, _) => write!(f, "Read(fd={}, pn={})", fd, pn),
+            IoKind::Write(_, fd, pn, _) => write!(f, "Write(fd={}, pn={})", fd, pn),
+            IoKind::WriteArc(_, fd, pn, _) => write!(f, "WriteArc(fd={}, pn={})", fd, pn),
+            IoKind::WriteRaw(_, fd, pn, _) => write!(f, "WriteRaw(fd={}, pn={})", fd, pn),
         }
     }
 }
@@ -47,9 +56,27 @@ pub enum IoKindResult {
 impl IoKind {
     pub fn unwrap_buf(self) -> FatPage {
         match self {
-            IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
-            IoKind::WriteArc(_, _, _) => panic!("attempted to extract owned buf from write_arc"),
-            IoKind::WriteRaw(_, _, _) => panic!("attempted to extract buf from write_raw"),
+            IoKind::Read(_, _, _, buf) | IoKind::Write(_, _, _, buf) => buf,
+            IoKind::WriteArc(_, _, _, _) => panic!("attempted to extract owned buf from write_arc"),
+            IoKind::WriteRaw(_, _, _, _) => panic!("attempted to extract buf from write_raw"),
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        match self {
+            IoKind::Read(id, _, _, _) => *id as u32 as usize,
+            IoKind::Write(id, _, _, _) => *id as u32 as usize,
+            IoKind::WriteArc(id, _, _, _) => *id as u32 as usize,
+            IoKind::WriteRaw(id, _, _, _) => *id as u32 as usize,
+        }
+    }
+
+    pub fn fd(&self) -> i32 {
+        match self {
+            IoKind::Read(_, fd, _, _) => *fd,
+            IoKind::Write(_, fd, _, _) => *fd,
+            IoKind::WriteArc(_, fd, _, _) => *fd,
+            IoKind::WriteRaw(_, fd, _, _) => *fd,
         }
     }
 
@@ -62,7 +89,7 @@ impl IoKind {
             // However, as each read operation follows a write operation,
             // there should be no unexpected end-of-file that is not aligned with PAGE_SIZE
             // when all previous writes have succeeded.
-            IoKind::Read(_, _, _) if res == 0 => IoKindResult::Ok,
+            IoKind::Read(_, _, _, _) if res == 0 => IoKindResult::Ok,
             // pread and pwrite return the number of bytes read or written
             _ if res == PAGE_SIZE as isize => IoKindResult::Ok,
             _ if res == -1 => {

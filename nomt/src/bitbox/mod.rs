@@ -447,7 +447,12 @@ impl PageLoader {
 
         let page = io_handle.page_pool().alloc_fat_page();
         let command = IoCommand {
-            kind: IoKind::Read(self.shared.ht_fd.as_raw_fd(), data_page_index, page),
+            kind: IoKind::Read(
+                io::FileId::Ht,
+                self.shared.ht_fd.as_raw_fd(),
+                data_page_index,
+                page,
+            ),
             user_data,
         };
 

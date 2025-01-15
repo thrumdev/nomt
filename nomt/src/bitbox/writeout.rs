@@ -39,7 +39,7 @@ pub(super) fn write_ht(
     for (pn, page) in ht {
         io_handle
             .send(IoCommand {
-                kind: IoKind::WriteArc(ht_fd.as_raw_fd(), pn, page),
+                kind: IoKind::WriteArc(crate::io::FileId::Ht, ht_fd.as_raw_fd(), pn, page),
                 user_data: 0,
             })
             .unwrap();

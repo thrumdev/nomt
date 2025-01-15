@@ -15,7 +15,12 @@ pub fn submit_freelist_write(
     for (pn, page) in free_list_pages {
         io_handle
             .send(crate::io::IoCommand {
-                kind: crate::io::IoKind::Write(store.store_fd(), pn.0 as u64, page),
+                kind: crate::io::IoKind::Write(
+                    store.store_file_id(),
+                    store.store_fd(),
+                    pn.0 as u64,
+                    page,
+                ),
                 user_data: 0,
             })
             .unwrap();

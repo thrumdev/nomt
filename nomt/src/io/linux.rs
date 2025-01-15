@@ -49,6 +49,10 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
     let (submitter, mut submit_queue, mut complete_queue) = ring.split();
     let mut retries = VecDeque::<IoPacket>::new();
 
+    const N_FILES: usize = 5;
+    let mut registered_files = [false; N_FILES];
+    submitter.register_files_sparse(N_FILES as u32).unwrap();
+
     loop {
         // 1. process completions.
         if !pending.is_empty() {
@@ -109,6 +113,13 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
                 }
             };
 
+            let id = next_io.command.kind.id();
+            if !registered_files[id] {
+                let fd = next_io.command.kind.fd();
+                registered_files[id] = true;
+                submitter.register_files_update(id as u32, &[fd]).unwrap();
+            }
+
             to_submit = true;
             let pending_index = pending.insert(PendingIo {
                 command: next_io.command,
@@ -135,24 +146,24 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
 
 fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
     match command.kind {
-        IoKind::Read(fd, page_index, ref mut page) => {
-            opcode::Read::new(types::Fd(fd), page.as_mut_ptr(), PAGE_SIZE as u32)
+        IoKind::Read(id, fd, page_index, ref mut page) => {
+            opcode::Read::new(types::Fixed(id as u32), page.as_mut_ptr(), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-        IoKind::Write(fd, page_index, ref page) => {
-            opcode::Write::new(types::Fd(fd), page.as_ptr(), PAGE_SIZE as u32)
+        IoKind::Write(id, fd, page_index, ref page) => {
+            opcode::Write::new(types::Fixed(id as u32), page.as_ptr(), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-        IoKind::WriteArc(fd, page_index, ref page) => {
+        IoKind::WriteArc(id, fd, page_index, ref page) => {
             let page: &[u8] = &*page;
-            opcode::Write::new(types::Fd(fd), page.as_ptr(), PAGE_SIZE as u32)
+            opcode::Write::new(types::Fixed(id as u32), page.as_ptr(), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-        IoKind::WriteRaw(fd, page_index, ref page) => {
-            opcode::Write::new(types::Fd(fd), page.as_ptr(), PAGE_SIZE as u32)
+        IoKind::WriteRaw(id, fd, page_index, ref page) => {
+            opcode::Write::new(types::Fixed(id as u32), page.as_ptr(), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }

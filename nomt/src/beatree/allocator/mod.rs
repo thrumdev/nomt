@@ -1,4 +1,4 @@
-use crate::io::{self, page_pool::FatPage, IoCommand, IoKind, PagePool, PAGE_SIZE};
+use crate::io::{self, page_pool::FatPage, FileId, IoCommand, IoKind, PagePool, PAGE_SIZE};
 
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{ArcMutexGuard, Mutex};
@@ -44,6 +44,7 @@ pub const FREELIST_EMPTY: PageNumber = PageNumber(0);
 #[derive(Clone)]
 pub struct Store {
     file: Arc<File>,
+    file_id: FileId,
     sync: Arc<Mutex<StoreSync>>,
 }
 
@@ -52,6 +53,7 @@ impl Store {
     pub fn open(
         page_pool: &PagePool,
         file: Arc<File>,
+        file_id: FileId,
         bump: PageNumber,
         free_list_head: Option<PageNumber>,
     ) -> anyhow::Result<Self> {
@@ -65,6 +67,7 @@ impl Store {
 
         Ok(Store {
             file,
+            file_id,
             sync: Arc::new(Mutex::new(sync)),
         })
     }
@@ -78,7 +81,7 @@ impl Store {
     pub fn io_command(&self, page_pool: &PagePool, pn: PageNumber, user_data: u64) -> IoCommand {
         let page = page_pool.alloc_fat_page();
         IoCommand {
-            kind: IoKind::Read(self.file.as_raw_fd(), pn.0 as u64, page),
+            kind: IoKind::Read(self.file_id, self.file.as_raw_fd(), pn.0 as u64, page),
             user_data,
         }
     }
@@ -123,6 +126,11 @@ impl Store {
     /// Get the raw FD of the store.
     pub fn store_fd(&self) -> RawFd {
         self.file.as_raw_fd()
+    }
+
+    /// Get the file id of the store.
+    pub fn store_file_id(&self) -> FileId {
+        self.file_id
     }
 }
 
