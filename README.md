@@ -25,6 +25,7 @@ NOMT: Project Root.
 |--<a href="./nomt">nomt</a>: Implementation of the NOMT database.
 |──<a href="./torture">torture</a>: Extensive testing suite for NOMT.
 |--<a href="./trickfs">trickfs</a>: A FUSE filesystem aiding deeper testing. Experimental.
+│   ├──<a href="./trickfs/trickmnt">trickmnt</a>: A tool that allows mounting trickfs.
 </pre>
 
 ## Architecture
