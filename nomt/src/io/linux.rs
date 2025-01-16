@@ -41,8 +41,14 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
         ring_builder.setup_iopoll();
     }
     let mut ring = ring_builder
-        .setup_coop_taskrun() // 5.19.
-        //.setup_sqpoll(50)
+        // makese the `task_work` to happen when there is context swithc
+        // avoiding interrupt to preempt user space and do things
+        //.setup_coop_taskrun() // Available since 5.19.
+        //.setup_sqpoll(10) // Available since 5.13
+        .setup_single_issuer() // Available since 6.0
+        // `task work` is handled explicitly when an application waits for completions
+        .setup_defer_taskrun() // Available since 6.1.
+        //.setup_taskrun_flag() // Available since 5.19
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 
@@ -56,6 +62,7 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
     loop {
         // 1. process completions.
         if !pending.is_empty() {
+            let _ = submitter.submit_and_wait(1).unwrap();
             complete_queue.sync();
             while let Some(completion_event) = complete_queue.next() {
                 if pending.get(completion_event.user_data() as usize).is_none() {
@@ -137,7 +144,6 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
         if to_submit {
             submit_queue.sync();
         }
-
         let wait = if pending.len() == MAX_IN_FLIGHT { 1 } else { 0 };
 
         submitter.submit_and_wait(wait).unwrap();
