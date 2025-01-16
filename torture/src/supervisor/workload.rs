@@ -1,18 +1,19 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use imbl::OrdMap;
 use rand::prelude::*;
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
 
-use crate::message::KeyValueChange;
-
-use super::{
-    comms,
-    controller::{self, SpawnedAgentController},
+use crate::{
+    message::KeyValueChange,
+    supervisor::{
+        cli::WorkloadParams,
+        comms,
+        controller::{self, SpawnedAgentController},
+    },
 };
 
 /// Biases is configuration for the workload generator. Its values are used to bias the probability
@@ -30,11 +31,11 @@ struct Biases {
 }
 
 impl Biases {
-    fn new() -> Self {
+    fn new(delete: u8, overflow: u8, new_key: u8) -> Self {
         Self {
-            delete: 0.1,
-            overflow: 0.1,
-            new_key: 0.5,
+            delete: (delete as f64) / 100.0,
+            overflow: (overflow as f64) / 100.0,
+            new_key: (new_key as f64) / 100.0,
         }
     }
 }
@@ -62,6 +63,11 @@ impl Snapshot {
 struct WorkloadState {
     rng: rand_pcg::Pcg64,
     biases: Biases,
+    /// The number of items that each commit will contain in its changeset.
+    size: usize,
+    /// If true, the size of each commit will be within 0 and self.size,
+    /// otherwise it will always be workload-size.
+    random_size: bool,
     /// The values that were committed.
     committed: Snapshot,
     /// All keys that were generated during this run.
@@ -72,10 +78,12 @@ struct WorkloadState {
 }
 
 impl WorkloadState {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, biases: Biases, size: usize, random_size: bool) -> Self {
         Self {
             rng: rand_pcg::Pcg64::seed_from_u64(seed),
-            biases: Biases::new(),
+            biases,
+            size,
+            random_size,
             committed: Snapshot::empty(),
             mentions: Vec::with_capacity(32 * 1024),
         }
@@ -91,7 +99,11 @@ impl WorkloadState {
         let mut snapshot = self.committed.clone();
         snapshot.sync_seqn += 1;
 
-        let num_changes = self.rng.gen_range(0..10000);
+        let num_changes = if self.random_size {
+            self.rng.gen_range(0..self.size)
+        } else {
+            self.size
+        };
         let mut changes = Vec::with_capacity(num_changes);
 
         // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
@@ -175,7 +187,7 @@ pub struct Workload {
     /// Initially `None`.
     agent: Option<SpawnedAgentController>,
     /// How many iterations the workload should perform.
-    workload_size: usize,
+    iterations: usize,
     /// The current state of the workload.
     state: WorkloadState,
     /// The identifier of the workload. Useful for debugging.
@@ -185,7 +197,12 @@ pub struct Workload {
 }
 
 impl Workload {
-    pub fn new(seed: u64, workdir: TempDir, workload_id: u64) -> Self {
+    pub fn new(
+        seed: u64,
+        workdir: TempDir,
+        workload_params: &WorkloadParams,
+        workload_id: u64,
+    ) -> Self {
         // TODO: Make the workload size configurable and more sophisticated.
         //
         // Right now the workload size is a synonym for the number of iterations. We probably
@@ -193,13 +210,22 @@ impl Workload {
         // testing the "edging" scenario where the supervisor tries to stay below the maximum
         // number of items in the database occasionally going over the limit expecting proper
         // handling of the situation.
-        let workload_size = 50;
-        let mut state = WorkloadState::new(seed);
+        let workload_biases = Biases::new(
+            workload_params.delete,
+            workload_params.overflow,
+            workload_params.new_key,
+        );
+        let mut state = WorkloadState::new(
+            seed,
+            workload_biases,
+            workload_params.size,
+            workload_params.random_size,
+        );
         let bitbox_seed = state.gen_bitbox_seed();
         Self {
             workdir,
             agent: None,
-            workload_size,
+            iterations: workload_params.iterations,
             state,
             workload_id,
             bitbox_seed,
@@ -223,7 +249,7 @@ impl Workload {
 
     async fn run_inner(&mut self) -> Result<()> {
         self.spawn_new_agent().await?;
-        for iterno in 0..self.workload_size {
+        for iterno in 0..self.iterations {
             self.run_iteration()
                 .instrument(trace_span!("iteration", iterno))
                 .await?;

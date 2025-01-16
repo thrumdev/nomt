@@ -4,7 +4,7 @@ use std::{path::PathBuf, process::exit};
 
 use anyhow::Result;
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, WorkloadParams};
 use tokio::{
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle},
@@ -31,7 +31,12 @@ pub async fn run() -> Result<()> {
     // Create a cancellation token and spawn the control loop task passing the token to it and
     // wait until the control loop task finishes or the user interrupts it.
     let ct = CancellationToken::new();
-    let control_loop_jh = task::spawn(control_loop(ct.clone(), seed, cli.flag_limit));
+    let control_loop_jh = task::spawn(control_loop(
+        ct.clone(),
+        seed,
+        cli.workload_params,
+        cli.flag_limit,
+    ));
     match join_interruptable(control_loop_jh, ct).await {
         ExitReason::Finished => {
             exit(0);
@@ -156,6 +161,7 @@ pub struct InvestigationFlag {
 async fn run_workload(
     cancel_token: CancellationToken,
     seed: u64,
+    workload_params: &WorkloadParams,
     workload_id: u64,
 ) -> Result<Option<InvestigationFlag>> {
     // This creates a temp dir for the working dir of the workload.
@@ -164,7 +170,7 @@ async fn run_workload(
         .suffix(format!("-workload-{}", workload_id).as_str())
         .tempdir()
         .expect("Failed to create a temp dir");
-    let mut workload = Workload::new(seed, workdir, workload_id);
+    let mut workload = Workload::new(seed, workdir, workload_params, workload_id);
     let result = workload.run(cancel_token).await;
     match result {
         Ok(()) => Ok(None),
@@ -191,6 +197,7 @@ fn print_flag(flag: &InvestigationFlag) {
 async fn control_loop(
     cancel_token: CancellationToken,
     mut seed: u64,
+    workload_params: WorkloadParams,
     flag_num_limit: usize,
 ) -> Result<()> {
     let mut flags = Vec::new();
@@ -201,7 +208,7 @@ async fn control_loop(
         let workload_id = workload_cnt;
         workload_cnt += 1;
         seed += 1;
-        let maybe_flag = run_workload(cancel_token.clone(), seed, workload_id)
+        let maybe_flag = run_workload(cancel_token.clone(), seed, &workload_params, workload_id)
             .instrument(trace_span!("workload", workload_id))
             .await?;
         if let Some(flag) = maybe_flag {
