@@ -50,58 +50,66 @@ pub async fn run(input: UnixStream) -> Result<()> {
         // concurrent access to NOMT (only one session could be created at once anyway).
         let Envelope { reqno, message } = stream.recv().await?;
         match message {
-            ToAgent::Commit(commit) => {
-                if commit.should_crash {
-                    // TODO: implement this in the future.
-                    //
-                    // This seems to be a big feature. As of now, I envision it, as we either:
-                    //
-                    // 1. Launch a concurrent process that brings down the process (e.g. via `abort`) at
-                    //    some non-deterministic time in the future.
-                    // 2. Adjust the VFS settings so that it will crash at a specific moment. This might
-                    //    be some specific moment like writing to Meta or maybe writing to some part of HT.
-                    // 3. Introduce fail point to do the same.
+            ToAgent::Commit(CommitPayload {
+                changeset,
+                should_crash: Some(crash_time),
+            }) => {
+                // TODO: implement this in the future.
+                //
+                // This seems to be a big feature. As of now, I envision it, as we either:
+                //
+                // 1. Launch a concurrent process that brings down the process (e.g. via `abort`) at
+                //    some non-deterministic time in the future.
+                // 2. Adjust the VFS settings so that it will crash at a specific moment. This might
+                //    be some specific moment like writing to Meta or maybe writing to some part of HT.
+                // 3. Introduce fail point to do the same.
 
-                    // Ack first.
-                    stream
-                        .send(Envelope {
-                            reqno,
-                            message: ToSupervisor::Ack,
-                        })
-                        .await?;
+                // Ack first.
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Ack,
+                    })
+                    .await?;
 
-                    let barrier_1 = Arc::new(tokio::sync::Barrier::new(2));
-                    let barrier_2 = barrier_1.clone();
-                    let task_1 = tokio::spawn(async move {
-                        barrier_1.wait().await;
-                        // Wait for a random time and then abort.
-                        // TODO: reduce non-determinism by using the supervisor generated seed.
-                        let millis = rand::thread_rng().gen_range(0..400);
-                        sleep(Duration::from_millis(millis)).await;
-                        tracing::info!("aborting after {}ms", millis);
-                        std::process::abort();
-                    });
-                    let task_2 = tokio::spawn(async move {
-                        barrier_2.wait().await;
-                        let start = std::time::Instant::now();
-                        let _ = agent.commit(commit).await;
-                        let elapsed = start.elapsed();
-                        tracing::info!("commit took {:?}", elapsed);
-                        std::process::abort();
-                    });
-                    let _ = tokio::join!(task_1, task_2);
-                    // This is unreachable because either the process will abort due to a timed
-                    // abort or due to the commit finishing successfully (and then aborting).
-                    unreachable!();
-                } else {
-                    agent.commit(commit).await?;
-                    stream
-                        .send(Envelope {
-                            reqno,
-                            message: ToSupervisor::Ack,
-                        })
-                        .await?;
-                }
+                let barrier_1 = Arc::new(tokio::sync::Barrier::new(2));
+                let barrier_2 = barrier_1.clone();
+                let task_1 = tokio::spawn(async move {
+                    barrier_1.wait().await;
+                    // Wait for a random time and then abort.
+                    // TODO: reduce non-determinism by using the supervisor generated seed.
+                    let crash_time = Duration::from_nanos(crash_time);
+                    sleep(crash_time).await;
+                    tracing::info!("aborting after {}ms", crash_time.as_millis());
+                    std::process::abort();
+                });
+                let task_2 = tokio::spawn(async move {
+                    barrier_2.wait().await;
+                    let start = std::time::Instant::now();
+                    let _ = agent.commit(changeset).await;
+                    let elapsed = start.elapsed();
+                    tracing::info!("commit took {:?}", elapsed);
+                    std::process::abort();
+                });
+                let _ = tokio::join!(task_1, task_2);
+                // This is unreachable because either the process will abort due to a timed
+                // abort or due to the commit finishing successfully (and then aborting).
+                unreachable!();
+            }
+            ToAgent::Commit(CommitPayload {
+                changeset,
+                should_crash: None,
+            }) => {
+                let start = std::time::Instant::now();
+                agent.commit(changeset).await?;
+                let elapsed = start.elapsed();
+                tracing::info!("commit took {:?}", elapsed.as_millis());
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::CommitSuccessful(elapsed.as_nanos() as u64),
+                    })
+                    .await?;
             }
             ToAgent::Query(key) => {
                 trace!("query: {}", hex::encode(key));
@@ -192,10 +200,10 @@ impl Agent {
         })
     }
 
-    async fn commit(&mut self, commit: CommitPayload) -> Result<()> {
+    async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Result<()> {
         let session = self.nomt.begin_session();
-        let mut actuals = Vec::with_capacity(commit.changeset.len());
-        for change in commit.changeset {
+        let mut actuals = Vec::with_capacity(changeset.len());
+        for change in changeset {
             match change {
                 KeyValueChange::Insert(key, value) => {
                     actuals.push((key, nomt::KeyReadWrite::Write(Some(value))));
