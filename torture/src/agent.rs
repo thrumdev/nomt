@@ -84,7 +84,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     let task_2 = tokio::spawn(async move {
                         barrier_2.wait().await;
                         let start = std::time::Instant::now();
-                        let _ = agent.commit(commit);
+                        let _ = agent.commit(commit).await;
                         let elapsed = start.elapsed();
                         tracing::info!("commit took {:?}", elapsed);
                         std::process::abort();
@@ -94,7 +94,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     // abort or due to the commit finishing successfully (and then aborting).
                     unreachable!();
                 } else {
-                    agent.commit(commit)?;
+                    agent.commit(commit).await?;
                     stream
                         .send(Envelope {
                             reqno,
@@ -192,7 +192,7 @@ impl Agent {
         })
     }
 
-    fn commit(&mut self, commit: CommitPayload) -> Result<()> {
+    async fn commit(&mut self, commit: CommitPayload) -> Result<()> {
         let session = self.nomt.begin_session();
         let mut actuals = Vec::with_capacity(commit.changeset.len());
         for change in commit.changeset {
@@ -205,7 +205,9 @@ impl Agent {
                 }
             }
         }
-        self.nomt.update_and_commit(session, actuals)?;
+
+        tokio::task::block_in_place(|| self.nomt.update_and_commit(session, actuals))?;
+
         Ok(())
     }
 
