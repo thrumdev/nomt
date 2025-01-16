@@ -560,7 +560,11 @@ impl fuser::Filesystem for Trick {
         let content = &inode_data.content();
         if content.is_empty() {
             // The backing buffer has not yet been created. Let's just return an empty buffer.
-            if has_odirect(flags) {
+            #[cfg(target_os = "linux")]
+            let pageworth = has_odirect(flags);
+            #[cfg(not(target_os = "linux"))]
+            let pageworth = false;
+            if pageworth {
                 reply.data(&[0u8; 4096]);
             } else {
                 reply.data(&[]);
@@ -854,6 +858,7 @@ impl fuser::Filesystem for Trick {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn has_odirect(flags: i32) -> bool {
     (flags & libc::O_DIRECT) != 0
 }

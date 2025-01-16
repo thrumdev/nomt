@@ -17,7 +17,6 @@ use workload::Workload;
 mod cli;
 mod comms;
 mod controller;
-mod trickfs;
 mod workload;
 
 /// The entrypoint for the supervisor part of the program.
@@ -207,14 +206,9 @@ const NON_DETERMINISM_DISCLAIMER: &str = "torture is a non-deterministic fuzzer.
 async fn control_loop(
     cancel_token: CancellationToken,
     seed: u64,
-    mut workload_params: WorkloadParams,
+    workload_params: WorkloadParams,
     flag_num_limit: usize,
 ) -> Result<()> {
-    if workload_params.trickfs && !trickfs::is_supported() {
-        warn!("TrickFS is not supported on this system. Disabling.");
-        workload_params.trickfs = false;
-    }
-
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
     // TODO: Run workloads in parallel. Make the concurrency factor configurable.

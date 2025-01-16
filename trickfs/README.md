@@ -21,3 +21,9 @@ the following commands:
 sudo apt update
 sudo apt install libfuse3-dev libfuse-dev
 ```
+
+On macOS you may need to install osxfuse:
+
+```sh
+brew install macfuse
+```
