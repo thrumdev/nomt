@@ -62,4 +62,12 @@ pub struct WorkloadParams {
     #[clap(default_value = "false")]
     #[arg(long = "workload-random-size")]
     pub random_size: bool,
+
+    /// When exercising a new commit, the probability of causing it to crash.
+    ///
+    /// Accepted values are in the range of 0 to 100
+    #[clap(default_value = "20")]
+    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
+    #[arg(long = "workload-commit-crash")]
+    pub crash: u8,
 }
