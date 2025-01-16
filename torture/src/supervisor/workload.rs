@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
 
 use crate::{
-    message::KeyValueChange,
+    message::{KeyValueChange, ToSupervisor},
     supervisor::{
         cli::WorkloadParams,
         comms,
@@ -197,6 +197,9 @@ pub struct Workload {
     workload_id: u64,
     /// The seed for bitbox generated for this workload.
     bitbox_seed: [u8; 16],
+    /// Data collected to evaluate the average commit time [ns].
+    tot_commit_time: u64,
+    n_successfull_commit: u64,
 }
 
 impl Workload {
@@ -233,6 +236,8 @@ impl Workload {
             state,
             workload_id,
             bitbox_seed,
+            tot_commit_time: 0,
+            n_successfull_commit: 0,
         }
     }
 
@@ -275,7 +280,6 @@ impl Workload {
             self.exercise_commit_crashing(&rr).await?;
         } else {
             trace!("run_iteration");
-            // TODO: assert that it doesn't crash.
             self.exercise_commit(&rr).await?;
         }
         Ok(())
@@ -284,14 +288,22 @@ impl Workload {
     /// Commit a changeset.
     async fn exercise_commit(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
         let (snapshot, changeset) = self.state.gen_commit();
-        rr.send_request(crate::message::ToAgent::Commit(
-            crate::message::CommitPayload {
-                changeset,
-                should_crash: false,
-            },
-        ))
-        .await?;
+        let ToSupervisor::CommitSuccessful(elapsed) = rr
+            .send_request(crate::message::ToAgent::Commit(
+                crate::message::CommitPayload {
+                    changeset,
+                    should_crash: None,
+                },
+            ))
+            .await?
+        else {
+            return Err(anyhow::anyhow!("Commit did not execute successfully"));
+        };
+
+        self.n_successfull_commit += 1;
+        self.tot_commit_time += elapsed;
         self.state.commit(snapshot);
+
         // TODO: Exercise should sample the values from the state.
         Ok(())
     }
@@ -302,13 +314,22 @@ impl Workload {
         rr: &comms::RequestResponse,
     ) -> anyhow::Result<()> {
         // Generate a changeset and the associated snapshot. Ask the agent to commit the changeset.
-        //
-        // The agent should crash before or after the commit.
         let (snapshot, changeset) = self.state.gen_commit();
+
+        // The agent should crash after `crash_time`ns.
+        // If no data avaible crash after 300ms.
+        let mut crash_time = self
+            .tot_commit_time
+            .checked_div(self.n_successfull_commit)
+            .unwrap_or(Duration::from_millis(300).as_nanos() as u64);
+        // Crash a little bit earlier than the average commit time to increase the
+        // possibilities of crashing during sync.
+        crash_time = (crash_time as f64 * 0.98) as u64;
+
         rr.send_request(crate::message::ToAgent::Commit(
             crate::message::CommitPayload {
                 changeset,
-                should_crash: true,
+                should_crash: Some(crash_time),
             },
         ))
         .await?;
@@ -341,7 +362,6 @@ impl Workload {
         }
 
         // TODO: Exercise should sample the values from the state.
-
         Ok(())
     }
 

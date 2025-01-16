@@ -49,8 +49,10 @@ pub struct CommitPayload {
     ///
     /// There must be no duplicate keys in the set.
     pub changeset: Vec<KeyValueChange>,
-    /// Whether the supervisor expects the child to crash during the commit.
-    pub should_crash: bool,
+    /// If Some the supervisor expects the commit to crash,
+    /// the crash should happen after the specified amount of time.
+    /// Time is specified in nanoseconds.
+    pub should_crash: Option<u64>,
 }
 
 /// The maximum size of an envelope, in the serialized form.
@@ -92,6 +94,9 @@ pub enum ToAgent {
 pub enum ToSupervisor {
     /// A generic acknowledgment message.
     Ack,
+    /// The response to a successful commit, it contains the elapsed time to perform the commit.
+    /// Time is measured in nanoseconds.
+    CommitSuccessful(u64),
     /// The response to a query for a key-value pair.
     QueryValue(Option<Value>),
     /// The response to a query for the current sequence number of the database.
