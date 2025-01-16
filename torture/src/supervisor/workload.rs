@@ -244,7 +244,7 @@ pub struct Workload {
     /// The handle to the trickfs FUSE FS.
     ///
     /// `Some` until the workload is torn down.
-    trick_handle: Option<super::trickfs::TrickHandle>,
+    trick_handle: Option<trickfs::TrickHandle>,
     /// The currently spawned agent.
     ///
     /// Initially `None`.
