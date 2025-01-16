@@ -28,14 +28,17 @@ struct Biases {
     /// When generating a key, whether it should be one that was appeared somewhere or a brand new
     /// key.
     new_key: f64,
+    /// When exercising a new commit, the probability of causing it to crash.
+    crash: f64,
 }
 
 impl Biases {
-    fn new(delete: u8, overflow: u8, new_key: u8) -> Self {
+    fn new(delete: u8, overflow: u8, new_key: u8, crash: u8) -> Self {
         Self {
             delete: (delete as f64) / 100.0,
             overflow: (overflow as f64) / 100.0,
             new_key: (new_key as f64) / 100.0,
+            crash: (crash as f64) / 100.0,
         }
     }
 }
@@ -214,6 +217,7 @@ impl Workload {
             workload_params.delete,
             workload_params.overflow,
             workload_params.new_key,
+            workload_params.crash,
         );
         let mut state = WorkloadState::new(
             seed,
@@ -265,17 +269,14 @@ impl Workload {
         // - commits should be much more frequent.
         // - crashes should be less frequent.
         // - rollbacks should be less frequent.
-        let exercise_ix = self.state.rng.gen_range(0..2);
-        trace!("run_iteration: choice {}", exercise_ix);
-        match exercise_ix {
-            0 => {
-                // TODO: assert that it doesn't crash.
-                self.exercise_commit(&rr).await?;
-            }
-            1 => {
-                self.exercise_commit_crashing(&rr).await?;
-            }
-            _ => unreachable!(),
+        let exercise_crash = self.state.rng.gen_bool(self.state.biases.crash);
+        if exercise_crash {
+            trace!("run_iteration, should crash");
+            self.exercise_commit_crashing(&rr).await?;
+        } else {
+            trace!("run_iteration");
+            // TODO: assert that it doesn't crash.
+            self.exercise_commit(&rr).await?;
         }
         Ok(())
     }
