@@ -1,7 +1,7 @@
 use anyhow::Result;
 use imbl::OrdMap;
 use rand::prelude::*;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
@@ -162,7 +162,12 @@ impl WorkloadState {
         // - Different power of two sizes.
         // - Change it to be a non-even.
         let len = if self.rng.gen_bool(self.biases.overflow) {
-            32 * 1024
+            // TODO: handle multiple overflow page scenario.
+            // Currently, using a value that is too large causes the channel to hang
+            // when the agent is responding with the queried value.
+            // However MAX_LEAF_VALUE_SIZE is 1332 thus 2000 is enough
+            // to test simple overflow values where only one additional page is used.
+            2000
         } else {
             32
         };
@@ -291,7 +296,7 @@ impl Workload {
         let ToSupervisor::CommitSuccessful(elapsed) = rr
             .send_request(crate::message::ToAgent::Commit(
                 crate::message::CommitPayload {
-                    changeset,
+                    changeset: changeset.clone(),
                     should_crash: None,
                 },
             ))
@@ -302,9 +307,37 @@ impl Workload {
 
         self.n_successfull_commit += 1;
         self.tot_commit_time += elapsed;
+
+        // Sample the agent to make sure the changeset was correctly applied.
+        let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+        if snapshot.sync_seqn != agent_sync_seqn {
+            return Err(anyhow::anyhow!("Unexpected sync_seqn after commit"));
+        }
+        self.ensure_changeset_applied(rr, &changeset).await?;
+
         self.state.commit(snapshot);
 
-        // TODO: Exercise should sample the values from the state.
+        Ok(())
+    }
+
+    async fn ensure_changeset_applied(
+        &self,
+        rr: &comms::RequestResponse,
+        changeset: &Vec<KeyValueChange>,
+    ) -> anyhow::Result<()> {
+        for change in changeset {
+            match change {
+                KeyValueChange::Insert(key, value)
+                    if rr.send_request_query(*key).await?.as_ref() != Some(&value) =>
+                {
+                    return Err(anyhow::anyhow!("Inserted item not present after commit"));
+                }
+                KeyValueChange::Delete(key) if rr.send_request_query(*key).await?.is_some() => {
+                    return Err(anyhow::anyhow!("Deleted item still present after commit"));
+                }
+                _ => (),
+            }
+        }
         Ok(())
     }
 
@@ -328,7 +361,7 @@ impl Workload {
 
         rr.send_request(crate::message::ToAgent::Commit(
             crate::message::CommitPayload {
-                changeset,
+                changeset: changeset.clone(),
                 should_crash: Some(crash_time),
             },
         ))
@@ -353,15 +386,39 @@ impl Workload {
         let rr = self.agent.as_ref().unwrap().rr();
         let seqno = rr.send_query_sync_seqn().await?;
         if seqno == snapshot.sync_seqn {
+            self.ensure_changeset_applied(rr, &changeset).await?;
             self.state.commit(snapshot);
         } else {
             info!(
                 "commit. seqno ours: {}, theirs: {}",
                 snapshot.sync_seqn, seqno
             );
+            self.ensure_changeset_reverted(rr, &changeset).await?;
         }
+        Ok(())
+    }
 
-        // TODO: Exercise should sample the values from the state.
+    async fn ensure_changeset_reverted(
+        &self,
+        rr: &comms::RequestResponse,
+        changeset: &Vec<KeyValueChange>,
+    ) -> anyhow::Result<()> {
+        // Given a reverted changeset, we need to ensure that each modified/deleted key
+        // is equal to its previous state and that each new key is not available.
+        for change in changeset {
+            match change {
+                KeyValueChange::Insert(key, value)
+                    if rr.send_request_query(*key).await?.as_ref() == Some(value) =>
+                {
+                    return Err(anyhow::anyhow!("Inserted item should be reverted"));
+                }
+                // This holds as long as we are sure that every deletions is done on present keys.
+                KeyValueChange::Delete(key) if rr.send_request_query(*key).await?.is_none() => {
+                    return Err(anyhow::anyhow!("Deletion should have been reverted"));
+                }
+                _ => (),
+            }
+        }
         Ok(())
     }
 
