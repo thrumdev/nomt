@@ -1,7 +1,7 @@
 use anyhow::Result;
 use imbl::OrdMap;
 use rand::prelude::*;
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
@@ -48,10 +48,7 @@ impl Biases {
 struct Snapshot {
     sync_seqn: u32,
     /// The state of the database at this snapshot.
-    ///
-    /// The key is the key of the key-value pair. Instead of using the 32 bytes of the key, we
-    /// save the index of the key in the `WorkloadState::mentions` vector.
-    state: OrdMap<u32, Option<Vec<u8>>>,
+    state: OrdMap<[u8; 32], Option<Vec<u8>>>,
 }
 
 impl Snapshot {
@@ -73,11 +70,6 @@ struct WorkloadState {
     random_size: bool,
     /// The values that were committed.
     committed: Snapshot,
-    /// All keys that were generated during this run.
-    ///
-    /// It's extremely unlikely to find any duplicates in there. Each key is very likely to store
-    /// a value.
-    mentions: Vec<[u8; 32]>,
 }
 
 impl WorkloadState {
@@ -88,7 +80,6 @@ impl WorkloadState {
             size,
             random_size,
             committed: Snapshot::empty(),
-            mentions: Vec::with_capacity(32 * 1024),
         }
     }
 
@@ -112,25 +103,19 @@ impl WorkloadState {
         // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
         // using a hash set.
         let mut used_keys = std::collections::HashSet::with_capacity(num_changes);
-        for _ in 0..num_changes {
-            // Generate a key until unique.
-            let key_index = loop {
-                let ki = self.gen_key();
-                if used_keys.insert(ki) {
-                    break ki;
-                }
-            };
+        loop {
+            let change = self.gen_key_value_change();
+            if used_keys.contains(change.key()) {
+                continue;
+            }
 
-            if self.rng.gen_bool(self.biases.delete) {
-                snapshot.state.insert(key_index, None);
-                let key = self.mentions[key_index as usize];
-                changes.push(KeyValueChange::Delete(key));
-            } else {
-                let value = self.gen_value();
-                snapshot.state.insert(key_index, Some(value.clone()));
-                let key = self.mentions[key_index as usize];
-                changes.push(KeyValueChange::Insert(key, value));
-            };
+            snapshot.state.insert(*change.key(), change.value());
+            used_keys.insert(*change.key());
+            changes.push(change);
+
+            if used_keys.len() >= num_changes {
+                break;
+            }
         }
 
         changes.sort_by(|a, b| a.key().cmp(&b.key()));
@@ -138,21 +123,35 @@ impl WorkloadState {
         (snapshot, changes)
     }
 
-    /// Returns a key that was generated before or a new key. The returned value is an index in the
-    /// `mentions` vector.
-    fn gen_key(&mut self) -> u32 {
+    /// Returns a KeyValueChange with a new key, a deleted or a modified one.
+    fn gen_key_value_change(&mut self) -> KeyValueChange {
         // TODO: sophisticated key generation.
         //
         // - Pick a key that was already generated before, but generate a key that shares some bits.
-        if self.mentions.is_empty() || self.rng.gen_bool(self.biases.new_key) {
-            let mut key = [0; 32];
+        let mut key = [0; 32];
+        if !self.committed.state.is_empty() && self.rng.gen_bool(self.biases.delete) {
+            loop {
+                self.rng.fill_bytes(&mut key);
+                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
+                    return KeyValueChange::Delete(*next_key);
+                }
+            }
+        }
+
+        if self.committed.state.is_empty() || self.rng.gen_bool(self.biases.new_key) {
+            loop {
+                self.rng.fill_bytes(&mut key);
+                if !self.committed.state.contains_key(&key) {
+                    return KeyValueChange::Insert(key, self.gen_value());
+                }
+            }
+        }
+
+        loop {
             self.rng.fill_bytes(&mut key);
-            let ix = self.mentions.len() as u32;
-            self.mentions.push(key.clone());
-            ix
-        } else {
-            let ix = self.rng.gen_range(0..self.mentions.len());
-            ix as u32
+            if let Some((next_key, _)) = self.committed.state.get_next(&key) {
+                return KeyValueChange::Insert(*next_key, self.gen_value());
+            }
         }
     }
 

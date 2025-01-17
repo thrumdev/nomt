@@ -24,6 +24,13 @@ impl KeyValueChange {
             KeyValueChange::Insert(ref key, _) | KeyValueChange::Delete(ref key) => key,
         }
     }
+
+    pub fn value(&self) -> Option<Value> {
+        match self {
+            KeyValueChange::Insert(_, val) => Some(val.clone()),
+            KeyValueChange::Delete(_) => None,
+        }
+    }
 }
 
 /// The parameters for the [`ToAgent::Init`] message.

@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt};
-use rand::Rng;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{BufReader, BufWriter},
