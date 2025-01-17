@@ -9,7 +9,7 @@ pub type Key = [u8; 32];
 pub type Value = Vec<u8>;
 
 /// A change in the key-value store.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum KeyValueChange {
     /// A key-value pair was inserted.
     Insert(Key, Value),
