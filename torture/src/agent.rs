@@ -111,7 +111,6 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     .await?;
             }
             ToAgent::Query(key) => {
-                trace!("query: {}", hex::encode(key));
                 let value = agent.query(key)?;
                 stream
                     .send(Envelope {
