@@ -92,6 +92,21 @@ pub fn run(params: RunParams) -> Result<()> {
 
     db.print_metrics();
     timer.print(workload_params.size);
+    print_max_rss();
 
     Ok(())
+}
+
+fn print_max_rss() {
+    let max_rss = get_max_rss().unwrap_or(0);
+    println!("max rss: {} MiB", max_rss / 1024);
+    fn get_max_rss() -> Option<usize> {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        if ret == 0 {
+            Some(usage.ru_maxrss as usize)
+        } else {
+            None
+        }
+    }
 }

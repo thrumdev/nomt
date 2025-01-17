@@ -10,7 +10,7 @@ license = "MIT/Apache-2.0"
 [dependencies]
 
 # benchmarking
-clap = { version = "4.4.8" , features = ["derive"] }
+clap = { version = "4.4.8", features = ["derive"] }
 anyhow = { version = "1.0.75" }
 hdrhistogram = "7.5.4"
 fxhash = "0.2.1"
@@ -23,6 +23,7 @@ serde = "1.0.199"
 humantime = "2.1.0"
 rayon = "1.10"
 lru = "0.12.5"
+libc = "0.2.155"
 
 # sov-db
 sov-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk" }
