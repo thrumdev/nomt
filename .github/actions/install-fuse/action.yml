@@ -1,0 +1,13 @@
+name: Install Ubuntu Dependencies
+description: "Installs dependencies on Ubuntu"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Update apt-get
+      shell: bash
+      run: sudo apt-get update
+
+    - name: Install FUSE libraries
+      shell: bash
+      run: sudo apt-get install -y libfuse3-dev libfuse-dev
