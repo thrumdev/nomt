@@ -406,16 +406,31 @@ impl Workload {
         // is equal to its previous state and that each new key is not available.
         for change in changeset {
             match change {
-                KeyValueChange::Insert(key, value)
-                    if rr.send_request_query(*key).await?.as_ref() == Some(value) =>
-                {
-                    return Err(anyhow::anyhow!("Inserted item should be reverted"));
+                KeyValueChange::Insert(key, _value) => {
+                    // The current value must be equal to the previous one.
+                    let current_value = rr.send_request_query(*key).await?;
+                    match self.state.committed.state.get(key) {
+                        None | Some(None) if current_value.is_some() => {
+                            return Err(anyhow::anyhow!("New inserted item should not be present"));
+                        }
+                        Some(prev_value) if current_value != *prev_value => {
+                            return Err(anyhow::anyhow!(
+                                "Modified item should be reverted to previous state"
+                            ));
+                        }
+                        _ => (),
+                    }
                 }
-                // This holds as long as we are sure that every deletions is done on present keys.
-                KeyValueChange::Delete(key) if rr.send_request_query(*key).await?.is_none() => {
-                    return Err(anyhow::anyhow!("Deletion should have been reverted"));
+                KeyValueChange::Delete(key) => {
+                    // UNWRAP: Non existing keys are not deleted.
+                    let prev_value = self.state.committed.state.get(key).unwrap();
+                    assert!(prev_value.is_some());
+                    if rr.send_request_query(*key).await?.as_ref() != prev_value.as_ref() {
+                        return Err(anyhow::anyhow!(
+                            "Deleted item should be reverted to previous state"
+                        ));
+                    }
                 }
-                _ => (),
             }
         }
         Ok(())
