@@ -480,6 +480,7 @@ dependencies = [
  "jmt",
  "kvdb",
  "kvdb-rocksdb",
+ "libc",
  "lru",
  "nomt",
  "rand",
