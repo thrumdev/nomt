@@ -436,6 +436,22 @@ impl Workload {
         Ok(())
     }
 
+    async fn ensure_snapshot_validity(&self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
+        for (i, (key, expected_value)) in (self.state.committed.state.iter()).enumerate() {
+            let value = rr.send_request_query(*key).await?;
+            if &value != expected_value {
+                return Err(anyhow::anyhow!(
+                    "Wrong {}ith key in snapshot,\n key: {:?},\n expected value: {:?},\n found value: {:?}",
+                    i,
+                    key,
+                    expected_value,
+                    value
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn spawn_new_agent(&mut self) -> anyhow::Result<()> {
         assert!(self.agent.is_none());
         controller::spawn_agent_into(&mut self.agent).await?;
@@ -445,6 +461,10 @@ impl Workload {
             .unwrap()
             .init(workdir, self.workload_id, self.bitbox_seed)
             .await?;
+
+        self.ensure_snapshot_validity(self.agent.as_ref().unwrap().rr())
+            .await?;
+
         Ok(())
     }
 
