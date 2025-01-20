@@ -37,6 +37,10 @@ struct Biases {
     commit_crash: f64,
     /// When executing a rollback this is the probability of causing it to crash.
     rollback_crash: f64,
+    /// The probability of turning on the `ENOSPC` error.
+    enospc_on: f64,
+    /// The probability of turning off the `ENOSPC` error.
+    enospc_off: f64,
 }
 
 impl Biases {
@@ -72,6 +76,8 @@ impl Biases {
             commit_crash: (commit_crash as f64) / 100.0,
             rollback_crash: (rollback_crash as f64) / 100.0,
             new_key_distribution,
+            enospc_on: 0.1,
+            enospc_off: 0.2,
         }
     }
 }
@@ -235,6 +241,10 @@ impl WorkloadState {
 pub struct Workload {
     /// Working directory for this particular workload.
     workdir: TempDir,
+    /// The handle to the trickfs FUSE FS.
+    ///
+    /// `Some` until the workload is torn down.
+    trick_handle: Option<super::trickfs::TrickHandle>,
     /// The currently spawned agent.
     ///
     /// Initially `None`.
@@ -254,6 +264,8 @@ pub struct Workload {
     ensure_changeset: bool,
     /// Whether to ensure the correctness of the entire state after every crash or rollback.
     ensure_snapshot: bool,
+    /// Whether the trickfs is currently configured to return `ENOSPC` errors for every write.
+    enabled_enospc: bool,
     /// Whether to randomly sample the state after every crash or rollback.
     sample_snapshot: bool,
     /// The max number of commits involved in a rollback.
@@ -279,7 +291,7 @@ impl Workload {
         workdir: TempDir,
         workload_params: &WorkloadParams,
         workload_id: u64,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         // TODO: Make the workload size configurable and more sophisticated.
         //
         // Right now the workload size is a synonym for the number of iterations. We probably
@@ -302,8 +314,19 @@ impl Workload {
             workload_params.random_size,
         );
         let bitbox_seed = state.gen_bitbox_seed();
-        Self {
+
+        #[cfg(target_os = "linux")]
+        let trick_handle = workload_params
+            .trickfs
+            .then(|| trickfs::spawn_trick(&workdir.path()))
+            .transpose()?;
+
+        #[cfg(not(target_os = "linux"))]
+        let trick_handle = None;
+
+        Ok(Self {
             workdir,
+            trick_handle,
             agent: None,
             iterations: workload_params.iterations,
             state,
@@ -316,7 +339,8 @@ impl Workload {
             sample_snapshot: workload_params.sample_snapshot,
             max_rollback_commits: workload_params.max_rollback_commits,
             scheduled_rollback: None,
-        }
+            enabled_enospc: false,
+        })
     }
 
     /// Run the workload.
@@ -359,6 +383,27 @@ impl Workload {
             return Ok(());
         }
 
+        if self.trick_handle.is_some() {
+            if self.enabled_enospc {
+                let should_turn_off = self.state.rng.gen_bool(self.state.biases.enospc_off);
+                if should_turn_off {
+                    info!("unsetting ENOSPC");
+                    self.enabled_enospc = false;
+                    self.trick_handle
+                        .as_ref()
+                        .unwrap()
+                        .set_trigger_enospc(false);
+                }
+            } else {
+                let should_turn_on = self.state.rng.gen_bool(self.state.biases.enospc_on);
+                if should_turn_on {
+                    info!("setting ENOSPC");
+                    self.enabled_enospc = true;
+                    self.trick_handle.as_ref().unwrap().set_trigger_enospc(true);
+                }
+            }
+        }
+
         // Do not schedule new rollbacks if they are already scheduled.
         let is_rollback_scheduled = self.scheduled_rollback.is_some();
         if !is_rollback_scheduled && self.state.rng.gen_bool(self.state.biases.rollback) {
@@ -381,7 +426,7 @@ impl Workload {
     /// Commit a changeset.
     async fn exercise_commit(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
         let (snapshot, changeset) = self.state.gen_commit();
-        let ToSupervisor::CommitSuccessful(elapsed) = rr
+        let ToSupervisor::CommitOutcome { elapsed, outcome } = rr
             .send_request(crate::message::ToAgent::Commit(
                 crate::message::CommitPayload {
                     changeset: changeset.clone(),
@@ -392,6 +437,25 @@ impl Workload {
         else {
             return Err(anyhow::anyhow!("Commit did not execute successfully"));
         };
+
+        if self.enabled_enospc {
+            // TODO: the same handling should be extended to the rollback.
+
+            // If we are in the `ENOSPC` mode, the commit should have failed.
+            if !matches!(outcome, crate::message::CommitOutcome::StorageFull) {
+                return Err(anyhow::anyhow!("Commit did not return ENOSPC"));
+            }
+
+            let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+            if self.state.committed.sync_seqn != agent_sync_seqn {
+                return Err(anyhow::anyhow!(
+                    "Unexpected sync_seqn after failed commit with ENOSPC"
+                ));
+            }
+            self.ensure_changeset_reverted(rr, &changeset).await?;
+
+            return Ok(());
+        }
 
         self.n_successfull_commit += 1;
         self.tot_commit_time += elapsed;
@@ -749,6 +813,11 @@ impl Workload {
     async fn teardown(&mut self) {
         if let Some(agent) = self.agent.take() {
             agent.teardown().await;
+        }
+        if let Some(trick_handle) = self.trick_handle.take() {
+            tokio::task::block_in_place(move || {
+                trick_handle.unmount_and_join();
+            });
         }
     }
 

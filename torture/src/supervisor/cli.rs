@@ -110,4 +110,11 @@ pub struct WorkloadParams {
     #[clap(default_value = "false")]
     #[arg(long = "sample-snapshot")]
     pub sample_snapshot: bool,
+
+    /// Whether to enable testing using the trickfs.
+    ///
+    /// Supported on Linux only.
+    #[clap(default_value = "false")]
+    #[arg(long = "trickfs")]
+    pub trickfs: bool,
 }

@@ -112,13 +112,29 @@ pub enum ToAgent {
     GracefulShutdown,
 }
 
+/// Different outcomes of a commit operation.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// The commit was successful.
+    Success,
+    /// The commit failed because the storage is full, dubbed ENOSPC.
+    StorageFull,
+    /// Some other failure occurred.
+    UnknownFailure,
+}
+
 /// Messages sent from the agent to the supervisor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ToSupervisor {
     /// A generic acknowledgment message.
     Ack,
-    /// The response to a successful commit, it contains the elapsed time to perform the commit.
-    CommitSuccessful(Duration),
+    /// The response to a completed commit request.
+    CommitOutcome {
+        /// The time it took for the operation to complete.
+        elapsed: Duration,
+        /// The outcome of the operation.
+        outcome: CommitOutcome,
+    },
     /// The response to a query for a key-value pair.
     QueryValue(Option<Value>),
     /// The response to a query for the current sequence number of the database.

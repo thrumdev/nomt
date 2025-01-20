@@ -17,8 +17,8 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
 
 use crate::message::{
-    self, CommitPayload, Envelope, InitPayload, KeyValueChange, RollbackPayload, ToAgent,
-    ToSupervisor, MAX_ENVELOPE_SIZE,
+    self, CommitOutcome, CommitPayload, Envelope, InitPayload, KeyValueChange, RollbackPayload,
+    ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
 };
 
 /// The entrypoint for the agent.
@@ -77,13 +77,13 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 should_crash: None,
             }) => {
                 let start = std::time::Instant::now();
-                agent.commit(changeset).await?;
+                let outcome = agent.commit(changeset).await;
                 let elapsed = start.elapsed();
                 tracing::info!("commit took {}ms", elapsed.as_millis());
                 stream
                     .send(Envelope {
                         reqno,
-                        message: ToSupervisor::CommitSuccessful(elapsed),
+                        message: ToSupervisor::CommitOutcome { elapsed, outcome },
                     })
                     .await?;
             }
@@ -221,7 +221,9 @@ async fn recv_init(stream: &mut Stream) -> Result<Agent> {
 
 struct Agent {
     workdir: PathBuf,
-    nomt: Nomt<Blake3Hasher>,
+    // We use `Option` here because we want to be able to recreate Nomt instance after it is
+    // being poisoned.
+    nomt: Option<Nomt<Blake3Hasher>>,
     id: String,
     bitbox_seed: [u8; 16],
 }
@@ -245,14 +247,16 @@ impl Agent {
         let nomt = Nomt::open(o)?;
         Ok(Self {
             workdir,
-            nomt,
+            nomt: Some(nomt),
             id: init.id,
             bitbox_seed: init.bitbox_seed,
         })
     }
 
-    async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Result<()> {
-        let session = self.nomt.begin_session(SessionParams::default());
+    async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> CommitOutcome {
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        let session = nomt.begin_session(SessionParams::default());
         let mut actuals = Vec::with_capacity(changeset.len());
         for change in changeset {
             match change {
@@ -265,23 +269,40 @@ impl Agent {
             }
         }
 
-        tokio::task::block_in_place(|| session.finish(actuals).commit(&self.nomt))?;
-
-        Ok(())
+        match tokio::task::block_in_place(|| session.finish(actuals).commit(&nomt)) {
+            Ok(()) => CommitOutcome::Success,
+            Err(err) => {
+                // Classify error.
+                if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                    match io_err.raw_os_error() {
+                        Some(errno) if errno == libc::ENOSPC => CommitOutcome::StorageFull,
+                        _ => CommitOutcome::UnknownFailure,
+                    }
+                } else {
+                    CommitOutcome::UnknownFailure
+                }
+            }
+        }
     }
 
     async fn rollback(&mut self, n_commits: usize) -> Result<()> {
-        tokio::task::block_in_place(|| self.nomt.rollback(n_commits))?;
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        tokio::task::block_in_place(|| nomt.rollback(n_commits))?;
         Ok(())
     }
 
     fn query(&mut self, key: message::Key) -> Result<Option<message::Value>> {
-        let value = self.nomt.read(key)?;
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        let value = nomt.read(key)?;
         Ok(value)
     }
 
     fn query_sync_seqn(&mut self) -> u32 {
-        self.nomt.sync_seqn()
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        nomt.sync_seqn()
     }
 }
 

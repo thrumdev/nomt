@@ -26,3 +26,5 @@ hex = "0.4.3"
 futures-util = "0.3.31"
 clap = { version = "4.5.23", features = ["derive"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+trickfs = { path = "../trickfs" }
