@@ -19,7 +19,7 @@
 
 #![allow(dead_code)]
 
-use crate::{beatree::ValueChange, page_cache::Page, page_diff::PageDiff};
+use crate::{beatree::ValueChange, store::DirtyPage};
 use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node},
@@ -53,7 +53,7 @@ impl Overlay {
     }
 
     /// Get the merkle page changes associated uniquely with this overlay.
-    pub(super) fn page_changes(&self) -> &HashMap<PageId, (Page, PageDiff)> {
+    pub(super) fn page_changes(&self) -> &HashMap<PageId, DirtyPage> {
         &self.inner.data.pages
     }
 
@@ -202,7 +202,7 @@ impl Index {
 
 /// Data associated with a single overlay.
 struct Data {
-    pages: HashMap<PageId, (Page, PageDiff)>,
+    pages: HashMap<PageId, DirtyPage>,
     values: HashMap<KeyPath, ValueChange>,
     status: OverlayStatus,
     parent_status: Option<OverlayStatus>,
@@ -288,7 +288,7 @@ impl LiveOverlay {
     ///
     /// `None` indicates that the page is not present in the overlay, not that the page doesn't
     /// exist.
-    pub(super) fn page(&self, page_id: &PageId) -> Option<(Page, PageDiff)> {
+    pub(super) fn page(&self, page_id: &PageId) -> Option<&DirtyPage> {
         self.parent
             .as_ref()
             .and_then(|parent| parent.index.pages.get(&page_id))
@@ -309,7 +309,6 @@ impl LiveOverlay {
                         .unwrap() // UNWRAP: index indicates that data exists.
                 }
             })
-            .cloned()
     }
 
     /// Get a value change by ID.
@@ -341,7 +340,7 @@ impl LiveOverlay {
     pub(super) fn finish(
         self,
         root: Node,
-        page_changes: HashMap<PageId, (Page, PageDiff)>,
+        page_changes: HashMap<PageId, DirtyPage>,
         value_changes: HashMap<KeyPath, ValueChange>,
         rollback_delta: Option<crate::rollback::Delta>,
     ) -> Overlay {

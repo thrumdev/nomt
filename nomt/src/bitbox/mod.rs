@@ -2,11 +2,11 @@ use crossbeam_channel::{Receiver, Sender};
 use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::File,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -15,8 +15,7 @@ use threadpool::ThreadPool;
 use crate::{
     io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
     page_cache::{Page, PageCache},
-    page_diff::PageDiff,
-    store::MerkleTransaction,
+    store::{BucketInfo, DirtyPage},
 };
 
 use self::{ht_file::HTOffsets, meta_map::MetaMap};
@@ -32,6 +31,44 @@ pub(crate) mod writeout;
 /// The index of a bucket within the map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BucketIndex(u64);
+
+/// Essentially an `Arc<Option<BucketIndex>>` that can be mutated atomically.
+///
+/// This is used as a shared placeholder for a bucket that _will_ be allocated in the future
+/// but hasn't yet.
+///
+/// Typically, this will be instantiated with `None` and then `set`.
+#[derive(Clone)]
+pub struct SharedMaybeBucketIndex(Arc<AtomicU64>);
+
+impl SharedMaybeBucketIndex {
+    // we assume that no bucket indices reach the max value of a u64, as this would require 2^76
+    // bytes of physical storage to reach, or 64 billion terabytes of page data.
+    const NONE_PATTERN: u64 = u64::MAX;
+
+    /// Create a new shared, optional bucket index.
+    pub fn new(bucket: Option<BucketIndex>) -> Self {
+        SharedMaybeBucketIndex(Arc::new(AtomicU64::new(match bucket {
+            None => Self::NONE_PATTERN,
+            Some(BucketIndex(x)) => x,
+        })))
+    }
+
+    /// Set the bucket index. This uses atomic `Relaxed` ordering.
+    pub fn set(&self, bucket: BucketIndex) {
+        self.0.store(bucket.0, Ordering::Relaxed)
+    }
+
+    /// Get the bucket index. This uses atomic `Relaxed` ordering.
+    pub fn get(&self) -> Option<BucketIndex> {
+        let val = self.0.load(Ordering::Relaxed);
+        if val == Self::NONE_PATTERN {
+            None
+        } else {
+            Some(BucketIndex(val))
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct DB {
@@ -100,15 +137,6 @@ impl DB {
         })
     }
 
-    /// Return a bucket allocator, used to determine the buckets which any newly inserted pages
-    /// will clear.
-    pub fn bucket_allocator(&self) -> BucketAllocator {
-        BucketAllocator {
-            shared: self.shared.clone(),
-            changed_buckets: HashMap::new(),
-        }
-    }
-
     /// Return space utilization counts.
     pub fn utilization(&self) -> HashTableUtilization {
         HashTableUtilization {
@@ -125,47 +153,83 @@ impl DB {
         &self,
         sync_seqn: u32,
         page_pool: &PagePool,
-        changes: Vec<(PageId, BucketIndex, Option<(Arc<FatPage>, PageDiff)>)>,
+        changes: impl IntoIterator<Item = (PageId, DirtyPage)>,
         wal_blob_builder: &mut WalBlobBuilder,
-    ) -> Vec<(u64, Arc<FatPage>)> {
+    ) -> (
+        Vec<(u64, Arc<FatPage>)>,
+        Vec<(PageId, Option<(Page, BucketIndex)>)>,
+    ) {
         wal_blob_builder.reset(sync_seqn);
 
         let mut meta_map = self.shared.meta_map.write();
 
         let mut changed_meta_pages = HashSet::new();
         let mut ht_pages = Vec::new();
+        let mut cache_updates = Vec::new();
 
         let mut occupied_buckets_delta = 0isize;
-        for (page_id, BucketIndex(bucket), page_info) in changes {
-            // let's extract its bucket
-            match page_info {
-                Some((page, page_diff)) => {
-                    // update meta map with new info
-                    let hash = hash_page_id(&page_id, &self.shared.seed);
-                    let meta_map_changed = meta_map.hint_not_match(bucket as usize, hash);
-                    if meta_map_changed {
-                        occupied_buckets_delta += 1;
-                        meta_map.set_full(bucket as usize, hash);
-                        changed_meta_pages.insert(meta_map.page_index(bucket as usize));
+
+        // Allocate relevant buckets and update the meta-map.
+        for (page_id, dirty_page) in changes {
+            if dirty_page.diff.cleared() {
+                occupied_buckets_delta -= 1;
+
+                // UNWRAP/PANIC: any cleared pages should have already existed on disk.
+                let bucket = match dirty_page.bucket {
+                    BucketInfo::Known(bucket) => bucket,
+                    BucketInfo::FreshOrDependent(maybe_bucket) => maybe_bucket.get().unwrap(),
+                    _ => unreachable!(),
+                }
+                .0;
+                meta_map.set_tombstone(bucket as usize);
+                changed_meta_pages.insert(meta_map.page_index(bucket as usize));
+                cache_updates.push((page_id.clone(), None));
+
+                wal_blob_builder.write_clear(bucket);
+            } else {
+                // Allocate the bucket, if one is necessary.
+                let (meta_map_changed, bucket) = match dirty_page.bucket {
+                    BucketInfo::Known(bucket) => (false, bucket.0),
+                    BucketInfo::FreshWithNoDependents => {
+                        let bucket = allocate_bucket(&page_id, &mut meta_map, &self.shared.seed);
+                        (true, bucket.0)
                     }
+                    BucketInfo::FreshOrDependent(maybe_bucket) => match maybe_bucket.get() {
+                        Some(bucket) => (false, bucket.0),
+                        None => {
+                            let bucket =
+                                allocate_bucket(&page_id, &mut meta_map, &self.shared.seed);
+                            // Propagate changes to dependents.
+                            maybe_bucket.set(bucket);
+                            (true, bucket.0)
+                        }
+                    },
+                };
 
-                    wal_blob_builder.write_update(
-                        page_id.encode(),
-                        &page_diff,
-                        page_diff.pack_changed_nodes(&page),
-                        bucket,
-                    );
-
-                    let pn = self.shared.store.data_page_index(bucket);
-                    ht_pages.push((pn, page));
-                }
-                None => {
-                    occupied_buckets_delta -= 1;
-                    meta_map.set_tombstone(bucket as usize);
+                // update meta map with new info
+                let hash = hash_page_id(&page_id, &self.shared.seed);
+                if meta_map_changed {
+                    occupied_buckets_delta += 1;
+                    meta_map.set_full(bucket as usize, hash);
                     changed_meta_pages.insert(meta_map.page_index(bucket as usize));
-                    wal_blob_builder.write_clear(bucket);
                 }
-            };
+
+                wal_blob_builder.write_update(
+                    page_id.encode(),
+                    &dirty_page.diff,
+                    dirty_page
+                        .diff
+                        .pack_changed_nodes(dirty_page.page.page_data()),
+                    bucket,
+                );
+
+                let pn = self.shared.store.data_page_index(bucket);
+                cache_updates.push((
+                    page_id.clone(),
+                    Some((dirty_page.page.clone(), BucketIndex(bucket))),
+                ));
+                ht_pages.push((pn, dirty_page.page.into_inner()));
+            }
         }
 
         for changed_meta_page in changed_meta_pages {
@@ -195,7 +259,7 @@ impl DB {
 
         wal_blob_builder.finalize();
 
-        ht_pages
+        (ht_pages, cache_updates)
     }
 }
 
@@ -227,8 +291,7 @@ impl SyncController {
         &mut self,
         sync_seqn: u32,
         page_cache: PageCache,
-        mut merkle_tx: MerkleTransaction,
-        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))> + Send + 'static,
+        updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) {
         let page_pool = self.db.shared.page_pool.clone();
         let bitbox = self.db.clone();
@@ -237,25 +300,19 @@ impl SyncController {
         // UNWRAP: safe because begin_sync is called only once.
         let wal_result_tx = self.wal_result_tx.take().unwrap();
         self.db.shared.sync_tp.execute(move || {
-            let deferred_old_pages =
-                page_cache.absorb_and_populate_transaction(updated_pages, &mut merkle_tx);
-
             let mut wal_blob_builder = wal_blob_builder.lock();
-            let ht_pages = bitbox.prepare_sync(
-                sync_seqn,
-                &page_pool,
-                merkle_tx.new_pages,
-                &mut *wal_blob_builder,
-            );
+            let (ht_pages, cache_updates) =
+                bitbox.prepare_sync(sync_seqn, &page_pool, updated_pages, &mut *wal_blob_builder);
             drop(wal_blob_builder);
 
             // Set the hash-table pages before spawning WAL writeout so they don't race with it.
             *ht_to_write.lock() = Some(ht_pages);
             Self::spawn_wal_writeout(wal_result_tx, bitbox);
 
+            // perform cache updates: insert changes and evict old pages.
             // evict and drop old pages outside of the critical path.
+            page_cache.batch_update(cache_updates);
             page_cache.evict();
-            drop(deferred_old_pages);
         });
     }
 
@@ -531,42 +588,20 @@ enum PageLoadState {
     Submitted,
 }
 
-/// Helper used in constructing a transaction. Used for finding buckets in which to write pages.
-pub struct BucketAllocator {
-    shared: Arc<Shared>,
-    // true: occupied. false: vacated
-    changed_buckets: HashMap<u64, bool>,
-}
+fn allocate_bucket(page_id: &PageId, meta_map: &mut MetaMap, seed: &[u8; 16]) -> BucketIndex {
+    let mut probe_seq = ProbeSequence::new(page_id, &meta_map, seed);
 
-impl BucketAllocator {
-    /// Allocate a bucket for a page which is known not to exist in the hash-table.
-    ///
-    /// `allocate` and `free` must be called in the same order that items are passed to `commit`,
-    /// or pages may silently disappear later.
-    pub fn allocate(&mut self, page_id: PageId) -> BucketIndex {
-        let meta_map = self.shared.meta_map.read();
-        let mut probe_seq = ProbeSequence::new(&page_id, &meta_map, &self.shared.seed);
-
-        let mut i = 0;
-        loop {
-            i += 1;
-            assert!(i < 10000, "hash-table full");
-            match probe_seq.next(&meta_map) {
-                ProbeResult::PossibleHit(_) => continue,
-                ProbeResult::Tombstone(bucket) | ProbeResult::Empty(bucket) => {
-                    // unless some other page has taken the bucket, fill it.
-                    if self.changed_buckets.get(&bucket).map_or(true, |full| !full) {
-                        self.changed_buckets.insert(bucket, true);
-                        return BucketIndex(bucket);
-                    }
-                }
+    let mut i = 0;
+    loop {
+        i += 1;
+        assert!(i < 10000, "hash-table full");
+        match probe_seq.next(&meta_map) {
+            ProbeResult::PossibleHit(_) => continue,
+            ProbeResult::Tombstone(bucket) | ProbeResult::Empty(bucket) => {
+                meta_map.set_full(bucket as usize, probe_seq.hash);
+                return BucketIndex(bucket);
             }
         }
-    }
-
-    /// Free a bucket which is known to be occupied by the given page ID.
-    pub fn free(&mut self, bucket_index: BucketIndex) {
-        self.changed_buckets.insert(bucket_index.0, false);
     }
 }
 
