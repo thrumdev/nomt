@@ -3,7 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     fmt,
     path::Path,
-    sync::LazyLock,
+    sync::{atomic::AtomicBool, Arc, LazyLock, Mutex},
     time::{Duration, UNIX_EPOCH},
     u64,
 };
@@ -306,10 +306,13 @@ pub struct Trick {
     /// Note that inodes are 1-based and this vector is 0-based.
     inodes: Vec<InodeData>,
     freelist: Vec<Inode>,
+    trigger_enospc: Arc<AtomicBool>,
 }
 
 impl Trick {
-    pub fn new() -> Self {
+    fn new() -> (Self, TrickHandle) {
+        let trigger_enospc = Arc::new(AtomicBool::new(false));
+
         let tree = Tree::new();
         let inodes = Vec::new();
         let freelist = Vec::new();
@@ -317,13 +320,19 @@ impl Trick {
             tree,
             inodes,
             freelist,
+            trigger_enospc: trigger_enospc.clone(),
         };
         // Initialize the root directory. Parent of the ROOT is ROOT.
         fs.register_inode(InodeData::new_dir(Inode::ROOT));
         fs.tree
             .ino_to_container
             .insert(Inode::ROOT, Container::new());
-        fs
+
+        let handle = TrickHandle {
+            bg_sess: None.into(),
+            trigger_enospc,
+        };
+        (fs, handle)
     }
 
     fn lookup_inode(&self, ino: Inode) -> Option<&InodeData> {
@@ -478,6 +487,13 @@ impl fuser::Filesystem for Trick {
     ) {
         // we don't really care about these parameters.
         let _ = (mode, umask, flags);
+        if self
+            .trigger_enospc
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            reply.error(libc::ENOSPC);
+            return;
+        }
         let Some(parent_container) = self.tree.ino_to_container.get(&Inode(parent)) else {
             log::trace!("parent inode doesn't exist");
             reply.error(libc::ENOENT);
@@ -571,6 +587,9 @@ impl fuser::Filesystem for Trick {
         reply: fuser::ReplyWrite,
     ) {
         let _ = (fh, flags, write_flags, lock_owner);
+        let trigger_enospc = self
+            .trigger_enospc
+            .load(std::sync::atomic::Ordering::Relaxed);
         let Some(inode_data) = self.lookup_inode_mut(Inode(ino)) else {
             reply.error(libc::ENOENT);
             return;
@@ -585,7 +604,12 @@ impl fuser::Filesystem for Trick {
             reply.error(libc::EFBIG);
             return;
         }
+        // Extension: if the file size is less than the new size, we should extend the file.
         if inode_data.size() < new_file_sz as u64 {
+            if trigger_enospc {
+                reply.error(libc::ENOSPC);
+                return;
+            }
             inode_data.set_size(new_file_sz as u64);
         }
         inode_data.content_mut()[offset..offset + len].copy_from_slice(data);
@@ -602,6 +626,13 @@ impl fuser::Filesystem for Trick {
         reply: fuser::ReplyEntry,
     ) {
         let _ = (mode, umask);
+        if self
+            .trigger_enospc
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            reply.error(libc::ENOSPC);
+            return;
+        }
         let Some(inode_data) = self.lookup_inode_mut(Inode(parent)) else {
             reply.error(libc::ENOENT);
             return;
@@ -762,14 +793,21 @@ impl fuser::Filesystem for Trick {
         reply: fuser::ReplyEmpty,
     ) {
         let _ = (fh, mode);
+        let trigger_enospc = self
+            .trigger_enospc
+            .load(std::sync::atomic::Ordering::Relaxed);
         let Some(inode_data) = self.lookup_inode_mut(Inode(ino)) else {
             reply.error(libc::ENOENT);
             return;
         };
         // fallocate should preallocate stuff. We here just gon pretend that we are preallocating.
-        // we should set the length though.
+        // Here we should extend the file if the offset + length is greater than the current file.
         let new_size = u64::try_from(offset).unwrap() + u64::try_from(length).unwrap();
         if inode_data.size() < new_size {
+            if trigger_enospc {
+                reply.error(libc::ENOSPC);
+                return;
+            }
             inode_data.set_size(new_size);
         }
         reply.ok();
@@ -785,6 +823,13 @@ impl fuser::Filesystem for Trick {
     ) {
         // fsync doesn't do anything since we are working in-memory, so just return OK.
         let _ = (ino, fh, datasync);
+        if self
+            .trigger_enospc
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            reply.error(libc::ENOSPC);
+            return;
+        }
         reply.ok();
     }
 
@@ -798,6 +843,13 @@ impl fuser::Filesystem for Trick {
     ) {
         // just like fsync, fsyncdir doesn't do anything.
         let _ = (req, ino, fh, datasync);
+        if self
+            .trigger_enospc
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            reply.error(libc::ENOSPC);
+            return;
+        }
         reply.ok();
     }
 }
@@ -807,13 +859,21 @@ fn has_odirect(flags: i32) -> bool {
 }
 
 pub struct TrickHandle {
-    bg_sess: fuser::BackgroundSession,
+    bg_sess: Mutex<Option<fuser::BackgroundSession>>,
+    trigger_enospc: Arc<AtomicBool>,
 }
 
 impl TrickHandle {
     /// Sets whether the file system should return ENOSPC on the subsequent write operations.
+    pub fn set_trigger_enospc(&self, on: bool) {
+        self.trigger_enospc
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn unmount_and_join(self) {
-        self.bg_sess.join();
+        if let Some(bg_sess) = self.bg_sess.lock().unwrap().take() {
+            bg_sess.join();
+        }
     }
 }
 
@@ -827,9 +887,9 @@ pub fn spawn_trick<P: AsRef<Path>>(mountpoint: P) -> std::io::Result<TrickHandle
         MountOption::AutoUnmount,
         MountOption::FSName("trick".to_string()),
     ];
-    let fs = Trick::new();
-    let bg_sess = fuser::spawn_mount2(fs, &mountpoint, options)?;
-    Ok(TrickHandle { bg_sess })
+    let (fs, mut handle) = Trick::new();
+    handle.bg_sess = Some(fuser::spawn_mount2(fs, &mountpoint, options)?).into();
+    Ok(handle)
 }
 
 #[cfg(test)]
@@ -857,7 +917,7 @@ mod tests {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
         let options = &[MountOption::RO, MountOption::FSName("trick".to_string())];
-        let fs = Trick::new();
+        let (fs, _handle) = Trick::new();
         let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
         drop(mount_handle);
     }
@@ -868,7 +928,7 @@ mod tests {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
         let options = &[MountOption::RW, MountOption::FSName("trick".to_string())];
-        let fs = Trick::new();
+        let (fs, _handle) = Trick::new();
         let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
         let filename = mountpoint.path().join("file");
         let file = fs::File::create(&filename).unwrap();
@@ -881,7 +941,7 @@ mod tests {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
         let options = &[MountOption::RW, MountOption::FSName("trick".to_string())];
-        let fs = Trick::new();
+        let (fs, _handle) = Trick::new();
         let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
         let filename = mountpoint.path().join("file");
         let file = fs::File::create(&filename).unwrap();
@@ -900,7 +960,7 @@ mod tests {
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
         ];
-        let fs = Trick::new();
+        let (fs, _handle) = Trick::new();
         let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
         let filename = mountpoint.path().join("file");
         let mut file = fs::File::options()
@@ -933,7 +993,7 @@ mod tests {
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
         ];
-        let fs = Trick::new();
+        let (fs, _handle) = Trick::new();
         let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
         let mut files = Vec::new();
         for i in 0..100 {
@@ -964,7 +1024,7 @@ mod tests {
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
         ];
-        let fs = Trick::new();
+        let (fs, _handle) = Trick::new();
         let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
 
         // Create a file
@@ -986,7 +1046,7 @@ mod tests {
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
         ];
-        let fs = Trick::new();
+        let (fs, _handle) = Trick::new();
         let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
 
         let filename = mountpoint.path().join("file");
@@ -1014,6 +1074,35 @@ mod tests {
             let slice = std::slice::from_raw_parts(data, 4096);
             assert_eq!(&test_data[..], &slice[0..test_data.len()][..]);
         }
+
+        drop(file);
+        drop(mount_handle);
+    }
+
+    #[test]
+    fn out_of_space() {
+        init_log();
+        let mountpoint = tempfile::tempdir().unwrap();
+        let options = &[
+            MountOption::RW,
+            MountOption::AutoUnmount,
+            MountOption::FSName("trick".to_string()),
+        ];
+        let (fs, handle) = Trick::new();
+        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+
+        let filename = mountpoint.path().join("file");
+        let mut file = fs::File::options()
+            .create_new(true)
+            .write(true)
+            .open(&filename)
+            .unwrap();
+
+        let test_data = b"hello world";
+        handle.set_trigger_enospc(true);
+        let _ = file.write_all(test_data).unwrap_err();
+        handle.set_trigger_enospc(false);
+        let _ = file.write_all(test_data).unwrap();
 
         drop(file);
         drop(mount_handle);
