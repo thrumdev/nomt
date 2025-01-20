@@ -166,7 +166,7 @@ async fn run_workload(
 ) -> Result<Option<InvestigationFlag>> {
     // This creates a temp dir for the working dir of the workload.
     let workdir = tempfile::Builder::new()
-        .prefix("orture-")
+        .prefix("torture-")
         .suffix(format!("-workload-{}", workload_id).as_str())
         .tempdir()
         .expect("Failed to create a temp dir");

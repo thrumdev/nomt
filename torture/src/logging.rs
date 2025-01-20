@@ -6,9 +6,9 @@ use tracing::{span, Level};
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::{prelude::*, registry::Registry, Layer};
 
-const ENV_NAME_COMMON: &str = "ORTURE_ALL_LOG";
-const ENV_NAME_AGENT: &str = "ORTURE_AGENT_LOG";
-const ENV_NAME_SUPERVISOR: &str = "ORTURE_SUPERVISOR_LOG";
+const ENV_NAME_COMMON: &str = "TORTURE_ALL_LOG";
+const ENV_NAME_AGENT: &str = "TORTURE_AGENT_LOG";
+const ENV_NAME_SUPERVISOR: &str = "TORTURE_SUPERVISOR_LOG";
 
 enum Kind {
     Agent,
