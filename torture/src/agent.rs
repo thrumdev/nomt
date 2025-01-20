@@ -110,6 +110,17 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     })
                     .await?;
             }
+            ToAgent::Rollback(n_blocks) => {
+                let start = std::time::Instant::now();
+                agent.rollback(n_blocks)?;
+                tracing::info!("rollback took {:?}", start.elapsed().as_millis());
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Ack,
+                    })
+                    .await?;
+            }
             ToAgent::Query(key) => {
                 let value = agent.query(key)?;
                 stream
@@ -189,6 +200,7 @@ impl Agent {
         o.path(workdir.join("nomt_db"));
         o.bitbox_seed(init.bitbox_seed);
         o.hashtable_buckets(500_000);
+        o.rollback(init.rollback);
         let nomt = Nomt::open(o)?;
         Ok(Self {
             workdir,
@@ -214,6 +226,11 @@ impl Agent {
 
         tokio::task::block_in_place(|| self.nomt.update_and_commit(session, actuals))?;
 
+        Ok(())
+    }
+
+    fn rollback(&mut self, n_blocks: usize) -> Result<()> {
+        self.nomt.rollback(n_blocks)?;
         Ok(())
     }
 

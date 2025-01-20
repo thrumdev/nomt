@@ -30,15 +30,18 @@ struct Biases {
     new_key: f64,
     /// When exercising a new commit, the probability of causing it to crash.
     crash: f64,
+    /// Instead of exercising a new commit, this is a probability of executing a rollback.
+    rollback: f64,
 }
 
 impl Biases {
-    fn new(delete: u8, overflow: u8, new_key: u8, crash: u8) -> Self {
+    fn new(delete: u8, overflow: u8, new_key: u8, crash: u8, rollback: u8) -> Self {
         Self {
             delete: (delete as f64) / 100.0,
             overflow: (overflow as f64) / 100.0,
             new_key: (new_key as f64) / 100.0,
             crash: (crash as f64) / 100.0,
+            rollback: (rollback as f64) / 100.0,
         }
     }
 }
@@ -68,8 +71,8 @@ struct WorkloadState {
     /// If true, the size of each commit will be within 0 and self.size,
     /// otherwise it will always be workload-size.
     random_size: bool,
-    /// The values that were committed.
-    committed: Snapshot,
+    /// All committed key values, divided in Snapshots.
+    committed: Vec<Snapshot>,
 }
 
 impl WorkloadState {
@@ -79,7 +82,7 @@ impl WorkloadState {
             biases,
             size,
             random_size,
-            committed: Snapshot::empty(),
+            committed: vec![Snapshot::empty()],
         }
     }
 
@@ -90,7 +93,7 @@ impl WorkloadState {
     }
 
     fn gen_commit(&mut self) -> (Snapshot, Vec<KeyValueChange>) {
-        let mut snapshot = self.committed.clone();
+        let mut snapshot = self.last_snapshot().clone();
         snapshot.sync_seqn += 1;
 
         let num_changes = if self.random_size {
@@ -129,19 +132,19 @@ impl WorkloadState {
         //
         // - Pick a key that was already generated before, but generate a key that shares some bits.
         let mut key = [0; 32];
-        if !self.committed.state.is_empty() && self.rng.gen_bool(self.biases.delete) {
+        if !self.last_snapshot().state.is_empty() && self.rng.gen_bool(self.biases.delete) {
             loop {
                 self.rng.fill_bytes(&mut key);
-                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
+                if let Some((next_key, Some(_))) = self.last_snapshot().state.get_next(&key) {
                     return KeyValueChange::Delete(*next_key);
                 }
             }
         }
 
-        if self.committed.state.is_empty() || self.rng.gen_bool(self.biases.new_key) {
+        if self.last_snapshot().state.is_empty() || self.rng.gen_bool(self.biases.new_key) {
             loop {
                 self.rng.fill_bytes(&mut key);
-                if !self.committed.state.contains_key(&key) {
+                if !self.last_snapshot().state.contains_key(&key) {
                     return KeyValueChange::Insert(key, self.gen_value());
                 }
             }
@@ -149,7 +152,7 @@ impl WorkloadState {
 
         loop {
             self.rng.fill_bytes(&mut key);
-            if let Some((next_key, _)) = self.committed.state.get_next(&key) {
+            if let Some((next_key, _)) = self.last_snapshot().state.get_next(&key) {
                 return KeyValueChange::Insert(*next_key, self.gen_value());
             }
         }
@@ -176,7 +179,12 @@ impl WorkloadState {
     }
 
     fn commit(&mut self, snapshot: Snapshot) {
-        self.committed = snapshot;
+        self.committed.push(snapshot);
+    }
+
+    fn last_snapshot(&self) -> &Snapshot {
+        // UNWRAP: self.committed contains always at least one empty snapshot.
+        self.committed.last().unwrap()
     }
 }
 
@@ -208,6 +216,8 @@ pub struct Workload {
     ensure_changeset: bool,
     /// Whether to ensure the correctness of the state after every crash.
     ensure_snapshot: bool,
+    /// The max number of blocks involved in a rollback.
+    max_rollback_blocks: usize,
 }
 
 impl Workload {
@@ -229,6 +239,7 @@ impl Workload {
             workload_params.overflow,
             workload_params.new_key,
             workload_params.crash,
+            workload_params.rollback,
         );
         let mut state = WorkloadState::new(
             seed,
@@ -248,6 +259,7 @@ impl Workload {
             n_successfull_commit: 0,
             ensure_changeset: workload_params.ensure_changeset,
             ensure_snapshot: workload_params.ensure_snapshot,
+            max_rollback_blocks: workload_params.max_rollback_blocks,
         }
     }
 
@@ -279,19 +291,19 @@ impl Workload {
     async fn run_iteration(&mut self) -> Result<()> {
         let agent = self.agent.as_ref().unwrap();
         let rr = agent.rr().clone();
-        // TODO: make the choice of the exercise more sophisticated.
-        //
-        // - commits should be much more frequent.
-        // - crashes should be less frequent.
-        // - rollbacks should be less frequent.
-        let exercise_crash = self.state.rng.gen_bool(self.state.biases.crash);
-        if exercise_crash {
-            trace!("run_iteration, should crash");
-            self.exercise_commit_crashing(&rr).await?;
-        } else {
-            trace!("run_iteration");
-            self.exercise_commit(&rr).await?;
+        trace!("run_iteration");
+
+        if self.state.rng.gen_bool(self.state.biases.rollback) {
+            self.exercise_rollback(&rr).await?;
+            return Ok(());
         }
+
+        if self.state.rng.gen_bool(self.state.biases.crash) {
+            self.exercise_commit_crashing(&rr).await?;
+            return Ok(());
+        }
+
+        self.exercise_commit(&rr).await?;
         Ok(())
     }
 
@@ -368,6 +380,7 @@ impl Workload {
         // possibilities of crashing during sync.
         crash_time = (crash_time as f64 * 0.98) as u64;
 
+        trace!("exercising crash");
         rr.send_request(crate::message::ToAgent::Commit(
             crate::message::CommitPayload {
                 changeset: changeset.clone(),
@@ -423,7 +436,7 @@ impl Workload {
                 KeyValueChange::Insert(key, _value) => {
                     // The current value must be equal to the previous one.
                     let current_value = rr.send_request_query(*key).await?;
-                    match self.state.committed.state.get(key) {
+                    match self.state.last_snapshot().state.get(key) {
                         None | Some(None) if current_value.is_some() => {
                             return Err(anyhow::anyhow!("New inserted item should not be present"));
                         }
@@ -437,7 +450,7 @@ impl Workload {
                 }
                 KeyValueChange::Delete(key) => {
                     // UNWRAP: Non existing keys are not deleted.
-                    let prev_value = self.state.committed.state.get(key).unwrap();
+                    let prev_value = self.state.last_snapshot().state.get(key).unwrap();
                     assert!(prev_value.is_some());
                     if rr.send_request_query(*key).await?.as_ref() != prev_value.as_ref() {
                         return Err(anyhow::anyhow!(
@@ -455,7 +468,13 @@ impl Workload {
             return Ok(());
         }
 
-        for (i, (key, expected_value)) in (self.state.committed.state.iter()).enumerate() {
+        if self.state.last_snapshot().sync_seqn != rr.send_query_sync_seqn().await? {
+            return Err(anyhow::anyhow!(
+                "Unexpected sync_seqn while ensuring snapshot validity"
+            ));
+        }
+
+        for (i, (key, expected_value)) in (self.state.last_snapshot().state.iter()).enumerate() {
             let value = rr.send_request_query(*key).await?;
             if &value != expected_value {
                 return Err(anyhow::anyhow!(
@@ -470,14 +489,43 @@ impl Workload {
         Ok(())
     }
 
+    async fn exercise_rollback(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
+        // TODO: n_blocks should also depend on the max rollback supported by NOMT.
+        let n_snapshots = self.state.committed.len();
+        let n_blocks_to_rollback = std::cmp::min(
+            self.state.rng.gen_range(1..self.max_rollback_blocks) as usize,
+            n_snapshots - 1,
+        );
+
+        let last_sync_seqn = self.state.last_snapshot().sync_seqn;
+        self.state
+            .committed
+            .truncate(n_snapshots - n_blocks_to_rollback);
+        // The application of a rollback counts as increased sync_seq.
+        self.state.committed.last_mut().unwrap().sync_seqn = last_sync_seqn + 1;
+
+        if n_blocks_to_rollback == 0 {
+            trace!("No available blocks to perform rollback with");
+            return Ok(());
+        }
+
+        trace!("exercising rollback of {} blocks", n_blocks_to_rollback);
+        rr.send_request(crate::message::ToAgent::Rollback(n_blocks_to_rollback))
+            .await?;
+
+        self.ensure_snapshot_validity(rr).await?;
+        Ok(())
+    }
+
     async fn spawn_new_agent(&mut self) -> anyhow::Result<()> {
         assert!(self.agent.is_none());
         controller::spawn_agent_into(&mut self.agent).await?;
         let workdir = self.workdir.path().display().to_string();
+        let rollback = self.state.biases.rollback > 0.0;
         self.agent
             .as_mut()
             .unwrap()
-            .init(workdir, self.workload_id, self.bitbox_seed)
+            .init(workdir, self.workload_id, self.bitbox_seed, rollback)
             .await?;
 
         self.ensure_snapshot_validity(self.agent.as_ref().unwrap().rr())

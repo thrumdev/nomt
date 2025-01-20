@@ -22,7 +22,7 @@ pub struct WorkloadParams {
     /// The probability of a delete operation as opposed to an insert operation.
     ///
     /// Accepted values are in the range of 0 to 100
-    #[clap(default_value = "1")]
+    #[clap(default_value = "10")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
     #[arg(long = "workload-delete-bias", short = 'd')]
     pub delete: u8,
@@ -31,7 +31,7 @@ pub struct WorkloadParams {
     /// overflow pages.
     ///
     /// Accepted values are in the range of 0 to 100
-    #[clap(default_value = "1")]
+    #[clap(default_value = "10")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
     #[arg(long = "workload-overflow-bias", short = 'o')]
     pub overflow: u8,
@@ -70,6 +70,22 @@ pub struct WorkloadParams {
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
     #[arg(long = "workload-commit-crash")]
     pub crash: u8,
+
+    /// Instead of exercising a new commit, this is a probability of executing a rollback.
+    ///
+    /// Accepted values are in the range of 0 to 100
+    #[clap(default_value = "5")]
+    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
+    #[arg(long = "workload-rollback")]
+    pub rollback: u8,
+
+    /// The max amount of blocks involved in a rollback.
+    ///
+    /// The effective number of blocks used for each rollback is randomly generated in the range
+    /// 0..max_rollback_blocks.
+    #[clap(default_value = "10")]
+    #[arg(long = "workload-max-rollback-blocks")]
+    pub max_rollback_blocks: usize,
 
     /// Whether to ensure the correct application of the changest after every commit.
     #[clap(default_value = "false")]
