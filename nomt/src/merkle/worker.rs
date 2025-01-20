@@ -27,7 +27,8 @@ use super::{
     page_set::PageSet,
     page_walker::{Output, PageWalker},
     seek::{Seek, Seeker},
-    KeyReadWrite, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand, WorkerOutput,
+    KeyReadWrite, LiveOverlay, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand,
+    WorkerOutput,
 };
 
 use crate::{
@@ -51,6 +52,7 @@ pub(super) struct UpdateParams {
 
 pub(super) struct WarmUpParams {
     pub page_cache: PageCache,
+    pub overlay: LiveOverlay,
     pub store: Store,
     pub root: Node,
 }
@@ -65,11 +67,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     let io_handle = params.store.io_pool().make_handle();
     let page_io_receiver = io_handle.receiver().clone();
 
-    // TODO [now]: this doesn't actually work. the pages stored into the page-set during warm-up
-    // need to be passed along to the workers afterwards; the page-set needs to be part of the
-    // output. and ideally sharded.
-    //
-    // TODO [now]: configure bucket mode.
+    // We always run with `WithoutDependents` here, and the mode is adjusted later, during `update`.
     let page_set = PageSet::new(
         io_handle.page_pool().clone(),
         super::page_set::FreshPageBucketMode::WithoutDependents,
@@ -78,7 +76,8 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     let seeker = Seeker::<H>::new(
         params.root,
         params.store.read_transaction(),
-        params.page_cache.clone(),
+        params.page_cache,
+        params.overlay,
         io_handle,
         page_loader,
         true,
@@ -109,6 +108,7 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Resu
         root,
         store.read_transaction(),
         page_cache.clone(),
+        command.shared.overlay.clone(),
         store.io_pool().make_handle(),
         store.page_loader(),
         command.shared.witness,
@@ -208,10 +208,13 @@ fn update<H: HashAlgorithm>(
 
     let mut output = WorkerOutput::new(shared.witness);
 
-    // TODO [now]: configurable bucket mode / refactor this away.
     let mut page_set = PageSet::new(
         page_pool,
-        super::page_set::FreshPageBucketMode::WithoutDependents,
+        if shared.into_overlay {
+            super::page_set::FreshPageBucketMode::WithDependents
+        } else {
+            super::page_set::FreshPageBucketMode::WithoutDependents
+        },
     );
 
     let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache);
@@ -227,7 +230,9 @@ fn update<H: HashAlgorithm>(
 
     // Ensure the root page updater holds the root page. It is possible that this worker did not
     // seek any keys, and therefore the root page would not have been populated yet.
-    if let Some((root_page, root_page_bucket)) = page_cache.get(ROOT_PAGE_ID) {
+    if let Some((root_page, root_page_bucket)) =
+        super::get_in_memory_page(&shared.overlay, &page_cache, &ROOT_PAGE_ID)
+    {
         page_set.insert(ROOT_PAGE_ID, root_page, root_page_bucket);
     }
 

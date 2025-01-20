@@ -6,13 +6,12 @@ use std::collections::HashMap;
 use crate::{
     io::PagePool,
     page_cache::{Page, PageMut},
-    store::{BucketIndex, BucketInfo, SharedMaybeBucketIndex},
+    store::{BucketInfo, SharedMaybeBucketIndex},
 };
 
 /// The mode to use when determining bucket indices for fresh pages.
 #[derive(Clone, Copy)]
 pub enum FreshPageBucketMode {
-    #[allow(dead_code)]
     WithDependents,
     WithoutDependents,
 }
@@ -42,9 +41,8 @@ impl PageSet {
     }
 
     /// Insert a page with a known bucket index.
-    pub fn insert(&mut self, page_id: PageId, page: Page, bucket_index: BucketIndex) {
-        self.map
-            .insert(page_id, (page, BucketInfo::Known(bucket_index)));
+    pub fn insert(&mut self, page_id: PageId, page: Page, bucket_info: BucketInfo) {
+        self.map.insert(page_id, (page, bucket_info));
     }
 }
 
@@ -60,5 +58,19 @@ impl super::page_walker::PageSet for PageSet {
         self.map
             .get(&page_id)
             .map(|(p, bucket_info)| (p.clone(), bucket_info.clone()))
+            .map(|(p, b)| {
+                if let (FreshPageBucketMode::WithDependents, &BucketInfo::FreshWithNoDependents) =
+                    (self.fresh_page_bucket_mode, &b)
+                {
+                    // during warm-ups, we always run with `WithoutDependents`. This replaces the
+                    // fresh variant if running with dependents during update.
+                    (
+                        p,
+                        BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+                    )
+                } else {
+                    (p, b)
+                }
+            })
     }
 }

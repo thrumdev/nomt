@@ -17,9 +17,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     io::PagePool,
-    page_cache::{PageCache, ShardIndex},
+    overlay::LiveOverlay,
+    page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
-    store::{DirtyPage, Store},
+    store::{BucketInfo, DirtyPage, Store},
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
@@ -121,10 +122,12 @@ impl UpdatePool {
         page_cache: PageCache,
         page_pool: PagePool,
         store: Store,
+        overlay: LiveOverlay,
         root: Node,
     ) -> Updater {
         let params = worker::WarmUpParams {
             page_cache: page_cache.clone(),
+            overlay: overlay.clone(),
             store: store.clone(),
             root,
         };
@@ -142,6 +145,7 @@ impl UpdatePool {
             root,
             store,
             page_pool,
+            overlay,
         }
     }
 }
@@ -156,6 +160,7 @@ pub struct Updater {
     root: Node,
     store: Store,
     page_pool: PagePool,
+    overlay: LiveOverlay,
 }
 
 impl Updater {
@@ -167,19 +172,25 @@ impl Updater {
     }
 
     /// Update the trie with the given key-value read/write operations.
+    ///
     /// Key-paths should be in sorted order
     /// and should appear at most once within the vector. Witness specifies whether or not
     /// to collect the witness of the operation.
+    /// `into_overlay` specifies whether the results of this will be committed into an overlay,
+    /// disabling certain optimizations.
     pub fn update_and_prove<H: HashAlgorithm>(
         self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
+        into_overlay: bool,
     ) -> UpdateHandle {
         if let Some(ref warm_up) = self.warm_up {
             let _ = warm_up.finish_tx.send(());
         }
         let shared = Arc::new(UpdateShared {
             witness,
+            into_overlay,
+            overlay: self.overlay.clone(),
             read_write,
             root_page_pending: Mutex::new(Vec::with_capacity(64)),
         });
@@ -378,7 +389,9 @@ struct UpdateShared {
     read_write: Vec<(KeyPath, KeyReadWrite)>,
     // nodes needing to be written to pages above a shard.
     root_page_pending: Mutex<Vec<(TriePosition, RootPagePending)>>,
+    overlay: LiveOverlay,
     witness: bool,
+    into_overlay: bool,
 }
 
 impl UpdateShared {
@@ -453,4 +466,34 @@ fn spawn_updater<H: HashAlgorithm>(
             .with_context(|| format!("worker {} erred out", worker_id));
         let _ = output_tx.send(output);
     });
+}
+
+fn get_in_memory_page(
+    overlay: &LiveOverlay,
+    page_cache: &PageCache,
+    page_id: &PageId,
+) -> Option<(Page, BucketInfo)> {
+    overlay
+        .page(page_id)
+        .map(|page| {
+            let bucket_info = match page.bucket {
+                BucketInfo::Known(ref b) => BucketInfo::Known(*b),
+                BucketInfo::FreshOrDependent(ref maybe) => {
+                    if let Some(bucket) = maybe.get() {
+                        BucketInfo::Known(bucket)
+                    } else {
+                        BucketInfo::FreshOrDependent(maybe.clone())
+                    }
+                }
+                // PANIC: overlays are never created with `FreshWithNoDependents`.
+                BucketInfo::FreshWithNoDependents => panic!(),
+            };
+
+            (page.page.clone(), bucket_info)
+        })
+        .or_else(|| {
+            page_cache
+                .get(page_id.clone())
+                .map(|(page, bucket)| (page, BucketInfo::Known(bucket)))
+        })
 }
