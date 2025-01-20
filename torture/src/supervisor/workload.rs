@@ -204,6 +204,10 @@ pub struct Workload {
     /// Data collected to evaluate the average commit time [ns].
     tot_commit_time: u64,
     n_successfull_commit: u64,
+    /// Whether to ensure the correct application of the changest after every commit.
+    ensure_changeset: bool,
+    /// Whether to ensure the correctness of the state after every crash.
+    ensure_snapshot: bool,
 }
 
 impl Workload {
@@ -242,6 +246,8 @@ impl Workload {
             bitbox_seed,
             tot_commit_time: 0,
             n_successfull_commit: 0,
+            ensure_changeset: workload_params.ensure_changeset,
+            ensure_snapshot: workload_params.ensure_snapshot,
         }
     }
 
@@ -324,6 +330,10 @@ impl Workload {
         rr: &comms::RequestResponse,
         changeset: &Vec<KeyValueChange>,
     ) -> anyhow::Result<()> {
+        if !self.ensure_changeset {
+            return Ok(());
+        }
+
         for change in changeset {
             match change {
                 KeyValueChange::Insert(key, value)
@@ -402,6 +412,10 @@ impl Workload {
         rr: &comms::RequestResponse,
         changeset: &Vec<KeyValueChange>,
     ) -> anyhow::Result<()> {
+        if !self.ensure_changeset {
+            return Ok(());
+        }
+
         // Given a reverted changeset, we need to ensure that each modified/deleted key
         // is equal to its previous state and that each new key is not available.
         for change in changeset {
@@ -437,6 +451,10 @@ impl Workload {
     }
 
     async fn ensure_snapshot_validity(&self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
+        if !self.ensure_snapshot {
+            return Ok(());
+        }
+
         for (i, (key, expected_value)) in (self.state.committed.state.iter()).enumerate() {
             let value = rr.send_request_query(*key).await?;
             if &value != expected_value {
