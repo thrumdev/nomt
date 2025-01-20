@@ -7,11 +7,11 @@ use crate::{
     },
     io::{CompleteIo, FatPage, IoHandle},
     page_cache::{Page, PageCache, PageMut},
-    store::{BucketIndex, PageLoad, PageLoader},
+    store::{BucketIndex, BucketInfo, PageLoad, PageLoader},
     HashAlgorithm,
 };
 
-use super::page_set::PageSet;
+use super::{page_set::PageSet, LiveOverlay};
 
 use nomt_core::{
     page::DEPTH,
@@ -236,6 +236,7 @@ pub struct Seeker<H: HashAlgorithm> {
     root: Node,
     beatree_read_transaction: BeatreeReadTx,
     page_cache: PageCache,
+    overlay: LiveOverlay,
     io_handle: IoHandle,
     page_loader: PageLoader,
     processed: usize,
@@ -256,6 +257,7 @@ impl<H: HashAlgorithm> Seeker<H> {
         root: Node,
         beatree_read_transaction: BeatreeReadTx,
         page_cache: PageCache,
+        overlay: LiveOverlay,
         io_handle: IoHandle,
         page_loader: PageLoader,
         record_siblings: bool,
@@ -264,6 +266,7 @@ impl<H: HashAlgorithm> Seeker<H> {
             root,
             beatree_read_transaction,
             page_cache,
+            overlay,
             io_handle,
             page_loader,
             processed: 0,
@@ -419,14 +422,16 @@ impl<H: HashAlgorithm> Seeker<H> {
         while let Some(query) = request.next_query() {
             match query {
                 IoQuery::MerklePage(page_id) => {
-                    if let Some((page, bucket_index)) = self.page_cache.get(page_id.clone()) {
+                    let maybe_in_memory =
+                        super::get_in_memory_page(&self.overlay, &self.page_cache, &page_id);
+                    if let Some((page, bucket_info)) = maybe_in_memory {
                         request.continue_seek::<H>(
                             &self.beatree_read_transaction,
                             page_id.clone(),
                             &page,
                             self.record_siblings,
                         );
-                        page_set.insert(page_id, page, bucket_index);
+                        page_set.insert(page_id, page, bucket_info);
                         continue;
                     }
 
@@ -525,7 +530,11 @@ impl<H: HashAlgorithm> Seeker<H> {
         let page = self
             .page_cache
             .insert(page_load.page_id().clone(), page.clone(), bucket_index);
-        page_set.insert(page_load.page_id().clone(), page.clone(), bucket_index);
+        page_set.insert(
+            page_load.page_id().clone(),
+            page.clone(),
+            BucketInfo::Known(bucket_index),
+        );
 
         for waiting_request in self
             .io_waiters

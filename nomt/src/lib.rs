@@ -325,6 +325,7 @@ impl<T: HashAlgorithm> Nomt<T> {
                 self.page_cache.clone(),
                 self.page_pool.clone(),
                 self.store.clone(),
+                live_overlay.clone(),
                 self.root(),
             )),
             session_cnt: self.session_cnt.clone(),
@@ -343,8 +344,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<Overlay> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, false)?;
+        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
+            &mut session,
+            actuals,
+            /* witness */ false,
+            /* into_overlay */ true,
+        )?;
         let updated_pages = merkle_update.updated_pages.into_frozen_iter().collect();
 
         let values = value_tx.into_iter().collect();
@@ -368,8 +373,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Overlay, Witness, WitnessedOperations)> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, true)?;
+        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
+            &mut session,
+            actuals,
+            /* witness */ true,
+            /* into_overlay */ true,
+        )?;
         let updated_pages = merkle_update.updated_pages.into_frozen_iter().collect();
 
         let values = value_tx.into_iter().collect();
@@ -425,8 +434,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<Node> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, false)?;
+        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
+            &mut session,
+            actuals,
+            /* witness */ false,
+            /* into_overlay */ false,
+        )?;
         self.commit_inner(
             merkle_update.root,
             merkle_update.updated_pages.into_frozen_iter(),
@@ -446,8 +459,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, true)?;
+        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
+            &mut session,
+            actuals,
+            /* witness */ true,
+            /* into_overlay */ false,
+        )?;
 
         // UNWRAP: witness specified as true.
         let witness = merkle_update.witness.unwrap();
@@ -469,6 +486,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         session: &mut Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
+        into_overlay: bool,
     ) -> anyhow::Result<(ValueTransaction, merkle::Output, Option<rollback::Delta>)> {
         if cfg!(debug_assertions) {
             // Check that the actuals are sorted by key path.
@@ -495,7 +513,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             .merkle_updater
             .take()
             .unwrap()
-            .update_and_prove::<T>(compact_actuals, witness);
+            .update_and_prove::<T>(compact_actuals, witness, into_overlay);
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
@@ -565,8 +583,9 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut sess, actuals, /* witness */ false)?;
+        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
+            &mut sess, actuals, /* witness */ false, /* into_overlay */ false,
+        )?;
         self.commit_inner(
             merkle_update.root,
             merkle_update.updated_pages.into_frozen_iter(),
