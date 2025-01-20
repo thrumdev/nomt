@@ -24,7 +24,7 @@ pub struct WorkloadParams {
     /// Accepted values are in the range of 0 to 100
     #[clap(default_value = "10")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "workload-delete-bias", short = 'd')]
+    #[arg(long = "delete-bias", short = 'd')]
     pub delete: u8,
 
     /// When generating a value, the probability of generating a value that will spill into the
@@ -33,7 +33,7 @@ pub struct WorkloadParams {
     /// Accepted values are in the range of 0 to 100
     #[clap(default_value = "10")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "workload-overflow-bias", short = 'o')]
+    #[arg(long = "overflow-bias", short = 'o')]
     pub overflow: u8,
 
     /// When generating a key, whether it should be one that was appeared somewhere
@@ -42,25 +42,25 @@ pub struct WorkloadParams {
     /// Accepted values are in the range of 0 to 100
     #[clap(default_value = "50")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "workload-new-key-bias", short = 'n')]
+    #[arg(long = "new-key-bias", short = 'n')]
     pub new_key: u8,
 
     /// The number of times a workload will be executed.
     #[clap(default_value = "50")]
-    #[arg(long = "workload-iterations", short = 'i')]
+    #[arg(long = "iterations", short = 'i')]
     pub iterations: usize,
 
     /// The size of a single workload iteration, the number of changesets per commit.
     #[clap(default_value = "5000")]
-    #[arg(long = "workload-size", short = 's')]
+    #[arg(long = "size", short = 's')]
     pub size: usize,
 
     /// Whether the size of each workload should be random or not.
     ///
-    /// If specified, the size of each commit will be within 0..workload-size,
-    /// otherwise it will always be workload-size.
+    /// If specified, the size of each commit will be within `0..size`,
+    /// otherwise it will always be `size`.
     #[clap(default_value = "false")]
-    #[arg(long = "workload-random-size")]
+    #[arg(long = "random-size")]
     pub random_size: bool,
 
     /// When exercising a new commit, the probability of causing it to crash.
@@ -68,7 +68,7 @@ pub struct WorkloadParams {
     /// Accepted values are in the range of 0 to 100
     #[clap(default_value = "20")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "workload-commit-crash")]
+    #[arg(long = "commit-crash")]
     pub crash: u8,
 
     /// Instead of exercising a new commit, this is a probability of executing a rollback.
@@ -76,7 +76,7 @@ pub struct WorkloadParams {
     /// Accepted values are in the range of 0 to 100
     #[clap(default_value = "5")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "workload-rollback")]
+    #[arg(long = "rollback")]
     pub rollback: u8,
 
     /// The max amount of blocks involved in a rollback.
@@ -84,7 +84,7 @@ pub struct WorkloadParams {
     /// The effective number of blocks used for each rollback is randomly generated in the range
     /// 0..max_rollback_blocks.
     #[clap(default_value = "10")]
-    #[arg(long = "workload-max-rollback-blocks")]
+    #[arg(long = "max-rollback-blocks")]
     pub max_rollback_blocks: usize,
 
     /// Whether to ensure the correct application of the changest after every commit.
