@@ -17,14 +17,14 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     io::PagePool,
-    page_cache::{Page, PageCache, ShardIndex},
-    page_diff::PageDiff,
+    page_cache::{PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
-    store::Store,
+    store::{DirtyPage, Store},
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
 
+mod page_set;
 mod page_walker;
 mod seek;
 mod worker;
@@ -38,10 +38,15 @@ impl UpdatedPages {
     /// Freeze, label, and iterate all the pages.
     ///
     /// Pages are 'labeled' by placing the page ID into the page data itself prior to freezing.
-    pub fn into_frozen_iter(self) -> impl Iterator<Item = (PageId, (Page, PageDiff))> {
+    pub fn into_frozen_iter(self) -> impl Iterator<Item = (PageId, DirtyPage)> {
         self.0.into_iter().flatten().map(|updated_page| {
-            let page = updated_page.page.freeze(&updated_page.page_id);
-            (updated_page.page_id, (page, updated_page.diff))
+            let page = updated_page.page.freeze();
+            let dirty = DirtyPage {
+                page,
+                diff: updated_page.diff,
+                bucket: updated_page.bucket_info,
+            };
+            (updated_page.page_id, dirty)
         })
     }
 }

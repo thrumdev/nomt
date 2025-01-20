@@ -24,7 +24,7 @@ use std::{
 use std::os::unix::fs::OpenOptionsExt as _;
 
 pub use self::page_loader::{PageLoad, PageLoader};
-pub use bitbox::{BucketIndex, HashTableUtilization};
+pub use bitbox::{BucketIndex, HashTableUtilization, SharedMaybeBucketIndex};
 
 mod flock;
 mod meta;
@@ -274,7 +274,7 @@ impl Store {
         &self,
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
-        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))> + Send + 'static,
+        updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -311,35 +311,43 @@ impl ValueTransaction {
     }
 }
 
-/// An atomic transaction on merkle tree pages to be applied against the store
-/// with [`Store::commit`].
-pub struct MerkleTransaction {
-    pub(crate) bucket_allocator: bitbox::BucketAllocator,
-    pub(crate) new_pages: Vec<(PageId, BucketIndex, Option<(Arc<FatPage>, PageDiff)>)>,
+/// Information about the bucket associated with a page.
+///
+/// This is either a firmly known bucket index or a pending bucket index which will be determined
+/// when the overlay is written.
+///
+/// The only overhead for non-fresh pages is the overhead of an enum. For fresh pages, there is an
+/// allocation and atomic overhead.
+#[derive(Clone)]
+pub enum BucketInfo {
+    /// The bucket index is known.
+    Known(BucketIndex),
+    /// The page is fresh and there are no dependents (i.e. overlays) which would require the result
+    /// of the page allocation.
+    FreshWithNoDependents,
+    /// The bucket index is either fresh or dependent on the bucket allocation of a fresh page
+    /// within an earlier overlay.
+    ///
+    /// This variant is specifically needed for storage overlays.
+    /// When a fresh page is first inserted into an overlay, its bucket is pending. This state is
+    /// shared with all subsequent overlays. The bucket is determined when the overlay first
+    /// containing the fresh page is committed. The allocated page will automatically propagate to
+    /// all dependent overlays.
+    ///
+    /// Without this shared state, it would be possible to lose track of the allocated bucket index
+    /// from one overlay to the next.
+    FreshOrDependent(SharedMaybeBucketIndex),
 }
 
-impl MerkleTransaction {
-    /// Write a page to storage in its entirety.
-    pub fn write_page(
-        &mut self,
-        page_id: PageId,
-        bucket: Option<BucketIndex>,
-        page: Arc<FatPage>,
-        page_diff: PageDiff,
-    ) -> BucketIndex {
-        let bucket_index =
-            bucket.unwrap_or_else(|| self.bucket_allocator.allocate(page_id.clone()));
-
-        self.new_pages
-            .push((page_id, bucket_index, Some((page, page_diff))));
-        bucket_index
-    }
-
-    /// Delete a page from storage.
-    pub fn delete_page(&mut self, page_id: PageId, bucket: BucketIndex) {
-        self.bucket_allocator.free(bucket);
-        self.new_pages.push((page_id, bucket, None));
-    }
+/// A dirty page to be written to the store.
+#[derive(Clone)]
+pub struct DirtyPage {
+    /// The (frozen) page.
+    pub page: Page,
+    /// The diff between this page and the last revision.
+    pub diff: PageDiff,
+    /// The bucket info associated with the page.
+    pub bucket: BucketInfo,
 }
 
 /// Creates and initializes a new empty database at the specified path.

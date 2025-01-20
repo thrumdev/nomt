@@ -24,7 +24,8 @@ use std::{
 };
 
 use super::{
-    page_walker::{Output, PageSource, PageWalker},
+    page_set::PageSet,
+    page_walker::{Output, PageWalker},
     seek::{Seek, Seeker},
     KeyReadWrite, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand, WorkerOutput,
 };
@@ -63,6 +64,17 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     let page_loader = params.store.page_loader();
     let io_handle = params.store.io_pool().make_handle();
     let page_io_receiver = io_handle.receiver().clone();
+
+    // TODO [now]: this doesn't actually work. the pages stored into the page-set during warm-up
+    // need to be passed along to the workers afterwards; the page-set needs to be part of the
+    // output. and ideally sharded.
+    //
+    // TODO [now]: configure bucket mode.
+    let page_set = PageSet::new(
+        io_handle.page_pool().clone(),
+        super::page_set::FreshPageBucketMode::WithoutDependents,
+    );
+
     let seeker = Seeker::<H>::new(
         params.root,
         params.store.read_transaction(),
@@ -72,7 +84,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
         true,
     );
 
-    let result = warm_up_phase(page_io_receiver, seeker, warmup_rx, finish_rx);
+    let result = warm_up_phase(page_io_receiver, seeker, page_set, warmup_rx, finish_rx);
 
     match result {
         Err(_) => return,
@@ -108,6 +120,7 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Resu
 fn warm_up_phase<H: HashAlgorithm>(
     page_io_receiver: Receiver<crate::io::CompleteIo>,
     mut seeker: Seeker<H>,
+    mut page_set: PageSet,
     warmup_rx: Receiver<WarmUpCommand>,
     finish_rx: Receiver<()>,
 ) -> anyhow::Result<HashMap<KeyPath, Seek>> {
@@ -128,7 +141,7 @@ fn warm_up_phase<H: HashAlgorithm>(
             continue;
         }
 
-        seeker.submit_all()?;
+        seeker.submit_all(&mut page_set)?;
         if !seeker.has_room() {
             // block on interrupt or next page ready.
             let index = select_no_work.ready();
@@ -139,7 +152,7 @@ fn warm_up_phase<H: HashAlgorithm>(
                     Ok(()) => break,
                 }
             } else if index == page_no_work_idx {
-                seeker.try_recv_page()?;
+                seeker.try_recv_page(&mut page_set)?;
             } else {
                 unreachable!()
             }
@@ -161,7 +174,7 @@ fn warm_up_phase<H: HashAlgorithm>(
 
                 seeker.push(warm_up_command.key_path);
             } else if index == page_idx {
-                seeker.try_recv_page()?;
+                seeker.try_recv_page(&mut page_set)?;
             } else {
                 unreachable!()
             }
@@ -173,9 +186,9 @@ fn warm_up_phase<H: HashAlgorithm>(
             warm_ups.insert(result.key, result);
             continue;
         }
-        seeker.submit_all()?;
+        seeker.submit_all(&mut page_set)?;
         if seeker.has_live_requests() {
-            seeker.recv_page()?;
+            seeker.recv_page(&mut page_set)?;
         }
     }
 
@@ -195,26 +208,33 @@ fn update<H: HashAlgorithm>(
 
     let mut output = WorkerOutput::new(shared.witness);
 
-    let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache, &page_pool);
+    // TODO [now]: configurable bucket mode / refactor this away.
+    let mut page_set = PageSet::new(
+        page_pool,
+        super::page_set::FreshPageBucketMode::WithoutDependents,
+    );
+
+    let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache);
 
     // one lucky thread gets the master write pass.
-    match updater.update(&mut seeker, &mut output, warm_ups)? {
+    match updater.update(&mut seeker, &mut output, &mut page_set, warm_ups)? {
         None => return Ok(output),
         Some(write_pass) => write_pass,
     };
 
     let pending_ops = shared.take_root_pending();
-    let mut root_page_updater = PageWalker::<H>::new(
-        root,
-        PageSource::PageCache(page_cache.clone()),
-        page_pool.clone(),
-        None,
-    );
+    let mut root_page_updater = PageWalker::<H>::new(root, None);
+
+    // Ensure the root page updater holds the root page. It is possible that this worker did not
+    // seek any keys, and therefore the root page would not have been populated yet.
+    if let Some((root_page, root_page_bucket)) = page_cache.get(ROOT_PAGE_ID) {
+        page_set.insert(ROOT_PAGE_ID, root_page, root_page_bucket);
+    }
 
     for (trie_pos, pending_op) in pending_ops {
         match pending_op {
             RootPagePending::Node(node) => {
-                root_page_updater.advance_and_place_node(trie_pos.clone(), node)
+                root_page_updater.advance_and_place_node(&page_set, trie_pos.clone(), node)
             }
             RootPagePending::SubTrie {
                 range_start,
@@ -223,7 +243,7 @@ fn update<H: HashAlgorithm>(
             } => {
                 let ops = subtrie_ops(&shared.read_write[range_start..range_end]);
                 let ops = nomt_core::update::leaf_ops_spliced(prev_terminal, &ops);
-                root_page_updater.advance_and_replace(trie_pos.clone(), ops.clone());
+                root_page_updater.advance_and_replace(&page_set, trie_pos.clone(), ops.clone());
             }
         }
     }
@@ -259,7 +279,6 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         shared: Arc<UpdateShared>,
         write_pass: WritePass<ShardIndex>,
         page_cache: &PageCache,
-        page_pool: &PagePool,
     ) -> Self {
         let region = match write_pass.region() {
             ShardIndex::Root => PageRegion::universe(),
@@ -278,21 +297,11 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             .binary_search_by_key(&key_range_end, |x| x.0)
             .unwrap_or_else(|i| i);
 
-        let page_source = match write_pass.region() {
-            ShardIndex::Root => PageSource::PageCache(page_cache.clone()),
-            ShardIndex::Shard(i) => PageSource::PageCacheShard(page_cache.get_shard(*i)),
-        };
-
         RangeUpdater {
             shared,
             write_pass,
             region,
-            page_walker: PageWalker::<H>::new(
-                root,
-                page_source,
-                page_pool.clone(),
-                Some(ROOT_PAGE_ID),
-            ),
+            page_walker: PageWalker::<H>::new(root, Some(ROOT_PAGE_ID)),
             range_start,
             range_end,
         }
@@ -303,6 +312,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
     fn handle_completion(
         &mut self,
         output: &mut WorkerOutput,
+        page_set: &PageSet,
         start_index: usize,
         seek_result: Seek,
     ) -> usize {
@@ -378,7 +388,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         } else {
             None
         };
-        self.attempt_advance(output, seek_result, ops, batch_size);
+        self.attempt_advance(output, page_set, seek_result, ops, batch_size);
 
         next_index
     }
@@ -388,6 +398,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
     fn attempt_advance(
         &mut self,
         output: &mut WorkerOutput,
+        page_set: &PageSet,
         seek_result: Seek,
         ops: Option<Vec<(KeyPath, Option<ValueHash>)>>,
         batch_size: usize,
@@ -397,7 +408,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             Some(ref ops) => {
                 let ops = nomt_core::update::leaf_ops_spliced(seek_result.terminal.clone(), &ops);
                 self.page_walker
-                    .advance_and_replace(seek_result.position.clone(), ops)
+                    .advance_and_replace(page_set, seek_result.position.clone(), ops)
             }
         };
 
@@ -429,6 +440,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         mut self,
         seeker: &mut Seeker<H>,
         output: &mut WorkerOutput,
+        page_set: &mut PageSet,
         warm_ups: Arc<HashMap<KeyPath, Seek>>,
     ) -> anyhow::Result<Option<WritePass<ShardIndex>>> {
         let mut start_index = self.range_start;
@@ -460,7 +472,8 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                     if skips > 0 {
                         skips -= 1;
                     } else {
-                        let end_index = self.handle_completion(output, start_index, seek_result);
+                        let end_index =
+                            self.handle_completion(output, page_set, start_index, seek_result);
 
                         // account for stuff we pushed that was already covered by the terminal
                         // we just popped off.
@@ -474,10 +487,10 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                 }
             }
 
-            seeker.submit_all()?;
+            seeker.submit_all(page_set)?;
             if !seeker.has_room() && seeker.has_live_requests() {
                 // no way to push work until at least one page fetch has concluded.
-                seeker.recv_page()?;
+                seeker.recv_page(page_set)?;
                 continue;
             }
 
@@ -493,11 +506,11 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                     }
                 } else {
                     seeker.push(self.shared.read_write[next_push].0);
-                    seeker.submit_all()?;
+                    seeker.submit_all(page_set)?;
                 }
             }
 
-            seeker.try_recv_page()?;
+            seeker.try_recv_page(page_set)?;
         }
 
         // 2. conclude.

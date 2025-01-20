@@ -11,6 +11,8 @@ use crate::{
     HashAlgorithm,
 };
 
+use super::page_set::PageSet;
+
 use nomt_core::{
     page::DEPTH,
     page_id::{PageId, ROOT_PAGE_ID},
@@ -229,7 +231,7 @@ enum IoRequest {
 /// path to the terminal node are in the page cache. This includes the page that contains the leaf
 /// children of the request.
 ///
-/// Requests are completed in the order the are submitted.
+/// Requests are completed in the order they are submitted.
 pub struct Seeker<H: HashAlgorithm> {
     root: Node,
     beatree_read_transaction: BeatreeReadTx,
@@ -292,12 +294,12 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Try to submit as many requests as possible.
-    pub fn submit_all(&mut self) -> anyhow::Result<()> {
+    pub fn submit_all(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
         if !self.has_room() {
             return Ok(());
         }
         self.submit_idle_page_loads()?;
-        self.submit_idle_key_path_requests()?;
+        self.submit_idle_key_path_requests(page_set)?;
 
         Ok(())
     }
@@ -328,18 +330,18 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Try to process the next I/O. Does not block the current thread.
-    pub fn try_recv_page(&mut self) -> anyhow::Result<()> {
+    pub fn try_recv_page(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
         if let Ok(io) = self.io_handle.try_recv() {
-            self.handle_completion(io)?;
+            self.handle_completion(page_set, io)?;
         }
 
         Ok(())
     }
 
     /// Block on processing the next I/O. Blocks the current thread.
-    pub fn recv_page(&mut self) -> anyhow::Result<()> {
+    pub fn recv_page(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
         let io = self.io_handle.recv()?;
-        self.handle_completion(io)?;
+        self.handle_completion(page_set, io)?;
         Ok(())
     }
 
@@ -365,12 +367,12 @@ impl<H: HashAlgorithm> Seeker<H> {
 
     // submit the next page for each idle key path request until backpressuring or no more progress
     // can be made.
-    fn submit_idle_key_path_requests(&mut self) -> anyhow::Result<()> {
+    fn submit_idle_key_path_requests(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
         while self.has_room() {
             match self.idle_requests.pop_front() {
                 None => return Ok(()),
                 Some(request_index) => {
-                    self.submit_key_path_request(request_index)?;
+                    self.submit_key_path_request(page_set, request_index)?;
                 }
             }
         }
@@ -385,8 +387,15 @@ impl<H: HashAlgorithm> Seeker<H> {
                 .page_loader
                 .probe(page_load, &self.io_handle, slab_index as u64)?
             {
-                // guaranteed fresh page
-                self.handle_merkle_page_and_continue(slab_index, None);
+                // PANIC: seek should really never reach fresh pages. we only request a page if
+                // we seek to an internal node above it, and in that case the page really should
+                // exist.
+                //
+                // This code path being reached indicates that the page definitely doesn't exist
+                // within the hash-table.
+                //
+                // Maybe better to return an error here. it indicates some kind of DB corruption.
+                unreachable!()
             }
         }
 
@@ -394,7 +403,11 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     // submit the next page for this key path request.
-    fn submit_key_path_request(&mut self, request_index: usize) -> anyhow::Result<()> {
+    fn submit_key_path_request(
+        &mut self,
+        page_set: &mut PageSet,
+        request_index: usize,
+    ) -> anyhow::Result<()> {
         let i = if request_index < self.processed {
             return Ok(());
         } else {
@@ -406,13 +419,14 @@ impl<H: HashAlgorithm> Seeker<H> {
         while let Some(query) = request.next_query() {
             match query {
                 IoQuery::MerklePage(page_id) => {
-                    if let Some(page) = self.page_cache.get(page_id.clone()) {
+                    if let Some((page, bucket_index)) = self.page_cache.get(page_id.clone()) {
                         request.continue_seek::<H>(
                             &self.beatree_read_transaction,
-                            page_id,
+                            page_id.clone(),
                             &page,
                             self.record_siblings,
                         );
+                        page_set.insert(page_id, page, bucket_index);
                         continue;
                     }
 
@@ -468,7 +482,7 @@ impl<H: HashAlgorithm> Seeker<H> {
         Ok(())
     }
 
-    fn handle_completion(&mut self, io: CompleteIo) -> anyhow::Result<()> {
+    fn handle_completion(&mut self, page_set: &mut PageSet, io: CompleteIo) -> anyhow::Result<()> {
         io.result?;
         let slab_index = io.command.user_data as usize;
 
@@ -479,7 +493,9 @@ impl<H: HashAlgorithm> Seeker<H> {
                 // UNWRAP: page loader always submits a `Read` command that yields a fat page.
                 let page = io.command.kind.unwrap_buf();
                 match merkle_load.try_complete(page) {
-                    Some(p) => self.handle_merkle_page_and_continue(slab_index, Some(p)),
+                    Some((page, bucket)) => {
+                        self.handle_merkle_page_and_continue(page_set, slab_index, page, bucket)
+                    }
                     None => self.idle_page_loads.push_back(slab_index),
                 };
             }
@@ -494,21 +510,22 @@ impl<H: HashAlgorithm> Seeker<H> {
 
     fn handle_merkle_page_and_continue(
         &mut self,
+        page_set: &mut PageSet,
         slab_index: usize,
-        page_data: Option<(FatPage, BucketIndex)>,
+        page_data: FatPage,
+        bucket_index: BucketIndex,
     ) {
         let IoRequest::Merkle(page_load) = self.io_slab.remove(slab_index) else {
             panic!()
         };
 
-        let (page, bucket_index) = match page_data {
-            None => (PageMut::pristine_empty(), None),
-            Some((page, bucket)) => (PageMut::pristine_with_data(page), Some(bucket)),
-        };
+        let page = PageMut::pristine_with_data(page_data).freeze();
 
+        // insert the page into the page cache and working page set.
         let page = self
             .page_cache
-            .insert(page_load.page_id().clone(), page, bucket_index);
+            .insert(page_load.page_id().clone(), page.clone(), bucket_index);
+        page_set.insert(page_load.page_id().clone(), page.clone(), bucket_index);
 
         for waiting_request in self
             .io_waiters

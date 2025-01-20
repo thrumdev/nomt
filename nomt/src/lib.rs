@@ -5,7 +5,6 @@
 use bitvec::prelude::*;
 use io::PagePool;
 use metrics::{Metric, Metrics};
-use page_diff::PageDiff;
 use std::{
     mem,
     sync::{atomic::AtomicUsize, Arc},
@@ -19,9 +18,9 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 use overlay::{LiveOverlay, OverlayMarker};
-use page_cache::{Page, PageCache};
+use page_cache::PageCache;
 use parking_lot::Mutex;
-use store::{Store, ValueTransaction};
+use store::{DirtyPage, Store, ValueTransaction};
 
 // CARGO HACK: silence lint; this is used in integration tests
 
@@ -403,7 +402,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         let page_changes: Vec<_> = overlay
             .page_changes()
             .into_iter()
-            .map(|(page_id, (ref page, ref diff))| (page_id.clone(), (page.clone(), diff.clone())))
+            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
             .collect();
         let values: Vec<_> = overlay
             .value_changes()
@@ -513,7 +512,7 @@ impl<T: HashAlgorithm> Nomt<T> {
     fn commit_inner(
         &self,
         new_root: Node,
-        updated_pages: impl IntoIterator<Item = (PageId, (Page, PageDiff))> + Send + 'static,
+        updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         rollback_delta: Option<rollback::Delta>,
         overlay_marker: Option<OverlayMarker>,
@@ -708,7 +707,7 @@ fn compute_root_node<H: HashAlgorithm>(page_cache: &PageCache, store: &Store) ->
     // 2: root page is empty and beatree has a single item. in this case, root is a leaf.
     // 3: root is an internal node.
 
-    if let Some(root_page) = page_cache.get(ROOT_PAGE_ID) {
+    if let Some((root_page, _)) = page_cache.get(ROOT_PAGE_ID) {
         let left = root_page.node(0);
         let right = root_page.node(1);
 
