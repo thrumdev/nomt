@@ -46,6 +46,8 @@ pub struct InitPayload {
     ///
     /// Only used upon creation a new NOMT db.
     pub bitbox_seed: [u8; 16],
+    /// Whether the agent is supposed to handle rollbacks.
+    pub rollback: bool,
 }
 
 /// The supervisor sends this message to the child process to indicate that the child should
@@ -86,6 +88,9 @@ pub enum ToAgent {
     /// The supervisor sends this message to the child process to indicate that the child should
     /// commit.
     Commit(CommitPayload),
+    /// The supervisor sends this message to the child process to indicate that the child should
+    /// perform a rollback of the number of specified blocks.
+    Rollback(usize),
     /// The supervisor sends this message to the child process to query the value of a given key.
     Query(Key),
     /// The supervisor sends this message to the child process to query the current sequence number

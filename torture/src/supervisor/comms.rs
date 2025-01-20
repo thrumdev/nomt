@@ -22,7 +22,6 @@ use tokio::{
 use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tracing::trace;
 
 use crate::message::{self, Envelope, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE};
 
