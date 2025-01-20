@@ -320,20 +320,43 @@ impl LiveOverlay {
             .as_ref()
             .and_then(|parent| parent.index.values.get(key))
             .and_then(|seqn| seqn.checked_sub(self.min_seqn))
-            .map(|seqn_diff| {
-                if seqn_diff == 0 {
-                    // UNWRAP: parent existence checked above
-                    // UNWRAP: index indicates that data exists.
-                    self.parent.as_ref().unwrap().data.values.get(key).unwrap()
-                } else {
-                    // UNWRAP: index indicates that data exists.
-                    self.ancestor_data[seqn_diff as usize - 1]
-                        .values
-                        .get(key)
-                        .unwrap()
-                }
-            })
+            .map(|seqn_diff| self.value_inner(key, seqn_diff))
             .cloned()
+    }
+
+    fn value_inner(&self, key: &KeyPath, seqn_diff: u64) -> &ValueChange {
+        if seqn_diff == 0 {
+            // UNWRAP: parent existence checked above
+            // UNWRAP: index indicates that data exists.
+            self.parent.as_ref().unwrap().data.values.get(key).unwrap()
+        } else {
+            // UNWRAP: index indicates that data exists.
+            self.ancestor_data[seqn_diff as usize - 1]
+                .values
+                .get(key)
+                .unwrap()
+        }
+    }
+
+    /// Iterate all value changes within the given key bounds.
+    pub(super) fn value_iter<'a>(
+        &'a self,
+        start: KeyPath,
+        end: Option<KeyPath>,
+    ) -> impl Iterator<Item = (KeyPath, &'a ValueChange)> {
+        self.parent
+            .as_ref()
+            .map(move |parent| {
+                parent
+                    .index
+                    .values
+                    .range(start..)
+                    .take_while(move |(k, _)| end.as_ref().map_or(true, |end| end > k))
+                    .filter_map(|(k, seqn)| seqn.checked_sub(self.min_seqn).map(|s| (k, s)))
+                    .map(|(k, seqn_diff)| (*k, self.value_inner(k, seqn_diff)))
+            })
+            .into_iter()
+            .flatten()
     }
 
     /// Finish this overlay and transform it into a frozen [`Overlay`].

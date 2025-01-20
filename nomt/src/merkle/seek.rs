@@ -4,6 +4,7 @@ use crate::{
     beatree::{
         iterator::{IterOutput, NeededLeavesIter},
         AsyncLeafLoad, BeatreeIterator, LeafNodeRef, PageNumber, ReadTransaction as BeatreeReadTx,
+        ValueChange,
     },
     io::{CompleteIo, FatPage, IoHandle},
     page_cache::{Page, PageCache, PageMut},
@@ -42,13 +43,14 @@ struct SeekRequest {
 impl SeekRequest {
     fn new<H: HashAlgorithm>(
         read_transaction: &BeatreeReadTx,
+        overlay: &LiveOverlay,
         key: KeyPath,
         root: Node,
     ) -> SeekRequest {
         let state = if trie::is_terminator(&root) {
             RequestState::Completed(None)
         } else if trie::is_leaf(&root) {
-            RequestState::begin_leaf_fetch(read_transaction, &TriePosition::new())
+            RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &TriePosition::new())
         } else {
             RequestState::Seeking
         };
@@ -101,6 +103,7 @@ impl SeekRequest {
     fn continue_seek<H: HashAlgorithm>(
         &mut self,
         read_transaction: &BeatreeReadTx,
+        overlay: &LiveOverlay,
         page_id: PageId,
         page: &Page,
         record_siblings: bool,
@@ -131,7 +134,8 @@ impl SeekRequest {
             }
 
             if trie::is_leaf(&cur_node) {
-                self.state = RequestState::begin_leaf_fetch(read_transaction, &self.position);
+                self.state =
+                    RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
                 do_leaf_fetch = true;
                 break;
             } else if trie::is_terminator(&cur_node) {
@@ -177,8 +181,34 @@ enum RequestState {
 }
 
 impl RequestState {
-    fn begin_leaf_fetch(read_transaction: &BeatreeReadTx, pos: &TriePosition) -> Self {
+    fn begin_leaf_fetch<H: HashAlgorithm>(
+        read_transaction: &BeatreeReadTx,
+        overlay: &LiveOverlay,
+        pos: &TriePosition,
+    ) -> Self {
         let (start, end) = range_bounds(pos.raw_path(), pos.depth() as usize);
+
+        // First see if the item is present within the overlay.
+        let overlay_item = overlay
+            .value_iter(start, end)
+            .filter(|(_, v)| v.as_option().is_some())
+            .next();
+
+        if let Some((key_path, overlay_leaf)) = overlay_item {
+            let value_hash = match overlay_leaf {
+                // PANIC: we filtered out all deletions above.
+                ValueChange::Delete => panic!(),
+                ValueChange::Insert(value) => H::hash_value(value),
+                ValueChange::InsertOverflow(_, value_hash) => value_hash.clone(),
+            };
+
+            return RequestState::Completed(Some(trie::LeafData {
+                key_path,
+                value_hash,
+            }));
+        }
+
+        // Fall back to iterator (most likely).
         let iter = read_transaction.iterator(start, end);
         let needed_leaves = iter.needed_leaves();
         RequestState::FetchingLeaf(iter, needed_leaves)
@@ -353,6 +383,7 @@ impl<H: HashAlgorithm> Seeker<H> {
         let request_index = self.processed + self.requests.len();
         self.requests.push_back(SeekRequest::new::<H>(
             &self.beatree_read_transaction,
+            &self.overlay,
             key,
             self.root,
         ));
@@ -427,6 +458,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                     if let Some((page, bucket_info)) = maybe_in_memory {
                         request.continue_seek::<H>(
                             &self.beatree_read_transaction,
+                            &self.overlay,
                             page_id.clone(),
                             &page,
                             self.record_siblings,
@@ -551,6 +583,7 @@ impl<H: HashAlgorithm> Seeker<H> {
 
             request.continue_seek::<H>(
                 &self.beatree_read_transaction,
+                &self.overlay,
                 page_load.page_id().clone(),
                 &page,
                 self.record_siblings,
