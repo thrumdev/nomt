@@ -70,4 +70,14 @@ pub struct WorkloadParams {
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
     #[arg(long = "workload-commit-crash")]
     pub crash: u8,
+
+    /// Whether to ensure the correct application of the changest after every commit.
+    #[clap(default_value = "false")]
+    #[arg(long = "ensure-changeset")]
+    pub ensure_changeset: bool,
+
+    /// Whether to ensure the correctness of the state after every crash.
+    #[clap(default_value = "false")]
+    #[arg(long = "ensure-snapshot")]
+    pub ensure_snapshot: bool,
 }
