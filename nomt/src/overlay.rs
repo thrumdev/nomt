@@ -17,8 +17,6 @@
 //! Creating a new overlay is an O(n) operation in the amount of changes relative to the parent,
 //! both in terms of new changes and outdated ancestors.
 
-#![allow(dead_code)]
-
 use crate::{beatree::ValueChange, store::DirtyPage};
 use nomt_core::{
     page_id::PageId,
@@ -277,11 +275,6 @@ impl LiveOverlay {
             ancestor_data,
             min_seqn,
         })
-    }
-
-    /// Whether the overlay is empty.
-    pub(super) fn is_empty(&self) -> bool {
-        self.parent.is_none()
     }
 
     /// Get a page by ID.
