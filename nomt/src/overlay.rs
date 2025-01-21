@@ -44,7 +44,7 @@ impl Overlay {
     /// If the provided marker is `None`, then this checks that this overlay doesn't have a parent.
     pub(super) fn parent_matches_marker(&self, marker: Option<&OverlayMarker>) -> bool {
         match (self.inner.data.parent_status.as_ref(), marker) {
-            (None, None) => true,
+            (None, _) => true,
             (Some(parent), Some(marker)) => parent.ptr_eq(&marker.0),
             _ => false,
         }
