@@ -535,6 +535,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
     /// Return Nomt's metrics.
     /// To collect them, they need to be activated at [`Nomt`] creation
+    #[doc(hidden)]
     pub fn metrics(&self) -> Metrics {
         self.metrics.clone()
     }
