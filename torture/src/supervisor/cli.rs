@@ -92,8 +92,13 @@ pub struct WorkloadParams {
     #[arg(long = "ensure-changeset")]
     pub ensure_changeset: bool,
 
-    /// Whether to ensure the correctness of the state after every crash.
+    /// Whether to ensure the correctness of the entire state after every crash or rollback.
     #[clap(default_value = "false")]
-    #[arg(long = "ensure-snapshot")]
+    #[arg(long = "ensure-snapshot", conflicts_with = "sample_snapshot")]
     pub ensure_snapshot: bool,
+
+    /// Whether to randomly sample the state after every crash or rollback.
+    #[clap(default_value = "false")]
+    #[arg(long = "sample-snapshot")]
+    pub sample_snapshot: bool,
 }

@@ -209,8 +209,10 @@ pub struct Workload {
     n_successfull_commit: u64,
     /// Whether to ensure the correct application of the changest after every commit.
     ensure_changeset: bool,
-    /// Whether to ensure the correctness of the state after every crash.
+    /// Whether to ensure the correctness of the entire state after every crash or rollback.
     ensure_snapshot: bool,
+    /// Whether to randomly sample the state after every crash or rollback.
+    sample_snapshot: bool,
     /// The max number of blocks involved in a rollback.
     max_rollback_blocks: usize,
 }
@@ -254,6 +256,7 @@ impl Workload {
             n_successfull_commit: 0,
             ensure_changeset: workload_params.ensure_changeset,
             ensure_snapshot: workload_params.ensure_snapshot,
+            sample_snapshot: workload_params.sample_snapshot,
             max_rollback_blocks: workload_params.max_rollback_blocks,
         }
     }
@@ -458,8 +461,11 @@ impl Workload {
         Ok(())
     }
 
-    async fn ensure_snapshot_validity(&self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
-        if !self.ensure_snapshot {
+    async fn ensure_snapshot_validity(
+        &mut self,
+        rr: &comms::RequestResponse,
+    ) -> anyhow::Result<()> {
+        if !self.ensure_snapshot && !self.sample_snapshot {
             return Ok(());
         }
 
@@ -469,6 +475,14 @@ impl Workload {
             ));
         }
 
+        if self.ensure_snapshot {
+            return self.check_entire_snapshot(rr).await;
+        }
+
+        self.check_sampled_snapshot(rr).await
+    }
+
+    async fn check_entire_snapshot(&self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
         for (i, (key, expected_value)) in (self.state.last_snapshot().state.iter()).enumerate() {
             let value = rr.send_request_query(*key).await?;
             if &value != expected_value {
@@ -477,6 +491,33 @@ impl Workload {
                     i,
                     hex::encode(key),
                     expected_value.as_ref().map(hex::encode),
+                    value.as_ref().map(hex::encode),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn check_sampled_snapshot(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
+        let mut key = [0; 32];
+        // The amount of items randomly sampled is equal to 5% of the entire state size.
+        let sample_check_size = (self.state.last_snapshot().state.len() as f64 * 0.05) as usize;
+        for _ in 0..sample_check_size {
+            let (key, expected_value) = loop {
+                self.state.rng.fill_bytes(&mut key);
+                if let Some((next_key, Some(expected_value))) =
+                    self.state.last_snapshot().state.get_next(&key)
+                {
+                    break (next_key, expected_value);
+                }
+            };
+
+            let value = rr.send_request_query(*key).await?;
+            if value.as_ref().map_or(true, |v| v != expected_value) {
+                return Err(anyhow::anyhow!(
+                    "Wrong key in snapshot,\n key: {:?},\n expected value: {:?},\n found value: {:?}",
+                    hex::encode(key),
+                    hex::encode(expected_value),
                     value.as_ref().map(hex::encode),
                 ));
             }
@@ -523,8 +564,8 @@ impl Workload {
             .init(workdir, self.workload_id, self.bitbox_seed, rollback)
             .await?;
 
-        self.ensure_snapshot_validity(self.agent.as_ref().unwrap().rr())
-            .await?;
+        let rr = self.agent.as_ref().unwrap().rr().clone();
+        self.ensure_snapshot_validity(&rr).await?;
 
         Ok(())
     }
