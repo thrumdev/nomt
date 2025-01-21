@@ -33,6 +33,7 @@ pub fn init(params: InitParams) -> Result<()> {
         workload_params.hashtable_buckets,
         workload_params.page_cache_size,
         workload_params.leaf_cache_size,
+        0,
     );
     db.execute(None, &mut *init, None);
 
@@ -53,6 +54,7 @@ pub fn run(params: RunParams) -> Result<()> {
         workload_params.hashtable_buckets,
         workload_params.page_cache_size,
         workload_params.leaf_cache_size,
+        workload_params.overlay_window_length,
     );
 
     if params.reset {

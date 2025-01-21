@@ -154,6 +154,14 @@ pub struct WorkloadParams {
     /// Only used with the Nomt backend.
     #[arg(long = "leaf-cache-size")]
     pub leaf_cache_size: Option<usize>,
+
+    /// The size of the window of in-memory overlays to use. 0 (default) means that changes are
+    /// committed directly to disk. Any value above 0 means that a rolling window of workloads are
+    /// committed first into memory and then into disk.
+    /// Only used with the Nomt backend.
+    #[arg(long = "overlay-window-length")]
+    #[clap(default_value = "0")]
+    pub overlay_window_length: usize,
 }
 
 #[derive(Debug, Clone, Args)]
