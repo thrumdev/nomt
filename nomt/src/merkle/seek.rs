@@ -136,7 +136,9 @@ impl SeekRequest {
             if trie::is_leaf(&cur_node) {
                 self.state =
                     RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
-                do_leaf_fetch = true;
+                if let RequestState::FetchingLeaf(_, _) = self.state {
+                    do_leaf_fetch = true;
+                }
                 break;
             } else if trie::is_terminator(&cur_node) {
                 self.state = RequestState::Completed(None);

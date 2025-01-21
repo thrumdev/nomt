@@ -405,6 +405,11 @@ impl LiveOverlay {
             }),
         }
     }
+
+    /// Get the overlay's root. If this is an empty overlay, returns `None`.
+    pub(super) fn parent_root(&self) -> Option<Node> {
+        self.parent.as_ref().map(|p| p.root)
+    }
 }
 
 #[cfg(test)]
