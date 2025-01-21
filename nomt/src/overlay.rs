@@ -119,6 +119,11 @@ impl OverlayStatus {
     fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
+
+    #[cfg(test)]
+    fn is_dropped(&self) -> bool {
+        self.0.load(Ordering::Relaxed) == Self::DROPPED
+    }
 }
 
 // Maps changes to sequence number.
@@ -262,7 +267,9 @@ impl LiveOverlay {
         // committed.
         if ancestor_data
             .last()
-            .and_then(|a| a.parent_status.as_ref())
+            .unwrap_or(&parent.data)
+            .parent_status
+            .as_ref()
             .map_or(false, |status| !status.is_committed())
         {
             return Err(InvalidAncestors::Incomplete);
@@ -287,7 +294,7 @@ impl LiveOverlay {
             .and_then(|parent| parent.index.pages.get(&page_id))
             .and_then(|seqn| seqn.checked_sub(self.min_seqn))
             .map(|seqn_diff| {
-                if seqn_diff == 0 {
+                if seqn_diff as usize == self.ancestor_data.len() {
                     self.parent
                         .as_ref()
                         .unwrap() // UNWRAP: parent existence checked above
@@ -296,7 +303,7 @@ impl LiveOverlay {
                         .get(page_id)
                         .unwrap() // UNWRAP: index indicates that data exists.
                 } else {
-                    self.ancestor_data[seqn_diff as usize - 1]
+                    self.ancestor_data[self.ancestor_data.len() - seqn_diff as usize - 1]
                         .pages
                         .get(page_id)
                         .unwrap() // UNWRAP: index indicates that data exists.
@@ -318,13 +325,13 @@ impl LiveOverlay {
     }
 
     fn value_inner(&self, key: &KeyPath, seqn_diff: u64) -> &ValueChange {
-        if seqn_diff == 0 {
+        if seqn_diff as usize == self.ancestor_data.len() {
             // UNWRAP: parent existence checked above
             // UNWRAP: index indicates that data exists.
             self.parent.as_ref().unwrap().data.values.get(key).unwrap()
         } else {
             // UNWRAP: index indicates that data exists.
-            self.ancestor_data[seqn_diff as usize - 1]
+            self.ancestor_data[self.ancestor_data.len() - seqn_diff as usize - 1]
                 .values
                 .get(key)
                 .unwrap()
@@ -397,5 +404,411 @@ impl LiveOverlay {
                 rollback_delta,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lazy_static::lazy_static;
+    use nomt_core::page_id::{ChildPageIndex, PageId, ROOT_PAGE_ID};
+
+    use crate::{
+        beatree::ValueChange,
+        io::PagePool,
+        page_cache::PageMut,
+        page_diff::PageDiff,
+        store::{BucketIndex, BucketInfo, DirtyPage, SharedMaybeBucketIndex},
+    };
+
+    use super::{InvalidAncestors, LiveOverlay};
+    use std::collections::{HashMap, VecDeque};
+
+    lazy_static! {
+        static ref PAGE_POOL: PagePool = PagePool::new();
+    }
+    fn dummy_page(page_id: PageId, value: u8, bucket_info: BucketInfo) -> DirtyPage {
+        let mut page = PageMut::pristine_empty(&PAGE_POOL, &page_id);
+        page.set_node(0, [value; 32]);
+        DirtyPage {
+            page: page.freeze(),
+            diff: PageDiff::default(),
+            bucket: bucket_info,
+        }
+    }
+
+    #[test]
+    fn blank_overlay_ok() {
+        assert!(LiveOverlay::new(None).is_ok());
+    }
+
+    #[test]
+    fn not_ancestor() {
+        let a =
+            LiveOverlay::new(None)
+                .unwrap()
+                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+        let a1 =
+            LiveOverlay::new(None)
+                .unwrap()
+                .finish([2; 32], HashMap::new(), HashMap::new(), None);
+
+        let mut ancestors = VecDeque::new();
+        ancestors.push_front(a);
+        let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [3; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        ancestors.push_front(b);
+
+        let _a = std::mem::replace(&mut ancestors[1], a1);
+        assert!(matches!(
+            LiveOverlay::new(&ancestors),
+            Err(InvalidAncestors::NotAncestor)
+        ));
+    }
+
+    #[test]
+    fn incomplete_ancestors() {
+        let a =
+            LiveOverlay::new(None)
+                .unwrap()
+                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+
+        let mut ancestors = VecDeque::new();
+        ancestors.push_front(a);
+        let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [2; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        ancestors.push_front(b);
+        let c = LiveOverlay::new(&ancestors).unwrap().finish(
+            [3; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        ancestors.push_front(c);
+
+        for overlay in ancestors.iter().take(2) {
+            assert!(!overlay
+                .inner
+                .data
+                .parent_status
+                .as_ref()
+                .unwrap()
+                .is_committed());
+        }
+        assert!(matches!(
+            LiveOverlay::new(ancestors.iter().take(1)),
+            Err(InvalidAncestors::Incomplete)
+        ));
+        assert!(matches!(
+            LiveOverlay::new(ancestors.iter().take(2)),
+            Err(InvalidAncestors::Incomplete)
+        ));
+        assert!(matches!(LiveOverlay::new(ancestors.iter().take(3)), Ok(_)));
+    }
+
+    #[test]
+    fn drop_propagation() {
+        let a =
+            LiveOverlay::new(None)
+                .unwrap()
+                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+
+        let mut ancestors = VecDeque::new();
+        ancestors.push_front(a);
+        let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [2; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+
+        drop(ancestors);
+
+        assert!(b.inner.data.parent_status.as_ref().unwrap().is_dropped());
+    }
+
+    #[test]
+    fn commit_overrides_drop_propagation() {
+        let a =
+            LiveOverlay::new(None)
+                .unwrap()
+                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+
+        let mut ancestors = VecDeque::new();
+        ancestors.push_front(a);
+        let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [2; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        ancestors[0].inner.data.status.commit();
+        drop(ancestors);
+
+        assert!(!b.inner.data.parent_status.as_ref().unwrap().is_dropped());
+        assert!(b.inner.data.parent_status.as_ref().unwrap().is_committed());
+    }
+
+    #[test]
+    fn committed_ancestors_considered_complete() {
+        let a =
+            LiveOverlay::new(None)
+                .unwrap()
+                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+
+        let mut ancestors = VecDeque::new();
+        ancestors.push_front(a);
+        let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [2; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        ancestors.push_front(b);
+        let c = LiveOverlay::new(&ancestors).unwrap().finish(
+            [3; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        ancestors.push_front(c);
+
+        let _ = ancestors.pop_back().unwrap().commit();
+
+        assert!(matches!(
+            LiveOverlay::new(ancestors.iter().take(1)),
+            Err(InvalidAncestors::Incomplete)
+        ));
+        assert!(matches!(LiveOverlay::new(ancestors.iter().take(2)), Ok(_)));
+    }
+
+    #[test]
+    fn new_overlay_contains_all_new() {
+        let page1a = dummy_page(
+            ROOT_PAGE_ID,
+            1,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+        let page1b = dummy_page(
+            ROOT_PAGE_ID,
+            2,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+
+        let key1 = [1; 32];
+        let value1a = ValueChange::Insert(vec![1, 2, 3]);
+        let value1b = ValueChange::Insert(vec![4, 5, 6]);
+
+        let page_map = vec![(ROOT_PAGE_ID, page1a)].into_iter().collect();
+        let value_map = vec![(key1, value1a)].into_iter().collect();
+        let a = LiveOverlay::new(None)
+            .unwrap()
+            .finish([1; 32], page_map, value_map, None);
+
+        let page_map = vec![(ROOT_PAGE_ID, page1b)].into_iter().collect();
+        let value_map = vec![(key1, value1b)].into_iter().collect();
+        let b = LiveOverlay::new(Some(&a))
+            .unwrap()
+            .finish([2; 32], page_map, value_map, None);
+
+        let c = LiveOverlay::new([&b, &a]).unwrap();
+
+        assert_eq!(c.page(&ROOT_PAGE_ID).unwrap().page.node(0), [2; 32]);
+        assert_eq!(c.value(&key1).unwrap(), ValueChange::Insert(vec![4, 5, 6]));
+    }
+
+    #[test]
+    fn access_prior_overlay_data() {
+        let page_id_1 = ROOT_PAGE_ID;
+        let page_id_2 = page_id_1
+            .child_page_id(ChildPageIndex::new(0).unwrap())
+            .unwrap();
+        let page_id_3 = page_id_1
+            .child_page_id(ChildPageIndex::new(1).unwrap())
+            .unwrap();
+
+        let page_1 = dummy_page(
+            page_id_1.clone(),
+            1,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+        let page_2 = dummy_page(
+            page_id_2.clone(),
+            2,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+        let page_3 = dummy_page(
+            page_id_3.clone(),
+            3,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+
+        let key_1 = [1; 32];
+        let key_2 = [2; 32];
+        let key_3 = [3; 32];
+
+        let value_1 = ValueChange::Insert(vec![1, 2, 3]);
+        let value_2 = ValueChange::Insert(vec![4, 5, 6]);
+        let value_3 = ValueChange::Insert(vec![7, 8, 9]);
+
+        let pages = [
+            (page_id_1.clone(), page_1),
+            (page_id_2.clone(), page_2),
+            (page_id_3.clone(), page_3),
+        ];
+        let values = [
+            (key_1, value_1.clone()),
+            (key_2, value_2.clone()),
+            (key_3, value_3.clone()),
+        ];
+
+        // build a chain of 3 overlays, each with one unique key and value.
+        let mut ancestors = VecDeque::new();
+        for ((page_id, page), (key, value)) in pages.into_iter().zip(values) {
+            let page_map = [(page_id, page)].into_iter().collect();
+            let value_map = [(key, value)].into_iter().collect();
+            let overlay = LiveOverlay::new(&ancestors)
+                .unwrap()
+                .finish([1; 32], page_map, value_map, None);
+            ancestors.push_front(overlay);
+        }
+
+        // ensure they can be accessed from an overlay that descends from that chain.
+        let overlay = LiveOverlay::new(&ancestors).unwrap();
+
+        assert_eq!(overlay.page(&page_id_1).unwrap().page.node(0), [1; 32]);
+        assert_eq!(overlay.page(&page_id_2).unwrap().page.node(0), [2; 32]);
+        assert_eq!(overlay.page(&page_id_3).unwrap().page.node(0), [3; 32]);
+
+        assert_eq!(
+            overlay.value(&key_1).unwrap(),
+            ValueChange::Insert(vec![1, 2, 3])
+        );
+        assert_eq!(
+            overlay.value(&key_2).unwrap(),
+            ValueChange::Insert(vec![4, 5, 6])
+        );
+        assert_eq!(
+            overlay.value(&key_3).unwrap(),
+            ValueChange::Insert(vec![7, 8, 9])
+        );
+    }
+
+    #[test]
+    fn fresh_or_dependent_propagates_correctly() {
+        let maybe_bucket = SharedMaybeBucketIndex::new(None);
+        let page = dummy_page(
+            ROOT_PAGE_ID,
+            1,
+            BucketInfo::FreshOrDependent(maybe_bucket.clone()),
+        );
+        let page2 = dummy_page(
+            ROOT_PAGE_ID,
+            2,
+            BucketInfo::FreshOrDependent(maybe_bucket.clone()),
+        );
+
+        let a = LiveOverlay::new(None).unwrap().finish(
+            [1; 32],
+            vec![(ROOT_PAGE_ID, page)].into_iter().collect(),
+            HashMap::new(),
+            None,
+        );
+        let b = LiveOverlay::new([&a]).unwrap().finish(
+            [2; 32],
+            vec![(ROOT_PAGE_ID, page2)].into_iter().collect(),
+            HashMap::new(),
+            None,
+        );
+        a.commit();
+
+        let bucket = BucketIndex::new(69);
+        maybe_bucket.set(bucket);
+
+        let c = LiveOverlay::new([&b]).unwrap();
+
+        let BucketInfo::FreshOrDependent(ref b) = c.page(&ROOT_PAGE_ID).unwrap().bucket else {
+            panic!()
+        };
+
+        assert_eq!(b.get(), Some(bucket));
+    }
+
+    #[test]
+    fn prune_below_works() {
+        let page_id_1 = ROOT_PAGE_ID;
+        let page_1 = dummy_page(
+            page_id_1.clone(),
+            1,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+
+        let page_id_2 = ROOT_PAGE_ID
+            .child_page_id(ChildPageIndex::new(1).unwrap())
+            .unwrap();
+        let page_2 = dummy_page(
+            page_id_2.clone(),
+            2,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+        let page_2b = dummy_page(
+            page_id_2.clone(),
+            3,
+            BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
+        );
+
+        let key_1 = [1; 32];
+        let val_1 = ValueChange::Insert(vec![1, 2, 3]);
+
+        let key_2 = [2; 32];
+        let val_2 = ValueChange::Insert(vec![4, 5, 6]);
+        let val_2b = ValueChange::Insert(vec![7, 8, 9]);
+
+        // create 2 overlays. The first stores page1/page2 , val1/val2. The second descends and
+        // stores page2b/val2b. Pruning the first should remove '1' but preserve 2b.
+
+        let page_map = vec![(page_id_1.clone(), page_1), (page_id_2.clone(), page_2)]
+            .into_iter()
+            .collect();
+        let value_map = vec![(key_1, val_1.clone()), (key_2, val_2.clone())]
+            .into_iter()
+            .collect();
+        let a = LiveOverlay::new(None)
+            .unwrap()
+            .finish([1; 32], page_map, value_map, None);
+
+        let page_map = vec![(page_id_2.clone(), page_2b)].into_iter().collect();
+        let value_map = vec![(key_2, val_2b.clone())].into_iter().collect();
+        let b = LiveOverlay::new([&a])
+            .unwrap()
+            .finish([1; 32], page_map, value_map, None);
+
+        a.commit();
+
+        let c =
+            LiveOverlay::new([&b])
+                .unwrap()
+                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+
+        // ensure everything from seqn 0 has been pruned.
+        assert_eq!(c.inner.index.pages_by_seqn[0].0, 1);
+        assert_eq!(c.inner.index.values_by_seqn[0].0, 1);
+
+        let d = LiveOverlay::new([&c, &b]).unwrap();
+
+        // pruned stuff is gone.
+        assert!(d.page(&page_id_1).is_none());
+        assert!(d.value(&key_1).is_none());
+
+        // page2b/val2b present.
+        assert_eq!(d.page(&page_id_2).unwrap().page.node(0), [3; 32]);
+        assert_eq!(d.value(&key_2).unwrap(), ValueChange::Insert(vec![7, 8, 9]));
     }
 }
