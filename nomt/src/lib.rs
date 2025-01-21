@@ -326,7 +326,7 @@ impl<T: HashAlgorithm> Nomt<T> {
                 self.page_pool.clone(),
                 self.store.clone(),
                 live_overlay.clone(),
-                self.root(),
+                live_overlay.parent_root().unwrap_or_else(|| self.root()),
             )),
             session_cnt: self.session_cnt.clone(),
             metrics: self.metrics.clone(),

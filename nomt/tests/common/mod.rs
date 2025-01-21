@@ -1,5 +1,5 @@
 use nomt::{
-    KeyPath, KeyReadWrite, Node, Nomt, Options, PanicOnSyncMode, Session, Witness,
+    KeyPath, KeyReadWrite, Node, Nomt, Options, Overlay, PanicOnSyncMode, Session, Witness,
     WitnessedOperations,
 };
 use std::{
@@ -125,6 +125,32 @@ impl Test {
             .unwrap();
         self.session = Some(self.nomt.begin_session());
         x
+    }
+
+    pub fn update(&mut self) -> (Overlay, Witness, WitnessedOperations) {
+        let session = mem::take(&mut self.session).unwrap();
+        let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
+        actual_access.sort_by_key(|(k, _)| *k);
+        let x = self.nomt.update_and_prove(session, actual_access).unwrap();
+
+        self.session = Some(self.nomt.begin_session());
+
+        x
+    }
+
+    pub fn commit_overlay(&mut self, overlay: Overlay) {
+        // force drop of live session before committing.
+        self.access.clear();
+        self.session = None;
+        self.nomt.commit_overlay(overlay).unwrap();
+        self.session = Some(self.nomt.begin_session());
+    }
+
+    pub fn start_overlay_session<'a>(&mut self, ancestors: impl IntoIterator<Item = &'a Overlay>) {
+        // force drop of live session before creating a new one.
+        self.access.clear();
+        self.session = None;
+        self.session = Some(self.nomt.begin_session_with_overlay(ancestors).unwrap());
     }
 
     pub fn root(&self) -> Node {
