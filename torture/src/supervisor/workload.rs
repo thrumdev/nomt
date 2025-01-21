@@ -164,12 +164,7 @@ impl WorkloadState {
         // - Different power of two sizes.
         // - Change it to be a non-even.
         let len = if self.rng.gen_bool(self.biases.overflow) {
-            // TODO: handle multiple overflow page scenario.
-            // Currently, using a value that is too large causes the channel to hang
-            // when the agent is responding with the queried value.
-            // However MAX_LEAF_VALUE_SIZE is 1332 thus 2000 is enough
-            // to test simple overflow values where only one additional page is used.
-            2000
+            32 * 1024
         } else {
             32
         };

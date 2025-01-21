@@ -80,7 +80,16 @@ impl RequestResponse {
         wr_stream.send(Envelope { reqno, message }).await?;
         drop(wr_stream);
 
-        let message = timeout(self.shared.timeout, rx).await??;
+        // TODO: Spawning a blocking task to handle the reception of the message
+        // in the one shot channel is a workaround to make it possible to handle
+        // large messages. Using the standard `timeout(self.shared.timeout, rx).await??;`
+        // does not work, it hangs when the expected value to be received is larger than 15KiB.
+        let message = timeout(
+            self.shared.timeout,
+            tokio::task::spawn_blocking(|| rx.blocking_recv()),
+        )
+        .await???;
+
         Ok(message)
     }
 
