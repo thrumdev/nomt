@@ -32,6 +32,13 @@ pub(crate) mod writeout;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BucketIndex(u64);
 
+#[cfg(test)]
+impl BucketIndex {
+    pub fn new(index: u64) -> Self {
+        BucketIndex(index)
+    }
+}
+
 /// Essentially an `Arc<Option<BucketIndex>>` that can be mutated atomically.
 ///
 /// This is used as a shared placeholder for a bucket that _will_ be allocated in the future

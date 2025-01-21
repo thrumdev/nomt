@@ -321,7 +321,7 @@ impl Tree {
 }
 
 /// A change in the value associated with a key.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValueChange {
     /// The key-value pair is deleted.
     Delete,
