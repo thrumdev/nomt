@@ -4,6 +4,7 @@
 
 use anyhow::Context;
 use crossbeam::channel::{self, Receiver, Sender};
+use page_set::FrozenSharedPageSet;
 use parking_lot::Mutex;
 
 use nomt_core::{
@@ -200,10 +201,11 @@ impl Updater {
 
         // receive warm-ups from worker.
         // TODO: handle error better.
-        let warm_ups = if let Some(ref warm_up) = self.warm_up {
-            warm_up.output_rx.recv().unwrap()
+        let (warm_ups, warm_page_set) = if let Some(ref warm_up) = self.warm_up {
+            let output = warm_up.output_rx.recv().unwrap();
+            (output.paths, Some(output.pages))
         } else {
-            HashMap::new()
+            (HashMap::new(), None)
         };
         let warm_ups = Arc::new(warm_ups);
 
@@ -224,6 +226,7 @@ impl Updater {
                 store: self.store.clone(),
                 root: self.root,
                 warm_ups: warm_ups.clone(),
+                warm_page_set: warm_page_set.clone(),
                 command,
                 worker_id,
             };
@@ -359,6 +362,11 @@ struct WarmUpCommand {
     key_path: KeyPath,
 }
 
+struct WarmUpOutput {
+    pages: FrozenSharedPageSet,
+    paths: HashMap<KeyPath, Seek>,
+}
+
 enum RootPagePending {
     SubTrie {
         range_start: usize,
@@ -431,7 +439,7 @@ impl UpdateShared {
 struct WarmUpHandle {
     finish_tx: Sender<()>,
     warmup_tx: Sender<WarmUpCommand>,
-    output_rx: Receiver<HashMap<KeyPath, Seek>>,
+    output_rx: Receiver<WarmUpOutput>,
 }
 
 fn spawn_warm_up<H: HashAlgorithm>(

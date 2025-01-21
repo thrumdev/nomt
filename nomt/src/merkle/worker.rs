@@ -24,11 +24,11 @@ use std::{
 };
 
 use super::{
-    page_set::PageSet,
+    page_set::{FrozenSharedPageSet, PageSet},
     page_walker::{Output, PageWalker},
     seek::{Seek, Seeker},
     KeyReadWrite, LiveOverlay, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand,
-    WorkerOutput,
+    WarmUpOutput, WorkerOutput,
 };
 
 use crate::{
@@ -46,6 +46,7 @@ pub(super) struct UpdateParams {
     pub store: Store,
     pub root: Node,
     pub warm_ups: Arc<HashMap<KeyPath, Seek>>,
+    pub warm_page_set: Option<FrozenSharedPageSet>,
     pub command: UpdateCommand,
     pub worker_id: usize,
 }
@@ -61,7 +62,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     params: WarmUpParams,
     warmup_rx: Receiver<WarmUpCommand>,
     finish_rx: Receiver<()>,
-    output_tx: Sender<HashMap<KeyPath, Seek>>,
+    output_tx: Sender<WarmUpOutput>,
 ) {
     let page_loader = params.store.page_loader();
     let io_handle = params.store.io_pool().make_handle();
@@ -71,6 +72,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     let page_set = PageSet::new(
         io_handle.page_pool().clone(),
         super::page_set::FreshPageBucketMode::WithoutDependents,
+        None,
     );
 
     let seeker = Seeker::<H>::new(
@@ -100,6 +102,7 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Resu
         store,
         root,
         warm_ups,
+        warm_page_set,
         command,
         ..
     } = params;
@@ -114,7 +117,15 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Resu
         command.shared.witness,
     );
 
-    update::<H>(root, page_cache, page_pool, seeker, command, warm_ups)
+    update::<H>(
+        root,
+        page_cache,
+        page_pool,
+        seeker,
+        command,
+        warm_ups,
+        warm_page_set,
+    )
 }
 
 fn warm_up_phase<H: HashAlgorithm>(
@@ -123,7 +134,7 @@ fn warm_up_phase<H: HashAlgorithm>(
     mut page_set: PageSet,
     warmup_rx: Receiver<WarmUpCommand>,
     finish_rx: Receiver<()>,
-) -> anyhow::Result<HashMap<KeyPath, Seek>> {
+) -> anyhow::Result<WarmUpOutput> {
     let mut select_all = Select::new();
     let warmup_idx = select_all.recv(&warmup_rx);
     let finish_idx = select_all.recv(&finish_rx);
@@ -192,7 +203,10 @@ fn warm_up_phase<H: HashAlgorithm>(
         }
     }
 
-    Ok(warm_ups)
+    Ok(WarmUpOutput {
+        pages: page_set.freeze(),
+        paths: warm_ups,
+    })
 }
 
 fn update<H: HashAlgorithm>(
@@ -202,6 +216,7 @@ fn update<H: HashAlgorithm>(
     mut seeker: Seeker<H>,
     command: UpdateCommand,
     warm_ups: Arc<HashMap<KeyPath, Seek>>,
+    warm_page_set: Option<FrozenSharedPageSet>,
 ) -> anyhow::Result<WorkerOutput> {
     let UpdateCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
@@ -215,6 +230,7 @@ fn update<H: HashAlgorithm>(
         } else {
             super::page_set::FreshPageBucketMode::WithoutDependents
         },
+        warm_page_set,
     );
 
     let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache);
