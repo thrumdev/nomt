@@ -71,7 +71,7 @@ pub struct WorkloadParams {
     #[arg(long = "commit-crash")]
     pub crash: u8,
 
-    /// Instead of exercising a new commit, this is a probability of executing a rollback.
+    /// Instead of exercising a new commit, this is the probability of executing a rollback.
     ///
     /// Accepted values are in the range of 0 to 100
     #[clap(default_value = "5")]
@@ -79,13 +79,22 @@ pub struct WorkloadParams {
     #[arg(long = "rollback")]
     pub rollback: u8,
 
-    /// The max amount of blocks involved in a rollback.
+    /// Instead of exercising a new commit, this is the probability of executing a rollback
+    /// and causing it to crash.
     ///
-    /// The effective number of blocks used for each rollback is randomly generated in the range
-    /// 0..max_rollback_blocks.
+    /// Accepted values are in the range of 0 to 100
+    #[clap(default_value = "5")]
+    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
+    #[arg(long = "rollback-crash")]
+    pub rollback_crash: u8,
+
+    /// The max amount of commits involved in a rollback.
+    ///
+    /// The effective number of commits used for each rollback is randomly generated in the range
+    /// 0..max_rollback_commits.
     #[clap(default_value = "10")]
-    #[arg(long = "max-rollback-blocks")]
-    pub max_rollback_blocks: usize,
+    #[arg(long = "max-rollback-commits")]
+    pub max_rollback_commits: usize,
 
     /// Whether to ensure the correct application of the changest after every commit.
     #[clap(default_value = "false")]

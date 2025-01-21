@@ -50,8 +50,7 @@ pub struct InitPayload {
     pub rollback: bool,
 }
 
-/// The supervisor sends this message to the child process to indicate that the child should
-/// commit.
+/// The parameters for the [`ToAgent::Commit`] message.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommitPayload {
     /// The set of changes that the child should commit.
@@ -59,6 +58,17 @@ pub struct CommitPayload {
     /// There must be no duplicate keys in the set.
     pub changeset: Vec<KeyValueChange>,
     /// If Some the supervisor expects the commit to crash,
+    /// the crash should happen after the specified amount of time.
+    /// Time is specified in nanoseconds.
+    pub should_crash: Option<u64>,
+}
+
+/// The parameters for the [`ToAgent::Rollback`] message.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RollbackPayload {
+    /// The number of commits that need to be rolled back.
+    pub n_commits: usize,
+    /// If Some the supervisor expects the rollback to crash,
     /// the crash should happen after the specified amount of time.
     /// Time is specified in nanoseconds.
     pub should_crash: Option<u64>,
@@ -89,8 +99,8 @@ pub enum ToAgent {
     /// commit.
     Commit(CommitPayload),
     /// The supervisor sends this message to the child process to indicate that the child should
-    /// perform a rollback of the number of specified blocks.
-    Rollback(usize),
+    /// perform a rollback.
+    Rollback(RollbackPayload),
     /// The supervisor sends this message to the child process to query the value of a given key.
     Query(Key),
     /// The supervisor sends this message to the child process to query the current sequence number
