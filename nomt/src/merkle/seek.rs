@@ -502,8 +502,8 @@ impl<H: HashAlgorithm> Seeker<H> {
         };
 
         let (page, bucket_index) = match page_data {
-            None => (PageMut::pristine_empty(), None),
-            Some((page, bucket)) => (PageMut::pristine_with_data(page), Some(bucket)),
+            None => (PageMut::new_empty(), None),
+            Some((page, bucket)) => (PageMut::new_with_data(page), Some(bucket)),
         };
 
         let page = self

@@ -99,11 +99,9 @@ impl PageSource {
     #[cfg(test)]
     fn insert_fresh(&self, page_id: PageId) -> Page {
         match self {
-            PageSource::PageCache(ref cache) => {
-                cache.insert(page_id, PageMut::pristine_empty(), None)
-            }
+            PageSource::PageCache(ref cache) => cache.insert(page_id, PageMut::new_empty(), None),
             PageSource::PageCacheShard(ref shard) => {
-                shard.insert(page_id, PageMut::pristine_empty(), None)
+                shard.insert(page_id, PageMut::new_empty(), None)
             }
         }
     }
@@ -354,7 +352,7 @@ impl<H: NodeHasher> PageWalker<H> {
                 let stack_item = if fresh {
                     UpdatedPage {
                         page_id: child_page_id,
-                        page: PageMut::pristine_empty(),
+                        page: PageMut::new_empty(),
                         diff: PageDiff::default(),
                     }
                 } else if self
@@ -1095,8 +1093,8 @@ mod tests {
         let terminator_6 = TriePosition::from_path_and_depth(key_path![0, 0, 0, 0, 0, 1], 6);
         let terminator_7 = TriePosition::from_path_and_depth(key_path![0, 0, 0, 0, 0, 0, 1], 7);
 
-        let mut root_page = PageMut::pristine_empty();
-        let mut page1 = PageMut::pristine_empty();
+        let mut root_page = PageMut::new_empty();
+        let mut page1 = PageMut::new_empty();
 
         // we place garbage in all the sibling positions for those internal  nodes.
         {

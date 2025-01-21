@@ -53,13 +53,13 @@ impl PageMut {
         }
     }
 
-    /// Create a pristine (i.e. blank) `PageMut`.
-    pub fn pristine_empty() -> PageMut {
+    /// Create a new blank `PageMut`.
+    pub fn new_empty() -> PageMut {
         PageMut { inner: None }
     }
 
-    /// Create a mutable page from raw page data.
-    pub fn pristine_with_data(data: FatPage) -> PageMut {
+    /// Create a mutable page cache page using the page pool page.
+    pub fn new_with_data(data: FatPage) -> PageMut {
         PageMut { inner: Some(data) }
     }
 
@@ -89,7 +89,7 @@ impl PageMut {
 
 impl From<FatPage> for PageMut {
     fn from(data: FatPage) -> PageMut {
-        Self::pristine_with_data(data)
+        Self::new_with_data(data)
     }
 }
 
@@ -481,8 +481,9 @@ impl PageCache {
         deferred_drop
     }
 
-    /// Evict stale pages for the cache. This should only be used after all dirty pages have been
-    /// prepared for writeout with `prepare_transaction`.
+    /// Evict LRUs.
+    ///
+    /// This should only be used after all dirty pages have been written out.
     pub fn evict(&self) {
         let shard_guards = self
             .shared
