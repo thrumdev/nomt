@@ -403,18 +403,20 @@ impl Workload {
         // Spawns a new agent and checks whether the commit was applied to the database and if so
         // we commit the snapshot to the state.
         self.spawn_new_agent().await?;
-        let rr = self.agent.as_ref().unwrap().rr();
+        let rr = self.agent.as_ref().unwrap().rr().clone();
         let seqno = rr.send_query_sync_seqn().await?;
         if seqno == snapshot.sync_seqn {
-            self.ensure_changeset_applied(rr, &changeset).await?;
+            self.ensure_changeset_applied(&rr, &changeset).await?;
             self.state.commit(snapshot);
         } else {
             info!(
                 "commit. seqno ours: {}, theirs: {}",
                 snapshot.sync_seqn, seqno
             );
-            self.ensure_changeset_reverted(rr, &changeset).await?;
+            self.ensure_changeset_reverted(&rr, &changeset).await?;
         }
+
+        self.ensure_snapshot_validity(&rr).await?;
         Ok(())
     }
 
@@ -469,9 +471,13 @@ impl Workload {
             return Ok(());
         }
 
-        if self.state.last_snapshot().sync_seqn != rr.send_query_sync_seqn().await? {
+        let expected_sync_seqn = self.state.last_snapshot().sync_seqn;
+        let sync_seqn = rr.send_query_sync_seqn().await?;
+        if expected_sync_seqn != sync_seqn {
             return Err(anyhow::anyhow!(
-                "Unexpected sync_seqn while ensuring snapshot validity"
+                "Unexpected sync_seqn while ensuring snapshot validity, expected: {}, found: {}",
+                expected_sync_seqn,
+                sync_seqn
             ));
         }
 
@@ -563,9 +569,6 @@ impl Workload {
             .unwrap()
             .init(workdir, self.workload_id, self.bitbox_seed, rollback)
             .await?;
-
-        let rr = self.agent.as_ref().unwrap().rr().clone();
-        self.ensure_snapshot_validity(&rr).await?;
 
         Ok(())
     }

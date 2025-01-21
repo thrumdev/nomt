@@ -113,7 +113,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
             ToAgent::Rollback(n_blocks) => {
                 let start = std::time::Instant::now();
                 agent.rollback(n_blocks)?;
-                tracing::info!("rollback took {:?}", start.elapsed().as_millis());
+                tracing::info!("rollback took {}ms", start.elapsed().as_millis());
                 stream
                     .send(Envelope {
                         reqno,
