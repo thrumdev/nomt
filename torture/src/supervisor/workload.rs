@@ -461,9 +461,9 @@ impl Workload {
                 return Err(anyhow::anyhow!(
                     "Wrong {}ith key in snapshot,\n key: {:?},\n expected value: {:?},\n found value: {:?}",
                     i,
-                    key,
-                    expected_value,
-                    value
+                    hex::encode(key),
+                    expected_value.as_ref().map(hex::encode),
+                    value.as_ref().map(hex::encode),
                 ));
             }
         }
