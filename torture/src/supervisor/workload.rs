@@ -81,8 +81,8 @@ struct WorkloadState {
     /// If true, the size of each commit will be within 0 and self.size,
     /// otherwise it will always be workload-size.
     random_size: bool,
-    /// All committed key values, divided in Snapshots.
-    committed: Vec<Snapshot>,
+    /// All committed key values.
+    committed: Snapshot,
 }
 
 impl WorkloadState {
@@ -92,7 +92,7 @@ impl WorkloadState {
             biases,
             size,
             random_size,
-            committed: vec![Snapshot::empty()],
+            committed: Snapshot::empty(),
         }
     }
 
@@ -103,7 +103,7 @@ impl WorkloadState {
     }
 
     fn gen_commit(&mut self) -> (Snapshot, Vec<KeyValueChange>) {
-        let mut snapshot = self.last_snapshot().clone();
+        let mut snapshot = self.committed.clone();
         snapshot.sync_seqn += 1;
 
         let num_changes = if self.random_size {
@@ -142,19 +142,19 @@ impl WorkloadState {
         //
         // - Pick a key that was already generated before, but generate a key that shares some bits.
         let mut key = [0; 32];
-        if !self.last_snapshot().state.is_empty() && self.rng.gen_bool(self.biases.delete) {
+        if !self.committed.state.is_empty() && self.rng.gen_bool(self.biases.delete) {
             loop {
                 self.rng.fill_bytes(&mut key);
-                if let Some((next_key, Some(_))) = self.last_snapshot().state.get_next(&key) {
+                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
                     return KeyValueChange::Delete(*next_key);
                 }
             }
         }
 
-        if self.last_snapshot().state.is_empty() || self.rng.gen_bool(self.biases.new_key) {
+        if self.committed.state.is_empty() || self.rng.gen_bool(self.biases.new_key) {
             loop {
                 self.rng.fill_bytes(&mut key);
-                if !self.last_snapshot().state.contains_key(&key) {
+                if !self.committed.state.contains_key(&key) {
                     return KeyValueChange::Insert(key, self.gen_value());
                 }
             }
@@ -162,7 +162,7 @@ impl WorkloadState {
 
         loop {
             self.rng.fill_bytes(&mut key);
-            if let Some((next_key, _)) = self.last_snapshot().state.get_next(&key) {
+            if let Some((next_key, _)) = self.committed.state.get_next(&key) {
                 return KeyValueChange::Insert(*next_key, self.gen_value());
             }
         }
@@ -183,27 +183,20 @@ impl WorkloadState {
         value
     }
 
-    fn rollback(&mut self, n_commits: usize) {
-        let last_sync_seqn = self.last_snapshot().sync_seqn;
-        self.committed.truncate(self.committed.len() - n_commits);
-        // The application of a rollback counts as increased sync_seq.
-        self.committed.last_mut().unwrap().sync_seqn = last_sync_seqn + 1;
+    fn rollback(&mut self, snapshot: Snapshot) {
+        self.committed.sync_seqn += 1;
+        self.committed.state = snapshot.state;
     }
 
     fn commit(&mut self, snapshot: Snapshot) {
-        self.committed.push(snapshot);
-    }
-
-    fn last_snapshot(&self) -> &Snapshot {
-        // UNWRAP: self.committed contains always at least one empty snapshot.
-        self.committed.last().unwrap()
+        self.committed = snapshot;
     }
 }
 
 /// This is a struct that controls workload execution.
 ///
 /// A workload is a set of tasks that the agents should perform. We say agents, plural, because
-/// the same workload can be executed by multiple agents. Howeever, it's always sequential. This
+/// the same workload can be executed by multiple agents. However, it's always sequential. This
 /// arises from the fact that as part of the workload we need to crash the agent to check how
 /// it behaves.
 pub struct Workload {
@@ -224,7 +217,7 @@ pub struct Workload {
     /// Data collected to evaluate the average commit time in nanoseconds.
     tot_commit_time: u64,
     n_successfull_commit: u64,
-    /// Whether to ensure the correct application of the changest after every commit.
+    /// Whether to ensure the correct application of the changeset after every commit.
     ensure_changeset: bool,
     /// Whether to ensure the correctness of the entire state after every crash or rollback.
     ensure_snapshot: bool,
@@ -232,6 +225,28 @@ pub struct Workload {
     sample_snapshot: bool,
     /// The max number of commits involved in a rollback.
     max_rollback_commits: usize,
+    /// If `Some` there are rollbacks waiting to be applied.
+    scheduled_rollbacks: ScheduledRollbacks,
+}
+
+/// Tracker of rollbacks waiting for being applied.
+struct ScheduledRollbacks {
+    /// If `Some` there is rollback waiting to be applied.
+    rollback: Option<ScheduledRollback>,
+    /// If `Some` there is rollback waiting to be applied,
+    /// alongside the delay after which the rollback process should panic,
+    /// measured in nanoseconds.
+    rollback_crash: Option<(ScheduledRollback, u64)>,
+}
+
+/// Contains the information required to apply a rollback.
+struct ScheduledRollback {
+    /// The sync_seqn at which the rollback will be applied.
+    sync_seqn: u32,
+    /// The number of commits the rollback will revert.
+    n_commits: usize,
+    /// The state at which the state is expected to be found after the rollback is applied.
+    snapshot: Snapshot,
 }
 
 impl Workload {
@@ -276,6 +291,10 @@ impl Workload {
             ensure_snapshot: workload_params.ensure_snapshot,
             sample_snapshot: workload_params.sample_snapshot,
             max_rollback_commits: workload_params.max_rollback_commits,
+            scheduled_rollbacks: ScheduledRollbacks {
+                rollback: None,
+                rollback_crash: None,
+            },
         }
     }
 
@@ -309,11 +328,31 @@ impl Workload {
         let rr = agent.rr().clone();
         trace!("run_iteration");
 
-        if self.state.rng.gen_bool(self.state.biases.rollback) {
-            if self.state.rng.gen_bool(self.state.biases.rollback_crash) {
-                self.exercise_rollback_crashing(&rr).await?;
+        if let Some((scheduled_rollback, should_crash)) = self
+            .scheduled_rollbacks
+            .is_time(self.state.committed.sync_seqn)
+        {
+            self.perform_scheduled_rollback(&rr, scheduled_rollback, should_crash)
+                .await?;
+            return Ok(());
+        }
+
+        // Do not schedule new rollbacks if they are already scheduled.
+        let mut rollback = self.state.biases.rollback;
+        if self.scheduled_rollbacks.is_rollback_scheduled() {
+            rollback = 0.0;
+        }
+
+        let mut rollback_crash = self.state.biases.rollback_crash;
+        if self.scheduled_rollbacks.is_rollback_crash_scheduled() {
+            rollback_crash = 0.0;
+        }
+
+        if self.state.rng.gen_bool(rollback) {
+            if self.state.rng.gen_bool(rollback_crash) {
+                self.schedule_rollback(true /*should_crash*/).await?
             } else {
-                self.exercise_rollback(&rr).await?;
+                self.schedule_rollback(false /*should_crash*/).await?
             }
         }
 
@@ -407,20 +446,72 @@ impl Workload {
 
     fn commits_to_rollback(&mut self) -> usize {
         // TODO: n_commits should also depend on the max rollback supported by NOMT.
-        let n_snapshots = self.state.committed.len();
         std::cmp::min(
             self.state.rng.gen_range(1..self.max_rollback_commits) as usize,
-            n_snapshots - 1,
+            self.state.committed.sync_seqn as usize,
         )
     }
 
-    async fn exercise_rollback(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
+    async fn schedule_rollback(&mut self, should_crash: bool) -> anyhow::Result<()> {
         let n_commits_to_rollback = self.commits_to_rollback();
         if n_commits_to_rollback == 0 {
             trace!("No available commits to perform rollback with");
             return Ok(());
         }
 
+        let last_snapshot = &self.state.committed;
+        let rollback_sync_seqn = last_snapshot.sync_seqn + n_commits_to_rollback as u32;
+        let scheduled_rollback = ScheduledRollback {
+            sync_seqn: rollback_sync_seqn,
+            n_commits: n_commits_to_rollback,
+            snapshot: last_snapshot.clone(),
+        };
+
+        if should_crash {
+            // TODO: more complex crash delay evaluation for rollbacks.
+            let crash_delay = Duration::from_millis(10).as_nanos() as u64;
+            self.scheduled_rollbacks.rollback_crash = Some((scheduled_rollback, crash_delay));
+        } else {
+            self.scheduled_rollbacks.rollback = Some(scheduled_rollback);
+        };
+
+        trace!(
+            "scheduled rollback {}for sync_seqn: {} of {} commits",
+            if should_crash { "crash " } else { "" },
+            rollback_sync_seqn,
+            n_commits_to_rollback,
+        );
+
+        Ok(())
+    }
+
+    async fn perform_scheduled_rollback(
+        &mut self,
+        rr: &comms::RequestResponse,
+        scheduled_rollback: ScheduledRollback,
+        should_crash: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let ScheduledRollback {
+            n_commits,
+            snapshot,
+            ..
+        } = scheduled_rollback;
+
+        match should_crash {
+            None => self.exercise_rollback(&rr, n_commits, snapshot).await,
+            Some(crash_delay) => {
+                self.exercise_rollback_crashing(&rr, n_commits, snapshot, crash_delay)
+                    .await
+            }
+        }
+    }
+
+    async fn exercise_rollback(
+        &mut self,
+        rr: &comms::RequestResponse,
+        n_commits_to_rollback: usize,
+        snapshot: Snapshot,
+    ) -> anyhow::Result<()> {
         trace!("exercising rollback of {} commits", n_commits_to_rollback);
         rr.send_request(crate::message::ToAgent::Rollback(
             crate::message::RollbackPayload {
@@ -431,11 +522,11 @@ impl Workload {
         .await?;
 
         let agent_sync_seqn = rr.send_query_sync_seqn().await?;
-        if agent_sync_seqn != self.state.last_snapshot().sync_seqn + 1 {
+        if agent_sync_seqn != self.state.committed.sync_seqn + 1 {
             return Err(anyhow::anyhow!("Unexpected sync_seqn after rollback"));
         }
 
-        self.state.rollback(n_commits_to_rollback);
+        self.state.rollback(snapshot);
         self.ensure_snapshot_validity(rr).await?;
         Ok(())
     }
@@ -443,17 +534,12 @@ impl Workload {
     async fn exercise_rollback_crashing(
         &mut self,
         rr: &comms::RequestResponse,
+        n_commits_to_rollback: usize,
+        snapshot: Snapshot,
+        crash_delay: u64,
     ) -> anyhow::Result<()> {
-        let n_commits_to_rollback = self.commits_to_rollback();
-        if n_commits_to_rollback == 0 {
-            trace!("No available commits to perform rollback with");
-            return Ok(());
-        }
-
-        let crash_delay = Duration::from_millis(50).as_nanos() as u64;
-
         trace!(
-            "exercising rollback of {} commits crash",
+            "exercising rollback crash of {} commits",
             n_commits_to_rollback
         );
         rr.send_request(crate::message::ToAgent::Rollback(
@@ -471,10 +557,10 @@ impl Workload {
         self.spawn_new_agent().await?;
         let rr = self.agent.as_ref().unwrap().rr().clone();
         let sync_seqn = rr.send_query_sync_seqn().await?;
-        let last_sync_seqn = self.state.last_snapshot().sync_seqn;
+        let last_sync_seqn = self.state.committed.sync_seqn;
         if sync_seqn == last_sync_seqn + 1 {
             // sync_seqn has increased, so the rollback is expected to be applied correctly
-            self.state.rollback(n_commits_to_rollback);
+            self.state.rollback(snapshot);
         } else if sync_seqn == last_sync_seqn {
             // The rollback successfully crashed.
             info!("rollback crashed, seqno: {}", last_sync_seqn);
@@ -544,7 +630,7 @@ impl Workload {
                 KeyValueChange::Insert(key, _value) => {
                     // The current value must be equal to the previous one.
                     let current_value = rr.send_request_query(*key).await?;
-                    match self.state.last_snapshot().state.get(key) {
+                    match self.state.committed.state.get(key) {
                         None | Some(None) if current_value.is_some() => {
                             return Err(anyhow::anyhow!("New inserted item should not be present"));
                         }
@@ -558,7 +644,7 @@ impl Workload {
                 }
                 KeyValueChange::Delete(key) => {
                     // UNWRAP: Non existing keys are not deleted.
-                    let prev_value = self.state.last_snapshot().state.get(key).unwrap();
+                    let prev_value = self.state.committed.state.get(key).unwrap();
                     assert!(prev_value.is_some());
                     if rr.send_request_query(*key).await?.as_ref() != prev_value.as_ref() {
                         return Err(anyhow::anyhow!(
@@ -579,7 +665,7 @@ impl Workload {
             return Ok(());
         }
 
-        let expected_sync_seqn = self.state.last_snapshot().sync_seqn;
+        let expected_sync_seqn = self.state.committed.sync_seqn;
         let sync_seqn = rr.send_query_sync_seqn().await?;
         if expected_sync_seqn != sync_seqn {
             return Err(anyhow::anyhow!(
@@ -597,7 +683,7 @@ impl Workload {
     }
 
     async fn check_entire_snapshot(&self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
-        for (i, (key, expected_value)) in (self.state.last_snapshot().state.iter()).enumerate() {
+        for (i, (key, expected_value)) in (self.state.committed.state.iter()).enumerate() {
             let value = rr.send_request_query(*key).await?;
             if &value != expected_value {
                 return Err(anyhow::anyhow!(
@@ -615,12 +701,12 @@ impl Workload {
     async fn check_sampled_snapshot(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
         let mut key = [0; 32];
         // The amount of items randomly sampled is equal to 5% of the entire state size.
-        let sample_check_size = (self.state.last_snapshot().state.len() as f64 * 0.05) as usize;
+        let sample_check_size = (self.state.committed.state.len() as f64 * 0.05) as usize;
         for _ in 0..sample_check_size {
             let (key, expected_value) = loop {
                 self.state.rng.fill_bytes(&mut key);
                 if let Some((next_key, Some(expected_value))) =
-                    self.state.last_snapshot().state.get_next(&key)
+                    self.state.committed.state.get_next(&key)
                 {
                     break (next_key, expected_value);
                 }
@@ -663,5 +749,49 @@ impl Workload {
     /// Return the working directory.
     pub fn into_workdir(self) -> TempDir {
         self.workdir
+    }
+}
+
+impl ScheduledRollbacks {
+    fn is_time(&mut self, curr_sync_seqn: u32) -> Option<(ScheduledRollback, Option<u64>)> {
+        if self
+            .rollback
+            .as_ref()
+            .map_or(false, |ScheduledRollback { sync_seqn, .. }| {
+                curr_sync_seqn == *sync_seqn
+            })
+        {
+            // UNWRAP: self.rollback has just been checked to be Some.
+            let scheduled_rollback = self.rollback.take().unwrap();
+
+            // The probability of having scheduled at the same time both a rollback and
+            // a rollback crash is very low, but if it happens, only the rollback will be applied.
+            // Discard the rollback crash data.
+            let _ = self.is_time(curr_sync_seqn);
+
+            return Some((scheduled_rollback, None));
+        }
+
+        if self
+            .rollback_crash
+            .as_ref()
+            .map_or(false, |(ScheduledRollback { sync_seqn, .. }, _)| {
+                curr_sync_seqn == *sync_seqn
+            })
+        {
+            // UNWRAP: self.rollback has just been checked to be Some.
+            let (scheduled_rollback, crash_delay) = self.rollback_crash.take().unwrap();
+            return Some((scheduled_rollback, Some(crash_delay)));
+        }
+
+        return None;
+    }
+
+    fn is_rollback_scheduled(&self) -> bool {
+        self.rollback.is_some()
+    }
+
+    fn is_rollback_crash_scheduled(&self) -> bool {
+        self.rollback_crash.is_some()
     }
 }
