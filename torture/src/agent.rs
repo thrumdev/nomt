@@ -234,7 +234,12 @@ impl Agent {
         o.path(workdir.join("nomt_db"));
         o.bitbox_seed(init.bitbox_seed);
         o.hashtable_buckets(500_000);
-        o.rollback(init.rollback);
+        if let Some(n_commits) = init.rollback {
+            o.rollback(true);
+            o.max_rollback_log_len(n_commits);
+        } else {
+            o.rollback(false);
+        }
         let nomt = Nomt::open(o)?;
         Ok(Self {
             workdir,
