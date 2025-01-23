@@ -47,7 +47,8 @@ pub struct InitPayload {
     /// Only used upon creation a new NOMT db.
     pub bitbox_seed: [u8; 16],
     /// Whether the agent is supposed to handle rollbacks.
-    pub rollback: bool,
+    /// If `Some`, the maximum amount of supported blocks in a single rollback is specified.
+    pub rollback: Option<u32>,
 }
 
 /// The parameters for the [`ToAgent::Commit`] message.

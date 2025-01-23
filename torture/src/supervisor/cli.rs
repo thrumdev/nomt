@@ -92,9 +92,9 @@ pub struct WorkloadParams {
     ///
     /// The effective number of commits used for each rollback is randomly generated in the range
     /// 0..max_rollback_commits.
-    #[clap(default_value = "10")]
+    #[clap(default_value = "100")]
     #[arg(long = "max-rollback-commits")]
-    pub max_rollback_commits: usize,
+    pub max_rollback_commits: u32,
 
     /// Whether to ensure the correct application of the changest after every commit.
     #[clap(default_value = "false")]
