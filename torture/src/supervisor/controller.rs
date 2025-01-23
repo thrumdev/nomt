@@ -33,7 +33,7 @@ impl SpawnedAgentController {
         workdir: String,
         workload_id: u64,
         bitbox_seed: [u8; 16],
-        rollback: bool,
+        rollback: Option<u32>,
     ) -> Result<()> {
         // Assign a unique ID to the agent.
         static AGENT_COUNT: AtomicUsize = AtomicUsize::new(0);

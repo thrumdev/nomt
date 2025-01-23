@@ -1,6 +1,6 @@
 use anyhow::Result;
 use imbl::OrdMap;
-use rand::prelude::*;
+use rand::{distributions::WeightedIndex, prelude::*};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
@@ -28,6 +28,9 @@ struct Biases {
     /// When generating a key, whether it should be one that was appeared somewhere or a brand new
     /// key.
     new_key: f64,
+    /// Distribution used when generating a new key to decide how many bytes needs to be shared
+    /// with an already existing key.
+    new_key_distribution: WeightedIndex<usize>,
     /// When executing a workload iteration ,this is the probability of executing a rollback.
     rollback: f64,
     /// When executing a commit this is the probability of causing it to crash.
@@ -45,6 +48,22 @@ impl Biases {
         commit_crash: u8,
         rollback_crash: u8,
     ) -> Self {
+        // When generating a new key to be inserted in the database,
+        // this distribution will generate the key.
+        // There is a 25% chance that the key is completely random,
+        // half of the 25% chance that the first byte will be shared with an existing key,
+        // one third of the 25% chance that two bytes will be shared with an existing key,
+        // and so on.
+        //
+        // There are:
+        // + 25% probability of having a key with 0 shared bytes.
+        // + 48% probability of having a key with 1 to 9 shared bytes.
+        // + 27% probability of having a key with more than 10 shared bytes.
+        //
+        // UNWRAP: provided iterator is not empty, no item is lower than zero
+        // and the total sum is greater than one.
+        let new_key_distribution = WeightedIndex::new((1usize..33).map(|x| (32 * 32) / x)).unwrap();
+
         Self {
             delete: (delete as f64) / 100.0,
             overflow: (overflow as f64) / 100.0,
@@ -52,6 +71,7 @@ impl Biases {
             rollback: (rollback as f64) / 100.0,
             commit_crash: (commit_crash as f64) / 100.0,
             rollback_crash: (rollback_crash as f64) / 100.0,
+            new_key_distribution,
         }
     }
 }
@@ -138,10 +158,8 @@ impl WorkloadState {
 
     /// Returns a KeyValueChange with a new key, a deleted or a modified one.
     fn gen_key_value_change(&mut self) -> KeyValueChange {
-        // TODO: sophisticated key generation.
-        //
-        // - Pick a key that was already generated before, but generate a key that shares some bits.
         let mut key = [0; 32];
+        // Generate a Delete KeyValueChange
         if !self.committed.state.is_empty() && self.rng.gen_bool(self.biases.delete) {
             loop {
                 self.rng.fill_bytes(&mut key);
@@ -151,15 +169,31 @@ impl WorkloadState {
             }
         }
 
-        if self.committed.state.is_empty() || self.rng.gen_bool(self.biases.new_key) {
+        // Generate a new key KeyValueChange
+        if self.committed.state.is_empty() {
+            self.rng.fill_bytes(&mut key);
+            return KeyValueChange::Insert(key, self.gen_value());
+        }
+
+        if self.rng.gen_bool(self.biases.new_key) {
             loop {
                 self.rng.fill_bytes(&mut key);
+
+                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
+                    continue;
+                };
+
+                let common_bytes =
+                    self.rng.sample(self.biases.new_key_distribution.clone()) as usize;
+                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
+
                 if !self.committed.state.contains_key(&key) {
                     return KeyValueChange::Insert(key, self.gen_value());
                 }
             }
         }
 
+        // Generate an update KeyValueChange
         loop {
             self.rng.fill_bytes(&mut key);
             if let Some((next_key, _)) = self.committed.state.get_next(&key) {
@@ -169,14 +203,12 @@ impl WorkloadState {
     }
 
     fn gen_value(&mut self) -> Vec<u8> {
-        // TODO: sophisticated value generation.
-        //
-        // - Different power of two sizes.
-        // - Change it to be a non-even.
+        // MAX_LEAF_VALUE_SIZE is 1332,
+        // thus every value size bigger than this will create an overflow value.
         let len = if self.rng.gen_bool(self.biases.overflow) {
-            32 * 1024
+            self.rng.gen_range(1333..32 * 1024)
         } else {
-            32
+            self.rng.gen_range(1..1333)
         };
         let mut value = vec![0; len];
         self.rng.fill_bytes(&mut value);
@@ -224,7 +256,7 @@ pub struct Workload {
     /// Whether to randomly sample the state after every crash or rollback.
     sample_snapshot: bool,
     /// The max number of commits involved in a rollback.
-    max_rollback_commits: usize,
+    max_rollback_commits: u32,
     /// If `Some` there are rollbacks waiting to be applied.
     scheduled_rollbacks: ScheduledRollbacks,
 }
@@ -444,16 +476,8 @@ impl Workload {
         Ok(())
     }
 
-    fn commits_to_rollback(&mut self) -> usize {
-        // TODO: n_commits should also depend on the max rollback supported by NOMT.
-        std::cmp::min(
-            self.state.rng.gen_range(1..self.max_rollback_commits) as usize,
-            self.state.committed.sync_seqn as usize,
-        )
-    }
-
     async fn schedule_rollback(&mut self, should_crash: bool) -> anyhow::Result<()> {
-        let n_commits_to_rollback = self.commits_to_rollback();
+        let n_commits_to_rollback = self.state.rng.gen_range(1..self.max_rollback_commits) as usize;
         if n_commits_to_rollback == 0 {
             trace!("No available commits to perform rollback with");
             return Ok(());
@@ -582,7 +606,6 @@ impl Workload {
         let agent_died_or_timeout = timeout(TOLERANCE, agent.died()).await;
         self.agent.take().unwrap().teardown().await;
         if let Err(Elapsed { .. }) = agent_died_or_timeout {
-            // TODO: flag for investigation.
             return Err(anyhow::anyhow!("agent did not die"));
         }
 
@@ -729,7 +752,11 @@ impl Workload {
         assert!(self.agent.is_none());
         controller::spawn_agent_into(&mut self.agent).await?;
         let workdir = self.workdir.path().display().to_string();
-        let rollback = self.state.biases.rollback > 0.0;
+        let rollback = if self.state.biases.rollback > 0.0 {
+            Some(self.max_rollback_commits)
+        } else {
+            None
+        };
         self.agent
             .as_mut()
             .unwrap()
