@@ -87,7 +87,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     let start = std::time::Instant::now();
                     let _ = agent.commit(changeset).await;
                     let elapsed = start.elapsed();
-                    tracing::info!("commit took {:?}", elapsed);
+                    tracing::info!("commit took {}ms", elapsed.as_millis());
                     std::process::abort();
                 });
                 let _ = tokio::join!(task_1, task_2);
@@ -102,7 +102,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 let start = std::time::Instant::now();
                 agent.commit(changeset).await?;
                 let elapsed = start.elapsed();
-                tracing::info!("commit took {:?}", elapsed.as_millis());
+                tracing::info!("commit took {}ms", elapsed.as_millis());
                 stream
                     .send(Envelope {
                         reqno,
