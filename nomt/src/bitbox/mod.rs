@@ -442,6 +442,9 @@ fn recover(
                 }
                 page_diff.unpack_changed_nodes(&changed_nodes, &mut page);
 
+                // Label the page.
+                page[PAGE_SIZE - 32..].copy_from_slice(&page_id);
+
                 ht_fd.write_all_at(&page, pn * PAGE_SIZE as u64)?;
             }
         }
