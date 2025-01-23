@@ -74,9 +74,12 @@ impl NomtDB {
 
     pub fn execute(&self, mut timer: Option<&mut Timer>, workload: &mut dyn Workload) {
         let mut overlay_window = self.overlay_window.lock().unwrap();
-        self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
-
+        if overlay_window.len() < self.overlay_window_capacity {
+            timer = None;
+        }
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
+
+        self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
 
         let session = if self.overlay_window_capacity == 0 {
             self.nomt.begin_session()
@@ -126,9 +129,13 @@ impl NomtDB {
         workloads: &mut [Box<dyn Workload>],
     ) {
         let mut overlay_window = self.overlay_window.lock().unwrap();
-        self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
+        if overlay_window.len() < self.overlay_window_capacity {
+            timer = None;
+        }
 
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
+
+        self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
 
         let session = if self.overlay_window_capacity == 0 {
             self.nomt.begin_session()
