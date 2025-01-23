@@ -87,7 +87,7 @@ impl FreeList {
         self.portions.last().map(|(head_pn, _)| head_pn).copied()
     }
 
-    pub fn pop(&mut self) -> Option<PageNumber> {
+    fn pop(&mut self) -> Option<PageNumber> {
         let pn;
         let head_empty = {
             let head = self.portions.last_mut()?;
@@ -179,29 +179,28 @@ impl FreeList {
         bump: &mut PageNumber,
     ) -> Vec<(PageNumber, FatPage)> {
         // No changes were made
-        if !self.pop && to_push.is_empty() {
+        let had_pops = std::mem::replace(&mut self.pop, false);
+        if !had_pops && to_push.is_empty() {
             return vec![];
         }
 
         // append the released free list pages
         to_push.extend(self.released_portions.drain(..));
 
-        if self.pop && to_push.is_empty() {
+        if had_pops && to_push.is_empty() {
             // note: empty vec when head is empty.
             return self.encode_head(page_pool).into_iter().collect();
         }
 
-        self.pop = false;
-
         let new_pages = self.preallocate(&mut to_push, bump);
         let pages = self.push_and_encode(page_pool, &to_push, new_pages);
+        // preallocate pops, therefore, we must set it back.
+        self.pop = false;
 
         let (len, fragmented) = len_and_fragmented(&self.portions);
         self.len = len;
         self.fragmented = fragmented;
 
-        // preallocate pops, therefore, we must set it back.
-        self.pop = false;
         pages
     }
 
