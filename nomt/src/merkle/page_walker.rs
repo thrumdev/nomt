@@ -350,13 +350,6 @@ impl<H: NodeHasher> PageWalker<H> {
                         diff: PageDiff::default(),
                         bucket_info,
                     }
-                } else if self
-                    .updated_pages
-                    .last()
-                    .map_or(false, |d| d.page_id == child_page_id)
-                {
-                    // UNWRAP: just checked
-                    self.updated_pages.pop().unwrap()
                 } else {
                     // UNWRAP: all pages on the path to the node should be in the cache.
                     let (page, bucket_info) = page_set.get(&child_page_id).unwrap();
