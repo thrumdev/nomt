@@ -21,7 +21,7 @@ use super::{
 ///
 /// This combines the in-memory overlays with the state of the leaf pages on the disk.
 /// This iterator does not handle the fetching of pages internally, but instead provides the needed
-/// page numbers. The [`ReadTransaction`]` will provide facilities for dispatching I/O with a
+/// page numbers. The [`super::ReadTransaction`]` will provide facilities for dispatching I/O with a
 /// provided handle.
 ///
 /// This is not a normal Rust iterator, due to its need to block. Furthermore, it is a streaming

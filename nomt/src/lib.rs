@@ -613,9 +613,9 @@ impl<T: HashAlgorithm> Nomt<T> {
 ///
 /// The session enables the application to perform reads and prepare writes.
 ///
-/// When the session is finished, the application can [commit][`Nomt::commit_and_prove`] the changes
-/// and create a [`Witness`] that can be used to prove the correctness of replaying the same
-/// operations.
+/// When the session is finished, the application can confirm the changes by calling
+/// [`Nomt::update`] or others and create a [`Witness`] that can be used to prove the correctness
+/// of replaying the same operations.
 pub struct Session {
     store: Store,
     merkle_updater: Option<Updater>, // always `Some` during lifecycle.
@@ -666,13 +666,15 @@ impl Session {
     /// Important considerations:
     /// 1. This function does not perform deduplication. Calling it multiple times for the same key
     ///    will result in multiple load operations, which can be wasteful.
-    /// 2. The definitive set of values to be committed is determined by the [`Nomt::commit`] call.
+    /// 2. The definitive set of values to be updated is determined by the update (e.g.
+    ///    [`Nomt::update`]) call.
+    ///
     ///    It's safe to call this function for keys that may not ultimately be written, and keys
     ///    not marked here but included in the final set will still be preserved.
     /// 3. While this function helps optimize I/O, it's not strictly necessary for correctness.
     ///    The commit process will ensure all required prior values are preserved.
-    /// 4. If the path is given to [`Nomt::commit`] with the `ReadThenWrite` operation, calling
-    ///    this function is not needed as the prior value will be taken from there.
+    /// 4. If the path is given to [`Nomt::update`] (and others) with the `ReadThenWrite` operation,
+    ///    calling this function is not needed as the prior value will be taken from there.
     ///
     /// For best performance, call this function once for each key you expect to write during the
     /// session, except for those that will be part of a `ReadThenWrite` operation. The earlier
