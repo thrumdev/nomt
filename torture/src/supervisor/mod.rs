@@ -152,6 +152,8 @@ pub struct InvestigationFlag {
     workdir: PathBuf,
     /// The reason for flagging.
     reason: anyhow::Error,
+    /// Seed used to generate the workload.
+    seed: u64,
 }
 
 /// Run the workload until either it either finishes, errors or gets cancelled.
@@ -178,16 +180,18 @@ async fn run_workload(
             workload_id,
             workdir: workload.into_workdir().into_path(),
             reason: err,
+            seed,
         })),
     }
 }
 
 fn print_flag(flag: &InvestigationFlag) {
     warn!(
-        "Flagged for investigation:\n  workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
+        "Flagged for investigation:\n  workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}\n  seed={seed}",
         workload_id = flag.workload_id,
         workdir = flag.workdir.display(),
         reason = flag.reason,
+        seed = flag.seed,
     );
 }
 
