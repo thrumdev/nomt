@@ -38,6 +38,9 @@ jobs:
   doc:
     name: NOMT - doc
     runs-on: ubuntu-latest
+    env:
+      # Treat rustdoc warnings as errors.
+      RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
