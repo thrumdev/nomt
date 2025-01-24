@@ -354,7 +354,7 @@ impl SegmentedLog {
         let mut seg_index = self.segments.len() - 1;
         while seg_index > 0 {
             let segment = &self.segments[seg_index];
-            if segment.max <= new_end_live {
+            if segment.min <= new_end_live {
                 break;
             }
             seg_index -= 1;
@@ -1320,6 +1320,34 @@ mod tests {
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
         log.prune_front(1.into())?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(1)));
+        Ok(())
+    }
+
+    #[test]
+    fn test_prune_front_segment_choice() -> Result<()> {
+        let h = TestHarness::new()?;
+        h.new_segment(1)?
+            .write_record(1, &[1u8; 10])?
+            .write_record(2, &[2u8; 10])?
+            .write_record(3, &[3u8; 10])?
+            .write()?;
+
+        h.new_segment(2)?
+            .write_record(4, &[4u8; 10])?
+            .write_record(5, &[5u8; 10])?
+            .write_record(6, &[6u8; 10])?
+            .write()?;
+
+        h.new_segment(3)?
+            .write_record(7, &[4u8; 10])?
+            .write_record(8, &[5u8; 10])?
+            .write_record(9, &[6u8; 10])?
+            .write()?;
+
+        let (mut log, _) = h.open_log(default_max_segment_size(), 1, 9)?;
+        assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(9)));
+        log.prune_front(5.into())?;
+
         Ok(())
     }
 
