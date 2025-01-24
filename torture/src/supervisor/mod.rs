@@ -147,6 +147,7 @@ async fn join_interruptable(
 
 #[derive(Debug)]
 pub struct InvestigationFlag {
+    seed: u64,
     workload_id: u64,
     /// The directory the agent was working in.
     workdir: PathBuf,
@@ -175,6 +176,7 @@ async fn run_workload(
     match result {
         Ok(()) => Ok(None),
         Err(err) => Ok(Some(InvestigationFlag {
+            seed,
             workload_id,
             workdir: workload.into_workdir().into_path(),
             reason: err,
@@ -184,7 +186,8 @@ async fn run_workload(
 
 fn print_flag(flag: &InvestigationFlag) {
     warn!(
-        "Flagged for investigation:\n workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
+        "Flagged for investigation:\n seed={seed}\n workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
+        seed = flag.seed,
         workload_id = flag.workload_id,
         workdir = flag.workdir.display(),
         reason = flag.reason,
@@ -200,7 +203,7 @@ const NON_DETERMINISM_DISCLAIMER: &str = "torture is a non-deterministic fuzzer.
 /// `cancel_token` is used to gracefully shutdown the supervisor.
 async fn control_loop(
     cancel_token: CancellationToken,
-    mut seed: u64,
+    seed: u64,
     workload_params: WorkloadParams,
     flag_num_limit: usize,
 ) -> Result<()> {
@@ -210,11 +213,16 @@ async fn control_loop(
     info!("Starting control loop, seed={seed}.\n{NON_DETERMINISM_DISCLAIMER}");
     loop {
         let workload_id = workload_cnt;
+        let workload_seed = seed + workload_cnt;
         workload_cnt += 1;
-        seed += 1;
-        let maybe_flag = run_workload(cancel_token.clone(), seed, &workload_params, workload_id)
-            .instrument(trace_span!("workload", workload_id))
-            .await?;
+        let maybe_flag = run_workload(
+            cancel_token.clone(),
+            workload_seed,
+            &workload_params,
+            workload_id,
+        )
+        .instrument(trace_span!("workload", workload_id))
+        .await?;
         if let Some(flag) = maybe_flag {
             print_flag(&flag);
             flags.push(flag);
