@@ -59,8 +59,11 @@ impl Fsyncer {
     ///
     /// # Panics
     ///
-    /// Panics if there is an outstanding fsync operation that hasn't been consumed by [`wait()`] yet.
-    /// Make sure to call [`wait()`] to consume any previous fsync result before issuing a new request.
+    /// Panics if there is an outstanding fsync operation that hasn't been consumed by
+    /// [`Self::wait()`] yet.
+    ///
+    /// Make sure to call [`Self::wait()`] to consume any previous fsync result before issuing a new
+    /// request.
     pub fn fsync(&self) {
         let mut s_guard = self.shared.s.lock();
         assert!(matches!(&*s_guard, State::Idle));

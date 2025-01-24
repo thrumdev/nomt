@@ -204,7 +204,7 @@ pub struct Workload {
     workload_id: u64,
     /// The seed for bitbox generated for this workload.
     bitbox_seed: [u8; 16],
-    /// Data collected to evaluate the average commit time [ns].
+    /// Data collected to evaluate the average commit time in nanoseconds.
     tot_commit_time: u64,
     n_successfull_commit: u64,
     /// Whether to ensure the correct application of the changest after every commit.
