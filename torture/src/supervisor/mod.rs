@@ -184,7 +184,7 @@ async fn run_workload(
 
 fn print_flag(flag: &InvestigationFlag) {
     warn!(
-        "Flagged for investigation:\n workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
+        "Flagged for investigation:\n  workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
         workload_id = flag.workload_id,
         workdir = flag.workdir.display(),
         reason = flag.reason,
