@@ -154,7 +154,12 @@ pub fn bitwise_memcpy(
         let chunk_start = chunk_index * 8;
 
         if let Some(Shift::Right(amount, _prev_remainder, curr_remainder)) = &mut shift {
-            let mask = (1 << *amount) - 1;
+            let mut mask = (1 << *amount) - 1;
+            if chunk_index == n_chunks - 1 {
+                // remove garbage of the last chunk from the remainder
+                mask &=
+                    last_chunk_mask(source_bit_start, source_bit_len, n_chunks).to_be_bytes()[7];
+            }
             let bits = source[chunk_start + 7] & mask;
             *curr_remainder = Some(bits << (8 - *amount));
         }
@@ -446,24 +451,32 @@ mod tests {
 
     #[test]
     fn reconstruct_key_garbage_in_last_remainder() {
-        // If the prefix is smaller than 8 bits and the separator is almost full,
-        // there could be possibilities where there is garbage in the last remainder
-        // and the last chunk will not even be used
-        for prefix_bit_len in 0..8 {
-            let prefix = [255];
-            for separator_bit_start in prefix_bit_len..8 {
-                for separator_bit_len in prefix_bit_len..=256 - prefix_bit_len {
-                    let separator_byte_len =
-                        ((separator_bit_start + separator_bit_len + 7 as usize) / 8)
-                            .next_multiple_of(8);
-                    let separator_bytes = vec![170; separator_byte_len];
+        // There could be the possibility of having garbage in the last remainder
+        for left_and_right in 0..2 {
+            for prefix_bit_len in 0..8 {
+                let prefix = [255];
 
-                    let separator = (&separator_bytes[..], separator_bit_start, separator_bit_len);
-                    let prefix = (&prefix[..], prefix_bit_len);
-                    let expected_key = reference_reconstruct_key(Some(prefix), separator);
-                    let key = super::reconstruct_key(Some(prefix), separator);
+                let separator_bit_start_range = if left_and_right == 0 {
+                    prefix_bit_len..=7
+                } else {
+                    0..=prefix_bit_len
+                };
 
-                    assert_eq!(expected_key, key);
+                for separator_bit_start in separator_bit_start_range {
+                    for separator_bit_len in prefix_bit_len..=256 - prefix_bit_len {
+                        let separator_byte_len =
+                            ((separator_bit_start + separator_bit_len + 7 as usize) / 8)
+                                .next_multiple_of(8);
+                        let separator_bytes = vec![255; separator_byte_len];
+
+                        let separator =
+                            (&separator_bytes[..], separator_bit_start, separator_bit_len);
+                        let prefix = (&prefix[..], prefix_bit_len);
+                        let expected_key = reference_reconstruct_key(Some(prefix), separator);
+                        let key = super::reconstruct_key(Some(prefix), separator);
+
+                        assert_eq!(expected_key, key);
+                    }
                 }
             }
         }
