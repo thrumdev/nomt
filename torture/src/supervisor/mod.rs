@@ -147,6 +147,7 @@ async fn join_interruptable(
 
 #[derive(Debug)]
 pub struct InvestigationFlag {
+    /// Seed used to generate the workload.
     seed: u64,
     workload_id: u64,
     /// The directory the agent was working in.
@@ -186,7 +187,8 @@ async fn run_workload(
 
 fn print_flag(flag: &InvestigationFlag) {
     warn!(
-        "Flagged for investigation:\n seed={seed}\n workload_id={workload_id}\n  workdir={workdir}\n  reason={reason}",
+        "Flagged for investigation:\n  seed={seed}\n  workload_id={workload_id}\n  \
+        workdir={workdir}\n  reason={reason}",
         seed = flag.seed,
         workload_id = flag.workload_id,
         workdir = flag.workdir.display(),
