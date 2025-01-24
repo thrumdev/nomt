@@ -63,29 +63,29 @@ pub struct WorkloadParams {
     #[arg(long = "random-size")]
     pub random_size: bool,
 
-    /// When exercising a new commit, the probability of causing it to crash.
+    /// When executing a workload iteration ,this is the probability of executing a rollback
+    /// instead of a commit.
     ///
     /// Accepted values are in the range of 0 to 100
-    #[clap(default_value = "20")]
+    #[clap(default_value = "30")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "commit-crash")]
-    pub crash: u8,
-
-    /// Instead of exercising a new commit, this is the probability of executing a rollback.
-    ///
-    /// Accepted values are in the range of 0 to 100
-    #[clap(default_value = "5")]
-    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "rollback")]
+    #[arg(long = "rollback-bias")]
     pub rollback: u8,
 
-    /// Instead of exercising a new commit, this is the probability of executing a rollback
-    /// and causing it to crash.
+    /// When executing a commit this is the probability of causing it to crash.
     ///
     /// Accepted values are in the range of 0 to 100
-    #[clap(default_value = "5")]
+    #[clap(default_value = "30")]
     #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
-    #[arg(long = "rollback-crash")]
+    #[arg(long = "commit-crash-bias")]
+    pub commit_crash: u8,
+
+    /// When executing a rollback this is the probability of causing it to crash.
+    ///
+    /// Accepted values are in the range of 0 to 100
+    #[clap(default_value = "30")]
+    #[clap(value_parser=clap::value_parser!(u8).range(0..=100))]
+    #[arg(long = "rollback-crash-bias")]
     pub rollback_crash: u8,
 
     /// The max amount of commits involved in a rollback.

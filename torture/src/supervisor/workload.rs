@@ -28,12 +28,11 @@ struct Biases {
     /// When generating a key, whether it should be one that was appeared somewhere or a brand new
     /// key.
     new_key: f64,
-    /// When exercising a new commit, the probability of causing it to crash.
-    crash: f64,
-    /// Instead of exercising a new commit, this is the probability of executing a rollback.
+    /// When executing a workload iteration ,this is the probability of executing a rollback.
     rollback: f64,
-    /// Instead of exercising a new commit, this is the probability of executing a rollback
-    /// and causing it to crash.
+    /// When executing a commit this is the probability of causing it to crash.
+    commit_crash: f64,
+    /// When executing a rollback this is the probability of causing it to crash.
     rollback_crash: f64,
 }
 
@@ -42,16 +41,16 @@ impl Biases {
         delete: u8,
         overflow: u8,
         new_key: u8,
-        crash: u8,
         rollback: u8,
+        commit_crash: u8,
         rollback_crash: u8,
     ) -> Self {
         Self {
             delete: (delete as f64) / 100.0,
             overflow: (overflow as f64) / 100.0,
             new_key: (new_key as f64) / 100.0,
-            crash: (crash as f64) / 100.0,
             rollback: (rollback as f64) / 100.0,
+            commit_crash: (commit_crash as f64) / 100.0,
             rollback_crash: (rollback_crash as f64) / 100.0,
         }
     }
@@ -253,8 +252,8 @@ impl Workload {
             workload_params.delete,
             workload_params.overflow,
             workload_params.new_key,
-            workload_params.crash,
             workload_params.rollback,
+            workload_params.commit_crash,
             workload_params.rollback_crash,
         );
         let mut state = WorkloadState::new(
@@ -310,22 +309,20 @@ impl Workload {
         let rr = agent.rr().clone();
         trace!("run_iteration");
 
-        if self.state.rng.gen_bool(self.state.biases.rollback_crash) {
-            self.exercise_rollback_crashing(&rr).await?;
-            return Ok(());
-        }
-
         if self.state.rng.gen_bool(self.state.biases.rollback) {
-            self.exercise_rollback(&rr).await?;
-            return Ok(());
+            if self.state.rng.gen_bool(self.state.biases.rollback_crash) {
+                self.exercise_rollback_crashing(&rr).await?;
+            } else {
+                self.exercise_rollback(&rr).await?;
+            }
         }
 
-        if self.state.rng.gen_bool(self.state.biases.crash) {
+        if self.state.rng.gen_bool(self.state.biases.commit_crash) {
             self.exercise_commit_crashing(&rr).await?;
-            return Ok(());
+        } else {
+            self.exercise_commit(&rr).await?;
         }
 
-        self.exercise_commit(&rr).await?;
         Ok(())
     }
 
