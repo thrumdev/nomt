@@ -10,8 +10,6 @@
 
 extern crate alloc;
 
-pub mod multi_proof;
-pub mod multi_proof_verification;
 pub mod page;
 pub mod page_id;
 pub mod proof;
