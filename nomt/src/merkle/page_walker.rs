@@ -52,9 +52,9 @@ use nomt_core::{
 };
 
 use crate::{
+    merkle::BucketInfo,
     page_cache::{Page, PageMut},
     page_diff::PageDiff,
-    store::BucketInfo,
 };
 
 /// The output of the page walker.
@@ -602,14 +602,13 @@ impl<H: NodeHasher> PageWalker<H> {
 #[cfg(test)]
 mod tests {
     use super::{
-        trie, Node, NodeHasherExt, Output, PageSet, PageWalker, TriePosition, UpdatedPage,
-        ROOT_PAGE_ID,
+        trie, BucketInfo, Node, NodeHasherExt, Output, PageSet, PageWalker, TriePosition,
+        UpdatedPage, ROOT_PAGE_ID,
     };
     use crate::{
         io::PagePool,
         page_cache::{Page, PageMut},
         page_diff::PageDiff,
-        store::BucketInfo,
         Blake3Hasher,
     };
     use bitvec::prelude::*;
@@ -663,13 +662,13 @@ mod tests {
     impl PageSet for MockPageSet {
         fn fresh(&self, page_id: &PageId) -> (PageMut, BucketInfo) {
             let page = PageMut::pristine_empty(&self.page_pool, page_id);
-            (page, BucketInfo::FreshWithNoDependents)
+            (page, BucketInfo::Fresh)
         }
 
         fn get(&self, page_id: &PageId) -> Option<(Page, BucketInfo)> {
             self.inner
                 .get(page_id)
-                .map(|p| (p.clone(), BucketInfo::FreshWithNoDependents))
+                .map(|p| (p.clone(), BucketInfo::Fresh))
         }
     }
 

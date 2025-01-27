@@ -344,13 +344,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<Overlay> {
-        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
-            &mut session,
-            actuals,
-            /* witness */ false,
-            /* into_overlay */ true,
-        )?;
-        let updated_pages = merkle_update.updated_pages.into_frozen_iter().collect();
+        let (value_tx, merkle_update, rollback_delta) =
+            self.update_inner(&mut session, actuals, /* witness */ false)?;
+        let updated_pages = merkle_update
+            .updated_pages
+            .into_frozen_iter(/* into_overlay */ true)
+            .collect();
 
         let values = value_tx.into_iter().collect();
 
@@ -373,13 +372,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Overlay, Witness, WitnessedOperations)> {
-        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
-            &mut session,
-            actuals,
-            /* witness */ true,
-            /* into_overlay */ true,
-        )?;
-        let updated_pages = merkle_update.updated_pages.into_frozen_iter().collect();
+        let (value_tx, merkle_update, rollback_delta) =
+            self.update_inner(&mut session, actuals, /* witness */ true)?;
+        let updated_pages = merkle_update
+            .updated_pages
+            .into_frozen_iter(/* into_overlay */ true)
+            .collect();
 
         let values = value_tx.into_iter().collect();
 
@@ -434,15 +432,13 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<Node> {
-        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
-            &mut session,
-            actuals,
-            /* witness */ false,
-            /* into_overlay */ false,
-        )?;
+        let (value_tx, merkle_update, rollback_delta) =
+            self.update_inner(&mut session, actuals, /* witness */ false)?;
         self.commit_inner(
             merkle_update.root,
-            merkle_update.updated_pages.into_frozen_iter(),
+            merkle_update
+                .updated_pages
+                .into_frozen_iter(/* into_overlay */ false),
             value_tx.into_iter(),
             rollback_delta,
             None,
@@ -459,19 +455,17 @@ impl<T: HashAlgorithm> Nomt<T> {
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
-        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
-            &mut session,
-            actuals,
-            /* witness */ true,
-            /* into_overlay */ false,
-        )?;
+        let (value_tx, merkle_update, rollback_delta) =
+            self.update_inner(&mut session, actuals, /* witness */ true)?;
 
         // UNWRAP: witness specified as true.
         let witness = merkle_update.witness.unwrap();
         let witnessed_ops = merkle_update.witnessed_operations.unwrap();
         self.commit_inner(
             merkle_update.root,
-            merkle_update.updated_pages.into_frozen_iter(),
+            merkle_update
+                .updated_pages
+                .into_frozen_iter(/* into_overlay */ false),
             value_tx.into_iter(),
             rollback_delta,
             None,
@@ -486,7 +480,6 @@ impl<T: HashAlgorithm> Nomt<T> {
         session: &mut Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
-        into_overlay: bool,
     ) -> anyhow::Result<(ValueTransaction, merkle::Output, Option<rollback::Delta>)> {
         if cfg!(debug_assertions) {
             // Check that the actuals are sorted by key path.
@@ -513,7 +506,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             .merkle_updater
             .take()
             .unwrap()
-            .update_and_prove::<T>(compact_actuals, witness, into_overlay);
+            .update_and_prove::<T>(compact_actuals, witness);
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
@@ -583,12 +576,13 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        let (value_tx, merkle_update, rollback_delta) = self.update_inner(
-            &mut sess, actuals, /* witness */ false, /* into_overlay */ false,
-        )?;
+        let (value_tx, merkle_update, rollback_delta) =
+            self.update_inner(&mut sess, actuals, /* witness */ false)?;
         self.commit_inner(
             merkle_update.root,
-            merkle_update.updated_pages.into_frozen_iter(),
+            merkle_update
+                .updated_pages
+                .into_frozen_iter(/* into_overlay */ false),
             value_tx.into_iter(),
             rollback_delta,
             None,
