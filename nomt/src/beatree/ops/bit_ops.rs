@@ -104,11 +104,11 @@ fn first_chunk_mask(bit_start: usize) -> u64 {
 }
 
 fn last_chunk_mask(bit_start: usize, bit_len: usize, n_chunks: usize) -> u64 {
-    let unused_last_bits = (bit_start + bit_len).saturating_sub((n_chunks - 1) * 64);
+    let used_last_chunk_bits = (bit_start + bit_len).saturating_sub((n_chunks - 1) * 64);
     // saturating_sub is necessary to prevent overflow in the rare case in which a right
     // shift may shift some bits onto the `n_chunks` chunk, leading to more than 64 bits
     // on the `n_chunks - 1` chunk.
-    1u64.checked_shl(64u32.saturating_sub(unused_last_bits as u32))
+    1u64.checked_shl(64u32.saturating_sub(used_last_chunk_bits as u32))
         .map(|m| !(m - 1))
         .unwrap_or(0)
 }
@@ -117,7 +117,8 @@ fn last_chunk_mask(bit_start: usize, bit_len: usize, n_chunks: usize) -> u64 {
 /// within the first byte into the destination, starting from the `destination_bit_start`ith bit.
 ///
 /// `destination` must be long enough to store the bits, accounting also possible shifts.
-/// `source` must have a length multiple of 8 bytes.
+/// `source` bytes must have the smallest length, multiple of 8 bytes that can contain
+/// all the source bits.
 ///
 /// All the bits in `destination` not involved in the copy will be left unchanged.
 pub fn bitwise_memcpy(
@@ -221,16 +222,25 @@ pub fn bitwise_memcpy(
         // move bits remainder between chunk boundaries
         match &mut shift {
             Some(Shift::Left(amount)) if chunk_index < n_chunks - 1 => {
-                // this mask removes possible garbage from the last remainder
+                // This is a rare case of copying the second-to-last source chunk to the destination,
+                // taking only the remainder from the last source chunk. We know this is happening
+                // because there is only 1 byte missing to be written in the destination after
+                // `n_chunks - 2` chunks.
+                // `mask` removes possible garbage from the last remainder.
+                // `unchanged_bits` keeps data which is not involved in the memcpy in the destination.
                 let mut mask = 255;
-                if n_chunks > 1 && chunk_index == n_chunks - 2 {
+                let mut unchanged_bits = 0;
+                if destination_offset + 8 == bytes_to_write {
                     mask = last_chunk_mask(source_bit_start, source_bit_len, n_chunks)
                         .to_be_bytes()[0];
+                    let bits_to_keep =
+                        (bytes_to_write * 8) - (destination_bit_start + source_bit_len);
+                    let mask_to = (1 << bits_to_keep) - 1;
+                    unchanged_bits = destination[destination_offset + 7] & mask_to;
                 }
 
                 let remainder_bits = (source[(chunk_index + 1) * 8] & mask) >> (8 - *amount);
-
-                chunk_shifted[7] |= remainder_bits;
+                chunk_shifted[7] |= remainder_bits | unchanged_bits;
             }
             Some(Shift::Right(_, prev_remainder, curr_remainder)) => {
                 if let Some(bits) = prev_remainder {
@@ -258,9 +268,14 @@ pub fn bitwise_memcpy(
         // There could be at most one byte which still needs to be written
         assert_eq!(bytes_to_write - destination_offset, 1);
         if let Some(Shift::Right(amount, Some(prev_remainder), _)) = &mut shift {
-            let mask = (1 << (8 - *amount)) - 1;
+            // The last right shift could require a shift of fewer bits,
+            // because there could be garbage between the end of the real
+            // reminder and the end of the chunk.
+            let garbage_bits = (n_chunks * 64) - (source_bit_start + source_bit_len);
+            let mask = (1 << (8 - (*amount - garbage_bits))) - 1;
+
             destination[destination_offset] &= mask;
-            destination[destination_offset] |= *prev_remainder;
+            destination[destination_offset] |= *prev_remainder & !mask;
         }
     }
 }
