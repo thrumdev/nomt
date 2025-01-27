@@ -69,11 +69,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     let page_io_receiver = io_handle.receiver().clone();
 
     // We always run with `WithoutDependents` here, and the mode is adjusted later, during `update`.
-    let page_set = PageSet::new(
-        io_handle.page_pool().clone(),
-        super::page_set::FreshPageBucketMode::WithoutDependents,
-        None,
-    );
+    let page_set = PageSet::new(io_handle.page_pool().clone(), None);
 
     let seeker = Seeker::<H>::new(
         params.root,
@@ -223,15 +219,7 @@ fn update<H: HashAlgorithm>(
 
     let mut output = WorkerOutput::new(shared.witness);
 
-    let mut page_set = PageSet::new(
-        page_pool,
-        if shared.into_overlay {
-            super::page_set::FreshPageBucketMode::WithDependents
-        } else {
-            super::page_set::FreshPageBucketMode::WithoutDependents
-        },
-        warm_page_set,
-    );
+    let mut page_set = PageSet::new(page_pool, warm_page_set);
 
     let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache);
 

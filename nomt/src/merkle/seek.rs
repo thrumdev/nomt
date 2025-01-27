@@ -8,11 +8,11 @@ use crate::{
     },
     io::{CompleteIo, FatPage, IoHandle},
     page_cache::{Page, PageCache, PageMut},
-    store::{BucketIndex, BucketInfo, PageLoad, PageLoader},
+    store::{BucketIndex, PageLoad, PageLoader},
     HashAlgorithm,
 };
 
-use super::{page_set::PageSet, LiveOverlay};
+use super::{page_set::PageSet, BucketInfo, LiveOverlay};
 
 use nomt_core::{
     page::DEPTH,

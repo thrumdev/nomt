@@ -3,46 +3,24 @@
 use nomt_core::page_id::PageId;
 use std::{collections::HashMap, sync::Arc};
 
+use super::BucketInfo;
 use crate::{
     io::PagePool,
     page_cache::{Page, PageMut},
-    store::{BucketInfo, SharedMaybeBucketIndex},
 };
-
-/// The mode to use when determining bucket indices for fresh pages.
-#[derive(Clone, Copy)]
-pub enum FreshPageBucketMode {
-    WithDependents,
-    WithoutDependents,
-}
 
 pub struct PageSet {
     map: HashMap<PageId, (Page, BucketInfo)>,
     warm_up_map: Option<Arc<HashMap<PageId, (Page, BucketInfo)>>>,
     page_pool: PagePool,
-    fresh_page_bucket_mode: FreshPageBucketMode,
 }
 
 impl PageSet {
-    pub fn new(
-        page_pool: PagePool,
-        mode: FreshPageBucketMode,
-        warmed_up: Option<FrozenSharedPageSet>,
-    ) -> Self {
+    pub fn new(page_pool: PagePool, warmed_up: Option<FrozenSharedPageSet>) -> Self {
         PageSet {
             map: HashMap::new(),
             page_pool,
             warm_up_map: warmed_up.map(|x| x.0),
-            fresh_page_bucket_mode: mode,
-        }
-    }
-
-    fn fresh_bucket_info(&self) -> BucketInfo {
-        match self.fresh_page_bucket_mode {
-            FreshPageBucketMode::WithDependents => {
-                BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None))
-            }
-            FreshPageBucketMode::WithoutDependents => BucketInfo::FreshWithNoDependents,
         }
     }
 
@@ -68,7 +46,7 @@ impl PageSet {
 impl super::page_walker::PageSet for PageSet {
     fn fresh(&self, page_id: &PageId) -> (PageMut, BucketInfo) {
         let page = PageMut::pristine_empty(&self.page_pool, &page_id);
-        let bucket_info = self.fresh_bucket_info();
+        let bucket_info = BucketInfo::Fresh;
 
         (page, bucket_info)
     }
@@ -78,20 +56,6 @@ impl super::page_walker::PageSet for PageSet {
             .get(&page_id)
             .map(|(p, bucket_info)| (p.clone(), bucket_info.clone()))
             .or_else(|| self.get_warmed_up(page_id))
-            .map(|(p, b)| {
-                if let (FreshPageBucketMode::WithDependents, &BucketInfo::FreshWithNoDependents) =
-                    (self.fresh_page_bucket_mode, &b)
-                {
-                    // during warm-ups, we always run with `WithoutDependents`. This replaces the
-                    // fresh variant if running with dependents during update.
-                    (
-                        p,
-                        BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(None)),
-                    )
-                } else {
-                    (p, b)
-                }
-            })
     }
 }
 
