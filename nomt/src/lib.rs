@@ -5,14 +5,11 @@
 use bitvec::prelude::*;
 use io::PagePool;
 use metrics::{Metric, Metrics};
-use std::{
-    mem,
-    sync::{atomic::AtomicUsize, Arc},
-};
+use std::{mem, sync::Arc};
 
 use merkle::{UpdatePool, Updater};
 use nomt_core::{
-    page_id::{PageId, ROOT_PAGE_ID},
+    page_id::ROOT_PAGE_ID,
     proof::PathProof,
     trie::{InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
@@ -20,7 +17,7 @@ use nomt_core::{
 use overlay::{LiveOverlay, OverlayMarker};
 use page_cache::PageCache;
 use parking_lot::Mutex;
-use store::{DirtyPage, Store, ValueTransaction};
+use store::{Store, ValueTransaction};
 
 // CARGO HACK: silence lint; this is used in integration tests
 
@@ -208,8 +205,6 @@ pub struct Nomt<T: HashAlgorithm> {
     page_pool: PagePool,
     store: Store,
     shared: Arc<Mutex<Shared>>,
-    /// The number of active sessions. Expected to be either 0 or 1.
-    session_cnt: Arc<AtomicUsize>,
     metrics: Metrics,
     _marker: std::marker::PhantomData<T>,
 }
@@ -241,7 +236,6 @@ impl<T: HashAlgorithm> Nomt<T> {
                 root,
                 last_commit_marker: None,
             })),
-            session_cnt: Arc::new(AtomicUsize::new(0)),
             metrics,
             _marker: std::marker::PhantomData,
         })
@@ -273,126 +267,116 @@ impl<T: HashAlgorithm> Nomt<T> {
         self.store.sync_seqn()
     }
 
-    /// Creates a new [`Session`] object, that serves a purpose of capturing the reads and writes
-    /// performed by the application, updating the trie and creating a [`Witness`], allowing to
-    /// re-execute the same operations without having access to the full trie.
+    /// Create a new [`Session`] object with the given parameters.
     ///
-    /// Only a single session may be created at a time. Creating a new session without dropping or
-    /// committing an existing open session will lead to a panic.
-    pub fn begin_session(&self) -> Session {
-        // UNWRAP: empty ancestors are always valid.
-        self.begin_session_inner(/* allow_rollback */ true, None)
-            .unwrap()
-    }
-
-    /// Creates a new [`Session`] object on top of a series of in-memory overlays.
+    /// The [`Session`] is a read-only handle on the database and is used to create a changeset to
+    /// be applied to the database. Sessions provide read interfaces and additionally coordinate
+    /// work such as proving and rollback preimages which make committing more efficient.
     ///
-    /// This will fail if the first overlay was not created on top of the previous overlays.
-    /// Providing an empty iterator will give the same result as `begin_session`.
-    ///
-    /// It is the user's responsibility to ensure that all uncommitted overlays are provided.
-    /// Failing to provide all uncommitted overlays or providing overlays which do not form a
-    /// sequence will lead to an error.
-    pub fn begin_session_with_overlay<'a>(
-        &self,
-        overlays: impl IntoIterator<Item = &'a Overlay>,
-    ) -> Result<Session, InvalidAncestors> {
-        self.begin_session_inner(/* allow_rollback */ true, overlays)
-    }
+    /// There may be multiple sessions live, though the existence of an outstanding session will
+    /// prevent writes to the database. Sessions are the main way of reading to the database,
+    /// and permit a changeset to be committed either directly to the database or into an
+    /// in-memory [`Overlay`].
+    pub fn begin_session(&self, params: SessionParams) -> Session {
+        let live_overlay = params.overlay;
 
-    fn begin_session_inner<'a>(
-        &self,
-        allow_rollback: bool,
-        overlays: impl IntoIterator<Item = &'a Overlay>,
-    ) -> Result<Session, InvalidAncestors> {
-        let live_overlay = LiveOverlay::new(overlays)?;
-
-        let prev = self
-            .session_cnt
-            .swap(1, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(prev, 0, "only one session could be active at a time");
         let store = self.store.clone();
-        let rollback_delta = if allow_rollback {
+        let rollback_delta = if params.record_rollback_delta {
             self.store
                 .rollback()
                 .map(|r| r.delta_builder(&store, &live_overlay))
         } else {
             None
         };
-        Ok(Session {
+        Session {
             store,
-            merkle_updater: Some(self.merkle_update_pool.begin::<T>(
+            merkle_updater: self.merkle_update_pool.begin::<T>(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
                 self.store.clone(),
                 live_overlay.clone(),
                 live_overlay.parent_root().unwrap_or_else(|| self.root()),
-            )),
-            session_cnt: self.session_cnt.clone(),
+            ),
             metrics: self.metrics.clone(),
             rollback_delta,
-            overlay: Some(live_overlay),
-        })
+            overlay: live_overlay,
+            witness_mode: params.witness,
+        }
     }
 
-    /// Update the merkle tree and commit the changes to an in-memory [`Overlay`].
-    ///
-    /// The actuals are a list of key paths and the corresponding read/write operations. The list
-    /// must be sorted by the key paths in ascending order. The key paths must be unique.
-    pub fn update(
+    /// Finish the provided [`Session`]. Provide the actual reads and writes (in sorted order)
+    /// that are to be considered within the finished session.
+    pub fn finish_session(
         &self,
         mut session: Session,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
-    ) -> anyhow::Result<Overlay> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, /* witness */ false)?;
-        let updated_pages = merkle_update
-            .updated_pages
-            .into_frozen_iter(/* into_overlay */ true)
-            .collect();
+    ) -> FinishedSession {
+        if cfg!(debug_assertions) {
+            // Check that the actuals are sorted by key path.
+            for i in 1..actuals.len() {
+                assert!(
+                    actuals[i].0 > actuals[i - 1].0,
+                    "actuals are not sorted at index {}",
+                    i
+                );
+            }
+        }
+        let rollback_delta = session
+            .rollback_delta
+            .take()
+            .map(|delta_builder| delta_builder.finalize(&actuals));
 
-        let values = value_tx.into_iter().collect();
+        let mut compact_actuals = Vec::with_capacity(actuals.len());
+        for (path, read_write) in &actuals {
+            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
+        }
 
-        // UNWRAP: overlay is always some during session lifecycle.
-        Ok(session.overlay.take().unwrap().finish(
-            merkle_update.root,
-            updated_pages,
-            values,
+        // UNWRAP: merkle_updater always `Some` during lifecycle.
+        let merkle_update_handle = session
+            .merkle_updater
+            .update_and_prove::<T>(compact_actuals, session.witness_mode.0);
+
+        let mut tx = self.store.new_value_tx();
+        for (path, read_write) in actuals {
+            if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
+                tx.write_value::<T>(path, value);
+            }
+        }
+
+        let merkle_output = merkle_update_handle.join();
+        FinishedSession {
+            value_transaction: tx,
+            merkle_output,
             rollback_delta,
-        ))
+            // UNWRAP: session overlay is always `Some` during lifecycle.
+            parent_overlay: session.overlay,
+        }
     }
 
-    /// Update the merkle tree and commit the changes to an in-memory [`Overlay`] and create a
-    /// proof of all updated values.
-    ///
-    /// The actuals are a list of key paths and the corresponding read/write operations. The list
-    /// must be sorted by the key paths in ascending order. The key paths must be unique.
-    pub fn update_and_prove(
-        &self,
-        mut session: Session,
-        actuals: Vec<(KeyPath, KeyReadWrite)>,
-    ) -> anyhow::Result<(Overlay, Witness, WitnessedOperations)> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, /* witness */ true)?;
-        let updated_pages = merkle_update
-            .updated_pages
-            .into_frozen_iter(/* into_overlay */ true)
-            .collect();
+    /// Commit a finished session to disk directly.
+    pub fn commit_finished(&self, session: FinishedSession) -> Result<(), anyhow::Error> {
+        // TODO: do a prev_root check or something to ensure continuity?
 
-        let values = value_tx.into_iter().collect();
+        {
+            let mut shared = self.shared.lock();
+            shared.root = session.merkle_output.root;
+            shared.last_commit_marker = None;
+        }
 
-        // UNWRAP: overlay is always some during session lifecycle.
-        let overlay = session.overlay.take().unwrap().finish(
-            merkle_update.root,
-            updated_pages,
-            values,
-            rollback_delta,
-        );
+        if let Some(rollback_delta) = session.rollback_delta {
+            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
+            let rollback = self.store.rollback().unwrap();
+            rollback.commit(rollback_delta)?;
+        }
 
-        // UNWRAP: witness specified as true.
-        let witness = merkle_update.witness.unwrap();
-        let witnessed_ops = merkle_update.witnessed_operations.unwrap();
-        Ok((overlay, witness, witnessed_ops))
+        self.store.commit(
+            session.value_transaction.into_iter(),
+            self.page_cache.clone(),
+            session
+                .merkle_output
+                .updated_pages
+                .into_frozen_iter(/* into_overlay */ false),
+        )
     }
 
     /// Commit the changes from this overlay to the underlying database.
@@ -420,118 +404,10 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         let marker = overlay.commit();
 
-        self.commit_inner(root, page_changes, values, rollback_delta, Some(marker))
-    }
-
-    /// Update the merkle tree and commit the changes to the underlying database.
-    ///
-    /// The actuals are a list of key paths and the corresponding read/write operations. The list
-    /// must be sorted by the key paths in ascending order. The key paths must be unique.
-    pub fn update_and_commit(
-        &self,
-        mut session: Session,
-        actuals: Vec<(KeyPath, KeyReadWrite)>,
-    ) -> anyhow::Result<Node> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, /* witness */ false)?;
-        self.commit_inner(
-            merkle_update.root,
-            merkle_update
-                .updated_pages
-                .into_frozen_iter(/* into_overlay */ false),
-            value_tx.into_iter(),
-            rollback_delta,
-            None,
-        )?;
-        Ok(merkle_update.root)
-    }
-
-    /// Commit the transaction and create a proof for the given session. Also, returns the new root.
-    ///
-    /// The actuals are a list of key paths and the corresponding read/write operations. The list
-    /// must be sorted by the key paths in ascending order. The key paths must be unique.
-    pub fn update_commit_and_prove(
-        &self,
-        mut session: Session,
-        actuals: Vec<(KeyPath, KeyReadWrite)>,
-    ) -> anyhow::Result<(Node, Witness, WitnessedOperations)> {
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut session, actuals, /* witness */ true)?;
-
-        // UNWRAP: witness specified as true.
-        let witness = merkle_update.witness.unwrap();
-        let witnessed_ops = merkle_update.witnessed_operations.unwrap();
-        self.commit_inner(
-            merkle_update.root,
-            merkle_update
-                .updated_pages
-                .into_frozen_iter(/* into_overlay */ false),
-            value_tx.into_iter(),
-            rollback_delta,
-            None,
-        )?;
-        Ok((merkle_update.root, witness, witnessed_ops))
-    }
-
-    // Perform updates and merklization, but just into memory. If `witness` is true, the returned
-    // witness fields will be `Some`
-    fn update_inner(
-        &self,
-        session: &mut Session,
-        actuals: Vec<(KeyPath, KeyReadWrite)>,
-        witness: bool,
-    ) -> anyhow::Result<(ValueTransaction, merkle::Output, Option<rollback::Delta>)> {
-        if cfg!(debug_assertions) {
-            // Check that the actuals are sorted by key path.
-            for i in 1..actuals.len() {
-                assert!(
-                    actuals[i].0 > actuals[i - 1].0,
-                    "actuals are not sorted at index {}",
-                    i
-                );
-            }
-        }
-        let rollback_delta = session
-            .rollback_delta
-            .take()
-            .map(|delta_builder| delta_builder.finalize(&actuals));
-
-        let mut compact_actuals = Vec::with_capacity(actuals.len());
-        for (path, read_write) in &actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
-        }
-
-        // UNWRAP: merkle_updater always `Some` during lifecycle.
-        let merkle_update_handle = session
-            .merkle_updater
-            .take()
-            .unwrap()
-            .update_and_prove::<T>(compact_actuals, witness);
-
-        let mut tx = self.store.new_value_tx();
-        for (path, read_write) in actuals {
-            if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
-                tx.write_value::<T>(path, value);
-            }
-        }
-
-        let merkle_update = merkle_update_handle.join();
-        Ok((tx, merkle_update, rollback_delta))
-    }
-
-    // Commit the transaction to disk.
-    fn commit_inner(
-        &self,
-        new_root: Node,
-        updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
-        value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
-        rollback_delta: Option<rollback::Delta>,
-        overlay_marker: Option<OverlayMarker>,
-    ) -> anyhow::Result<()> {
         {
             let mut shared = self.shared.lock();
-            shared.root = new_root;
-            shared.last_commit_marker = overlay_marker;
+            shared.root = root;
+            shared.last_commit_marker = Some(marker);
         }
 
         if let Some(rollback_delta) = rollback_delta {
@@ -541,9 +417,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         }
 
         self.store
-            .commit(value_tx, self.page_cache.clone(), updated_pages)?;
-
-        Ok(())
+            .commit(values, self.page_cache.clone(), page_changes)
     }
 
     /// Perform a rollback of the last `n` commits.
@@ -564,9 +438,9 @@ impl<T: HashAlgorithm> Nomt<T> {
         // interfere with the rollback log: if another rollback were to be issued, it must rollback
         // the changes in the rollback log and not the changes performed by the current rollback.
         // UNWRAP: `None` ancestors are always valid.
-        let mut sess = self
-            .begin_session_inner(/* allow_rollback */ false, None)
-            .unwrap();
+        let mut session_params = SessionParams::default();
+        session_params.record_rollback_delta = false;
+        let sess = self.begin_session(session_params);
 
         // Convert the traceback into a series of write commands.
         let mut actuals = Vec::new();
@@ -576,17 +450,8 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        let (value_tx, merkle_update, rollback_delta) =
-            self.update_inner(&mut sess, actuals, /* witness */ false)?;
-        self.commit_inner(
-            merkle_update.root,
-            merkle_update
-                .updated_pages
-                .into_frozen_iter(/* into_overlay */ false),
-            value_tx.into_iter(),
-            rollback_delta,
-            None,
-        )?;
+        let finished = self.finish_session(sess, actuals);
+        self.commit_finished(finished)?;
 
         Ok(())
     }
@@ -604,20 +469,82 @@ impl<T: HashAlgorithm> Nomt<T> {
     }
 }
 
+/// A configuration type used to inform NOMT whether to generate witnesses of accessed data.
+pub struct WitnessMode(bool);
+
+impl WitnessMode {
+    /// Witness all reads and writes to the trie.
+    pub fn read_write() -> Self {
+        WitnessMode(true)
+    }
+
+    /// Do not generate a witness.
+    pub fn disabled() -> Self {
+        WitnessMode(false)
+    }
+}
+
+/// Parameters for instantiating a session.
+pub struct SessionParams {
+    record_rollback_delta: bool,
+    witness: WitnessMode,
+    overlay: LiveOverlay,
+}
+
+impl Default for SessionParams {
+    fn default() -> Self {
+        SessionParams {
+            record_rollback_delta: true,
+            witness: WitnessMode::disabled(),
+            // UNWRAP: empty live overlay always valid.
+            overlay: LiveOverlay::new(None).unwrap(),
+        }
+    }
+}
+
+impl SessionParams {
+    /// Whether to generate a witness of the read and written keys. Default: disabled
+    ///
+    /// If `WitnessMode::read_write()` is provided, then when this session has concluded it will be
+    /// possible to use [`FinishedSession::take_witness`] to get the recorded witness.
+    pub fn witness_mode(mut self, witness: WitnessMode) -> Self {
+        self.witness = witness;
+        self
+    }
+
+    /// Use a set of live overlays (ancestors, in descending order) as a parent. Default: None
+    ///
+    /// Errors are returned if the set of ancestor overlays provided are not _sound_ or _complete_.
+    ///
+    /// An error is returned if the overlays do not represent a chain, starting from the first.
+    /// i.e. the second overlay must be an ancestor of the first, and the third must be an ancestor
+    /// of the second, and so on. This can be thought of as soundness.
+    ///
+    /// An error is returned if the final overlay's parent has not yet been committed. The complete
+    /// set of all uncommitted ancestors must be provided.
+    pub fn overlay<'a>(
+        mut self,
+        ancestors: impl IntoIterator<Item = &'a Overlay>,
+    ) -> Result<Self, InvalidAncestors> {
+        self.overlay = LiveOverlay::new(ancestors)?;
+        Ok(self)
+    }
+}
+
 /// A session presents a way of interaction with the trie.
 ///
 /// The session enables the application to perform reads and prepare writes.
 ///
 /// When the session is finished, the application can confirm the changes by calling
-/// [`Nomt::update`] or others and create a [`Witness`] that can be used to prove the correctness
-/// of replaying the same operations.
+/// [`Nomt::finish_session`] or others and create a [`Witness`] that can be used to prove the
+/// correctness of replaying the same operations.
 pub struct Session {
     store: Store,
-    merkle_updater: Option<Updater>, // always `Some` during lifecycle.
-    session_cnt: Arc<AtomicUsize>,
+    merkle_updater: Updater,
     metrics: Metrics,
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
-    overlay: Option<LiveOverlay>, // always `Some` during lifecycle.
+    overlay: LiveOverlay,
+    witness_mode: WitnessMode,
 }
 
 impl Session {
@@ -633,8 +560,7 @@ impl Session {
     /// session to maximize throughput.
     /// There is no correctness issue with doing too many warm-ups, but there is a cost for I/O.
     pub fn warm_up(&self, path: KeyPath) {
-        // UNWRAP: merkle_updater always `Some` during lifecycle.
-        self.merkle_updater.as_ref().unwrap().warm_up(path);
+        self.merkle_updater.warm_up(path);
     }
 
     /// Synchronously read the value stored under the given key.
@@ -642,11 +568,7 @@ impl Session {
     /// Returns `None` if the value is not stored under the given key. Fails only if I/O fails.
     pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
         let _maybe_guard = self.metrics.record(Metric::ValueFetchTime);
-        if let Some(value_change) = self
-            .overlay
-            .as_ref()
-            .and_then(|overlay| overlay.value(&path))
-        {
+        if let Some(value_change) = self.overlay.value(&path) {
             return Ok(value_change.as_option().map(|v| v.to_vec()));
         }
         self.store.load_value(path)
@@ -662,14 +584,15 @@ impl Session {
     /// 1. This function does not perform deduplication. Calling it multiple times for the same key
     ///    will result in multiple load operations, which can be wasteful.
     /// 2. The definitive set of values to be updated is determined by the update (e.g.
-    ///    [`Nomt::update`]) call.
+    ///    [`Nomt::finish_session`]) call.
     ///
     ///    It's safe to call this function for keys that may not ultimately be written, and keys
     ///    not marked here but included in the final set will still be preserved.
     /// 3. While this function helps optimize I/O, it's not strictly necessary for correctness.
     ///    The commit process will ensure all required prior values are preserved.
-    /// 4. If the path is given to [`Nomt::update`] (and others) with the `ReadThenWrite` operation,
-    ///    calling this function is not needed as the prior value will be taken from there.
+    /// 4. If the path is given to [`Nomt::finish_session`] (and others) with the `ReadThenWrite`
+    ///    operation, calling this function is not needed as the prior value will be taken from
+    ///    there.
     ///
     /// For best performance, call this function once for each key you expect to write during the
     /// session, except for those that will be part of a `ReadThenWrite` operation. The earlier
@@ -681,12 +604,53 @@ impl Session {
     }
 }
 
-impl Drop for Session {
-    fn drop(&mut self) {
-        let prev = self
-            .session_cnt
-            .swap(0, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(prev, 1, "expected one active session at commit time");
+/// A finished session.
+///
+/// This is the result of completing a session and computing the merkle root and merkle DB changes,
+/// but which has not yet been applied to the underlying store.
+///
+/// It may either be committed directly to the database or transformed into an in-memory [`Overlay`]
+/// to be used as a base for further in-memory sessions.
+pub struct FinishedSession {
+    value_transaction: ValueTransaction,
+    merkle_output: merkle::Output,
+    rollback_delta: Option<rollback::Delta>,
+    parent_overlay: LiveOverlay,
+}
+
+impl FinishedSession {
+    /// Get the root as-of this session.
+    pub fn root(&self) -> [u8; 32] {
+        self.merkle_output.root
+    }
+
+    /// Take the witness, if any.
+    ///
+    /// If this session was configured with proving  (see [`SessionParams::witness_mode`]),
+    /// this will be `Some` on the first call and `None` thereafter.
+    pub fn take_witness(&mut self) -> Option<(Witness, WitnessedOperations)> {
+        self.merkle_output
+            .witness
+            .take()
+            .zip(self.merkle_output.witnessed_operations.take())
+    }
+
+    /// Transform this into an overlay that can be queried in memory and used as the base for
+    /// further in-memory [`Session`]s.
+    pub fn into_overlay(self) -> Overlay {
+        let updated_pages = self
+            .merkle_output
+            .updated_pages
+            .into_frozen_iter(/* into_overlay */ true)
+            .collect();
+        let values = self.value_transaction.into_iter().collect();
+
+        self.parent_overlay.finish(
+            self.merkle_output.root,
+            updated_pages,
+            values,
+            self.rollback_delta,
+        )
     }
 }
 

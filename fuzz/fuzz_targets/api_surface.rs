@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, Value};
+use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, SessionParams, Value, WitnessMode};
 
 fuzz_target!(|run: Run| {
     let db = open_db(run.commit_concurrency);
@@ -13,7 +13,9 @@ fuzz_target!(|run: Run| {
     for call in run.calls.calls {
         match call {
             NomtCall::BeginSession { session_calls } => {
-                let session = db.begin_session();
+                let session = db.begin_session(
+                    SessionParams::default().witness_mode(WitnessMode::read_write()),
+                );
                 for session_call in session_calls {
                     match session_call {
                         SessionCall::TentativeRead {
@@ -28,7 +30,8 @@ fuzz_target!(|run: Run| {
                             session.warm_up(key_path);
                         }
                         SessionCall::CommitAndProve { keys } => {
-                            let _ = db.update_commit_and_prove(session, keys);
+                            let finished = db.finish_session(session, keys);
+                            let _ = db.commit_finished(finished);
                             break;
                         }
                         SessionCall::Drop => {

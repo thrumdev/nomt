@@ -1,5 +1,8 @@
 use anyhow::Result;
-use nomt::{Blake3Hasher, KeyReadWrite, Node, Nomt, Options, Witness, WitnessedOperations};
+use nomt::{
+    Blake3Hasher, KeyReadWrite, Node, Nomt, Options, SessionParams, Witness, WitnessMode,
+    WitnessedOperations,
+};
 use sha2::Digest;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
@@ -23,7 +26,8 @@ impl NomtDB {
         //
         // Writes do not occur immediately, instead,
         // they are cached and applied all at once later on
-        let session = nomt.begin_session();
+        let session =
+            nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
 
         // Here we will move the data saved under b"key1" to b"key2" and deletes it
         //
@@ -55,7 +59,13 @@ impl NomtDB {
         // The final step in handling a session involves committing all changes
         // to update the trie structure and obtaining the new root of the trie,
         // along with a witness and the witnessed operations.
-        let (root, witness, witnessed) = nomt.update_commit_and_prove(session, actual_access)?;
+        let mut finished = nomt.finish_session(session, actual_access);
+
+        // These fields are set because the finished session was configured with
+        // `WitnessMode::read_write`.
+        let (witness, witnessed) = finished.take_witness().unwrap();
+        let root = finished.root();
+        nomt.commit_finished(finished)?;
 
         Ok((prev_root, root, witness, witnessed))
     }

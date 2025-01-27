@@ -1,6 +1,9 @@
 use crate::{backend::Transaction, timer::Timer, workload::Workload};
 use fxhash::FxHashMap;
-use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, Overlay, Session};
+use nomt::{
+    Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, Overlay, Session, SessionParams,
+    WitnessMode,
+};
 use sha2::Digest;
 use std::{
     collections::{hash_map::Entry, VecDeque},
@@ -81,13 +84,14 @@ impl NomtDB {
 
         self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
 
-        let session = if self.overlay_window_capacity == 0 {
-            self.nomt.begin_session()
+        let session_params = SessionParams::default().witness_mode(WitnessMode::read_write());
+
+        let session_params = if self.overlay_window_capacity == 0 {
+            session_params
         } else {
-            self.nomt
-                .begin_session_with_overlay(overlay_window.iter())
-                .unwrap()
+            session_params.overlay(overlay_window.iter()).unwrap()
         };
+        let session = self.nomt.begin_session(session_params);
 
         let mut transaction = Tx {
             session: &session,
@@ -105,16 +109,11 @@ impl NomtDB {
         let mut actual_access: Vec<_> = access.into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
 
+        let finished = self.nomt.finish_session(session, actual_access);
         if self.overlay_window_capacity == 0 {
-            self.nomt
-                .update_commit_and_prove(session, actual_access)
-                .unwrap();
+            self.nomt.commit_finished(finished).unwrap();
         } else {
-            let new_overlay = self
-                .nomt
-                .update_and_prove(session, actual_access)
-                .unwrap()
-                .0;
+            let new_overlay = finished.into_overlay();
             overlay_window.push_front(new_overlay);
         }
     }
@@ -137,13 +136,14 @@ impl NomtDB {
 
         self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
 
-        let session = if self.overlay_window_capacity == 0 {
-            self.nomt.begin_session()
+        let session_params = SessionParams::default().witness_mode(WitnessMode::read_write());
+
+        let session_params = if self.overlay_window_capacity == 0 {
+            session_params
         } else {
-            self.nomt
-                .begin_session_with_overlay(overlay_window.iter())
-                .unwrap()
+            session_params.overlay(overlay_window.iter()).unwrap()
         };
+        let session = self.nomt.begin_session(session_params);
         let mut results: Vec<Option<_>> = (0..workloads.len()).map(|_| None).collect();
 
         let use_timer = timer.is_some();
@@ -182,17 +182,12 @@ impl NomtDB {
             .flatten()
             .collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        if self.overlay_window_capacity == 0 {
-            self.nomt
-                .update_commit_and_prove(session, actual_access)
-                .unwrap();
-        } else {
-            let new_overlay = self
-                .nomt
-                .update_and_prove(session, actual_access)
-                .unwrap()
-                .0;
 
+        let finished = self.nomt.finish_session(session, actual_access);
+        if self.overlay_window_capacity == 0 {
+            self.nomt.commit_finished(finished).unwrap();
+        } else {
+            let new_overlay = finished.into_overlay();
             overlay_window.push_front(new_overlay);
         }
     }

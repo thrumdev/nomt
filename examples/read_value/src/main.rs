@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nomt::{Blake3Hasher, KeyReadWrite, Nomt, Options};
+use nomt::{Blake3Hasher, KeyReadWrite, Nomt, Options, SessionParams, WitnessMode};
 use sha2::Digest;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
@@ -15,7 +15,8 @@ fn main() -> Result<()> {
 
     // Instantiate a new Session object to handle read and write operations
     // and generate a Witness later on
-    let session = nomt.begin_session();
+    let session =
+        nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
 
     // Reading a key from the database
     let key_path = sha2::Sha256::digest(b"key").into();
@@ -25,8 +26,9 @@ fn main() -> Result<()> {
     // we will prove the read.
     session.warm_up(key_path);
 
-    let _witness =
-        nomt.update_commit_and_prove(session, vec![(key_path, KeyReadWrite::Read(value))])?;
+    let mut finished = nomt.finish_session(session, vec![(key_path, KeyReadWrite::Read(value))]);
+    let _witness = finished.take_witness();
+    nomt.commit_finished(finished)?;
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use nomt::{
-    KeyPath, KeyReadWrite, Node, Nomt, Options, Overlay, PanicOnSyncMode, Session, Witness,
-    WitnessedOperations,
+    KeyPath, KeyReadWrite, Node, Nomt, Options, Overlay, PanicOnSyncMode, Session, SessionParams,
+    Witness, WitnessMode, WitnessedOperations,
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -74,7 +74,8 @@ impl Test {
         o.hashtable_buckets(hashtable_buckets);
         o.commit_concurrency(commit_concurrency);
         let nomt = Nomt::open(o).unwrap();
-        let session = nomt.begin_session();
+        let session =
+            nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
         Self {
             nomt,
             session: Some(session),
@@ -119,23 +120,30 @@ impl Test {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        let x = self
-            .nomt
-            .update_commit_and_prove(session, actual_access)
-            .unwrap();
-        self.session = Some(self.nomt.begin_session());
-        x
+        let mut finished = self.nomt.finish_session(session, actual_access);
+        let root = finished.root();
+        let (witness, witnessed_ops) = finished.take_witness().unwrap();
+        self.nomt.commit_finished(finished).unwrap();
+        self.session = Some(
+            self.nomt
+                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
+        );
+        (root, witness, witnessed_ops)
     }
 
     pub fn update(&mut self) -> (Overlay, Witness, WitnessedOperations) {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        let x = self.nomt.update_and_prove(session, actual_access).unwrap();
+        let mut finished = self.nomt.finish_session(session, actual_access);
+        let (witness, witnessed_ops) = finished.take_witness().unwrap();
 
-        self.session = Some(self.nomt.begin_session());
+        self.session = Some(
+            self.nomt
+                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
+        );
 
-        x
+        (finished.into_overlay(), witness, witnessed_ops)
     }
 
     pub fn commit_overlay(&mut self, overlay: Overlay) {
@@ -143,14 +151,21 @@ impl Test {
         self.access.clear();
         self.session = None;
         self.nomt.commit_overlay(overlay).unwrap();
-        self.session = Some(self.nomt.begin_session());
+        self.session = Some(
+            self.nomt
+                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
+        );
     }
 
     pub fn start_overlay_session<'a>(&mut self, ancestors: impl IntoIterator<Item = &'a Overlay>) {
         // force drop of live session before creating a new one.
         self.access.clear();
         self.session = None;
-        self.session = Some(self.nomt.begin_session_with_overlay(ancestors).unwrap());
+        let params = SessionParams::default()
+            .witness_mode(WitnessMode::read_write())
+            .overlay(ancestors)
+            .unwrap();
+        self.session = Some(self.nomt.begin_session(params));
     }
 
     pub fn root(&self) -> Node {
