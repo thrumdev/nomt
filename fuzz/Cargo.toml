@@ -38,3 +38,9 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "prefix_len"
+path = "fuzz_targets/prefix_len.rs"
+test = false
+doc = false
+bench = false
