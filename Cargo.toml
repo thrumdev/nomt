@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "nomt", "fuzz", "torture", "examples/*"]
+members = ["core", "nomt", "fuzz", "torture", "examples/*", "trickfs"]
 exclude = ["benchtop"]
 
 [workspace.package]
