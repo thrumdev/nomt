@@ -33,7 +33,7 @@ use leaf_cache::LeafCache;
 pub mod benches;
 
 #[cfg(feature = "fuzz")]
-pub use ops::bit_ops::bitwise_memcpy;
+pub use ops::bit_ops::*;
 
 pub type Key = [u8; 32];
 

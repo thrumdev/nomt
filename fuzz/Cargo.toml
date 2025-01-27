@@ -30,3 +30,11 @@ path = "fuzz_targets/bitwise_memcpy.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "separate"
+path = "fuzz_targets/separate.rs"
+test = false
+doc = false
+bench = false
+
