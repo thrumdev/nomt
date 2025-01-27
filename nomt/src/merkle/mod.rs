@@ -21,7 +21,7 @@ use crate::{
     overlay::LiveOverlay,
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
-    store::{BucketInfo, DirtyPage, Store},
+    store::{BucketIndex, DirtyPage, SharedMaybeBucketIndex, Store},
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
@@ -40,17 +40,39 @@ impl UpdatedPages {
     /// Freeze, label, and iterate all the pages.
     ///
     /// Pages are 'labeled' by placing the page ID into the page data itself prior to freezing.
-    pub fn into_frozen_iter(self) -> impl Iterator<Item = (PageId, DirtyPage)> {
-        self.0.into_iter().flatten().map(|updated_page| {
+    pub fn into_frozen_iter(
+        self,
+        alloc_dependent: bool,
+    ) -> impl Iterator<Item = (PageId, DirtyPage)> {
+        self.0.into_iter().flatten().map(move |updated_page| {
             let page = updated_page.page.freeze();
             let dirty = DirtyPage {
                 page,
                 diff: updated_page.diff,
-                bucket: updated_page.bucket_info,
+                bucket: match updated_page.bucket_info {
+                    BucketInfo::Known(b) => crate::store::BucketInfo::Known(b),
+                    BucketInfo::Dependent(b) => crate::store::BucketInfo::FreshOrDependent(b),
+                    BucketInfo::Fresh => {
+                        if alloc_dependent {
+                            crate::store::BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(
+                                None,
+                            ))
+                        } else {
+                            crate::store::BucketInfo::FreshWithNoDependents
+                        }
+                    }
+                },
             };
             (updated_page.page_id, dirty)
         })
     }
+}
+
+#[derive(Clone)]
+pub enum BucketInfo {
+    Known(BucketIndex),
+    Dependent(SharedMaybeBucketIndex),
+    Fresh,
 }
 
 /// Whether a key was read or written.
@@ -177,20 +199,16 @@ impl Updater {
     /// Key-paths should be in sorted order
     /// and should appear at most once within the vector. Witness specifies whether or not
     /// to collect the witness of the operation.
-    /// `into_overlay` specifies whether the results of this will be committed into an overlay,
-    /// disabling certain optimizations.
     pub fn update_and_prove<H: HashAlgorithm>(
         self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
-        into_overlay: bool,
     ) -> UpdateHandle {
         if let Some(ref warm_up) = self.warm_up {
             let _ = warm_up.finish_tx.send(());
         }
         let shared = Arc::new(UpdateShared {
             witness,
-            into_overlay,
             overlay: self.overlay.clone(),
             read_write,
             root_page_pending: Mutex::new(Vec::with_capacity(64)),
@@ -399,7 +417,6 @@ struct UpdateShared {
     root_page_pending: Mutex<Vec<(TriePosition, RootPagePending)>>,
     overlay: LiveOverlay,
     witness: bool,
-    into_overlay: bool,
 }
 
 impl UpdateShared {
@@ -485,16 +502,16 @@ fn get_in_memory_page(
         .page(page_id)
         .map(|page| {
             let bucket_info = match page.bucket {
-                BucketInfo::Known(ref b) => BucketInfo::Known(*b),
-                BucketInfo::FreshOrDependent(ref maybe) => {
+                crate::store::BucketInfo::Known(ref b) => BucketInfo::Known(*b),
+                crate::store::BucketInfo::FreshOrDependent(ref maybe) => {
                     if let Some(bucket) = maybe.get() {
                         BucketInfo::Known(bucket)
                     } else {
-                        BucketInfo::FreshOrDependent(maybe.clone())
+                        BucketInfo::Dependent(maybe.clone())
                     }
                 }
                 // PANIC: overlays are never created with `FreshWithNoDependents`.
-                BucketInfo::FreshWithNoDependents => panic!(),
+                crate::store::BucketInfo::FreshWithNoDependents => panic!(),
             };
 
             (page.page.clone(), bucket_info)
