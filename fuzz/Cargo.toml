@@ -51,3 +51,10 @@ path = "fuzz_targets/separator_len.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "reconstruct_key"
+path = "fuzz_targets/reconstruct_key.rs"
+test = false
+doc = false
+bench = false
