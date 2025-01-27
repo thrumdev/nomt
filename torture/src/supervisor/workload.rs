@@ -30,18 +30,29 @@ struct Biases {
     new_key: f64,
     /// When exercising a new commit, the probability of causing it to crash.
     crash: f64,
-    /// Instead of exercising a new commit, this is a probability of executing a rollback.
+    /// Instead of exercising a new commit, this is the probability of executing a rollback.
     rollback: f64,
+    /// Instead of exercising a new commit, this is the probability of executing a rollback
+    /// and causing it to crash.
+    rollback_crash: f64,
 }
 
 impl Biases {
-    fn new(delete: u8, overflow: u8, new_key: u8, crash: u8, rollback: u8) -> Self {
+    fn new(
+        delete: u8,
+        overflow: u8,
+        new_key: u8,
+        crash: u8,
+        rollback: u8,
+        rollback_crash: u8,
+    ) -> Self {
         Self {
             delete: (delete as f64) / 100.0,
             overflow: (overflow as f64) / 100.0,
             new_key: (new_key as f64) / 100.0,
             crash: (crash as f64) / 100.0,
             rollback: (rollback as f64) / 100.0,
+            rollback_crash: (rollback_crash as f64) / 100.0,
         }
     }
 }
@@ -173,6 +184,13 @@ impl WorkloadState {
         value
     }
 
+    fn rollback(&mut self, n_commits: usize) {
+        let last_sync_seqn = self.last_snapshot().sync_seqn;
+        self.committed.truncate(self.committed.len() - n_commits);
+        // The application of a rollback counts as increased sync_seq.
+        self.committed.last_mut().unwrap().sync_seqn = last_sync_seqn + 1;
+    }
+
     fn commit(&mut self, snapshot: Snapshot) {
         self.committed.push(snapshot);
     }
@@ -213,8 +231,8 @@ pub struct Workload {
     ensure_snapshot: bool,
     /// Whether to randomly sample the state after every crash or rollback.
     sample_snapshot: bool,
-    /// The max number of blocks involved in a rollback.
-    max_rollback_blocks: usize,
+    /// The max number of commits involved in a rollback.
+    max_rollback_commits: usize,
 }
 
 impl Workload {
@@ -237,6 +255,7 @@ impl Workload {
             workload_params.new_key,
             workload_params.crash,
             workload_params.rollback,
+            workload_params.rollback_crash,
         );
         let mut state = WorkloadState::new(
             seed,
@@ -257,7 +276,7 @@ impl Workload {
             ensure_changeset: workload_params.ensure_changeset,
             ensure_snapshot: workload_params.ensure_snapshot,
             sample_snapshot: workload_params.sample_snapshot,
-            max_rollback_blocks: workload_params.max_rollback_blocks,
+            max_rollback_commits: workload_params.max_rollback_commits,
         }
     }
 
@@ -290,6 +309,11 @@ impl Workload {
         let agent = self.agent.as_ref().unwrap();
         let rr = agent.rr().clone();
         trace!("run_iteration");
+
+        if self.state.rng.gen_bool(self.state.biases.rollback_crash) {
+            self.exercise_rollback_crashing(&rr).await?;
+            return Ok(());
+        }
 
         if self.state.rng.gen_bool(self.state.biases.rollback) {
             self.exercise_rollback(&rr).await?;
@@ -335,6 +359,153 @@ impl Workload {
         Ok(())
     }
 
+    /// Commit a changeset and induce a crash.
+    async fn exercise_commit_crashing(
+        &mut self,
+        rr: &comms::RequestResponse,
+    ) -> anyhow::Result<()> {
+        // Generate a changeset and the associated snapshot. Ask the agent to commit the changeset.
+        let (snapshot, changeset) = self.state.gen_commit();
+
+        // The agent should crash after `crash_delay`ns.
+        // If no data avaible crash after 300ms.
+        let mut crash_delay = self
+            .tot_commit_time
+            .checked_div(self.n_successfull_commit)
+            .unwrap_or(Duration::from_millis(300).as_nanos() as u64);
+        // Crash a little bit earlier than the average commit time to increase the
+        // possibilities of crashing during sync.
+        crash_delay = (crash_delay as f64 * 0.98) as u64;
+
+        trace!("exercising commit crash");
+        rr.send_request(crate::message::ToAgent::Commit(
+            crate::message::CommitPayload {
+                changeset: changeset.clone(),
+                should_crash: Some(crash_delay),
+            },
+        ))
+        .await?;
+
+        self.wait_for_crash().await?;
+
+        // Spawns a new agent and checks whether the commit was applied to the database and if so
+        // we commit the snapshot to the state.
+        self.spawn_new_agent().await?;
+        let rr = self.agent.as_ref().unwrap().rr().clone();
+        let seqno = rr.send_query_sync_seqn().await?;
+        if seqno == snapshot.sync_seqn {
+            self.ensure_changeset_applied(&rr, &changeset).await?;
+            self.state.commit(snapshot);
+        } else {
+            info!(
+                "commit. seqno ours: {}, theirs: {}",
+                snapshot.sync_seqn, seqno
+            );
+            self.ensure_changeset_reverted(&rr, &changeset).await?;
+        }
+
+        self.ensure_snapshot_validity(&rr).await?;
+        Ok(())
+    }
+
+    fn commits_to_rollback(&mut self) -> usize {
+        // TODO: n_commits should also depend on the max rollback supported by NOMT.
+        let n_snapshots = self.state.committed.len();
+        std::cmp::min(
+            self.state.rng.gen_range(1..self.max_rollback_commits) as usize,
+            n_snapshots - 1,
+        )
+    }
+
+    async fn exercise_rollback(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
+        let n_commits_to_rollback = self.commits_to_rollback();
+        if n_commits_to_rollback == 0 {
+            trace!("No available commits to perform rollback with");
+            return Ok(());
+        }
+
+        trace!("exercising rollback of {} commits", n_commits_to_rollback);
+        rr.send_request(crate::message::ToAgent::Rollback(
+            crate::message::RollbackPayload {
+                n_commits: n_commits_to_rollback,
+                should_crash: None,
+            },
+        ))
+        .await?;
+
+        let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+        if agent_sync_seqn != self.state.last_snapshot().sync_seqn + 1 {
+            return Err(anyhow::anyhow!("Unexpected sync_seqn after rollback"));
+        }
+
+        self.state.rollback(n_commits_to_rollback);
+        self.ensure_snapshot_validity(rr).await?;
+        Ok(())
+    }
+
+    async fn exercise_rollback_crashing(
+        &mut self,
+        rr: &comms::RequestResponse,
+    ) -> anyhow::Result<()> {
+        let n_commits_to_rollback = self.commits_to_rollback();
+        if n_commits_to_rollback == 0 {
+            trace!("No available commits to perform rollback with");
+            return Ok(());
+        }
+
+        let crash_delay = Duration::from_millis(50).as_nanos() as u64;
+
+        trace!(
+            "exercising rollback of {} commits crash",
+            n_commits_to_rollback
+        );
+        rr.send_request(crate::message::ToAgent::Rollback(
+            crate::message::RollbackPayload {
+                n_commits: n_commits_to_rollback,
+                should_crash: Some(crash_delay),
+            },
+        ))
+        .await?;
+
+        self.wait_for_crash().await?;
+
+        // Spawns a new agent and checks whether the rollback was applied to the database and if so
+        // we rollback to the correct snapshot in the state.
+        self.spawn_new_agent().await?;
+        let rr = self.agent.as_ref().unwrap().rr().clone();
+        let sync_seqn = rr.send_query_sync_seqn().await?;
+        let last_sync_seqn = self.state.last_snapshot().sync_seqn;
+        if sync_seqn == last_sync_seqn + 1 {
+            // sync_seqn has increased, so the rollback is expected to be applied correctly
+            self.state.rollback(n_commits_to_rollback);
+        } else if sync_seqn == last_sync_seqn {
+            // The rollback successfully crashed.
+            info!("rollback crashed, seqno: {}", last_sync_seqn);
+        } else {
+            return Err(anyhow::anyhow!("Unexpected sync_seqn after rollback crash"));
+        }
+
+        self.ensure_snapshot_validity(&rr).await?;
+        Ok(())
+    }
+
+    async fn wait_for_crash(&mut self) -> anyhow::Result<()> {
+        // Wait until the agent dies. We give it a grace period of 5 seconds.
+        //
+        // Note that we don't "take" the agent from the `workload_agent` place. This is because there is
+        // always a looming possibility of SIGINT arriving.
+        const TOLERANCE: Duration = Duration::from_secs(5);
+        let agent = self.agent.as_mut().unwrap();
+        let agent_died_or_timeout = timeout(TOLERANCE, agent.died()).await;
+        self.agent.take().unwrap().teardown().await;
+        if let Err(Elapsed { .. }) = agent_died_or_timeout {
+            // TODO: flag for investigation.
+            return Err(anyhow::anyhow!("agent did not die"));
+        }
+
+        Ok(())
+    }
+
     async fn ensure_changeset_applied(
         &self,
         rr: &comms::RequestResponse,
@@ -357,66 +528,6 @@ impl Workload {
                 _ => (),
             }
         }
-        Ok(())
-    }
-
-    /// Commit a changeset and induce a crash.
-    async fn exercise_commit_crashing(
-        &mut self,
-        rr: &comms::RequestResponse,
-    ) -> anyhow::Result<()> {
-        // Generate a changeset and the associated snapshot. Ask the agent to commit the changeset.
-        let (snapshot, changeset) = self.state.gen_commit();
-
-        // The agent should crash after `crash_time`ns.
-        // If no data avaible crash after 300ms.
-        let mut crash_time = self
-            .tot_commit_time
-            .checked_div(self.n_successfull_commit)
-            .unwrap_or(Duration::from_millis(300).as_nanos() as u64);
-        // Crash a little bit earlier than the average commit time to increase the
-        // possibilities of crashing during sync.
-        crash_time = (crash_time as f64 * 0.98) as u64;
-
-        trace!("exercising crash");
-        rr.send_request(crate::message::ToAgent::Commit(
-            crate::message::CommitPayload {
-                changeset: changeset.clone(),
-                should_crash: Some(crash_time),
-            },
-        ))
-        .await?;
-
-        // Wait until the agent dies. We give it a grace period of 5 seconds.
-        //
-        // Note that we don't "take" the agent from the `workload_agent` place. This is because there is
-        // always a looming possibility of SIGINT arriving.
-        const TOLERANCE: Duration = Duration::from_secs(5);
-        let agent = self.agent.as_mut().unwrap();
-        let agent_died_or_timeout = timeout(TOLERANCE, agent.died()).await;
-        self.agent.take().unwrap().teardown().await;
-        if let Err(Elapsed { .. }) = agent_died_or_timeout {
-            // TODO: flag for investigation.
-            return Err(anyhow::anyhow!("agent did not die"));
-        }
-
-        // Spawns a new agent and checks whether the commit was applied to the database and if so
-        // we commit the snapshot to the state.
-        self.spawn_new_agent().await?;
-        let rr = self.agent.as_ref().unwrap().rr().clone();
-        let seqno = rr.send_query_sync_seqn().await?;
-        if seqno == snapshot.sync_seqn {
-            self.ensure_changeset_applied(&rr, &changeset).await?;
-            self.state.commit(snapshot);
-        } else {
-            info!(
-                "commit. seqno ours: {}, theirs: {}",
-                snapshot.sync_seqn, seqno
-            );
-            self.ensure_changeset_reverted(&rr, &changeset).await?;
-        }
-
-        self.ensure_snapshot_validity(&rr).await?;
         Ok(())
     }
 
@@ -528,34 +639,6 @@ impl Workload {
                 ));
             }
         }
-        Ok(())
-    }
-
-    async fn exercise_rollback(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
-        // TODO: n_blocks should also depend on the max rollback supported by NOMT.
-        let n_snapshots = self.state.committed.len();
-        let n_blocks_to_rollback = std::cmp::min(
-            self.state.rng.gen_range(1..self.max_rollback_blocks) as usize,
-            n_snapshots - 1,
-        );
-
-        let last_sync_seqn = self.state.last_snapshot().sync_seqn;
-        self.state
-            .committed
-            .truncate(n_snapshots - n_blocks_to_rollback);
-        // The application of a rollback counts as increased sync_seq.
-        self.state.committed.last_mut().unwrap().sync_seqn = last_sync_seqn + 1;
-
-        if n_blocks_to_rollback == 0 {
-            trace!("No available blocks to perform rollback with");
-            return Ok(());
-        }
-
-        trace!("exercising rollback of {} blocks", n_blocks_to_rollback);
-        rr.send_request(crate::message::ToAgent::Rollback(n_blocks_to_rollback))
-            .await?;
-
-        self.ensure_snapshot_validity(rr).await?;
         Ok(())
     }
 

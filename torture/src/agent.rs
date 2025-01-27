@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt};
+use std::future::Future;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{BufReader, BufWriter},
@@ -16,8 +17,8 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
 
 use crate::message::{
-    self, CommitPayload, Envelope, InitPayload, KeyValueChange, ToAgent, ToSupervisor,
-    MAX_ENVELOPE_SIZE,
+    self, CommitPayload, Envelope, InitPayload, KeyValueChange, RollbackPayload, ToAgent,
+    ToSupervisor, MAX_ENVELOPE_SIZE,
 };
 
 /// The entrypoint for the agent.
@@ -51,18 +52,8 @@ pub async fn run(input: UnixStream) -> Result<()> {
         match message {
             ToAgent::Commit(CommitPayload {
                 changeset,
-                should_crash: Some(crash_time),
+                should_crash: Some(crash_delay),
             }) => {
-                // TODO: implement this in the future.
-                //
-                // This seems to be a big feature. As of now, I envision it, as we either:
-                //
-                // 1. Launch a concurrent process that brings down the process (e.g. via `abort`) at
-                //    some non-deterministic time in the future.
-                // 2. Adjust the VFS settings so that it will crash at a specific moment. This might
-                //    be some specific moment like writing to Meta or maybe writing to some part of HT.
-                // 3. Introduce fail point to do the same.
-
                 // Ack first.
                 stream
                     .send(Envelope {
@@ -71,28 +62,14 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     })
                     .await?;
 
-                let barrier_1 = Arc::new(tokio::sync::Barrier::new(2));
-                let barrier_2 = barrier_1.clone();
-                let task_1 = tokio::spawn(async move {
-                    barrier_1.wait().await;
-                    // Wait for a random time and then abort.
-                    // TODO: reduce non-determinism by using the supervisor generated seed.
-                    let crash_time = Duration::from_nanos(crash_time);
-                    sleep(crash_time).await;
-                    tracing::info!("aborting after {}ms", crash_time.as_millis());
-                    std::process::abort();
-                });
-                let task_2 = tokio::spawn(async move {
-                    barrier_2.wait().await;
+                let task = async move {
                     let start = std::time::Instant::now();
                     let _ = agent.commit(changeset).await;
                     let elapsed = start.elapsed();
                     tracing::info!("commit took {}ms", elapsed.as_millis());
-                    std::process::abort();
-                });
-                let _ = tokio::join!(task_1, task_2);
-                // This is unreachable because either the process will abort due to a timed
-                // abort or due to the commit finishing successfully (and then aborting).
+                };
+
+                crash_task(task, crash_delay).await;
                 unreachable!();
             }
             ToAgent::Commit(CommitPayload {
@@ -110,9 +87,33 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     })
                     .await?;
             }
-            ToAgent::Rollback(n_blocks) => {
+            ToAgent::Rollback(RollbackPayload {
+                n_commits,
+                should_crash: Some(crash_delay),
+            }) => {
+                // Ack first.
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Ack,
+                    })
+                    .await?;
+
+                let task = async move {
+                    let start = std::time::Instant::now();
+                    let _ = agent.rollback(n_commits).await;
+                    tracing::info!("rollback took {:?}", start.elapsed());
+                };
+
+                crash_task(task, crash_delay).await;
+                unreachable!();
+            }
+            ToAgent::Rollback(RollbackPayload {
+                n_commits,
+                should_crash: None,
+            }) => {
                 let start = std::time::Instant::now();
-                agent.rollback(n_blocks)?;
+                agent.rollback(n_commits).await?;
                 tracing::info!("rollback took {}ms", start.elapsed().as_millis());
                 stream
                     .send(Envelope {
@@ -153,6 +154,39 @@ pub async fn run(input: UnixStream) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Execute the provided `task` and make it crash after the specified `crash_delay`.
+/// The delay must be specified in nanoseconds.
+async fn crash_task(task: impl Future<Output = ()> + Send + 'static, crash_delay: u64) {
+    // TODO: implement this in the future.
+    //
+    // This seems to be a big feature. As of now, I envision it, as we either:
+    //
+    // 1. Launch a concurrent process that brings down the process (e.g. via `abort`) at
+    //    some non-deterministic time in the future.
+    // 2. Adjust the VFS settings so that it will crash at a specific moment. This might
+    //    be some specific moment like writing to Meta or maybe writing to some part of HT.
+    // 3. Introduce fail point to do the same.
+
+    let barrier_1 = Arc::new(tokio::sync::Barrier::new(2));
+    let barrier_2 = barrier_1.clone();
+    let task_1 = tokio::spawn(async move {
+        barrier_1.wait().await;
+        let crash_delay = Duration::from_nanos(crash_delay);
+        sleep(crash_delay).await;
+        tracing::info!("aborting after {}ms", crash_delay.as_millis());
+        std::process::abort();
+    });
+    let task_2 = tokio::spawn(async move {
+        barrier_2.wait().await;
+        task.await;
+        std::process::abort();
+    });
+    let _ = tokio::join!(task_1, task_2);
+    // This is unreachable because either the process will abort due to a timed
+    // abort or due to the commit finishing successfully (and then aborting).
+    unreachable!();
 }
 
 /// Receives the [`ToAgent::Init`] message from the supervisor and returns the initialized agent. Sends
@@ -229,8 +263,8 @@ impl Agent {
         Ok(())
     }
 
-    fn rollback(&mut self, n_blocks: usize) -> Result<()> {
-        self.nomt.rollback(n_blocks)?;
+    async fn rollback(&mut self, n_commits: usize) -> Result<()> {
+        tokio::task::block_in_place(|| self.nomt.rollback(n_commits))?;
         Ok(())
     }
 
