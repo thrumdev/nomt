@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
-use nomt::{Blake3Hasher, Nomt};
+use nomt::{Blake3Hasher, Nomt, SessionParams};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{BufReader, BufWriter},
@@ -211,7 +211,7 @@ impl Agent {
     }
 
     async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Result<()> {
-        let session = self.nomt.begin_session();
+        let session = self.nomt.begin_session(SessionParams::default());
         let mut actuals = Vec::with_capacity(changeset.len());
         for change in changeset {
             match change {
@@ -224,7 +224,10 @@ impl Agent {
             }
         }
 
-        tokio::task::block_in_place(|| self.nomt.update_and_commit(session, actuals))?;
+        tokio::task::block_in_place(|| {
+            let finished = self.nomt.finish_session(session, actuals);
+            self.nomt.commit_finished(finished)
+        })?;
 
         Ok(())
     }
