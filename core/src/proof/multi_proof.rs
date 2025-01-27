@@ -249,6 +249,8 @@ impl MultiProof {
 pub enum MultiProofVerificationError {
     /// Root hash mismatched at the end of the verification.
     RootMismatch,
+    /// Multi-proof paths were provided out of order.
+    PathsOutOfOrder,
     /// Extra siblings were provided.
     TooManySiblings,
 }
@@ -381,6 +383,20 @@ pub fn verify<H: NodeHasher>(
     multi_proof: &MultiProof,
     root: Node,
 ) -> Result<VerifiedMultiProof, MultiProofVerificationError> {
+    let mut new_paths = Vec::with_capacity(multi_proof.paths.len());
+    for i in 0..multi_proof.paths.len() {
+        let path = &multi_proof.paths[i];
+        new_paths.push(VerifiedMultiPath {
+            terminal: path.terminal.clone(),
+            depth: path.depth,
+        });
+        if i > 0 {
+            if path.terminal.path() <= multi_proof.paths[i - 1].terminal.path() {
+                return Err(MultiProofVerificationError::PathsOutOfOrder);
+            }
+        }
+    }
+
     let (new_root, siblings_used) =
         verify_range::<H>(0, &multi_proof.paths, &multi_proof.siblings)?;
 
@@ -392,15 +408,7 @@ pub fn verify<H: NodeHasher>(
         return Err(MultiProofVerificationError::TooManySiblings);
     }
 
-    let paths = multi_proof
-        .paths
-        .iter()
-        .map(|path| VerifiedMultiPath {
-            terminal: path.terminal.clone(),
-            depth: path.depth,
-        })
-        .collect::<Vec<_>>();
-    Ok(VerifiedMultiProof { inner: paths })
+    Ok(VerifiedMultiProof { inner: new_paths })
 }
 
 // returns the the node made by verifying this range along with the number of siblings used.
