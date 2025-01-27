@@ -197,11 +197,16 @@ impl VerifiedPathProof {
     }
 }
 
+/// Errors that can occur when verifying an update proof.
 #[derive(Debug, Clone, Copy)]
 pub enum VerifyUpdateError {
+    /// The paths through the trie were provided out-of-order.
     PathsOutOfOrder,
+    /// The operations on the trie were provided out-of-order.
     OpsOutOfOrder,
+    /// An operation was out of scope for the path it was provided with.
     OpOutOfScope,
+    /// A path was provided without any operations.
     PathWithoutOps,
     /// Paths were verified against different state-roots.
     RootMismatch,
