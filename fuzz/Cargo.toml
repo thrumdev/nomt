@@ -44,3 +44,10 @@ path = "fuzz_targets/prefix_len.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "separator_len"
+path = "fuzz_targets/separator_len.rs"
+test = false
+doc = false
+bench = false
