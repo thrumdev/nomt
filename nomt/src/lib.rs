@@ -30,11 +30,11 @@ pub use options::{Options, PanicOnSyncMode};
 pub use overlay::{InvalidAncestors, Overlay};
 pub use store::HashTableUtilization;
 
-// beatree module needs to be exposed to be benchmarked
-#[cfg(feature = "benchmarks")]
+// beatree module needs to be exposed to be benchmarked and fuzzed
+#[cfg(any(feature = "benchmarks", feature = "fuzz"))]
 #[allow(missing_docs)]
 pub mod beatree;
-#[cfg(not(feature = "benchmarks"))]
+#[cfg(not(any(feature = "benchmarks", feature = "fuzz")))]
 mod beatree;
 
 mod bitbox;

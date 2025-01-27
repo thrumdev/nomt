@@ -32,6 +32,9 @@ use leaf_cache::LeafCache;
 #[cfg(feature = "benchmarks")]
 pub mod benches;
 
+#[cfg(feature = "fuzz")]
+pub use ops::bit_ops::bitwise_memcpy;
+
 pub type Key = [u8; 32];
 
 #[derive(Clone)]

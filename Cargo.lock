@@ -1050,6 +1050,7 @@ name = "nomt-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "bitvec",
  "libfuzzer-sys",
  "nomt",
  "tempfile",

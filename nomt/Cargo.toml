@@ -56,4 +56,5 @@ harness = false
 
 [features]
 benchmarks = ["dep:criterion"]
+fuzz = []
 borsh = ["dep:borsh", "nomt-core/borsh"]
