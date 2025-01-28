@@ -46,7 +46,7 @@ fn overlay_root_calculation() {
     let overlay_a = test.update().0;
 
     assert_eq!(
-        overlay_a.root(),
+        overlay_a.root().into_inner(),
         expected_root(vec![([1; 32], vec![1, 2, 3])]),
     );
 
@@ -55,7 +55,7 @@ fn overlay_root_calculation() {
     let overlay_b = test.update().0;
 
     assert_eq!(
-        overlay_b.root(),
+        overlay_b.root().into_inner(),
         expected_root(vec![([1; 32], vec![1, 2, 3]), ([2; 32], vec![4, 5, 6])]),
     );
 
@@ -65,7 +65,7 @@ fn overlay_root_calculation() {
     let overlay_c = test.update().0;
 
     assert_eq!(
-        overlay_c.root(),
+        overlay_c.root().into_inner(),
         expected_root(vec![
             ([1; 32], vec![7, 8, 9]),
             ([2; 32], vec![4, 5, 6]),

@@ -47,7 +47,7 @@ fn produced_witness_validity() {
     for (i, witnessed_path) in witness.path_proofs.iter().enumerate() {
         let verified = witnessed_path
             .inner
-            .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root)
+            .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root.into_inner())
             .unwrap();
         for read in witnessed
             .reads
@@ -86,7 +86,7 @@ fn produced_witness_validity() {
     }
 
     assert_eq!(
-        proof::verify_update::<Blake3Hasher>(prev_root, &updates).unwrap(),
-        new_root,
+        proof::verify_update::<Blake3Hasher>(prev_root.into_inner(), &updates).unwrap(),
+        new_root.into_inner(),
     );
 }

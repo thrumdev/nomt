@@ -17,7 +17,7 @@
 //! Creating a new overlay is an O(n) operation in the amount of changes relative to the parent,
 //! both in terms of new changes and outdated ancestors.
 
-use crate::{beatree::ValueChange, store::DirtyPage};
+use crate::{beatree::ValueChange, store::DirtyPage, Root};
 use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node},
@@ -36,8 +36,8 @@ pub struct Overlay {
 
 impl Overlay {
     /// Get the merkle root at this overlay.
-    pub fn root(&self) -> Node {
-        self.inner.root
+    pub fn root(&self) -> Root {
+        Root(self.inner.root)
     }
 
     /// Check whether the parent of this overlay matches the provided marker.

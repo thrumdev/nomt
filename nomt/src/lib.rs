@@ -11,7 +11,7 @@ use merkle::{UpdatePool, Updater};
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
-    trie::{InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
+    trie::{self, InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
 };
 use overlay::{LiveOverlay, OverlayMarker};
@@ -57,7 +57,7 @@ pub type Value = Vec<u8>;
 
 struct Shared {
     /// The current root of the trie.
-    root: Node,
+    root: Root,
     /// The marker of the last committed overlay. `None` if the last commit was not an overlay.
     last_commit_marker: Option<OverlayMarker>,
 }
@@ -197,6 +197,48 @@ impl KeyReadWrite {
     }
 }
 
+/// The root of the Merkle Trie.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Root([u8; 32]);
+
+impl Root {
+    /// Whether the root represents an empty trie.
+    pub fn is_empty(&self) -> bool {
+        self.0 == trie::TERMINATOR
+    }
+
+    /// Get the underlying bytes of the root.
+    pub fn into_inner(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Root {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for byte in &self.0[0..4] {
+            write!(f, "{:02x}", byte)?;
+        }
+
+        write!(f, "...")?;
+
+        for byte in &self.0[28..32] {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for Root {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Root(")?;
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        write!(f, ")")?;
+        Ok(())
+    }
+}
+
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt<T: HashAlgorithm> {
     merkle_update_pool: UpdatePool,
@@ -233,7 +275,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             page_pool,
             store,
             shared: Arc::new(Mutex::new(Shared {
-                root,
+                root: Root(root),
                 last_commit_marker: None,
             })),
             metrics,
@@ -242,13 +284,13 @@ impl<T: HashAlgorithm> Nomt<T> {
     }
 
     /// Returns a recent root of the trie.
-    pub fn root(&self) -> Node {
+    pub fn root(&self) -> Root {
         self.shared.lock().root.clone()
     }
 
-    /// Returns true if the trie has not been modified after the creation.
+    /// Returns true if the trie has no items in it.
     pub fn is_empty(&self) -> bool {
-        self.root() == TERMINATOR
+        self.root().is_empty()
     }
 
     /// Returns the value stored under the given key.
@@ -295,7 +337,9 @@ impl<T: HashAlgorithm> Nomt<T> {
                 self.page_pool.clone(),
                 self.store.clone(),
                 live_overlay.clone(),
-                live_overlay.parent_root().unwrap_or_else(|| self.root()),
+                live_overlay
+                    .parent_root()
+                    .unwrap_or_else(|| self.root().into_inner()),
             ),
             metrics: self.metrics.clone(),
             rollback_delta,
@@ -359,7 +403,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         {
             let mut shared = self.shared.lock();
-            shared.root = session.merkle_output.root;
+            shared.root = Root(session.merkle_output.root);
             shared.last_commit_marker = None;
         }
 
@@ -620,8 +664,8 @@ pub struct FinishedSession {
 
 impl FinishedSession {
     /// Get the root as-of this session.
-    pub fn root(&self) -> [u8; 32] {
-        self.merkle_output.root
+    pub fn root(&self) -> Root {
+        Root(self.merkle_output.root)
     }
 
     /// Take the witness, if any.

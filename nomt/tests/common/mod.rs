@@ -1,6 +1,6 @@
 use nomt::{
-    KeyPath, KeyReadWrite, Node, Nomt, Options, Overlay, PanicOnSyncMode, Session, SessionParams,
-    Witness, WitnessMode, WitnessedOperations,
+    KeyPath, KeyReadWrite, Node, Nomt, Options, Overlay, PanicOnSyncMode, Root, Session,
+    SessionParams, Witness, WitnessMode, WitnessedOperations,
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -116,7 +116,7 @@ impl Test {
         }
     }
 
-    pub fn commit(&mut self) -> (Node, Witness, WitnessedOperations) {
+    pub fn commit(&mut self) -> (Root, Witness, WitnessedOperations) {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
@@ -168,7 +168,7 @@ impl Test {
         self.session = Some(self.nomt.begin_session(params));
     }
 
-    pub fn root(&self) -> Node {
+    pub fn root(&self) -> Root {
         self.nomt.root()
     }
 }
