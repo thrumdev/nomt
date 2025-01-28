@@ -30,8 +30,7 @@ fuzz_target!(|run: Run| {
                             session.warm_up(key_path);
                         }
                         SessionCall::CommitAndProve { keys } => {
-                            let finished = db.finish_session(session, keys);
-                            let _ = db.commit_finished(finished);
+                            let _ = session.finish(keys).commit(&db);
                             break;
                         }
                         SessionCall::Drop => {
