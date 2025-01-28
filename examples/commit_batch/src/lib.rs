@@ -1,6 +1,6 @@
 use anyhow::Result;
 use nomt::{
-    Blake3Hasher, KeyReadWrite, Node, Nomt, Options, SessionParams, Witness, WitnessMode,
+    Blake3Hasher, KeyReadWrite, Nomt, Options, Root, SessionParams, Witness, WitnessMode,
     WitnessedOperations,
 };
 use sha2::Digest;
@@ -10,7 +10,7 @@ const NOMT_DB_FOLDER: &str = "nomt_db";
 pub struct NomtDB;
 
 impl NomtDB {
-    pub fn commit_batch() -> Result<(Node, Node, Witness, WitnessedOperations)> {
+    pub fn commit_batch() -> Result<(Root, Root, Witness, WitnessedOperations)> {
         // Define the options used to open NOMT
         let mut opts = Options::new();
         opts.path(NOMT_DB_FOLDER);

@@ -74,14 +74,14 @@ fn test_rollback_to_initial() {
     nomt.commit_finished(finished).unwrap();
 
     assert_eq!(
-        nomt.root(),
+        nomt.root().into_inner(),
         hex!("c6e25744545ddabdaf0a95201f8285e670ee9b3e0c1ced4a3006baafd1ac2fdf")
     );
 
     let result = nomt.rollback(1);
     assert!(result.is_ok());
     assert_eq!(
-        nomt.root(),
+        nomt.root().into_inner(),
         hex!("0000000000000000000000000000000000000000000000000000000000000000")
     );
 }
@@ -193,7 +193,7 @@ impl TestPlan {
             let finished = nomt.finish_session(session, operations);
             nomt.commit_finished(finished).unwrap();
             let post_root = nomt.root();
-            expected_roots.push(post_root);
+            expected_roots.push(post_root.into_inner());
         }
 
         Self {
@@ -261,11 +261,11 @@ impl TestPlan {
             }
         }
 
-        if nomt.root() != self.expected_roots[commit_ix] {
+        if nomt.root().into_inner() != self.expected_roots[commit_ix] {
             errors.push(format!(
-                "wrong root: expected {:x?}, found {:x?}",
+                "wrong root: expected {:x?}, found {}",
                 hex::encode(self.expected_roots[commit_ix]),
-                hex::encode(nomt.root())
+                hex::encode(nomt.root().into_inner())
             ));
         }
 

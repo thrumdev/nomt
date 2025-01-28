@@ -72,7 +72,7 @@ fn fill_and_empty(seed: [u8; 16], commit_concurrency: usize) {
         }
     }
 
-    assert_eq!([0; 32], t.commit().0);
+    assert!(t.commit().0.is_empty());
 }
 
 fn rand_key(rng: &mut impl Rng) -> [u8; 32] {

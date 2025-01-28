@@ -31,7 +31,7 @@ fn add_remove_1000() {
             accounts += 1;
         }
         {
-            root = t.commit().0;
+            root = t.commit().0.into_inner();
         }
 
         assert_eq!(root, common::expected_root(accounts));
@@ -46,7 +46,7 @@ fn add_remove_1000() {
             common::kill(&mut t, accounts);
         }
         {
-            root = t.commit().0;
+            root = t.commit().0.into_inner();
         }
 
         assert_eq!(root, common::expected_root(accounts));

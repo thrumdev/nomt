@@ -28,7 +28,7 @@ fn main() -> Result<()> {
         // Constructing the verified operations
         let verified = witnessed_path
             .inner
-            .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root)
+            .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root.into_inner())
             .unwrap();
 
         // Among all read operations performed the ones that interact
@@ -86,8 +86,8 @@ fn main() -> Result<()> {
     }
 
     assert_eq!(
-        proof::verify_update::<Blake3Hasher>(prev_root, &updates).unwrap(),
-        new_root,
+        proof::verify_update::<Blake3Hasher>(prev_root.into_inner(), &updates).unwrap(),
+        new_root.into_inner(),
     );
 
     Ok(())
