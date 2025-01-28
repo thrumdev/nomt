@@ -83,7 +83,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 stream
                     .send(Envelope {
                         reqno,
-                        message: ToSupervisor::CommitSuccessful(elapsed.as_nanos() as u64),
+                        message: ToSupervisor::CommitSuccessful(elapsed.as_millis() as u64),
                     })
                     .await?;
             }
@@ -157,7 +157,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
 }
 
 /// Execute the provided `task` and make it crash after the specified `crash_delay`.
-/// The delay must be specified in nanoseconds.
+/// The delay must be specified in milliseconds.
 async fn crash_task(task: impl Future<Output = ()> + Send + 'static, crash_delay: u64) {
     // TODO: implement this in the future.
     //

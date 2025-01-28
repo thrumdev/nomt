@@ -47,7 +47,7 @@ pub struct InitPayload {
     /// Only used upon creation a new NOMT db.
     pub bitbox_seed: [u8; 16],
     /// Whether the agent is supposed to handle rollbacks.
-    /// If `Some`, the maximum amount of supported blocks in a single rollback is specified.
+    /// If `Some`, the maximum number of supported blocks in a single rollback is specified.
     pub rollback: Option<u32>,
 }
 
@@ -60,7 +60,7 @@ pub struct CommitPayload {
     pub changeset: Vec<KeyValueChange>,
     /// If Some the supervisor expects the commit to crash,
     /// the crash should happen after the specified amount of time.
-    /// Time is specified in nanoseconds.
+    /// Time is specified in milliseconds.
     pub should_crash: Option<u64>,
 }
 
@@ -71,7 +71,7 @@ pub struct RollbackPayload {
     pub n_commits: usize,
     /// If Some the supervisor expects the rollback to crash,
     /// the crash should happen after the specified amount of time.
-    /// Time is specified in nanoseconds.
+    /// Time is specified in milliseconds.
     pub should_crash: Option<u64>,
 }
 
@@ -118,7 +118,7 @@ pub enum ToSupervisor {
     /// A generic acknowledgment message.
     Ack,
     /// The response to a successful commit, it contains the elapsed time to perform the commit.
-    /// Time is measured in nanoseconds.
+    /// Time is measured in milliseconds.
     CommitSuccessful(u64),
     /// The response to a query for a key-value pair.
     QueryValue(Option<Value>),
