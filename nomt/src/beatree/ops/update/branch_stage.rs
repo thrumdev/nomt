@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::ops::Range;
 use std::sync::Arc;
 use threadpool::ThreadPool;
@@ -59,7 +60,7 @@ pub fn run(
     let num_workers = workers.len();
     let (worker_result_tx, worker_result_rx) = crossbeam_channel::bounded(num_workers);
 
-    for worker_params in workers {
+    for (worker_id, worker_params) in workers.into_iter().enumerate() {
         let bbn_index = bbn_index.clone();
         let bbn_writer = bbn_writer.clone();
         let page_pool = page_pool.clone();
@@ -68,17 +69,22 @@ pub fn run(
 
         let worker_result_tx = worker_result_tx.clone();
         thread_pool.execute(move || {
-            // passing the large `Arc` values by reference ensures that they are dropped at the
-            // end of this scope, not the end of `run_worker`.
-            let res = run_worker(
-                bbn_index,
-                bbn_writer,
-                page_pool,
-                io_handle,
-                &*changeset,
-                worker_params,
-            );
-            let _ = worker_result_tx.send(res);
+            let output_or_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // passing the large `Arc` values by reference ensures that they are dropped at the
+                // end of this scope, not the end of `run_worker`.
+                Ok(run_worker(
+                    bbn_index,
+                    bbn_writer,
+                    page_pool,
+                    io_handle,
+                    &*changeset,
+                    worker_params,
+                ))
+            }));
+            let output = output_or_panic
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("panic in branch stage: {:?}", e)))
+                .with_context(|| format!("worker {} erred out", worker_id));
+            let _ = worker_result_tx.send(output);
         });
     }
 
@@ -89,7 +95,7 @@ pub fn run(
 
     for _ in 0..num_workers {
         // UNWRAP: results are always sent unless worker panics.
-        let worker_output = worker_result_rx.recv().unwrap();
+        let worker_output = worker_result_rx.recv()??;
         apply_bbn_changes(bbn_index, &mut output, worker_output);
     }
 
