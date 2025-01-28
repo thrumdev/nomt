@@ -375,7 +375,7 @@ fn leaf_stage_inner(input: StageInputs) -> TestResult {
     let mut changeset: BTreeMap<[u8; 32], ValueChange> = insertions.clone();
     changeset.extend(deletions.clone());
 
-    let (leaf_stage_output, prior_leaf_page_numbers) = exec_leaf_stage(64, changeset);
+    let (leaf_stage_output, prior_leaf_page_numbers) = exec_leaf_stage(1, changeset);
 
     TestResult::from_bool(is_valid_leaf_stage_output(
         leaf_stage_output,
