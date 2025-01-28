@@ -186,6 +186,7 @@ impl LeafUpdater {
             self.separator_override = None;
             DigestResult::Finished
         } else {
+            panic!("test panic");
             if self.separator_override.is_none() {
                 // UNWRAP: if cutoff exists, then base must too.
                 // Merge is only performed when not at the rightmost leaf. this is protected by the
