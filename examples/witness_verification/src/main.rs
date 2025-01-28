@@ -17,7 +17,7 @@ impl NodeHasher for Blake3Hasher {
 
 fn main() -> Result<()> {
     // The witness produced in the example `commit_batch` will be used
-    let (prev_root, new_root, witness, witnessed) = commit_batch::NomtDB::commit_batch().unwrap();
+    let (prev_root, new_root, witness) = commit_batch::NomtDB::commit_batch().unwrap();
 
     let mut updates = Vec::new();
 
@@ -38,7 +38,8 @@ fn main() -> Result<()> {
         //
         // This information could already be known if we committed the batch initially,
         // and thus, the witnessed field could be discarded entirely.
-        for read in witnessed
+        for read in witness
+            .operations
             .reads
             .iter()
             .skip_while(|r| r.path_index != i)
@@ -65,7 +66,8 @@ fn main() -> Result<()> {
         // Later, it needs to be verified that all these writes bring
         // the new trie to the expected state
         let mut write_ops = Vec::new();
-        for write in witnessed
+        for write in witness
+            .operations
             .writes
             .iter()
             .skip_while(|r| r.path_index != i)

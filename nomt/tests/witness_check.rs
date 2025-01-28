@@ -8,7 +8,7 @@ fn produced_witness_validity() {
     let mut accounts = 0;
     let mut t = Test::new("witness_validity");
 
-    let (prev_root, _, _) = {
+    let (prev_root, _) = {
         for _ in 0..10 {
             common::set_balance(&mut t, accounts, 1000);
             accounts += 1;
@@ -16,7 +16,7 @@ fn produced_witness_validity() {
         t.commit()
     };
 
-    let (new_root, witness, witnessed) = {
+    let (new_root, witness) = {
         // read all existing accounts.
         for i in 0..accounts {
             t.read_id(i);
@@ -40,8 +40,8 @@ fn produced_witness_validity() {
         t.commit()
     };
 
-    assert_eq!(witnessed.reads.len(), 15); // 10 existing + 5 nonexisting
-    assert_eq!(witnessed.writes.len(), 10); // 5 deletes + 5 inserts
+    assert_eq!(witness.operations.reads.len(), 15); // 10 existing + 5 nonexisting
+    assert_eq!(witness.operations.writes.len(), 10); // 5 deletes + 5 inserts
 
     let mut updates = Vec::new();
     for (i, witnessed_path) in witness.path_proofs.iter().enumerate() {
@@ -49,7 +49,8 @@ fn produced_witness_validity() {
             .inner
             .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root.into_inner())
             .unwrap();
-        for read in witnessed
+        for read in witness
+            .operations
             .reads
             .iter()
             .skip_while(|r| r.path_index != i)
@@ -68,7 +69,8 @@ fn produced_witness_validity() {
         }
 
         let mut write_ops = Vec::new();
-        for write in witnessed
+        for write in witness
+            .operations
             .writes
             .iter()
             .skip_while(|r| r.path_index != i)

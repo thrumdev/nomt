@@ -72,6 +72,8 @@ struct Shared {
 pub struct Witness {
     /// Various paths down the trie used as part of this witness.
     pub path_proofs: Vec<WitnessedPath>,
+    /// The operations witnessed by the paths.
+    pub operations: WitnessedOperations,
 }
 
 /// Operations provable by a corresponding witness.
@@ -672,11 +674,8 @@ impl FinishedSession {
     ///
     /// If this session was configured with proving  (see [`SessionParams::witness_mode`]),
     /// this will be `Some` on the first call and `None` thereafter.
-    pub fn take_witness(&mut self) -> Option<(Witness, WitnessedOperations)> {
-        self.merkle_output
-            .witness
-            .take()
-            .zip(self.merkle_output.witnessed_operations.take())
+    pub fn take_witness(&mut self) -> Option<Witness> {
+        self.merkle_output.witness.take()
     }
 
     /// Transform this into an overlay that can be queried in memory and used as the base for

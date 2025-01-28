@@ -284,11 +284,10 @@ impl UpdateHandle {
 
         let mut maybe_witness = self.shared.witness.then_some(Witness {
             path_proofs: Vec::new(),
-        });
-
-        let mut maybe_witnessed_ops = self.shared.witness.then_some(WitnessedOperations {
-            reads: Vec::new(),
-            writes: Vec::new(),
+            operations: WitnessedOperations {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
         });
 
         let mut updated_pages = Vec::new();
@@ -317,7 +316,6 @@ impl UpdateHandle {
                 // `maybe_witness` and `maybe_witnessed_ops` must be initialized to contain
                 // all witnesses from all workers.
                 let witness = maybe_witness.as_mut().unwrap();
-                let witnessed_ops = maybe_witnessed_ops.as_mut().unwrap();
 
                 let path_proof_count = witnessed_paths.len();
                 witness.path_proofs.reserve(witnessed_paths.len());
@@ -336,14 +334,14 @@ impl UpdateHandle {
                                 }
                             });
 
-                            witnessed_ops.reads.push(WitnessedRead {
+                            witness.operations.reads.push(WitnessedRead {
                                 key: *k,
                                 value: value_hash,
                                 path_index: path_index + path_proof_offset,
                             });
                         }
                         if let Some(written) = v.written_value() {
-                            witnessed_ops.writes.push(WitnessedWrite {
+                            witness.operations.writes.push(WitnessedWrite {
                                 key: *k,
                                 value: written,
                                 path_index: path_index + path_proof_offset,
@@ -365,7 +363,6 @@ impl UpdateHandle {
             root: new_root.unwrap(),
             updated_pages: UpdatedPages(updated_pages),
             witness: maybe_witness,
-            witnessed_operations: maybe_witnessed_ops,
         }
     }
 }
@@ -378,8 +375,6 @@ pub struct Output {
     pub updated_pages: UpdatedPages,
     /// Optional witness
     pub witness: Option<Witness>,
-    /// Optional list of all witnessed operations.
-    pub witnessed_operations: Option<WitnessedOperations>,
 }
 
 struct UpdateCommand {
