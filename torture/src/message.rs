@@ -3,6 +3,8 @@
 //! This is used only for inter-process communication and thus doesn't need to care about versioning
 //! or compatibility.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 pub type Key = [u8; 32];
@@ -47,7 +49,7 @@ pub struct InitPayload {
     /// Only used upon creation a new NOMT db.
     pub bitbox_seed: [u8; 16],
     /// Whether the agent is supposed to handle rollbacks.
-    /// If `Some`, the maximum amount of supported blocks in a single rollback is specified.
+    /// If `Some`, the maximum number of supported blocks in a single rollback is specified.
     pub rollback: Option<u32>,
 }
 
@@ -60,8 +62,7 @@ pub struct CommitPayload {
     pub changeset: Vec<KeyValueChange>,
     /// If Some the supervisor expects the commit to crash,
     /// the crash should happen after the specified amount of time.
-    /// Time is specified in nanoseconds.
-    pub should_crash: Option<u64>,
+    pub should_crash: Option<Duration>,
 }
 
 /// The parameters for the [`ToAgent::Rollback`] message.
@@ -71,8 +72,7 @@ pub struct RollbackPayload {
     pub n_commits: usize,
     /// If Some the supervisor expects the rollback to crash,
     /// the crash should happen after the specified amount of time.
-    /// Time is specified in nanoseconds.
-    pub should_crash: Option<u64>,
+    pub should_crash: Option<Duration>,
 }
 
 /// The maximum size of an envelope, in the serialized form.
@@ -118,8 +118,7 @@ pub enum ToSupervisor {
     /// A generic acknowledgment message.
     Ack,
     /// The response to a successful commit, it contains the elapsed time to perform the commit.
-    /// Time is measured in nanoseconds.
-    CommitSuccessful(u64),
+    CommitSuccessful(Duration),
     /// The response to a query for a key-value pair.
     QueryValue(Option<Value>),
     /// The response to a query for the current sequence number of the database.

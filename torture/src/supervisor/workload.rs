@@ -216,6 +216,7 @@ impl WorkloadState {
     }
 
     fn rollback(&mut self, snapshot: Snapshot) {
+        // The application of a rollback counts as increased sync_seq.
         self.committed.sync_seqn += 1;
         self.committed.state = snapshot.state;
     }
@@ -246,8 +247,8 @@ pub struct Workload {
     workload_id: u64,
     /// The seed for bitbox generated for this workload.
     bitbox_seed: [u8; 16],
-    /// Data collected to evaluate the average commit time in nanoseconds.
-    tot_commit_time: u64,
+    /// Data collected to evaluate the average commit time.
+    tot_commit_time: Duration,
     n_successfull_commit: u64,
     /// Whether to ensure the correct application of the changeset after every commit.
     ensure_changeset: bool,
@@ -257,18 +258,9 @@ pub struct Workload {
     sample_snapshot: bool,
     /// The max number of commits involved in a rollback.
     max_rollback_commits: u32,
-    /// If `Some` there are rollbacks waiting to be applied.
-    scheduled_rollbacks: ScheduledRollbacks,
-}
-
-/// Tracker of rollbacks waiting for being applied.
-struct ScheduledRollbacks {
-    /// If `Some` there is rollback waiting to be applied.
-    rollback: Option<ScheduledRollback>,
     /// If `Some` there is rollback waiting to be applied,
-    /// alongside the delay after which the rollback process should panic,
-    /// measured in nanoseconds.
-    rollback_crash: Option<(ScheduledRollback, u64)>,
+    /// possibly alongside the delay after which the rollback process should panic.
+    scheduled_rollback: Option<(ScheduledRollback, Option<Duration>)>,
 }
 
 /// Contains the information required to apply a rollback.
@@ -317,16 +309,13 @@ impl Workload {
             state,
             workload_id,
             bitbox_seed,
-            tot_commit_time: 0,
+            tot_commit_time: Duration::ZERO,
             n_successfull_commit: 0,
             ensure_changeset: workload_params.ensure_changeset,
             ensure_snapshot: workload_params.ensure_snapshot,
             sample_snapshot: workload_params.sample_snapshot,
             max_rollback_commits: workload_params.max_rollback_commits,
-            scheduled_rollbacks: ScheduledRollbacks {
-                rollback: None,
-                rollback_crash: None,
-            },
+            scheduled_rollback: None,
         }
     }
 
@@ -360,28 +349,20 @@ impl Workload {
         let rr = agent.rr().clone();
         trace!("run_iteration");
 
-        if let Some((scheduled_rollback, should_crash)) = self
-            .scheduled_rollbacks
-            .is_time(self.state.committed.sync_seqn)
-        {
+        if self.scheduled_rollback.as_ref().map_or(false, |(r, _)| {
+            r.sync_seqn == self.state.committed.sync_seqn
+        }) {
+            // UNWRAP: scheduled_rollback has just be checked to be `Some`
+            let (scheduled_rollback, should_crash) = self.scheduled_rollback.take().unwrap();
             self.perform_scheduled_rollback(&rr, scheduled_rollback, should_crash)
                 .await?;
             return Ok(());
         }
 
         // Do not schedule new rollbacks if they are already scheduled.
-        let mut rollback = self.state.biases.rollback;
-        if self.scheduled_rollbacks.is_rollback_scheduled() {
-            rollback = 0.0;
-        }
-
-        let mut rollback_crash = self.state.biases.rollback_crash;
-        if self.scheduled_rollbacks.is_rollback_crash_scheduled() {
-            rollback_crash = 0.0;
-        }
-
-        if self.state.rng.gen_bool(rollback) {
-            if self.state.rng.gen_bool(rollback_crash) {
+        let is_rollback_scheduled = self.scheduled_rollback.is_some();
+        if !is_rollback_scheduled && self.state.rng.gen_bool(self.state.biases.rollback) {
+            if self.state.rng.gen_bool(self.state.biases.rollback_crash) {
                 self.schedule_rollback(true /*should_crash*/).await?
             } else {
                 self.schedule_rollback(false /*should_crash*/).await?
@@ -437,19 +418,20 @@ impl Workload {
 
         // The agent should crash after `crash_delay`ns.
         // If no data avaible crash after 300ms.
-        let mut crash_delay = self
+        let mut crash_delay_millis = self
             .tot_commit_time
-            .checked_div(self.n_successfull_commit)
-            .unwrap_or(Duration::from_millis(300).as_nanos() as u64);
+            .as_millis()
+            .checked_div(self.n_successfull_commit as u128)
+            .unwrap_or(300) as u64;
         // Crash a little bit earlier than the average commit time to increase the
         // possibilities of crashing during sync.
-        crash_delay = (crash_delay as f64 * 0.98) as u64;
+        crash_delay_millis = (crash_delay_millis as f64 * 0.98) as u64;
 
         trace!("exercising commit crash");
         rr.send_request(crate::message::ToAgent::Commit(
             crate::message::CommitPayload {
                 changeset: changeset.clone(),
-                should_crash: Some(crash_delay),
+                should_crash: Some(Duration::from_millis(crash_delay_millis)),
             },
         ))
         .await?;
@@ -478,10 +460,6 @@ impl Workload {
 
     async fn schedule_rollback(&mut self, should_crash: bool) -> anyhow::Result<()> {
         let n_commits_to_rollback = self.state.rng.gen_range(1..self.max_rollback_commits) as usize;
-        if n_commits_to_rollback == 0 {
-            trace!("No available commits to perform rollback with");
-            return Ok(());
-        }
 
         let last_snapshot = &self.state.committed;
         let rollback_sync_seqn = last_snapshot.sync_seqn + n_commits_to_rollback as u32;
@@ -491,13 +469,14 @@ impl Workload {
             snapshot: last_snapshot.clone(),
         };
 
-        if should_crash {
+        let maybe_crash_delay = if should_crash {
             // TODO: more complex crash delay evaluation for rollbacks.
-            let crash_delay = Duration::from_millis(10).as_nanos() as u64;
-            self.scheduled_rollbacks.rollback_crash = Some((scheduled_rollback, crash_delay));
+            Some(Duration::from_millis(10))
         } else {
-            self.scheduled_rollbacks.rollback = Some(scheduled_rollback);
+            None
         };
+
+        self.scheduled_rollback = Some((scheduled_rollback, maybe_crash_delay));
 
         trace!(
             "scheduled rollback {}for sync_seqn: {} of {} commits",
@@ -513,7 +492,7 @@ impl Workload {
         &mut self,
         rr: &comms::RequestResponse,
         scheduled_rollback: ScheduledRollback,
-        should_crash: Option<u64>,
+        should_crash: Option<Duration>,
     ) -> anyhow::Result<()> {
         let ScheduledRollback {
             n_commits,
@@ -560,7 +539,7 @@ impl Workload {
         rr: &comms::RequestResponse,
         n_commits_to_rollback: usize,
         snapshot: Snapshot,
-        crash_delay: u64,
+        crash_delay: Duration,
     ) -> anyhow::Result<()> {
         trace!(
             "exercising rollback crash of {} commits",
@@ -776,49 +755,5 @@ impl Workload {
     /// Return the working directory.
     pub fn into_workdir(self) -> TempDir {
         self.workdir
-    }
-}
-
-impl ScheduledRollbacks {
-    fn is_time(&mut self, curr_sync_seqn: u32) -> Option<(ScheduledRollback, Option<u64>)> {
-        if self
-            .rollback
-            .as_ref()
-            .map_or(false, |ScheduledRollback { sync_seqn, .. }| {
-                curr_sync_seqn == *sync_seqn
-            })
-        {
-            // UNWRAP: self.rollback has just been checked to be Some.
-            let scheduled_rollback = self.rollback.take().unwrap();
-
-            // The probability of having scheduled at the same time both a rollback and
-            // a rollback crash is very low, but if it happens, only the rollback will be applied.
-            // Discard the rollback crash data.
-            let _ = self.is_time(curr_sync_seqn);
-
-            return Some((scheduled_rollback, None));
-        }
-
-        if self
-            .rollback_crash
-            .as_ref()
-            .map_or(false, |(ScheduledRollback { sync_seqn, .. }, _)| {
-                curr_sync_seqn == *sync_seqn
-            })
-        {
-            // UNWRAP: self.rollback has just been checked to be Some.
-            let (scheduled_rollback, crash_delay) = self.rollback_crash.take().unwrap();
-            return Some((scheduled_rollback, Some(crash_delay)));
-        }
-
-        return None;
-    }
-
-    fn is_rollback_scheduled(&self) -> bool {
-        self.rollback.is_some()
-    }
-
-    fn is_rollback_crash_scheduled(&self) -> bool {
-        self.rollback_crash.is_some()
     }
 }
