@@ -26,9 +26,9 @@ fn main() -> Result<()> {
     // we will prove the read.
     session.warm_up(key_path);
 
-    let mut finished = nomt.finish_session(session, vec![(key_path, KeyReadWrite::Read(value))]);
+    let mut finished = session.finish(vec![(key_path, KeyReadWrite::Read(value))]);
     let _witness = finished.take_witness();
-    nomt.commit_finished(finished)?;
+    finished.commit(&nomt)?;
 
     Ok(())
 }

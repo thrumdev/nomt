@@ -267,10 +267,7 @@ impl Agent {
             }
         }
 
-        tokio::task::block_in_place(|| {
-            let finished = self.nomt.finish_session(session, actuals);
-            self.nomt.commit_finished(finished)
-        })?;
+        tokio::task::block_in_place(|| session.finish(actuals).commit(&self.nomt))?;
 
         Ok(())
     }

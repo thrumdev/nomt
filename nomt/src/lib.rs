@@ -321,7 +321,7 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// prevent writes to the database. Sessions are the main way of reading to the database,
     /// and permit a changeset to be committed either directly to the database or into an
     /// in-memory [`Overlay`].
-    pub fn begin_session(&self, params: SessionParams) -> Session {
+    pub fn begin_session(&self, params: SessionParams) -> Session<T> {
         let live_overlay = params.overlay;
 
         let store = self.store.clone();
@@ -347,82 +347,8 @@ impl<T: HashAlgorithm> Nomt<T> {
             rollback_delta,
             overlay: live_overlay,
             witness_mode: params.witness,
+            _marker: std::marker::PhantomData,
         }
-    }
-
-    /// Finish the provided [`Session`]. Provide the actual reads and writes (in sorted order)
-    /// that are to be considered within the finished session.
-    pub fn finish_session(
-        &self,
-        mut session: Session,
-        actuals: Vec<(KeyPath, KeyReadWrite)>,
-    ) -> FinishedSession {
-        if cfg!(debug_assertions) {
-            // Check that the actuals are sorted by key path.
-            for i in 1..actuals.len() {
-                assert!(
-                    actuals[i].0 > actuals[i - 1].0,
-                    "actuals are not sorted at index {}",
-                    i
-                );
-            }
-        }
-        let rollback_delta = session
-            .rollback_delta
-            .take()
-            .map(|delta_builder| delta_builder.finalize(&actuals));
-
-        let mut compact_actuals = Vec::with_capacity(actuals.len());
-        for (path, read_write) in &actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
-        }
-
-        // UNWRAP: merkle_updater always `Some` during lifecycle.
-        let merkle_update_handle = session
-            .merkle_updater
-            .update_and_prove::<T>(compact_actuals, session.witness_mode.0);
-
-        let mut tx = self.store.new_value_tx();
-        for (path, read_write) in actuals {
-            if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
-                tx.write_value::<T>(path, value);
-            }
-        }
-
-        let merkle_output = merkle_update_handle.join();
-        FinishedSession {
-            value_transaction: tx,
-            merkle_output,
-            rollback_delta,
-            // UNWRAP: session overlay is always `Some` during lifecycle.
-            parent_overlay: session.overlay,
-        }
-    }
-
-    /// Commit a finished session to disk directly.
-    pub fn commit_finished(&self, session: FinishedSession) -> Result<(), anyhow::Error> {
-        // TODO: do a prev_root check or something to ensure continuity?
-
-        {
-            let mut shared = self.shared.lock();
-            shared.root = Root(session.merkle_output.root);
-            shared.last_commit_marker = None;
-        }
-
-        if let Some(rollback_delta) = session.rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = self.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
-
-        self.store.commit(
-            session.value_transaction.into_iter(),
-            self.page_cache.clone(),
-            session
-                .merkle_output
-                .updated_pages
-                .into_frozen_iter(/* into_overlay */ false),
-        )
     }
 
     /// Commit the changes from this overlay to the underlying database.
@@ -496,8 +422,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        let finished = self.finish_session(sess, actuals);
-        self.commit_finished(finished)?;
+        sess.finish(actuals).commit(&self)?;
 
         Ok(())
     }
@@ -582,18 +507,19 @@ impl SessionParams {
 /// The session enables the application to perform reads and prepare writes.
 ///
 /// When the session is finished, the application can confirm the changes by calling
-/// [`Nomt::finish_session`] or others and create a [`Witness`] that can be used to prove the
+/// [`Session::finish`] or others and create a [`Witness`] that can be used to prove the
 /// correctness of replaying the same operations.
-pub struct Session {
+pub struct Session<T: HashAlgorithm> {
     store: Store,
     merkle_updater: Updater,
     metrics: Metrics,
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
     overlay: LiveOverlay,
     witness_mode: WitnessMode,
+    _marker: std::marker::PhantomData<T>,
 }
 
-impl Session {
+impl<T: HashAlgorithm> Session<T> {
     /// Signal to the backend to warm up the merkle paths and b-tree pages for a key, so they are
     /// ready by the time you commit the session.
     ///
@@ -630,13 +556,13 @@ impl Session {
     /// 1. This function does not perform deduplication. Calling it multiple times for the same key
     ///    will result in multiple load operations, which can be wasteful.
     /// 2. The definitive set of values to be updated is determined by the update (e.g.
-    ///    [`Nomt::finish_session`]) call.
+    ///    [`Session::finish`]) call.
     ///
     ///    It's safe to call this function for keys that may not ultimately be written, and keys
     ///    not marked here but included in the final set will still be preserved.
     /// 3. While this function helps optimize I/O, it's not strictly necessary for correctness.
     ///    The commit process will ensure all required prior values are preserved.
-    /// 4. If the path is given to [`Nomt::finish_session`] (and others) with the `ReadThenWrite`
+    /// 4. If the path is given to [`Session::finish`] (and others) with the `ReadThenWrite`
     ///    operation, calling this function is not needed as the prior value will be taken from
     ///    there.
     ///
@@ -646,6 +572,53 @@ impl Session {
     pub fn preserve_prior_value(&self, path: KeyPath) {
         if let Some(rollback) = &self.rollback_delta {
             rollback.tentative_preserve_prior(path);
+        }
+    }
+
+    /// Finish the session. Provide the actual reads and writes (in sorted order) that are to be
+    /// considered within the finished session.
+    ///
+    /// This function blocks until the merkle root and changeset are computed.
+    pub fn finish(mut self, actuals: Vec<(KeyPath, KeyReadWrite)>) -> FinishedSession {
+        if cfg!(debug_assertions) {
+            // Check that the actuals are sorted by key path.
+            for i in 1..actuals.len() {
+                assert!(
+                    actuals[i].0 > actuals[i - 1].0,
+                    "actuals are not sorted at index {}",
+                    i
+                );
+            }
+        }
+        let rollback_delta = self
+            .rollback_delta
+            .take()
+            .map(|delta_builder| delta_builder.finalize(&actuals));
+
+        let mut compact_actuals = Vec::with_capacity(actuals.len());
+        for (path, read_write) in &actuals {
+            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
+        }
+
+        // UNWRAP: merkle_updater always `Some` during lifecycle.
+        let merkle_update_handle = self
+            .merkle_updater
+            .update_and_prove::<T>(compact_actuals, self.witness_mode.0);
+
+        let mut tx = self.store.new_value_tx();
+        for (path, read_write) in actuals {
+            if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
+                tx.write_value::<T>(path, value);
+            }
+        }
+
+        let merkle_output = merkle_update_handle.join();
+        FinishedSession {
+            value_transaction: tx,
+            merkle_output,
+            rollback_delta,
+            // UNWRAP: session overlay is always `Some` during lifecycle.
+            parent_overlay: self.overlay,
         }
     }
 }
@@ -693,6 +666,34 @@ impl FinishedSession {
             updated_pages,
             values,
             self.rollback_delta,
+        )
+    }
+
+    /// Commit this session to disk directly.
+    ///
+    /// This will return an error if I/O fails or if the changeset is no longer valid
+    /// (i.e. if another competing session or overlay was committed and invalidated this changeset).
+    pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> Result<(), anyhow::Error> {
+        // TODO: do a prev_root check or something to ensure continuity?
+
+        {
+            let mut shared = nomt.shared.lock();
+            shared.root = Root(self.merkle_output.root);
+            shared.last_commit_marker = None;
+        }
+
+        if let Some(rollback_delta) = self.rollback_delta {
+            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
+            let rollback = nomt.store.rollback().unwrap();
+            rollback.commit(rollback_delta)?;
+        }
+
+        nomt.store.commit(
+            self.value_transaction.into_iter(),
+            nomt.page_cache.clone(),
+            self.merkle_output
+                .updated_pages
+                .into_frozen_iter(/* into_overlay */ false),
         )
     }
 }
@@ -788,11 +789,12 @@ fn compute_root_node<H: HashAlgorithm>(page_cache: &PageCache, store: &Store) ->
 
 #[cfg(test)]
 mod tests {
+    use crate::Blake3Hasher;
 
     #[test]
     fn session_is_sync() {
         fn is_sync<T: Sync>() {}
 
-        is_sync::<crate::Session>();
+        is_sync::<crate::Session<Blake3Hasher>>();
     }
 }

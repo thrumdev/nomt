@@ -109,9 +109,9 @@ impl NomtDB {
         let mut actual_access: Vec<_> = access.into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
 
-        let finished = self.nomt.finish_session(session, actual_access);
+        let finished = session.finish(actual_access);
         if self.overlay_window_capacity == 0 {
-            self.nomt.commit_finished(finished).unwrap();
+            finished.commit(&self.nomt).unwrap();
         } else {
             let new_overlay = finished.into_overlay();
             overlay_window.push_front(new_overlay);
@@ -183,9 +183,9 @@ impl NomtDB {
             .collect();
         actual_access.sort_by_key(|(k, _)| *k);
 
-        let finished = self.nomt.finish_session(session, actual_access);
+        let finished = session.finish(actual_access);
         if self.overlay_window_capacity == 0 {
-            self.nomt.commit_finished(finished).unwrap();
+            finished.commit(&self.nomt).unwrap();
         } else {
             let new_overlay = finished.into_overlay();
             overlay_window.push_front(new_overlay);
@@ -206,7 +206,7 @@ impl NomtDB {
 
 struct Tx<'a> {
     timer: Option<&'a mut Timer>,
-    session: &'a Session,
+    session: &'a Session<Blake3Hasher>,
     access: FxHashMap<KeyPath, KeyReadWrite>,
 }
 

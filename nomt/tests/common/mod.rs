@@ -41,7 +41,7 @@ fn opts(path: PathBuf) -> Options {
 
 pub struct Test {
     nomt: Nomt<nomt::Blake3Hasher>,
-    session: Option<Session>,
+    session: Option<Session<nomt::Blake3Hasher>>,
     access: HashMap<KeyPath, KeyReadWrite>,
 }
 
@@ -120,10 +120,10 @@ impl Test {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        let mut finished = self.nomt.finish_session(session, actual_access);
+        let mut finished = session.finish(actual_access);
         let root = finished.root();
         let witness = finished.take_witness().unwrap();
-        self.nomt.commit_finished(finished).unwrap();
+        finished.commit(&self.nomt).unwrap();
         self.session = Some(
             self.nomt
                 .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
@@ -135,7 +135,7 @@ impl Test {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        let mut finished = self.nomt.finish_session(session, actual_access);
+        let mut finished = session.finish(actual_access);
         let witness = finished.take_witness().unwrap();
 
         self.session = Some(
