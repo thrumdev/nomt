@@ -71,7 +71,7 @@ impl NomtDB {
         if overlay_window.len() == self.overlay_window_capacity {
             let _ = timer.as_mut().map(|t| t.record_span("commit_overlay"));
             let overlay = overlay_window.pop_back().unwrap();
-            self.nomt.commit_overlay(overlay).unwrap();
+            overlay.commit(&self.nomt).unwrap();
         }
     }
 

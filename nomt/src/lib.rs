@@ -351,47 +351,6 @@ impl<T: HashAlgorithm> Nomt<T> {
         }
     }
 
-    /// Commit the changes from this overlay to the underlying database.
-    ///
-    /// This assumes no sessions are active and will panic otherwise.
-    ///
-    /// This call will fail if the overlay has a parent which has not been committed.
-    pub fn commit_overlay(&self, overlay: Overlay) -> anyhow::Result<()> {
-        if !overlay.parent_matches_marker(self.shared.lock().last_commit_marker.as_ref()) {
-            anyhow::bail!("Overlay parent not committed");
-        }
-
-        let root = overlay.root();
-        let page_changes: Vec<_> = overlay
-            .page_changes()
-            .into_iter()
-            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
-            .collect();
-        let values: Vec<_> = overlay
-            .value_changes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let rollback_delta = overlay.rollback_delta().map(|delta| delta.clone());
-
-        let marker = overlay.commit();
-
-        {
-            let mut shared = self.shared.lock();
-            shared.root = root;
-            shared.last_commit_marker = Some(marker);
-        }
-
-        if let Some(rollback_delta) = rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = self.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
-
-        self.store
-            .commit(values, self.page_cache.clone(), page_changes)
-    }
-
     /// Perform a rollback of the last `n` commits.
     ///
     /// This function assumes no sessions are active and panics otherwise.
@@ -671,8 +630,9 @@ impl FinishedSession {
 
     /// Commit this session to disk directly.
     ///
-    /// This will return an error if I/O fails or if the changeset is no longer valid
-    /// (i.e. if another competing session or overlay was committed and invalidated this changeset).
+    /// This will return an error if I/O fails or if the changeset is no longer valid.
+    /// The changeset may be invalidated if another competing session, overlay, or rollback was
+    /// committed.
     pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> Result<(), anyhow::Error> {
         // TODO: do a prev_root check or something to ensure continuity?
 
@@ -695,6 +655,51 @@ impl FinishedSession {
                 .updated_pages
                 .into_frozen_iter(/* into_overlay */ false),
         )
+    }
+}
+
+impl Overlay {
+    /// Commit the changes from this overlay to the underlying database.
+    ///
+    /// This assumes no sessions are active and will panic otherwise.
+    ///
+    /// This will return an error if I/O fails or if the changeset is no longer valid, or if the
+    /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
+    /// rollback.
+    pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> anyhow::Result<()> {
+        if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
+            anyhow::bail!("Overlay parent not committed");
+        }
+
+        let root = self.root();
+        let page_changes: Vec<_> = self
+            .page_changes()
+            .into_iter()
+            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
+            .collect();
+        let values: Vec<_> = self
+            .value_changes()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
+
+        let marker = self.mark_committed();
+
+        {
+            let mut shared = nomt.shared.lock();
+            shared.root = root;
+            shared.last_commit_marker = Some(marker);
+        }
+
+        if let Some(rollback_delta) = rollback_delta {
+            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
+            let rollback = nomt.store.rollback().unwrap();
+            rollback.commit(rollback_delta)?;
+        }
+
+        nomt.store
+            .commit(values, nomt.page_cache.clone(), page_changes)
     }
 }
 
