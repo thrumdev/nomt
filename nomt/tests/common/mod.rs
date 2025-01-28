@@ -1,6 +1,6 @@
 use nomt::{
     KeyPath, KeyReadWrite, Node, Nomt, Options, Overlay, PanicOnSyncMode, Root, Session,
-    SessionParams, Witness, WitnessMode, WitnessedOperations,
+    SessionParams, Witness, WitnessMode,
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -116,34 +116,34 @@ impl Test {
         }
     }
 
-    pub fn commit(&mut self) -> (Root, Witness, WitnessedOperations) {
+    pub fn commit(&mut self) -> (Root, Witness) {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
         let mut finished = self.nomt.finish_session(session, actual_access);
         let root = finished.root();
-        let (witness, witnessed_ops) = finished.take_witness().unwrap();
+        let witness = finished.take_witness().unwrap();
         self.nomt.commit_finished(finished).unwrap();
         self.session = Some(
             self.nomt
                 .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
         );
-        (root, witness, witnessed_ops)
+        (root, witness)
     }
 
-    pub fn update(&mut self) -> (Overlay, Witness, WitnessedOperations) {
+    pub fn update(&mut self) -> (Overlay, Witness) {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
         let mut finished = self.nomt.finish_session(session, actual_access);
-        let (witness, witnessed_ops) = finished.take_witness().unwrap();
+        let witness = finished.take_witness().unwrap();
 
         self.session = Some(
             self.nomt
                 .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
         );
 
-        (finished.into_overlay(), witness, witnessed_ops)
+        (finished.into_overlay(), witness)
     }
 
     pub fn commit_overlay(&mut self, overlay: Overlay) {

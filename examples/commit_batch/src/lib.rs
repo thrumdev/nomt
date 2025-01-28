@@ -1,8 +1,5 @@
 use anyhow::Result;
-use nomt::{
-    Blake3Hasher, KeyReadWrite, Nomt, Options, Root, SessionParams, Witness, WitnessMode,
-    WitnessedOperations,
-};
+use nomt::{Blake3Hasher, KeyReadWrite, Nomt, Options, Root, SessionParams, Witness, WitnessMode};
 use sha2::Digest;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";
@@ -10,7 +7,7 @@ const NOMT_DB_FOLDER: &str = "nomt_db";
 pub struct NomtDB;
 
 impl NomtDB {
-    pub fn commit_batch() -> Result<(Root, Root, Witness, WitnessedOperations)> {
+    pub fn commit_batch() -> Result<(Root, Root, Witness)> {
         // Define the options used to open NOMT
         let mut opts = Options::new();
         opts.path(NOMT_DB_FOLDER);
@@ -61,12 +58,12 @@ impl NomtDB {
         // along with a witness and the witnessed operations.
         let mut finished = nomt.finish_session(session, actual_access);
 
-        // These fields are set because the finished session was configured with
+        // This field is set because the finished session was configured with
         // `WitnessMode::read_write`.
-        let (witness, witnessed) = finished.take_witness().unwrap();
+        let witness = finished.take_witness().unwrap();
         let root = finished.root();
         nomt.commit_finished(finished)?;
 
-        Ok((prev_root, root, witness, witnessed))
+        Ok((prev_root, root, witness))
     }
 }
