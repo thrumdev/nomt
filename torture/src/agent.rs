@@ -69,7 +69,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     tracing::info!("commit took {}ms", elapsed.as_millis());
                 };
 
-                crash_task(task, crash_delay).await;
+                crash_task(task, crash_delay, "commit").await;
                 unreachable!();
             }
             ToAgent::Commit(CommitPayload {
@@ -105,7 +105,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     tracing::info!("rollback took {:?}", start.elapsed());
                 };
 
-                crash_task(task, crash_delay).await;
+                crash_task(task, crash_delay, "rollback").await;
                 unreachable!();
             }
             ToAgent::Rollback(RollbackPayload {
@@ -158,7 +158,11 @@ pub async fn run(input: UnixStream) -> Result<()> {
 
 /// Execute the provided `task` and make it crash after the specified `crash_delay`.
 /// The delay must be specified in nanoseconds.
-async fn crash_task(task: impl Future<Output = ()> + Send + 'static, crash_delay: u64) {
+async fn crash_task(
+    task: impl Future<Output = ()> + Send + 'static,
+    crash_delay: u64,
+    op: &'static str,
+) {
     // TODO: implement this in the future.
     //
     // This seems to be a big feature. As of now, I envision it, as we either:
@@ -175,7 +179,7 @@ async fn crash_task(task: impl Future<Output = ()> + Send + 'static, crash_delay
         barrier_1.wait().await;
         let crash_delay = Duration::from_nanos(crash_delay);
         sleep(crash_delay).await;
-        tracing::info!("aborting after {}ms", crash_delay.as_millis());
+        tracing::info!("aborting {op} after {}ms", crash_delay.as_millis());
         std::process::abort();
     });
     let task_2 = tokio::spawn(async move {
