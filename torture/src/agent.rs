@@ -83,7 +83,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 stream
                     .send(Envelope {
                         reqno,
-                        message: ToSupervisor::CommitSuccessful(elapsed.as_nanos() as u64),
+                        message: ToSupervisor::CommitSuccessful(elapsed),
                     })
                     .await?;
             }
@@ -157,10 +157,9 @@ pub async fn run(input: UnixStream) -> Result<()> {
 }
 
 /// Execute the provided `task` and make it crash after the specified `crash_delay`.
-/// The delay must be specified in nanoseconds.
 async fn crash_task(
     task: impl Future<Output = ()> + Send + 'static,
-    crash_delay: u64,
+    crash_delay: Duration,
     op: &'static str,
 ) {
     // TODO: implement this in the future.
@@ -177,7 +176,6 @@ async fn crash_task(
     let barrier_2 = barrier_1.clone();
     let task_1 = tokio::spawn(async move {
         barrier_1.wait().await;
-        let crash_delay = Duration::from_nanos(crash_delay);
         sleep(crash_delay).await;
         tracing::info!("aborting {op} after {}ms", crash_delay.as_millis());
         std::process::abort();
