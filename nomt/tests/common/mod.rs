@@ -150,7 +150,7 @@ impl Test {
         // force drop of live session before committing.
         self.access.clear();
         self.session = None;
-        self.nomt.commit_overlay(overlay).unwrap();
+        overlay.commit(&self.nomt).unwrap();
         self.session = Some(
             self.nomt
                 .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),

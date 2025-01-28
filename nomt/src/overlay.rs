@@ -66,7 +66,7 @@ impl Overlay {
     }
 
     /// Mark the overlay as committed and return a marker.
-    pub(super) fn commit(&self) -> OverlayMarker {
+    pub(super) fn mark_committed(&self) -> OverlayMarker {
         let status = self.inner.data.status.clone();
         status.commit();
         OverlayMarker(status)
@@ -585,7 +585,7 @@ mod tests {
         );
         ancestors.push_front(c);
 
-        let _ = ancestors.pop_back().unwrap().commit();
+        let _ = ancestors.pop_back().unwrap().mark_committed();
 
         assert!(matches!(
             LiveOverlay::new(ancestors.iter().take(1)),
@@ -732,7 +732,7 @@ mod tests {
             HashMap::new(),
             None,
         );
-        a.commit();
+        a.mark_committed();
 
         let bucket = BucketIndex::new(69);
         maybe_bucket.set(bucket);
@@ -795,7 +795,7 @@ mod tests {
             .unwrap()
             .finish([1; 32], page_map, value_map, None);
 
-        a.commit();
+        a.mark_committed();
 
         let c =
             LiveOverlay::new([&b])
