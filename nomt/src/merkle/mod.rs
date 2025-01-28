@@ -40,6 +40,9 @@ impl UpdatedPages {
     /// Freeze, label, and iterate all the pages.
     ///
     /// Pages are 'labeled' by placing the page ID into the page data itself prior to freezing.
+    ///
+    /// `alloc_dependent` tells this function to allocate placeholder shared memory for storing
+    /// bucket indices of fresh pages. This is meant to be used when committing into an overlay.
     pub fn into_frozen_iter(
         self,
         alloc_dependent: bool,
@@ -68,10 +71,18 @@ impl UpdatedPages {
     }
 }
 
+/// This is akin to the store::BucketInfo, except it has a single variant for fresh pages.
+///
+/// Determining whether to allocate a `SharedMaybeBucketIndex` for fresh pages requires some
+/// context, namely, whether this is being committed into an overlay or not. This type allows us
+/// to defer that decision to later on in the pipeline.
 #[derive(Clone)]
 pub enum BucketInfo {
+    /// The bucket index is known.
     Known(BucketIndex),
+    /// The bucket index is dependent on some prior overlay.
     Dependent(SharedMaybeBucketIndex),
+    /// The bucket index is fresh and to-be-allocated later.
     Fresh,
 }
 
