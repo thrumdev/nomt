@@ -273,9 +273,9 @@ impl DB {
 pub struct SyncController {
     db: DB,
     /// The channel to send the result of the WAL writeout. Option is to allow `take`.
-    wal_result_tx: Option<Sender<anyhow::Result<()>>>,
+    wal_result_tx: Option<Sender<std::io::Result<()>>>,
     /// The channel to receive the result of the WAL writeout.
-    wal_result_rx: Receiver<anyhow::Result<()>>,
+    wal_result_rx: Receiver<std::io::Result<()>>,
     /// The pages along with their page numbers to write out to the HT file.
     ht_to_write: Arc<Mutex<Option<Vec<(u64, Arc<FatPage>)>>>>,
 }
@@ -323,7 +323,7 @@ impl SyncController {
         });
     }
 
-    fn spawn_wal_writeout(wal_result_tx: Sender<anyhow::Result<()>>, bitbox: DB) {
+    fn spawn_wal_writeout(wal_result_tx: Sender<std::io::Result<()>>, bitbox: DB) {
         let bitbox = bitbox.clone();
         let tp = bitbox.shared.sync_tp.clone();
         tp.execute(move || {
@@ -337,7 +337,7 @@ impl SyncController {
     /// Wait for the pre-meta WAL file to be written out.
     ///
     /// Must be invoked by the sync thread. Blocking.
-    pub fn wait_pre_meta(&self) -> anyhow::Result<()> {
+    pub fn wait_pre_meta(&self) -> std::io::Result<()> {
         match self.wal_result_rx.recv() {
             Ok(wal_result) => wal_result,
             Err(_) => panic!("unexpected hungup"),
@@ -348,7 +348,7 @@ impl SyncController {
     ///
     /// Has to be called after the manifest is updated. Must be invoked by the sync
     /// thread. Blocking.
-    pub fn post_meta(&self, io_handle: IoHandle) -> anyhow::Result<()> {
+    pub fn post_meta(&self, io_handle: IoHandle) -> std::io::Result<()> {
         let ht_pages = self.ht_to_write.lock().take().unwrap();
         // Writeout the HT pages and truncate the WAL file.
         //

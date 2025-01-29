@@ -457,7 +457,7 @@ impl SyncController {
     /// with updating the manifest.
     ///
     /// This must be called after [`Self::begin_sync`].
-    pub fn wait_pre_meta(&mut self) -> anyhow::Result<SyncData> {
+    pub fn wait_pre_meta(&mut self) -> std::io::Result<SyncData> {
         self.inner.sync.bbn_fsync.wait()?;
         self.inner.sync.ln_fsync.wait()?;
 

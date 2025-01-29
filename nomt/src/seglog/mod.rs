@@ -277,7 +277,7 @@ impl SegmentedLog {
     /// # Panics
     ///
     /// The new live range must be a subset of the old live range.
-    pub fn prune_back(&mut self, new_start_live: RecordId) -> Result<()> {
+    pub fn prune_back(&mut self, new_start_live: RecordId) -> std::io::Result<()> {
         if new_start_live.is_nil() {
             self.start_live = RecordId::nil();
             self.end_live = RecordId::nil();
@@ -333,7 +333,7 @@ impl SegmentedLog {
     ///
     /// It's possible to return remove all items from the log, i.e. to reset the log to an empty
     /// state, by setting the new live end to zero. That would update the live range to `(0, 0)`.
-    pub fn prune_front(&mut self, new_end_live: RecordId) -> Result<()> {
+    pub fn prune_front(&mut self, new_end_live: RecordId) -> std::io::Result<()> {
         if new_end_live.is_nil() {
             self.start_live = RecordId::nil();
             self.end_live = RecordId::nil();
@@ -390,7 +390,7 @@ impl SegmentedLog {
         Ok(())
     }
 
-    fn remove_all_segments(&mut self) -> Result<()> {
+    fn remove_all_segments(&mut self) -> std::io::Result<()> {
         let _ = self.head_segment_writer.take();
 
         for segment in &self.segments {
@@ -602,7 +602,7 @@ impl Recovery {
 }
 
 /// Scans the segment file and returns the file offset of the end of the specified record.
-fn scan_record_end(path: &Path, end_live: RecordId) -> Result<Option<u64>> {
+fn scan_record_end(path: &Path, end_live: RecordId) -> std::io::Result<Option<u64>> {
     let mut seg_reader = SegmentFileReader::new(File::open(path)?, None)?;
     loop {
         let header = match seg_reader.read_header()? {
@@ -622,11 +622,15 @@ fn scan_record_end(path: &Path, end_live: RecordId) -> Result<Option<u64>> {
     }
 }
 
-fn truncate_head_segment(path: &Path, new_end_live: RecordId) -> Result<SegmentFileWriter> {
+fn truncate_head_segment(
+    path: &Path,
+    new_end_live: RecordId,
+) -> std::io::Result<SegmentFileWriter> {
     let end = match scan_record_end(path, new_end_live)? {
         None => {
-            return Err(anyhow::anyhow!(
-                "Failed to find the last live record in the head segment"
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                anyhow::anyhow!("Failed to find the last live record in the head segment"),
             ));
         }
         Some(offset) => offset,
