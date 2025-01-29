@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::{
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom, Write},
@@ -25,7 +24,11 @@ impl SegmentFileWriter {
         Self { file, file_size }
     }
 
-    pub fn write_header(&mut self, payload_length: u32, record_id: RecordId) -> Result<()> {
+    pub fn write_header(
+        &mut self,
+        payload_length: u32,
+        record_id: RecordId,
+    ) -> std::io::Result<()> {
         let mut header = [0u8; HEADER_SIZE as usize];
         {
             let mut header = RecordHeaderMut::new(&mut header);
@@ -37,7 +40,7 @@ impl SegmentFileWriter {
         Ok(())
     }
 
-    pub fn write_payload(&mut self, payload: &[u8]) -> Result<()> {
+    pub fn write_payload(&mut self, payload: &[u8]) -> std::io::Result<()> {
         self.file.write_all(payload)?;
         // Calculate the next aligned position.
         let record_alignment = RECORD_ALIGNMENT as u64;
@@ -55,7 +58,7 @@ impl SegmentFileWriter {
         Ok(())
     }
 
-    pub fn fsync(&mut self) -> Result<()> {
+    pub fn fsync(&mut self) -> std::io::Result<()> {
         self.file.sync_data()?;
         Ok(())
     }
@@ -85,7 +88,7 @@ pub struct SegmentFileReader {
 }
 
 impl SegmentFileReader {
-    pub fn new(file: File, file_size: Option<u64>) -> Result<Self> {
+    pub fn new(file: File, file_size: Option<u64>) -> std::io::Result<Self> {
         let file_size = if let Some(file_size) = file_size {
             file_size
         } else {
@@ -103,7 +106,7 @@ impl SegmentFileReader {
     /// Reads the header of the record.
     ///
     /// Returns `None` if the end of the file is reached.
-    pub fn read_header(&mut self) -> Result<Option<RecordHeader>> {
+    pub fn read_header(&mut self) -> std::io::Result<Option<RecordHeader>> {
         if self.next_pos.unwrap_or(0) >= self.file_size {
             return Ok(None);
         }
@@ -114,9 +117,13 @@ impl SegmentFileReader {
             // will read the next header.
             self.buf_reader
                 .seek(SeekFrom::Current(-(HEADER_SIZE as i64)))?;
-            return Err(anyhow::anyhow!(
-                "Record payload length is too large: {}",
-                header.payload_length()
+
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                anyhow::anyhow!(
+                    "Record payload length is too large: {}",
+                    header.payload_length()
+                ),
             ));
         }
         self.payload_length = Some(header.payload_length());
@@ -134,7 +141,7 @@ impl SegmentFileReader {
     /// Skips the payload of the record.
     ///
     /// Must be called after `read_header`.
-    pub fn skip_payload(&mut self) -> Result<()> {
+    pub fn skip_payload(&mut self) -> std::io::Result<()> {
         self.seek_next()?;
         Ok(())
     }
@@ -142,7 +149,7 @@ impl SegmentFileReader {
     /// Reads the payload of the record.
     ///
     /// Must be called after `read_header`.
-    pub fn read_payload(&mut self, payload_buf: &mut Vec<u8>) -> Result<()> {
+    pub fn read_payload(&mut self, payload_buf: &mut Vec<u8>) -> std::io::Result<()> {
         payload_buf.resize(self.payload_length.unwrap() as usize, 0);
         self.buf_reader.read_exact(payload_buf)?;
         self.seek_next()?;
@@ -152,14 +159,14 @@ impl SegmentFileReader {
     /// Positions the reader at the beginning of the next record.
     ///
     /// Must be called after `read_header`.
-    pub fn seek_next(&mut self) -> Result<()> {
+    pub fn seek_next(&mut self) -> std::io::Result<()> {
         self.buf_reader
             .seek(SeekFrom::Start(self.next_pos.unwrap()))?;
         Ok(())
     }
 
     /// Returns the current position of the reader.
-    pub fn pos(&mut self) -> Result<u64> {
+    pub fn pos(&mut self) -> std::io::Result<u64> {
         Ok(self.buf_reader.stream_position()?)
     }
 }

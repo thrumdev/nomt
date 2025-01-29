@@ -137,13 +137,13 @@ impl Meta {
         }
     }
 
-    pub fn read(page_pool: &PagePool, fd: &File) -> Result<Self> {
+    pub fn read(page_pool: &PagePool, fd: &File) -> std::io::Result<Self> {
         let page = io::read_page(page_pool, fd, 0)?;
         let meta = Meta::decode(&page[..META_SIZE]);
         Ok(meta)
     }
 
-    pub fn write(page_pool: &PagePool, fd: &File, meta: &Meta) -> Result<()> {
+    pub fn write(page_pool: &PagePool, fd: &File, meta: &Meta) -> std::io::Result<()> {
         let mut page = page_pool.alloc_fat_page();
         meta.encode_to(&mut page.as_mut()[..META_SIZE]);
         fd.write_all_at(&page[..], 0)?;

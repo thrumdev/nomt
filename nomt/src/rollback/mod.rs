@@ -262,7 +262,7 @@ impl Rollback {
         &self,
         new_start_live: Option<u64>,
         new_end_live: Option<u64>,
-    ) -> anyhow::Result<()> {
+    ) -> std::io::Result<()> {
         if let Some(new_start_live) = new_start_live {
             let mut seglog = self.shared.seglog.lock();
             seglog.prune_back(new_start_live.into())?;
@@ -279,7 +279,7 @@ pub struct SyncController {
     rollback: Rollback,
     wd: Arc<Mutex<Option<WriteoutData>>>,
     wd_cv: Arc<Condvar>,
-    post_meta: Arc<Mutex<Option<anyhow::Result<()>>>>,
+    post_meta: Arc<Mutex<Option<std::io::Result<()>>>>,
     post_meta_cv: Arc<Condvar>,
 }
 
@@ -343,7 +343,7 @@ impl SyncController {
     }
 
     /// Wait until the post-meta writeout completes.
-    pub fn wait_post_meta(&self) -> anyhow::Result<()> {
+    pub fn wait_post_meta(&self) -> std::io::Result<()> {
         let mut post_meta = self.post_meta.lock();
         self.post_meta_cv
             .wait_while(&mut post_meta, |post_meta| post_meta.is_none());
