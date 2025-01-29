@@ -353,6 +353,10 @@ impl<T: HashAlgorithm> Nomt<T> {
             None
         };
 
+        let prev_root = live_overlay
+            .parent_root()
+            .unwrap_or_else(|| self.root().into_inner());
+
         Session {
             store,
             merkle_updater: self.merkle_update_pool.begin::<T>(
@@ -360,9 +364,7 @@ impl<T: HashAlgorithm> Nomt<T> {
                 self.page_pool.clone(),
                 self.store.clone(),
                 live_overlay.clone(),
-                live_overlay
-                    .parent_root()
-                    .unwrap_or_else(|| self.root().into_inner()),
+                prev_root,
             ),
             metrics: self.metrics.clone(),
             rollback_delta,
@@ -371,6 +373,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             access_guard: params
                 .take_global_guard
                 .then(|| RwLock::read_arc(&self.access_lock)),
+            prev_root: Root(prev_root),
             _marker: std::marker::PhantomData,
         }
     }
@@ -513,6 +516,7 @@ pub struct Session<T: HashAlgorithm> {
     overlay: LiveOverlay,
     witness_mode: WitnessMode,
     access_guard: Option<ArcRwLockReadGuard<parking_lot::RawRwLock, ()>>,
+    prev_root: Root,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -614,6 +618,7 @@ impl<T: HashAlgorithm> Session<T> {
             merkle_output,
             rollback_delta,
             parent_overlay: self.overlay,
+            prev_root: self.prev_root,
             take_global_guard: self.access_guard.is_some(),
         }
     }
@@ -631,6 +636,7 @@ pub struct FinishedSession {
     merkle_output: merkle::Output,
     rollback_delta: Option<rollback::Delta>,
     parent_overlay: LiveOverlay,
+    prev_root: Root,
     // INTERNAL: whether to take a write guard while committing. always true except during rollback.
     take_global_guard: bool,
 }
@@ -660,6 +666,7 @@ impl FinishedSession {
         let values = self.value_transaction.into_iter().collect();
 
         self.parent_overlay.finish(
+            self.prev_root.into_inner(),
             self.merkle_output.root,
             updated_pages,
             values,
@@ -675,12 +682,17 @@ impl FinishedSession {
     /// The changeset may be invalidated if another competing session, overlay, or rollback was
     /// committed.
     pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> Result<(), anyhow::Error> {
-        // TODO: do a prev_root check or something to ensure continuity?
-
         let _write_guard = self.take_global_guard.then(|| nomt.access_lock.write());
 
         {
             let mut shared = nomt.shared.lock();
+            if shared.root != self.prev_root {
+                anyhow::bail!(
+                    "Changeset no longer valid (expected previous root {:?}, got {:?})",
+                    self.prev_root,
+                    shared.root
+                );
+            }
             shared.root = Root(self.merkle_output.root);
             shared.last_commit_marker = None;
         }
@@ -733,6 +745,13 @@ impl Overlay {
 
         {
             let mut shared = nomt.shared.lock();
+            if shared.root != self.prev_root() {
+                anyhow::bail!(
+                    "Changeset no longer valid (expected previous root {:?}, got {:?})",
+                    self.prev_root(),
+                    shared.root
+                );
+            }
             shared.root = root;
             shared.last_commit_marker = Some(marker);
         }

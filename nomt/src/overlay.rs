@@ -40,6 +40,11 @@ impl Overlay {
         Root(self.inner.root)
     }
 
+    /// Get the previous root of this overlay.
+    pub(super) fn prev_root(&self) -> Root {
+        Root(self.inner.prev_root)
+    }
+
     /// Check whether the parent of this overlay matches the provided marker.
     /// If the provided marker is `None`, then this checks that this overlay doesn't have a parent.
     pub(super) fn parent_matches_marker(&self, marker: Option<&OverlayMarker>) -> bool {
@@ -74,6 +79,7 @@ impl Overlay {
 }
 
 struct OverlayInner {
+    prev_root: Node,
     root: Node,
     index: Index,
     data: Arc<Data>,
@@ -362,6 +368,7 @@ impl LiveOverlay {
     /// Finish this overlay and transform it into a frozen [`Overlay`].
     pub(super) fn finish(
         self,
+        prev_root: Node,
         root: Node,
         page_changes: HashMap<PageId, DirtyPage>,
         value_changes: HashMap<KeyPath, ValueChange>,
@@ -392,6 +399,7 @@ impl LiveOverlay {
         Overlay {
             inner: Arc::new(OverlayInner {
                 index,
+                prev_root,
                 root,
                 data: Arc::new(Data {
                     pages: page_changes,
@@ -448,18 +456,25 @@ mod tests {
 
     #[test]
     fn not_ancestor() {
-        let a =
-            LiveOverlay::new(None)
-                .unwrap()
-                .finish([1; 32], HashMap::new(), HashMap::new(), None);
-        let a1 =
-            LiveOverlay::new(None)
-                .unwrap()
-                .finish([2; 32], HashMap::new(), HashMap::new(), None);
+        let a = LiveOverlay::new(None).unwrap().finish(
+            [0; 32],
+            [1; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        let a1 = LiveOverlay::new(None).unwrap().finish(
+            [1; 32],
+            [2; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
 
         let mut ancestors = VecDeque::new();
         ancestors.push_front(a);
         let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [2; 32],
             [3; 32],
             HashMap::new(),
             HashMap::new(),
@@ -476,14 +491,18 @@ mod tests {
 
     #[test]
     fn incomplete_ancestors() {
-        let a =
-            LiveOverlay::new(None)
-                .unwrap()
-                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+        let a = LiveOverlay::new(None).unwrap().finish(
+            [0; 32],
+            [1; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
 
         let mut ancestors = VecDeque::new();
         ancestors.push_front(a);
         let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [1; 32],
             [2; 32],
             HashMap::new(),
             HashMap::new(),
@@ -491,6 +510,7 @@ mod tests {
         );
         ancestors.push_front(b);
         let c = LiveOverlay::new(&ancestors).unwrap().finish(
+            [2; 32],
             [3; 32],
             HashMap::new(),
             HashMap::new(),
@@ -520,14 +540,18 @@ mod tests {
 
     #[test]
     fn drop_propagation() {
-        let a =
-            LiveOverlay::new(None)
-                .unwrap()
-                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+        let a = LiveOverlay::new(None).unwrap().finish(
+            [0; 32],
+            [1; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
 
         let mut ancestors = VecDeque::new();
         ancestors.push_front(a);
         let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [1; 32],
             [2; 32],
             HashMap::new(),
             HashMap::new(),
@@ -541,14 +565,18 @@ mod tests {
 
     #[test]
     fn commit_overrides_drop_propagation() {
-        let a =
-            LiveOverlay::new(None)
-                .unwrap()
-                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+        let a = LiveOverlay::new(None).unwrap().finish(
+            [0; 32],
+            [1; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
 
         let mut ancestors = VecDeque::new();
         ancestors.push_front(a);
         let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [1; 32],
             [2; 32],
             HashMap::new(),
             HashMap::new(),
@@ -563,14 +591,18 @@ mod tests {
 
     #[test]
     fn committed_ancestors_considered_complete() {
-        let a =
-            LiveOverlay::new(None)
-                .unwrap()
-                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+        let a = LiveOverlay::new(None).unwrap().finish(
+            [0; 32],
+            [1; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
 
         let mut ancestors = VecDeque::new();
         ancestors.push_front(a);
         let b = LiveOverlay::new(&ancestors).unwrap().finish(
+            [1; 32],
             [2; 32],
             HashMap::new(),
             HashMap::new(),
@@ -578,6 +610,7 @@ mod tests {
         );
         ancestors.push_front(b);
         let c = LiveOverlay::new(&ancestors).unwrap().finish(
+            [2; 32],
             [3; 32],
             HashMap::new(),
             HashMap::new(),
@@ -615,13 +648,13 @@ mod tests {
         let value_map = vec![(key1, value1a)].into_iter().collect();
         let a = LiveOverlay::new(None)
             .unwrap()
-            .finish([1; 32], page_map, value_map, None);
+            .finish([0; 32], [1; 32], page_map, value_map, None);
 
         let page_map = vec![(ROOT_PAGE_ID, page1b)].into_iter().collect();
         let value_map = vec![(key1, value1b)].into_iter().collect();
         let b = LiveOverlay::new(Some(&a))
             .unwrap()
-            .finish([2; 32], page_map, value_map, None);
+            .finish([1; 32], [2; 32], page_map, value_map, None);
 
         let c = LiveOverlay::new([&b, &a]).unwrap();
 
@@ -681,7 +714,7 @@ mod tests {
             let value_map = [(key, value)].into_iter().collect();
             let overlay = LiveOverlay::new(&ancestors)
                 .unwrap()
-                .finish([1; 32], page_map, value_map, None);
+                .finish([0; 32], [1; 32], page_map, value_map, None);
             ancestors.push_front(overlay);
         }
 
@@ -721,12 +754,14 @@ mod tests {
         );
 
         let a = LiveOverlay::new(None).unwrap().finish(
+            [0; 32],
             [1; 32],
             vec![(ROOT_PAGE_ID, page)].into_iter().collect(),
             HashMap::new(),
             None,
         );
         let b = LiveOverlay::new([&a]).unwrap().finish(
+            [1; 32],
             [2; 32],
             vec![(ROOT_PAGE_ID, page2)].into_iter().collect(),
             HashMap::new(),
@@ -787,20 +822,23 @@ mod tests {
             .collect();
         let a = LiveOverlay::new(None)
             .unwrap()
-            .finish([1; 32], page_map, value_map, None);
+            .finish([0; 32], [1; 32], page_map, value_map, None);
 
         let page_map = vec![(page_id_2.clone(), page_2b)].into_iter().collect();
         let value_map = vec![(key_2, val_2b.clone())].into_iter().collect();
         let b = LiveOverlay::new([&a])
             .unwrap()
-            .finish([1; 32], page_map, value_map, None);
+            .finish([0; 32], [1; 32], page_map, value_map, None);
 
         a.mark_committed();
 
-        let c =
-            LiveOverlay::new([&b])
-                .unwrap()
-                .finish([1; 32], HashMap::new(), HashMap::new(), None);
+        let c = LiveOverlay::new([&b]).unwrap().finish(
+            [0; 32],
+            [1; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
 
         // ensure everything from seqn 0 has been pruned.
         assert_eq!(c.inner.index.pages_by_seqn[0].0, 1);
