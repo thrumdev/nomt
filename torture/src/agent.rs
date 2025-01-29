@@ -174,6 +174,7 @@ async fn crash_task(task: impl Future<Output = ()> + Send + 'static, crash_delay
     let task_1 = tokio::spawn(async move {
         barrier_1.wait().await;
         let crash_delay = Duration::from_nanos(crash_delay);
+        //let crash_delay = Duration::from_millis(crash_delay);
         sleep(crash_delay).await;
         tracing::info!("aborting after {}ms", crash_delay.as_millis());
         std::process::abort();
