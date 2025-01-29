@@ -311,6 +311,19 @@ impl<T: HashAlgorithm> Nomt<T> {
         self.store.sync_seqn()
     }
 
+    /// Whether the database is poisoned.
+    ///
+    /// A database becomes poisoned when an error occurred during a commit operation.
+    ///
+    /// From this point on, the database is in an inconsistent state and should be considered
+    /// read-only. Any further modifying operations will return an error.
+    ///
+    /// In order to recover from a poisoned database, the application should discard this instance
+    /// and create a new one.
+    pub fn is_poisoned(&self) -> bool {
+        self.store.is_poisoned()
+    }
+
     /// Create a new [`Session`] object with the given parameters.
     ///
     /// The [`Session`] is a read-only handle on the database and is used to create a changeset to

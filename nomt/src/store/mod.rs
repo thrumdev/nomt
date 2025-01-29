@@ -17,7 +17,7 @@ use nomt_core::{page_id::PageId, trie::KeyPath};
 use parking_lot::Mutex;
 use std::{
     fs::{File, OpenOptions},
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 #[cfg(target_os = "linux")]
@@ -46,6 +46,7 @@ struct Shared {
     meta_fd: File,
     #[allow(unused)]
     flock: flock::Flock,
+    poisoned: AtomicBool,
 
     // Retained for the lifetime of the store.
     _db_dir_fd: Arc<File>,
@@ -199,8 +200,15 @@ impl Store {
                 _db_dir_fd: db_dir_fd,
                 meta_fd,
                 flock,
+                poisoned: false.into(),
             }),
         })
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.shared
+            .poisoned
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn sync_seqn(&self) -> u32 {
@@ -278,7 +286,15 @@ impl Store {
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
-        sync.sync(
+        if self
+            .shared
+            .poisoned
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("Store is poisoned due to prior error");
+        }
+
+        if let Err(e) = sync.sync(
             &self.shared,
             value_tx,
             self.shared.pages.clone(),
@@ -286,8 +302,12 @@ impl Store {
             self.shared.rollback.clone(),
             page_cache,
             updated_pages,
-        )
-        .unwrap();
+        ) {
+            self.shared
+                .poisoned
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(e);
+        }
         Ok(())
     }
 }

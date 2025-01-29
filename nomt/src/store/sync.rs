@@ -51,9 +51,8 @@ impl Sync {
             rollback.begin_sync();
         }
 
-        // TODO: comprehensive error handling is coming later.
-        bitbox_sync.wait_pre_meta().unwrap();
-        let beatree_meta_wd = beatree_sync.wait_pre_meta().unwrap();
+        bitbox_sync.wait_pre_meta()?;
+        let beatree_meta_wd = beatree_sync.wait_pre_meta()?;
         let (rollback_start_live, rollback_end_live) = match rollback_sync {
             Some(ref rollback) => rollback.wait_pre_meta(),
             None => (0, 0),
@@ -90,8 +89,7 @@ impl Sync {
         beatree_sync.post_meta();
 
         if let Some(ref rollback) = rollback_sync {
-            // TODO: comprehensive error handling is coming later.
-            rollback.wait_post_meta().unwrap();
+            rollback.wait_post_meta()?;
         }
 
         Ok(())
