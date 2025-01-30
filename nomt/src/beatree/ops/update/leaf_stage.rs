@@ -547,22 +547,28 @@ fn run_worker(
 
     for (key, op) in &changeset[worker_params.op_range.clone()] {
         // ensure key is in scope for leaf updater. if not, digest it. merge rightwards until
-        //    done _or_ key is in scope.
+        // done _or_ key is in scope.
         while !leaf_updater.is_in_scope(&key) {
+            // After `digest`, some changed items could have been produced and they could be used
+            // to respond to the left neighbor. However, we should only respond if we are sure that
+            // we will not introduce changed items with smaller separators later on.
             let k = if let LeafDigestResult::NeedsMerge(cutoff) =
                 leaf_updater.digest(&mut new_leaf_state)
             {
+                // If we are dealing with a NeedsMerge, there is a high probability that the leaf updater
+                // has a new pending leaf which still needs to be constructed with a separator smaller
+                // than the last entry in the `leaves_tracker`.
                 cutoff
             } else {
+                // If the `leaf_updater` has finished the last digest, we are safe to try to respond.
+                try_answer_left_neighbor(
+                    &mut pending_left_request,
+                    &mut worker_params,
+                    &mut new_leaf_state.leaves_tracker,
+                    has_finished_workload,
+                );
                 *key
             };
-
-            try_answer_left_neighbor(
-                &mut pending_left_request,
-                &mut worker_params,
-                &mut new_leaf_state.leaves_tracker,
-                has_finished_workload,
-            );
 
             has_extended_range = false;
             if worker_params.range.high.map_or(false, |high| k >= high) {
@@ -595,13 +601,6 @@ fn run_worker(
     }
 
     while let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut new_leaf_state) {
-        try_answer_left_neighbor(
-            &mut pending_left_request,
-            &mut worker_params,
-            &mut new_leaf_state.leaves_tracker,
-            has_finished_workload,
-        );
-
         has_extended_range = false;
         if worker_params
             .range
