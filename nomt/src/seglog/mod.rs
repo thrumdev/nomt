@@ -176,7 +176,7 @@ pub struct SegmentedLog {
 }
 
 impl SegmentedLog {
-    /// Append a record to the log.
+    /// Append a record to the log and return its ID.
     ///
     /// After this function returned, the data is guaranteed to be persisted.
     pub fn append(&mut self, data: &[u8]) -> Result<RecordId> {
@@ -187,7 +187,7 @@ impl SegmentedLog {
             ));
         }
 
-        let record_id = self.gen_record_id();
+        let record_id = self.end_live.next();
 
         // If the head segment is full or doesn't exist, create a new one.
         let root_dir_fsync = match self.head_segment_writer {
@@ -210,6 +210,9 @@ impl SegmentedLog {
         writer.write_header(data.len() as u32, record_id)?;
         writer.write_payload(data)?;
         writer.fsync()?;
+
+        // Once the write succeeded, update the live range.
+        self.end_live = record_id;
         if self.start_live.is_nil() {
             self.start_live = record_id;
         }
@@ -253,13 +256,6 @@ impl SegmentedLog {
     fn gen_segment_id(&self) -> u32 {
         let last_segment_id = self.segments.last().map(|s| s.id).unwrap_or(0);
         last_segment_id.wrapping_add(1)
-    }
-
-    /// Generate a new record ID and update the live end.
-    fn gen_record_id(&mut self) -> RecordId {
-        let id = self.end_live.next();
-        self.end_live = id;
-        id
     }
 
     /// Prunes the items from the back of the log (oldest records).
