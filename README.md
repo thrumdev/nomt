@@ -10,6 +10,22 @@ NOMT is designed to take advantage of hardware improvements in Solid State Drive
 
 NOMT exposes a many-readers-one-writer API organized around batch transactions referred to as `Session`s. Predictable performance in a metered execution environment is a key goal of NOMT, and therefore only one `Session` may be live at a time.
 
+## Project Structure
+
+<pre>
+NOMT: Project Root.
+├──<a href="./benchtop">benchtop</a>: A benchmarking tool for NOMT.
+|--<a href="./core">core</a>: Core logic, primarily for verifying and updating the NOMT.
+|--<a href="./docs">docs</a>: Documentation
+|--<a href="./fuzz">fuzz</a>: Fuzzing suite.
+├──<a href="./examples">examples</a>: Various examples of using NOMT.
+│   ├── <a href="./examples/commit_batch">commit_batch</a>: Demonstration of a simple commit.
+│   ├── <a href="./examples/read_value">read_value</a>: Reading a value from the NOMT.
+│   ├── <a href="./examples/witness_verification">witness_verification</a>: Demonstration of how to verify a witness in a light-client setting.
+|--<a href="./nomt">nomt</a>: Implementation of the NOMT database.
+|──<a href="./torture">torture</a>: Extensive testing suite for NOMT.
+</pre>
+
 ## Architecture
 
 Internally, NOMT consists of two parallel stores, Beatree and Bitbox. Beatree stores raw key-value pairs and is based around a B-Tree variant optimized for stable, fast random access patterns and high-entropy keys. Bitbox stores a custom sparse binary merkle tree in an on-disk hashtable in a format amenable to SSDs.
