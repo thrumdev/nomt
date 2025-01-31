@@ -277,7 +277,7 @@ impl Rollback {
 
 pub struct SyncController {
     rollback: Rollback,
-    wd: Arc<Mutex<Option<WriteoutData>>>,
+    wd: Arc<Mutex<Option<std::io::Result<WriteoutData>>>>,
     wd_cv: Arc<Condvar>,
     post_meta: Arc<Mutex<Option<std::io::Result<()>>>>,
     post_meta_cv: Arc<Condvar>,
@@ -307,8 +307,17 @@ impl SyncController {
         let wd = self.wd.clone();
         let wd_cv = self.wd_cv.clone();
         tp.execute(move || {
-            let writeout_data = rollback.writeout_start();
-            let _ = wd.lock().replace(writeout_data);
+            let writeout_data_or_panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rollback.writeout_start()
+                }))
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        anyhow::anyhow!("panic in rollback begin sync: {:?}", e),
+                    )
+                });
+            let _ = wd.lock().replace(writeout_data_or_panic);
             wd_cv.notify_one();
         });
     }
@@ -317,12 +326,15 @@ impl SyncController {
     /// `(start_live, end_live)`.
     ///
     /// This should be called by the sync thread. Blocking.
-    pub fn wait_pre_meta(&self) -> (u64, u64) {
+    pub fn wait_pre_meta(&self) -> std::io::Result<(u64, u64)> {
         let mut wd = self.wd.lock();
         self.wd_cv.wait_while(&mut wd, |wd| wd.is_none());
-        // UNWRAP: we checked above that `wd` is not `None`.
-        let wd = wd.as_ref().unwrap();
-        (wd.rollback_start_live, wd.rollback_end_live)
+        if let Some(Err(err)) = wd.take_if(|res| res.is_err()) {
+            return Err(err);
+        }
+        // UNWRAPs: we checked above that `wd` is not `None` or `Some(Err(..))`.
+        let wd = wd.as_ref().unwrap().as_ref().unwrap();
+        Ok((wd.rollback_start_live, wd.rollback_end_live))
     }
 
     /// This should be called after the meta has been updated.
@@ -330,7 +342,8 @@ impl SyncController {
     /// This function doesn't block.
     pub fn post_meta(&self) {
         let tp = self.rollback.shared.sync_tp.clone();
-        let wd = self.wd.lock().take().unwrap();
+        // UNWRAPs: `wd` is being set to `Some(Ok(...))` in `begin_sync`.
+        let wd = self.wd.lock().take().unwrap().unwrap();
         let post_meta = self.post_meta.clone();
         let post_meta_cv = self.post_meta_cv.clone();
         let rollback = self.rollback.clone();

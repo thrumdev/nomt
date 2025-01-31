@@ -54,7 +54,7 @@ impl Sync {
         bitbox_sync.wait_pre_meta()?;
         let beatree_meta_wd = beatree_sync.wait_pre_meta()?;
         let (rollback_start_live, rollback_end_live) = match rollback_sync {
-            Some(ref rollback) => rollback.wait_pre_meta(),
+            Some(ref rollback) => rollback.wait_pre_meta()?,
             None => (0, 0),
         };
 
