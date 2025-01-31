@@ -1,7 +1,7 @@
 use allocator::{Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use imbl::OrdMap;
 
 use leaf::node::MAX_LEAF_VALUE_SIZE;
@@ -169,6 +169,7 @@ impl Tree {
         //
         // That will exclude any other syncs from happening. This is a long running operation.
         let sync = self.sync.lock_arc();
+        let (begin_sync_result_tx, begin_sync_result_rx) = crossbeam_channel::bounded(1);
         SyncController {
             inner: Arc::new(SharedSyncController {
                 sync,
@@ -178,6 +179,8 @@ impl Tree {
                 bbn_index: Mutex::new(None),
                 pre_swap_rx: Mutex::new(None),
             }),
+            begin_sync_result_tx: Some(begin_sync_result_tx),
+            begin_sync_result_rx,
         }
     }
 
@@ -300,6 +303,8 @@ impl Tree {
             //   available and reachable from the old index
             // + All necessary page writes will be issued to the store and their completion waited
             //   upon. However, these changes are not reflected until `finish_sync`.
+            //
+            // UNWRAP: `ops::update` is always expected to succed.
             ops::update(
                 staged_changeset.clone(),
                 bbn_index,
@@ -408,6 +413,10 @@ pub fn create(db_dir: impl AsRef<Path>) -> anyhow::Result<()> {
 /// should be discarded.
 // TODO: error handling is coming in a follow up.
 pub struct SyncController {
+    // The channel to send the result of the begin sync task. Option is to allow `take`.
+    begin_sync_result_tx: Option<Sender<std::io::Result<()>>>,
+    // The channel to receive the result of the begin sync task.
+    begin_sync_result_rx: Receiver<std::io::Result<()>>,
     inner: Arc<SharedSyncController>,
 }
 
@@ -431,8 +440,9 @@ impl SyncController {
         changeset: impl IntoIterator<Item = (Key, ValueChange)> + Send + 'static,
     ) {
         let inner = self.inner.clone();
-        self.inner.sync.tp.execute(move || {
+        let begin_sync_task = move || {
             Tree::commit(&inner.shared, changeset);
+
             let (out_meta, out_bbn_index, out_pre_swap_rx) =
                 Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_counter);
 
@@ -450,6 +460,20 @@ impl SyncController {
 
             inner.sync.bbn_fsync.fsync();
             inner.sync.ln_fsync.fsync();
+        };
+
+        // UNWRAP: safe because begin_sync is called only once.
+        let begin_sync_result_tx = self.begin_sync_result_tx.take().unwrap();
+        self.inner.sync.tp.execute(move || {
+            let success_or_panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| begin_sync_task()))
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            anyhow::anyhow!("panic in beatree begin sync: {:?}", e),
+                        )
+                    });
+            let _ = begin_sync_result_tx.send(success_or_panic);
         });
     }
 
@@ -458,6 +482,8 @@ impl SyncController {
     ///
     /// This must be called after [`Self::begin_sync`].
     pub fn wait_pre_meta(&mut self) -> std::io::Result<SyncData> {
+        // UNWRAP: beatree begin sync logic is not expected to hungup.
+        self.begin_sync_result_rx.recv().unwrap()?;
         self.inner.sync.bbn_fsync.wait()?;
         self.inner.sync.ln_fsync.wait()?;
 
