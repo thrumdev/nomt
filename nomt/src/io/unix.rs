@@ -1,7 +1,7 @@
 use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender};
 
-pub fn start_io_worker(io_workers: usize, _iopoll: bool) -> Sender<IoPacket> {
+pub fn start_io_worker(io_workers: usize) -> Sender<IoPacket> {
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
     for _ in 0..io_workers {
