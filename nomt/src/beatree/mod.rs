@@ -230,7 +230,7 @@ impl Tree {
         sync: &Sync,
         shared: &Arc<RwLock<Shared>>,
         read_transaction_counter: &ReadTransactionCounter,
-    ) -> (SyncData, Index, Receiver<()>) {
+    ) -> (SyncData, Index, Receiver<std::io::Result<()>>) {
         // Take the shared lock. Briefly.
         let staged_changeset;
         let bbn_index;
@@ -426,7 +426,7 @@ struct SharedSyncController {
     read_transaction_counter: ReadTransactionCounter,
     sync_data: Mutex<Option<SyncData>>,
     bbn_index: Mutex<Option<Index>>,
-    pre_swap_rx: Mutex<Option<Receiver<()>>>,
+    pre_swap_rx: Mutex<Option<Receiver<std::io::Result<()>>>>,
 }
 
 impl SyncController {
@@ -496,15 +496,16 @@ impl SyncController {
     ///
     /// Has to be called after the manifest is updated. Must be invoked by the sync
     /// thread. Blocking.
-    pub fn post_meta(&mut self) {
+    pub fn post_meta(&mut self) -> std::io::Result<()> {
         let pre_swap_rx = self.inner.pre_swap_rx.lock().take().unwrap();
 
-        // UNWRAP: the offloaded non-critical sync work is infallible and may fail only if it
-        // panics.
-        let () = pre_swap_rx.recv().unwrap();
+        // UNWRAP: the offloaded non-critical sync work is infallible
+        // and may fail only if it panics.
+        pre_swap_rx.recv().unwrap()?;
 
         let bbn_index = self.inner.bbn_index.lock().take().unwrap();
         Tree::finish_sync(&self.inner.shared, bbn_index);
+        Ok(())
     }
 }
 

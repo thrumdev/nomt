@@ -86,7 +86,7 @@ impl Sync {
         }
 
         bitbox_sync.post_meta(shared.io_pool.make_handle())?;
-        beatree_sync.post_meta();
+        beatree_sync.post_meta()?;
 
         if let Some(ref rollback) = rollback_sync {
             rollback.wait_post_meta()?;
