@@ -406,7 +406,6 @@ pub fn create(db_dir: impl AsRef<Path>) -> anyhow::Result<()> {
 ///
 /// If [`Self::wait_pre_meta`] returns an error, the sync process has failed and the controller
 /// should be discarded.
-// TODO: error handling is coming in a follow up.
 pub struct SyncController {
     inner: Arc<SharedSyncController>,
 }
