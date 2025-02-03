@@ -306,7 +306,7 @@ impl Store {
             self.shared
                 .poisoned
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            anyhow::bail!(e);
+            return Err(e);
         }
         Ok(())
     }

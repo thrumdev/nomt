@@ -37,7 +37,7 @@ impl Sync {
         rollback: Option<rollback::Rollback>,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
-    ) -> std::io::Result<()> {
+    ) -> anyhow::Result<()> {
         self.sync_seqn += 1;
         let sync_seqn = self.sync_seqn;
 

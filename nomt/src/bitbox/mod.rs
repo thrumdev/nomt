@@ -3,6 +3,7 @@ use nomt_core::page_id::PageId;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use std::{
     collections::HashSet,
+    fmt,
     fs::File,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
@@ -27,6 +28,27 @@ mod ht_file;
 mod meta_map;
 mod wal;
 pub(crate) mod writeout;
+
+/// An error that can happen during bitbox's sync.
+#[derive(Debug)]
+pub enum SyncError {
+    /// During assigning a bucket to a page, the allocator gave up, meaning that the occupancy rate
+    /// is too high.
+    BucketExhaustion,
+    /// An error occurred while writing to the WAL file.
+    WalWrite(std::io::Error),
+}
+
+impl fmt::Display for SyncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyncError::BucketExhaustion => write!(f, "bucket exhaustion"),
+            SyncError::WalWrite(e) => write!(f, "wal write error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
 
 /// The index of a bucket within the map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,10 +184,13 @@ impl DB {
         page_pool: &PagePool,
         changes: impl IntoIterator<Item = (PageId, DirtyPage)>,
         wal_blob_builder: &mut WalBlobBuilder,
-    ) -> (
-        Vec<(u64, Arc<FatPage>)>,
-        Vec<(PageId, Option<(Page, BucketIndex)>)>,
-    ) {
+    ) -> Result<
+        (
+            Vec<(u64, Arc<FatPage>)>,
+            Vec<(PageId, Option<(Page, BucketIndex)>)>,
+        ),
+        SyncError,
+    > {
         wal_blob_builder.reset(sync_seqn);
 
         let mut meta_map = self.shared.meta_map.write();
@@ -196,22 +221,26 @@ impl DB {
             } else {
                 // Allocate the bucket, if one is necessary.
                 let (meta_map_changed, bucket) = match dirty_page.bucket {
-                    BucketInfo::Known(bucket) => (false, bucket.0),
+                    BucketInfo::Known(bucket) => (false, bucket),
                     BucketInfo::FreshWithNoDependents => {
-                        let bucket = allocate_bucket(&page_id, &mut meta_map, &self.shared.seed);
-                        (true, bucket.0)
+                        let bucket = allocate_bucket(&page_id, &mut meta_map, &self.shared.seed)
+                            .ok_or(SyncError::BucketExhaustion)?;
+                        (true, bucket)
                     }
                     BucketInfo::FreshOrDependent(maybe_bucket) => match maybe_bucket.get() {
-                        Some(bucket) => (false, bucket.0),
+                        Some(bucket) => (false, bucket),
                         None => {
                             let bucket =
-                                allocate_bucket(&page_id, &mut meta_map, &self.shared.seed);
+                                allocate_bucket(&page_id, &mut meta_map, &self.shared.seed)
+                                    .ok_or(SyncError::BucketExhaustion)?;
                             // Propagate changes to dependents.
                             maybe_bucket.set(bucket);
-                            (true, bucket.0)
+                            (true, bucket)
                         }
                     },
                 };
+
+                let BucketIndex(bucket) = bucket;
 
                 // update meta map with new info
                 let hash = hash_page_id(&page_id, &self.shared.seed);
@@ -266,27 +295,27 @@ impl DB {
 
         wal_blob_builder.finalize();
 
-        (ht_pages, cache_updates)
+        Ok((ht_pages, cache_updates))
     }
 }
 
 pub struct SyncController {
     db: DB,
-    /// The channel to send the result of the WAL writeout. Option is to allow `take`.
-    wal_result_tx: Option<Sender<std::io::Result<()>>>,
-    /// The channel to receive the result of the WAL writeout.
-    wal_result_rx: Receiver<std::io::Result<()>>,
+    /// The channel to send the result of the pre-meta sync errors. Option is to allow `take`.
+    pre_meta_result_tx: Option<Sender<Result<(), SyncError>>>,
+    /// he channel to receive the result of the pre-meta sync errors.
+    pre_meta_result_rx: Receiver<Result<(), SyncError>>,
     /// The pages along with their page numbers to write out to the HT file.
     ht_to_write: Arc<Mutex<Option<Vec<(u64, Arc<FatPage>)>>>>,
 }
 
 impl SyncController {
     fn new(db: DB) -> Self {
-        let (wal_result_tx, wal_result_rx) = crossbeam_channel::bounded(1);
+        let (pre_meta_result_tx, pre_meta_result_rx) = crossbeam_channel::bounded(1);
         Self {
             db,
-            wal_result_tx: Some(wal_result_tx),
-            wal_result_rx,
+            pre_meta_result_tx: Some(pre_meta_result_tx),
+            pre_meta_result_rx,
             ht_to_write: Arc::new(Mutex::new(None)),
         }
     }
@@ -305,16 +334,31 @@ impl SyncController {
         let ht_to_write = self.ht_to_write.clone();
         let wal_blob_builder = self.db.shared.wal_blob_builder.clone();
         // UNWRAP: safe because begin_sync is called only once.
-        let wal_result_tx = self.wal_result_tx.take().unwrap();
+        let pre_meta_result_tx = self.pre_meta_result_tx.take().unwrap();
         self.db.shared.sync_tp.execute(move || {
             let mut wal_blob_builder = wal_blob_builder.lock();
-            let (ht_pages, cache_updates) =
-                bitbox.prepare_sync(sync_seqn, &page_pool, updated_pages, &mut *wal_blob_builder);
+            let (ht_pages, cache_updates) = match bitbox.prepare_sync(
+                sync_seqn,
+                &page_pool,
+                updated_pages,
+                &mut *wal_blob_builder,
+            ) {
+                Ok(v) => v,
+                Err(SyncError::BucketExhaustion) => {
+                    // Bail the commit.
+                    //
+                    // The sync coordinator will poison the database and all further commits will
+                    // be rejected. Therefore, there is no need to perform cleanup.
+                    let _ = pre_meta_result_tx.send(Err(SyncError::BucketExhaustion));
+                    return;
+                }
+                Err(SyncError::WalWrite(_)) => unreachable!(),
+            };
             drop(wal_blob_builder);
 
             // Set the hash-table pages before spawning WAL writeout so they don't race with it.
             *ht_to_write.lock() = Some(ht_pages);
-            Self::spawn_wal_writeout(wal_result_tx, bitbox);
+            Self::spawn_wal_writeout(pre_meta_result_tx, bitbox);
 
             // perform cache updates: insert changes and evict old pages.
             // evict and drop old pages outside of the critical path.
@@ -323,22 +367,25 @@ impl SyncController {
         });
     }
 
-    fn spawn_wal_writeout(wal_result_tx: Sender<std::io::Result<()>>, bitbox: DB) {
+    fn spawn_wal_writeout(pre_meta_result_tx: Sender<Result<(), SyncError>>, bitbox: DB) {
         let bitbox = bitbox.clone();
         let tp = bitbox.shared.sync_tp.clone();
         tp.execute(move || {
             let wal_blob_builder = bitbox.shared.wal_blob_builder.lock();
             let wal_slice = wal_blob_builder.as_slice();
-            let wal_result = writeout::write_wal(&bitbox.shared.wal_fd, wal_slice);
-            let _ = wal_result_tx.send(wal_result);
+            let wal_result =
+                writeout::write_wal(&bitbox.shared.wal_fd, wal_slice).map_err(SyncError::WalWrite);
+            let _ = pre_meta_result_tx.send(wal_result);
         });
     }
 
-    /// Wait for the pre-meta WAL file to be written out.
+    /// Wait for the pre-meta operations to complete.
+    ///
+    /// This includes WAL file to be written out.
     ///
     /// Must be invoked by the sync thread. Blocking.
-    pub fn wait_pre_meta(&self) -> std::io::Result<()> {
-        match self.wal_result_rx.recv() {
+    pub fn wait_pre_meta(&self) -> Result<(), SyncError> {
+        match self.pre_meta_result_rx.recv() {
             Ok(wal_result) => wal_result,
             Err(_) => panic!("unexpected hungup"),
         }
@@ -598,18 +645,31 @@ enum PageLoadState {
     Submitted,
 }
 
-fn allocate_bucket(page_id: &PageId, meta_map: &mut MetaMap, seed: &[u8; 16]) -> BucketIndex {
+/// Allocates a bucket in the meta map for the given page ID.
+///
+/// Returns the index of the allocated bucket.
+///
+/// This performs a limited number of attempts. In case too many attempts have been made and the
+/// allocator gave up returns `None`.
+fn allocate_bucket(
+    page_id: &PageId,
+    meta_map: &mut MetaMap,
+    seed: &[u8; 16],
+) -> Option<BucketIndex> {
     let mut probe_seq = ProbeSequence::new(page_id, &meta_map, seed);
 
     let mut i = 0;
     loop {
         i += 1;
-        assert!(i < 10000, "hash-table full");
+        if i >= 10000 {
+            // Give up.
+            return None;
+        }
         match probe_seq.next(&meta_map) {
             ProbeResult::PossibleHit(_) => continue,
             ProbeResult::Tombstone(bucket) | ProbeResult::Empty(bucket) => {
                 meta_map.set_full(bucket as usize, probe_seq.hash);
-                return BucketIndex(bucket);
+                return Some(BucketIndex(bucket));
             }
         }
     }
