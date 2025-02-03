@@ -36,7 +36,7 @@ impl KeyValueChange {
 }
 
 /// The parameters for the [`ToAgent::Init`] message.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InitPayload {
     /// ID string that can be used to identify the agent. This is used for logging and debugging.
     pub id: String,
@@ -44,6 +44,11 @@ pub struct InitPayload {
     ///
     /// The directory must exist.
     pub workdir: String,
+}
+
+/// The parameters for the [`ToAgent::Open`] message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpenPayload {
     /// The seed that should be used for bitbox.
     ///
     /// Only used upon creation a new NOMT db.
@@ -94,8 +99,11 @@ pub struct Envelope<T> {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ToAgent {
     /// The first message sent by the supervisor to the child process. Contains the parameters the
-    /// supervisor expects the child to use.
+    /// supervisor expects the child to use. Usually sent only once per child process.
     Init(InitPayload),
+    /// The supervisor sends this message to the child process to instruct it to open a database
+    /// with the given parameters.
+    Open(OpenPayload),
     /// The supervisor sends this message to the child process to indicate that the child should
     /// commit.
     Commit(CommitPayload),
@@ -123,13 +131,39 @@ pub enum CommitOutcome {
     UnknownFailure,
 }
 
+/// Elaboration on the agent initialization result inside of [`ToSupervisor::InitResponse`].
+#[derive(Debug, Serialize, Deserialize)]
+pub enum InitOutcome {
+    /// The agent successfully initialized.
+    Success,
+    /// The agent failed to initialize because the workdir does not exist.
+    ///
+    /// This is the supervisor's failure.
+    WorkdirDoesNotExist,
+}
+
+/// Elaboration on the opening the database result inside of [`ToSupervisor::OpenResponse`].
+#[derive(Debug, Serialize, Deserialize)]
+pub enum OpenOutcome {
+    /// The agent successfully opened the database.
+    Success,
+    /// The agent failed to initialize because the volume is full.
+    StorageFull,
+    /// Uncategorised failure has happened with the given message.
+    UnknownFailure(String),
+}
+
 /// Messages sent from the agent to the supervisor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ToSupervisor {
     /// A generic acknowledgment message.
     Ack,
+    /// The response to the [`ToAgent::Init`] request.
+    InitResponse(InitOutcome),
+    /// The response to the [`ToAgent::Open`] request.
+    OpenResponse(OpenOutcome),
     /// The response to a completed commit request.
-    CommitOutcome {
+    CommitResponse {
         /// The time it took for the operation to complete.
         elapsed: Duration,
         /// The outcome of the operation.
