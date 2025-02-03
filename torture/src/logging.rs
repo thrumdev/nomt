@@ -76,7 +76,7 @@ pub fn init_supervisor() {
         .expect("Failed to set supervisor subscriber");
 }
 
-pub fn init_agent(agent_id: &str, workdir: &Path) {
+pub fn init_agent(agent_id: &str, workdir: &impl AsRef<Path>) {
     // Console layer with ANSI colors
     let console_layer = fmt::layer()
         .with_writer(io::stdout)
@@ -98,7 +98,7 @@ pub fn init_agent(agent_id: &str, workdir: &Path) {
     let file = std::fs::File::options()
         .create(true)
         .append(true)
-        .open(workdir.join("agent.log"))
+        .open(workdir.as_ref().join("agent.log"))
         .unwrap();
 
     // TODO: this has an issue currently. While the ANSI is false the colors are not disabled

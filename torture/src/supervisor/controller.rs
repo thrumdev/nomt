@@ -1,3 +1,5 @@
+use crate::message::{InitOutcome, OpenOutcome};
+
 use super::comms;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -8,6 +10,7 @@ pub struct SpawnedAgentController {
     child: Child,
     rr: comms::RequestResponse,
     torn_down: AtomicBool,
+    agent_number: usize,
 }
 
 // This is a safe-guard to ensure that the [`SpawnedAgentController::teardown`] is called
@@ -28,26 +31,41 @@ impl Drop for SpawnedAgentController {
 }
 
 impl SpawnedAgentController {
-    pub async fn init(
-        &mut self,
-        workdir: String,
-        workload_id: u64,
-        bitbox_seed: [u8; 16],
-        rollback: Option<u32>,
-    ) -> Result<()> {
-        // Assign a unique ID to the agent.
-        static AGENT_COUNT: AtomicUsize = AtomicUsize::new(0);
-        let agent_number = AGENT_COUNT.fetch_add(1, Ordering::Relaxed);
-        let id = format!("agent-{}-{}", workload_id, agent_number);
-        self.rr
+    pub async fn init(&mut self, workdir: String, workload_id: u64) -> Result<InitOutcome> {
+        let id = format!("agent-{}-{}", workload_id, self.agent_number);
+        let response = self
+            .rr
             .send_request(crate::message::ToAgent::Init(crate::message::InitPayload {
                 id,
                 workdir,
+            }))
+            .await?;
+        match response {
+            crate::message::ToSupervisor::InitResponse(outcome) => return Ok(outcome),
+            _ => {
+                panic!("expected init, unexpected response: {:?}", response);
+            }
+        }
+    }
+
+    pub async fn open(
+        &mut self,
+        bitbox_seed: [u8; 16],
+        rollback: Option<u32>,
+    ) -> Result<OpenOutcome> {
+        let response = self
+            .rr
+            .send_request(crate::message::ToAgent::Open(crate::message::OpenPayload {
                 bitbox_seed,
                 rollback,
             }))
             .await?;
-        Ok(())
+        match response {
+            crate::message::ToSupervisor::OpenResponse(outcome) => return Ok(outcome),
+            _ => {
+                panic!("expected open, unexpected response: {:?}", response);
+            }
+        }
     }
 
     /// Kills the process, shuts down the comms, and cleans up the resources.
@@ -85,7 +103,12 @@ pub async fn spawn_agent_into(place: &mut Option<SpawnedAgentController>) -> Res
     let (rr, task) = comms::run(stream);
     let _ = tokio::spawn(task);
 
+    // Assign a unique ID to the agent.
+    static AGENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let agent_number = AGENT_COUNT.fetch_add(1, Ordering::Relaxed);
+
     *place = Some(SpawnedAgentController {
+        agent_number,
         child,
         rr,
         torn_down: AtomicBool::new(false),

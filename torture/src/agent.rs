@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
 use nomt::{Blake3Hasher, Nomt, SessionParams};
 use std::future::Future;
+use std::path::Path;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{BufReader, BufWriter},
@@ -17,14 +18,17 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
 
 use crate::message::{
-    self, CommitOutcome, CommitPayload, Envelope, InitPayload, KeyValueChange, RollbackPayload,
-    ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
+    self, CommitOutcome, CommitPayload, Envelope, InitOutcome, KeyValueChange, OpenOutcome,
+    OpenPayload, RollbackPayload, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
 };
 
 /// The entrypoint for the agent.
 ///
 /// `input` is the UnixStream that the agent should use to communicate with its supervisor.
 pub async fn run(input: UnixStream) -> Result<()> {
+    let pid = std::process::id();
+    trace!(pid, "Child process started");
+
     // Make the process non-dumpable.
     //
     // We expect this process to abort on a crash, so we don't want to leave lots of core dumps
@@ -33,15 +37,8 @@ pub async fn run(input: UnixStream) -> Result<()> {
     nix::sys::prctl::set_dumpable(false)?;
 
     let mut stream = Stream::new(input);
-    let mut agent = recv_init(&mut stream).await?;
-
-    crate::logging::init_agent(&agent.id, &agent.workdir);
-    let pid = std::process::id();
-    trace!(
-        pid,
-        bitbox_seed = hex::encode(&agent.bitbox_seed),
-        "Child process started"
-    );
+    let workdir = initialize(&mut stream).await?;
+    let mut agent = Agent::new();
 
     loop {
         // TODO: make the message processing non-blocking.
@@ -83,7 +80,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 stream
                     .send(Envelope {
                         reqno,
-                        message: ToSupervisor::CommitOutcome { elapsed, outcome },
+                        message: ToSupervisor::CommitResponse { elapsed, outcome },
                     })
                     .await?;
             }
@@ -150,7 +147,19 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 drop(agent);
                 break;
             }
-            ToAgent::Init(init) => bail!("unexpected init message, id={}", init.id),
+            ToAgent::Open(open_params) => {
+                tracing::info!("opening the database");
+                let outcome = agent.perform_open(&workdir, open_params).await;
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::OpenResponse(outcome),
+                    })
+                    .await?;
+            }
+            ToAgent::Init(_) => {
+                bail!("Unexpected Init message");
+            }
         }
     }
     Ok(())
@@ -191,14 +200,16 @@ async fn crash_task(
     unreachable!();
 }
 
-/// Receives the [`ToAgent::Init`] message from the supervisor and returns the initialized agent. Sends
-/// an Ack message back to the supervisor.
+/// Performs the initialization of the agent.
+///
+/// Receives the [`ToAgent::Init`] message from the supervisor, initializes the logging, confirms
+/// the receipt of the message, and returns the path to the working directory.
 ///
 /// # Errors
 ///
 /// Returns an error if the message is not an Init message or if the message is not received
 /// within a certain time limit.
-async fn recv_init(stream: &mut Stream) -> Result<Agent> {
+async fn initialize(stream: &mut Stream) -> Result<PathBuf> {
     const DEADLINE: Duration = Duration::from_secs(1);
     let Envelope { reqno, message } = match timeout(DEADLINE, stream.recv()).await {
         Ok(envelope) => envelope?,
@@ -209,48 +220,61 @@ async fn recv_init(stream: &mut Stream) -> Result<Agent> {
     let ToAgent::Init(init) = message else {
         anyhow::bail!("Expected Init message");
     };
-    let agent = Agent::new(init)?;
-    stream
-        .send(Envelope {
-            reqno,
-            message: ToSupervisor::Ack,
-        })
-        .await?;
-    Ok(agent)
+
+    crate::logging::init_agent(&init.id, &init.workdir);
+
+    let workdir = PathBuf::from(&init.workdir);
+    if !workdir.exists() {
+        stream
+            .send(Envelope {
+                reqno,
+                message: ToSupervisor::InitResponse(InitOutcome::WorkdirDoesNotExist),
+            })
+            .await?;
+        bail!("Workdir does not exist");
+    } else {
+        stream
+            .send(Envelope {
+                reqno,
+                message: ToSupervisor::InitResponse(InitOutcome::Success),
+            })
+            .await?;
+        Ok(workdir)
+    }
 }
 
 struct Agent {
-    workdir: PathBuf,
-    // We use `Option` here because we want to be able to recreate Nomt instance after it is
-    // being poisoned.
     nomt: Option<Nomt<Blake3Hasher>>,
-    id: String,
-    bitbox_seed: [u8; 16],
 }
 
 impl Agent {
-    fn new(init: InitPayload) -> Result<Self> {
-        let workdir = PathBuf::from(&init.workdir);
-        if !workdir.exists() {
-            bail!("workdir does not exist: {:?}", workdir);
+    fn new() -> Self {
+        Self { nomt: None }
+    }
+
+    async fn perform_open(&mut self, workdir: &Path, open_params: OpenPayload) -> OpenOutcome {
+        if let Some(nomt) = self.nomt.take() {
+            tracing::trace!("dropping the existing NOMT instance");
+            drop(nomt);
         }
+
         let mut o = nomt::Options::new();
         o.path(workdir.join("nomt_db"));
-        o.bitbox_seed(init.bitbox_seed);
+        o.bitbox_seed(open_params.bitbox_seed);
         o.hashtable_buckets(500_000);
-        if let Some(n_commits) = init.rollback {
+        if let Some(n_commits) = open_params.rollback {
             o.rollback(true);
             o.max_rollback_log_len(n_commits);
         } else {
             o.rollback(false);
         }
-        let nomt = Nomt::open(o)?;
-        Ok(Self {
-            workdir,
-            nomt: Some(nomt),
-            id: init.id,
-            bitbox_seed: init.bitbox_seed,
-        })
+        let nomt = match tokio::task::block_in_place(|| Nomt::open(o)) {
+            Ok(nomt) => nomt,
+            Err(ref err) if is_enospc(err) => return OpenOutcome::StorageFull,
+            Err(ref err) => return OpenOutcome::UnknownFailure(err.to_string()),
+        };
+        self.nomt = Some(nomt);
+        OpenOutcome::Success
     }
 
     async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> CommitOutcome {
@@ -269,20 +293,22 @@ impl Agent {
             }
         }
 
-        match tokio::task::block_in_place(|| session.finish(actuals).commit(&nomt)) {
+        // Perform the commit.
+        let commit_result = tokio::task::block_in_place(|| session.finish(actuals).commit(&nomt));
+
+        // Classify the result into one of the outcome bins.
+        let outcome = match commit_result {
             Ok(()) => CommitOutcome::Success,
-            Err(err) => {
-                // Classify error.
-                if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-                    match io_err.raw_os_error() {
-                        Some(errno) if errno == libc::ENOSPC => CommitOutcome::StorageFull,
-                        _ => CommitOutcome::UnknownFailure,
-                    }
-                } else {
-                    CommitOutcome::UnknownFailure
-                }
-            }
+            Err(ref err) if is_enospc(err) => CommitOutcome::StorageFull,
+            Err(_) => CommitOutcome::UnknownFailure,
+        };
+
+        // Log the outcome if it was not successful.
+        if !matches!(outcome, CommitOutcome::Success) {
+            trace!("unsuccessful commit: {:?}", outcome);
         }
+
+        outcome
     }
 
     async fn rollback(&mut self, n_commits: usize) -> Result<()> {
@@ -304,6 +330,17 @@ impl Agent {
         let nomt = self.nomt.as_ref().unwrap();
         nomt.sync_seqn()
     }
+}
+
+/// Examines the given error to determine if it is an `ENOSPC` IO error.
+fn is_enospc(err: &anyhow::Error) -> bool {
+    let Some(io_err) = err.downcast_ref::<std::io::Error>() else {
+        return false;
+    };
+    let Some(errno) = io_err.raw_os_error() else {
+        return false;
+    };
+    errno == libc::ENOSPC
 }
 
 /// Abstraction over the stream of messages from the supervisor.

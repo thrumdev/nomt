@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
 
 use crate::{
-    message::{KeyValueChange, ToSupervisor},
+    message::{InitOutcome, KeyValueChange, OpenOutcome, ToSupervisor},
     supervisor::{
         cli::WorkloadParams,
         comms,
@@ -425,8 +425,10 @@ impl Workload {
 
     /// Commit a changeset.
     async fn exercise_commit(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
+        trace!("exercising commit");
+
         let (snapshot, changeset) = self.state.gen_commit();
-        let ToSupervisor::CommitOutcome { elapsed, outcome } = rr
+        let ToSupervisor::CommitResponse { elapsed, outcome } = rr
             .send_request(crate::message::ToAgent::Commit(
                 crate::message::CommitPayload {
                     changeset: changeset.clone(),
@@ -438,23 +440,48 @@ impl Workload {
             return Err(anyhow::anyhow!("Commit did not execute successfully"));
         };
 
-        if self.enabled_enospc {
-            // TODO: the same handling should be extended to the rollback.
-
-            // If we are in the `ENOSPC` mode, the commit should have failed.
-            if !matches!(outcome, crate::message::CommitOutcome::StorageFull) {
-                return Err(anyhow::anyhow!("Commit did not return ENOSPC"));
+        match outcome {
+            crate::message::CommitOutcome::Success => {
+                // The commit was successful.
+                if self.enabled_enospc {
+                    return Err(anyhow::anyhow!("Commit should have failed with ENOSPC"));
+                }
             }
+            crate::message::CommitOutcome::StorageFull => {
+                // The commit failed due to `ENOSPC`.
+                if !self.enabled_enospc {
+                    return Err(anyhow::anyhow!("Commit should have succeeded"));
+                }
 
-            let agent_sync_seqn = rr.send_query_sync_seqn().await?;
-            if self.state.committed.sync_seqn != agent_sync_seqn {
-                return Err(anyhow::anyhow!(
-                    "Unexpected sync_seqn after failed commit with ENOSPC"
-                ));
+                // At this point, we expect the agent will have its NOMT instance poisoned.
+                //
+                // But we still should be able to make the sync_seqn and the kv queries.
+                let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+                if self.state.committed.sync_seqn != agent_sync_seqn {
+                    return Err(anyhow::anyhow!(
+                        "Unexpected sync_seqn after failed commit with ENOSPC"
+                    ));
+                }
+                self.ensure_changeset_reverted(rr, &changeset).await?;
+
+                // Now we instruct the agent to re-open NOMT and check if the sync_seqn is still the same.
+                // We will reuse the same process.
+                self.ensure_agent_open_db().await?;
+
+                // Verify that the sync_seqn is still the same for the second time.
+                let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+                if self.state.committed.sync_seqn != agent_sync_seqn {
+                    return Err(anyhow::anyhow!(
+                        "Unexpected sync_seqn after failed commit with ENOSPC"
+                    ));
+                }
+
+                // Return early to not account for the commit in the statistics.
+                return Ok(());
             }
-            self.ensure_changeset_reverted(rr, &changeset).await?;
-
-            return Ok(());
+            crate::message::CommitOutcome::UnknownFailure => {
+                return Err(anyhow::anyhow!("Commit failed due to unknown reasons"));
+            }
         }
 
         self.n_successfull_commit += 1;
@@ -477,6 +504,8 @@ impl Workload {
         &mut self,
         rr: &comms::RequestResponse,
     ) -> anyhow::Result<()> {
+        trace!("exercising commit crash");
+
         // Generate a changeset and the associated snapshot. Ask the agent to commit the changeset.
         let (snapshot, changeset) = self.state.gen_commit();
 
@@ -491,7 +520,6 @@ impl Workload {
         // possibilities of crashing during sync.
         crash_delay_millis = (crash_delay_millis as f64 * 0.98) as u64;
 
-        trace!("exercising commit crash");
         rr.send_request(crate::message::ToAgent::Commit(
             crate::message::CommitPayload {
                 changeset: changeset.clone(),
@@ -795,16 +823,66 @@ impl Workload {
         assert!(self.agent.is_none());
         controller::spawn_agent_into(&mut self.agent).await?;
         let workdir = self.workdir.path().display().to_string();
+        let outcome = self
+            .agent
+            .as_mut()
+            .unwrap()
+            .init(workdir, self.workload_id)
+            .await?;
+        if let InitOutcome::Success = outcome {
+            ()
+        } else {
+            return Err(anyhow::anyhow!("Unexpected init outcome: {:?}", outcome));
+        }
+
+        // Finally, make the agent open the database.
+        self.ensure_agent_open_db().await?;
+
+        Ok(())
+    }
+
+    /// Ensure that the agent has opened the database.
+    ///
+    /// If the agent has run out of storage, we will turn off the `ENOSPC` error and try again.
+    async fn ensure_agent_open_db(&mut self) -> anyhow::Result<()> {
         let rollback = if self.state.biases.rollback > 0.0 {
             Some(self.max_rollback_commits)
         } else {
             None
         };
-        self.agent
+        let outcome = self
+            .agent
             .as_mut()
             .unwrap()
-            .init(workdir, self.workload_id, self.bitbox_seed, rollback)
+            .open(self.bitbox_seed, rollback)
             .await?;
+
+        match outcome {
+            OpenOutcome::Success => (),
+            OpenOutcome::StorageFull => {
+                // We got storage full and we know here that enospc is enabled.
+                //
+                // We assume this is trickfs and thus we can turn it off, otherwise,
+                // we won't be able to continue.
+                assert!(self.enabled_enospc);
+                self.enabled_enospc = false;
+                self.trick_handle
+                    .as_ref()
+                    .unwrap()
+                    .set_trigger_enospc(false);
+
+                let outcome = self
+                    .agent
+                    .as_mut()
+                    .unwrap()
+                    .open(self.bitbox_seed, rollback)
+                    .await?;
+                assert!(matches!(outcome, OpenOutcome::Success));
+            }
+            OpenOutcome::UnknownFailure(err) => {
+                panic!("unexpected open outcome: {:?}", err);
+            }
+        }
 
         Ok(())
     }
