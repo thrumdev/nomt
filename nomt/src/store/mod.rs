@@ -17,6 +17,7 @@ use nomt_core::{page_id::PageId, trie::KeyPath};
 use parking_lot::Mutex;
 use std::{
     fs::{File, OpenOptions},
+    os::fd::AsRawFd,
     sync::{atomic::AtomicBool, Arc},
 };
 
@@ -84,8 +85,6 @@ impl Store {
             }
         }
 
-        let io_pool = io::start_io_pool(o.io_workers, page_pool.clone(), o.defer_taskrun);
-
         let meta_fd = {
             let mut options = OpenOptions::new();
             options.read(true).write(true);
@@ -143,6 +142,16 @@ impl Store {
                 libc::fcntl(ht_fd.as_raw_fd(), libc::F_NOCACHE, 1);
                 libc::fcntl(wal_fd.as_raw_fd(), libc::F_NOCACHE, 1);
             }
+        }
+
+        let (io_pool, maybe_register_files) =
+            io::start_io_pool(o.io_workers, page_pool.clone(), o.defer_taskrun);
+
+        // Avaialbe only on linux.
+        if let Some(register_files) = maybe_register_files {
+            // NOTE: the order must be respected in order to TODO
+            let files = &[ht_fd.as_raw_fd(), bbn_fd.as_raw_fd(), ln_fd.as_raw_fd()];
+            register_files.regsiter(files);
         }
 
         let meta = meta::Meta::read(&page_pool, &meta_fd)?;

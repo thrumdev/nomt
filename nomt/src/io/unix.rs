@@ -72,3 +72,10 @@ fn execute(mut command: IoCommand) -> CompleteIo {
 
     CompleteIo { command, result }
 }
+
+// TODO: comment
+pub struct RegisterFiles {}
+
+impl RegisterFiles {
+    pub fn regsiter(&self, _files: &[RawFd]) {}
+}

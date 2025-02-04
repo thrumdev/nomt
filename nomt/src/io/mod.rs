@@ -22,9 +22,13 @@ pub use page_pool::{FatPage, PagePool};
 
 pub enum IoKind {
     Read(RawFd, u64, FatPage),
+    //ReadFixed(usize, u64, FatPage),
     Write(RawFd, u64, FatPage),
+    //WriteFixed(usize, u64, FatPage),
     WriteArc(RawFd, u64, Arc<FatPage>),
+    //WriteArcFixed(RawFd, u64, Arc<FatPage>),
     WriteRaw(RawFd, u64, Page),
+    //WriteRawFixed(RawFd, u64, Page),
 }
 
 impl fmt::Debug for IoKind {
@@ -96,15 +100,22 @@ struct IoPacket {
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
-pub fn start_io_pool(io_workers: usize, page_pool: PagePool, defer_taskrun: bool) -> IoPool {
-    let sender = platform::start_io_worker(io_workers, defer_taskrun);
-    IoPool { sender, page_pool }
+pub fn start_io_pool(
+    io_workers: usize,
+    page_pool: PagePool,
+    defer_taskrun: bool,
+) -> (IoPool, Option<platform::RegisterFiles>) {
+    let (sender, register_files) = platform::start_io_worker(io_workers, defer_taskrun);
+    (IoPool { sender, page_pool }, register_files)
 }
 
 #[cfg(test)]
-pub fn start_test_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
-    let sender = platform::start_io_worker(io_workers, false);
-    IoPool { sender, page_pool }
+pub fn start_test_io_pool(
+    io_workers: usize,
+    page_pool: PagePool,
+) -> (IoPool, Option<platform::RegisterFiles>) {
+    let (sender, _) = platform::start_io_worker(io_workers, false);
+    (IoPool { sender, page_pool }, None)
 }
 
 /// A manager for the broader I/O pool. This can be used to create new I/O handles.
