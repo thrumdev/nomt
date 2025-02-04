@@ -14,29 +14,36 @@ struct PendingIo {
     completion_sender: Sender<CompleteIo>,
 }
 
-pub fn start_io_worker(io_workers: usize) -> Sender<IoPacket> {
+pub fn start_io_worker(io_workers: usize, defer_taskrun: bool) -> Sender<IoPacket> {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
-    start_workers(command_rx, io_workers);
+    start_workers(command_rx, io_workers, defer_taskrun);
 
     command_tx
 }
 
-fn start_workers(command_rx: Receiver<IoPacket>, io_workers: usize) {
+fn start_workers(command_rx: Receiver<IoPacket>, io_workers: usize, defer_taskrun: bool) {
     for i in 0..io_workers {
         let command_rx = command_rx.clone();
         let _ = std::thread::Builder::new()
             .name(format!("io_worker-{i}"))
-            .spawn(move || run_worker(command_rx))
+            .spawn(move || run_worker(command_rx, defer_taskrun))
             .unwrap();
     }
 }
 
-fn run_worker(command_rx: Receiver<IoPacket>) {
+fn run_worker(command_rx: Receiver<IoPacket>, defer_taskrun: bool) {
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
-    let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
+    let mut ring_builder = IoUring::<squeue::Entry, cqueue::Entry>::builder();
+    ring_builder.setup_iopoll();
+    if defer_taskrun {
+        ring_builder
+            .setup_single_issuer() // Available since 6.0
+            .setup_defer_taskrun(); // Available since 6.1.
+    }
+    let mut ring = ring_builder
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 
@@ -46,6 +53,12 @@ fn run_worker(command_rx: Receiver<IoPacket>) {
     loop {
         // 1. process completions.
         if !pending.is_empty() {
+            if defer_taskrun {
+                let _ = unsafe {
+                    submitter.enter::<()>(0, 0, 1 /* IORING_ENTER_GETEVENTS */, None)
+                };
+            }
+
             complete_queue.sync();
             while let Some(completion_event) = complete_queue.next() {
                 if pending.get(completion_event.user_data() as usize).is_none() {

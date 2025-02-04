@@ -84,7 +84,7 @@ impl Store {
             }
         }
 
-        let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
+        let io_pool = io::start_io_pool(o.io_workers, page_pool.clone(), o.defer_taskrun);
 
         let meta_fd = {
             let mut options = OpenOptions::new();

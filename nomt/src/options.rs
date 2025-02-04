@@ -25,6 +25,9 @@ pub struct Options {
     /// The maximum size of the leaf cache specified in MiB, rounded down
     /// to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
     pub(crate) leaf_cache_size: usize,
+    /// Whether to use the io_uring feature `defer_taskrun`.
+    /// Available since linux kernel 6.1.
+    pub(crate) defer_taskrun: bool,
 }
 
 impl Options {
@@ -48,6 +51,7 @@ impl Options {
             preallocate_ht: true,
             page_cache_size: 256,
             leaf_cache_size: 256,
+            defer_taskrun: false,
         }
     }
 
@@ -149,6 +153,15 @@ impl Options {
     /// Default: 256MiB.
     pub fn leaf_cache_size(&mut self, leaf_cache_size: usize) {
         self.leaf_cache_size = leaf_cache_size;
+    }
+
+    /// Whether to use the io_uring feature `defer_taskrun`.
+    ///
+    /// Available since linux kernel 6.1.
+    ///
+    /// Default: false.
+    pub fn defer_taskrun(&mut self, defer_taskrun: bool) {
+        self.defer_taskrun = defer_taskrun;
     }
 }
 

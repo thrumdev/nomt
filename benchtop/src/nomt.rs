@@ -27,6 +27,7 @@ impl NomtDB {
         page_cache_size: Option<usize>,
         leaf_cache_size: Option<usize>,
         overlay_window_capacity: usize,
+        defer_taskrun: bool,
     ) -> Self {
         let nomt_db_folder =
             std::env::var("NOMT_DB_FOLDER").unwrap_or_else(|_| NOMT_DB_FOLDER.to_string());
@@ -40,6 +41,7 @@ impl NomtDB {
         opts.path(nomt_db_folder);
         opts.commit_concurrency(commit_concurrency);
         opts.io_workers(io_workers);
+        opts.defer_taskrun(defer_taskrun);
         opts.metrics(true);
         if let Some(size) = page_cache_size {
             opts.page_cache_size(size);

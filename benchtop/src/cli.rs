@@ -162,6 +162,16 @@ pub struct WorkloadParams {
     #[arg(long = "overlay-window-length")]
     #[clap(default_value = "0")]
     pub overlay_window_length: usize,
+
+    /// Whether to use the io_uring feature `defer_taskrun`.
+    ///
+    /// Only used with the Nomt backend.
+    /// Available since linux kernel 6.1.
+    ///
+    /// Default: false.
+    #[clap(default_value = "false")]
+    #[arg(long)]
+    pub defer_taskrun: bool,
 }
 
 #[derive(Debug, Clone, Args)]

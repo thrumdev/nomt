@@ -24,6 +24,7 @@ impl Backend {
         page_cache_size: Option<usize>,
         leaf_cache_size: Option<usize>,
         overlay_window_length: usize,
+        defer_taskrun: bool,
     ) -> DB {
         match self {
             Backend::SovDB => DB::Sov(SovDB::open(reset)),
@@ -35,6 +36,7 @@ impl Backend {
                 page_cache_size,
                 leaf_cache_size,
                 overlay_window_length,
+                defer_taskrun,
             )),
             Backend::SpTrie => DB::SpTrie(SpTrieDB::open(reset)),
         }

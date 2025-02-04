@@ -34,6 +34,7 @@ pub fn init(params: InitParams) -> Result<()> {
         workload_params.page_cache_size,
         workload_params.leaf_cache_size,
         0,
+        workload_params.defer_taskrun,
     );
     db.execute(None, &mut *init, None);
 
@@ -55,6 +56,7 @@ pub fn run(params: RunParams) -> Result<()> {
         workload_params.page_cache_size,
         workload_params.leaf_cache_size,
         workload_params.overlay_window_length,
+        workload_params.defer_taskrun,
     );
 
     if params.reset {
