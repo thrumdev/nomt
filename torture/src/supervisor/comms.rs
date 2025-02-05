@@ -93,8 +93,7 @@ impl RequestResponse {
         Ok(message)
     }
 
-    // Requests the value of the key from the agent.
-    #[allow(dead_code)]
+    /// Requests the value of the key from the agent.
     pub async fn send_request_query(&self, key: message::Key) -> anyhow::Result<Option<Vec<u8>>> {
         match self
             .send_request(crate::message::ToAgent::Query(key))
