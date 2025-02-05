@@ -35,6 +35,7 @@ pub mod beatree;
 mod beatree;
 
 mod bitbox;
+mod error;
 mod merkle;
 mod metrics;
 mod options;
