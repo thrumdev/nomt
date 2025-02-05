@@ -48,11 +48,7 @@ impl SpawnedAgentController {
         }
     }
 
-    pub async fn open(
-        &mut self,
-        bitbox_seed: [u8; 16],
-        rollback: Option<u32>,
-    ) -> Result<OpenOutcome> {
+    pub async fn open(&self, bitbox_seed: [u8; 16], rollback: Option<u32>) -> Result<OpenOutcome> {
         let response = self
             .rr
             .send_request(crate::message::ToAgent::Open(crate::message::OpenPayload {
