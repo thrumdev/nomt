@@ -1,13 +1,16 @@
 mod common;
 
 use common::Test;
-use nomt::NodeKind;
+use nomt::{trie::NodeKind, Blake3Hasher};
 
 #[test]
 fn root_on_empty_db() {
     let t = Test::new("compute_root_empty");
     let root = t.root();
-    assert_eq!(NodeKind::of(&root.into_inner()), NodeKind::Terminator);
+    assert_eq!(
+        NodeKind::of::<Blake3Hasher>(&root.into_inner()),
+        NodeKind::Terminator
+    );
 }
 
 #[test]
@@ -20,7 +23,10 @@ fn root_on_leaf() {
 
     let t = Test::new_with_params("compute_root_leaf", 1, 1, None, false);
     let root = t.root();
-    assert_eq!(NodeKind::of(&root.into_inner()), NodeKind::Leaf);
+    assert_eq!(
+        NodeKind::of::<Blake3Hasher>(&root.into_inner()),
+        NodeKind::Leaf
+    );
 }
 
 #[test]
@@ -34,5 +40,8 @@ fn root_on_internal() {
 
     let t = Test::new_with_params("compute_root_internal", 1, 1, None, false);
     let root = t.root();
-    assert_eq!(NodeKind::of(&root.into_inner()), NodeKind::Internal);
+    assert_eq!(
+        NodeKind::of::<Blake3Hasher>(&root.into_inner()),
+        NodeKind::Internal
+    );
 }

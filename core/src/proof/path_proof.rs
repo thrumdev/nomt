@@ -1,8 +1,6 @@
 //! Proving and verifying inclusion, non-inclusion, and updates to the trie.
 
-use crate::trie::{
-    self, InternalData, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, NodeKind, TERMINATOR,
-};
+use crate::trie::{self, InternalData, KeyPath, LeafData, Node, NodeHasher, NodeKind, TERMINATOR};
 use crate::trie_pos::TriePosition;
 
 use bitvec::prelude::*;
@@ -295,7 +293,7 @@ pub fn verify_update<H: NodeHasher>(
                 *sibling
             };
 
-            match (NodeKind::of(&cur_node), NodeKind::of(&sibling)) {
+            match (NodeKind::of::<H>(&cur_node), NodeKind::of::<H>(&sibling)) {
                 (NodeKind::Terminator, NodeKind::Terminator) => {}
                 (NodeKind::Leaf, NodeKind::Terminator) => {}
                 (NodeKind::Terminator, NodeKind::Leaf) => {

@@ -1,6 +1,6 @@
 //! Trie update logic helpers.
 
-use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, NodeHasherExt, ValueHash};
+use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, ValueHash};
 
 use bitvec::prelude::*;
 
@@ -252,16 +252,43 @@ pub fn build_trie<H: NodeHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bitvec, build_trie, trie, BitVec, LeafData, Msb0, Node, NodeHasher, NodeHasherExt,
-        WriteNode,
-    };
+    use crate::trie::{NodeKind, TERMINATOR};
+
+    use super::{bitvec, build_trie, trie, BitVec, LeafData, Msb0, Node, NodeHasher, WriteNode};
 
     struct DummyNodeHasher;
 
     impl NodeHasher for DummyNodeHasher {
-        fn hash_node(data: &trie::NodePreimage) -> [u8; 32] {
-            blake3::hash(data).into()
+        fn hash_leaf(data: &trie::LeafData) -> [u8; 32] {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&data.key_path);
+            hasher.update(&data.value_hash);
+            let mut hash: [u8; 32] = hasher.finalize().into();
+
+            // Label with MSB
+            hash[0] |= 0b10000000;
+            hash
+        }
+
+        fn hash_internal(data: &trie::InternalData) -> [u8; 32] {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&data.left);
+            hasher.update(&data.right);
+            let mut hash: [u8; 32] = hasher.finalize().into();
+
+            // Label with MSB
+            hash[0] &= 0b01111111;
+            hash
+        }
+
+        fn node_kind(node: &Node) -> NodeKind {
+            if node[0] >> 7 == 1 {
+                NodeKind::Leaf
+            } else if node == &TERMINATOR {
+                NodeKind::Terminator
+            } else {
+                NodeKind::Internal
+            }
         }
     }
 

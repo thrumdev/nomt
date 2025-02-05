@@ -2,7 +2,7 @@ mod common;
 
 use common::Test;
 use hex_literal::hex;
-use nomt::Node;
+use nomt::trie::Node;
 
 #[test]
 fn add_remove_1000() {

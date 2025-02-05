@@ -1,7 +1,7 @@
 use crate::{backend::Transaction, timer::Timer, workload::Workload};
 use fxhash::FxHashMap;
 use nomt::{
-    Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, Overlay, Session, SessionParams,
+    trie::KeyPath, Blake3Hasher, KeyReadWrite, Nomt, Options, Overlay, Session, SessionParams,
     WitnessMode,
 };
 use sha2::Digest;

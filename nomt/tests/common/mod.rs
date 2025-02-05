@@ -1,6 +1,7 @@
 use nomt::{
-    KeyPath, KeyReadWrite, Node, Nomt, Options, Overlay, PanicOnSyncMode, Root, Session,
-    SessionParams, Witness, WitnessMode,
+    trie::{KeyPath, Node},
+    KeyReadWrite, Nomt, Options, Overlay, PanicOnSyncMode, Root, Session, SessionParams, Witness,
+    WitnessMode,
 };
 use std::{
     collections::{hash_map::Entry, HashMap},

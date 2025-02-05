@@ -1,7 +1,7 @@
 use anyhow::Result;
 use nomt_core::{
     proof,
-    trie::{LeafData, NodeHasher},
+    trie::{self, LeafData, Node, NodeHasher, NodeKind, TERMINATOR},
 };
 
 // Hash nodes using blake3. The Hasher below will be utilized in the witness
@@ -10,8 +10,36 @@ use nomt_core::{
 pub struct Blake3Hasher;
 
 impl NodeHasher for Blake3Hasher {
-    fn hash_node(data: &nomt_core::trie::NodePreimage) -> [u8; 32] {
-        blake3::hash(data).into()
+    fn hash_leaf(data: &trie::LeafData) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&data.key_path);
+        hasher.update(&data.value_hash);
+        let mut hash: [u8; 32] = hasher.finalize().into();
+
+        // Label with MSB
+        hash[0] |= 0b10000000;
+        hash
+    }
+
+    fn hash_internal(data: &trie::InternalData) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&data.left);
+        hasher.update(&data.right);
+        let mut hash: [u8; 32] = hasher.finalize().into();
+
+        // Label with MSB
+        hash[0] &= 0b01111111;
+        hash
+    }
+
+    fn node_kind(node: &Node) -> NodeKind {
+        if node[0] >> 7 == 1 {
+            NodeKind::Leaf
+        } else if node == &TERMINATOR {
+            NodeKind::Terminator
+        } else {
+            NodeKind::Internal
+        }
     }
 }
 
