@@ -120,15 +120,15 @@ pub enum ToAgent {
     GracefulShutdown,
 }
 
-/// Different outcomes of a commit operation.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum CommitOutcome {
-    /// The commit was successful.
+/// Different outcomes of an operation.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub enum Outcome {
+    /// The operation was successful.
     Success,
-    /// The commit failed because the storage is full, dubbed ENOSPC.
+    /// The operation failed because the storage is full, dubbed ENOSPC.
     StorageFull,
     /// Some other failure occurred.
-    UnknownFailure,
+    UnknownFailure(String),
 }
 
 /// Elaboration on the agent initialization result inside of [`ToSupervisor::InitResponse`].
@@ -167,7 +167,7 @@ pub enum ToSupervisor {
         /// The time it took for the operation to complete.
         elapsed: Duration,
         /// The outcome of the operation.
-        outcome: CommitOutcome,
+        outcome: Outcome,
     },
     /// The response to a query for a key-value pair.
     QueryValue(Option<Value>),
