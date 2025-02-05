@@ -414,101 +414,96 @@ impl Workload {
             }
         }
 
-        if self.state.rng.gen_bool(self.state.biases.commit_crash) {
-            self.exercise_commit_crashing(&rr).await?;
-        } else {
-            self.exercise_commit(&rr).await?;
-        }
+        let should_crash = self.state.rng.gen_bool(self.state.biases.commit_crash);
+        self.exercise_commit(&rr, should_crash).await?;
 
         Ok(())
     }
 
     /// Commit a changeset.
-    async fn exercise_commit(&mut self, rr: &comms::RequestResponse) -> anyhow::Result<()> {
-        trace!("exercising commit");
+    async fn exercise_commit(
+        &mut self,
+        rr: &comms::RequestResponse,
+        should_crash: bool,
+    ) -> anyhow::Result<()> {
+        let should_crash = if should_crash {
+            trace!("exercising commit crash");
+            Some(self.get_crash_delay())
+        } else {
+            trace!("exercising commit");
+            None
+        };
 
+        // Generate a changeset and the associated snapshot
         let (snapshot, changeset) = self.state.gen_commit();
-        let ToSupervisor::CommitResponse { elapsed, outcome } = rr
+        let commit_response = rr
             .send_request(crate::message::ToAgent::Commit(
                 crate::message::CommitPayload {
                     changeset: changeset.clone(),
-                    should_crash: None,
+                    should_crash,
                 },
             ))
-            .await?
-        else {
-            return Err(anyhow::anyhow!("Commit did not execute successfully"));
+            .await?;
+
+        let is_applied = if should_crash.is_some() {
+            let ToSupervisor::Ack = commit_response else {
+                return Err(anyhow::anyhow!("Commit crash did not execute successfully"));
+            };
+
+            self.wait_for_crash().await?;
+
+            // During a commit crash, every type of error could happen.
+            // However the agent will be respawned, so it will just
+            // make sure the changeset was correctly applied or reverted.
+            self.spawn_new_agent().await?;
+            let agent = self.agent.as_ref().unwrap();
+            let rr = agent.rr().clone();
+
+            // Sample the agent to make sure the changeset was correctly applied or reverted.
+            let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+            if snapshot.sync_seqn == agent_sync_seqn {
+                true
+            } else if self.state.committed.sync_seqn == agent_sync_seqn {
+                false
+            } else {
+                return Err(anyhow::anyhow!("Unexpected sync_seqn after commit crash",));
+            }
+        } else {
+            let ToSupervisor::CommitResponse { elapsed, outcome } = commit_response else {
+                return Err(anyhow::anyhow!("Commit did not execute successfully"));
+            };
+
+            // Keep track of ENOSPC because the flag could be erased during the agent's respawn
+            let was_enospc_enabled = self.enabled_enospc;
+            self.ensure_outcome_validity(rr, &outcome).await?;
+
+            if matches!(outcome, crate::message::Outcome::Success) {
+                self.n_successfull_commit += 1;
+                self.tot_commit_time += elapsed;
+            }
+
+            // Sample the agent to make sure the changeset was correctly applied or reverted.
+            let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+            if was_enospc_enabled {
+                false
+            } else if snapshot.sync_seqn == agent_sync_seqn {
+                true
+            } else {
+                return Err(anyhow::anyhow!("Unexpected sync_seqn after commit"));
+            }
         };
 
-        match outcome {
-            crate::message::CommitOutcome::Success => {
-                // The commit was successful.
-                if self.enabled_enospc {
-                    return Err(anyhow::anyhow!("Commit should have failed with ENOSPC"));
-                }
-            }
-            crate::message::CommitOutcome::StorageFull => {
-                // The commit failed due to `ENOSPC`.
-                if !self.enabled_enospc {
-                    return Err(anyhow::anyhow!("Commit should have succeeded"));
-                }
-
-                // At this point, we expect the agent will have its NOMT instance poisoned.
-                //
-                // But we still should be able to make the sync_seqn and the kv queries.
-                let agent_sync_seqn = rr.send_query_sync_seqn().await?;
-                if self.state.committed.sync_seqn != agent_sync_seqn {
-                    return Err(anyhow::anyhow!(
-                        "Unexpected sync_seqn after failed commit with ENOSPC"
-                    ));
-                }
-                self.ensure_changeset_reverted(rr, &changeset).await?;
-
-                // Now we instruct the agent to re-open NOMT and check if the sync_seqn is still the same.
-                // We will reuse the same process.
-                self.ensure_agent_open_db().await?;
-
-                // Verify that the sync_seqn is still the same for the second time.
-                let agent_sync_seqn = rr.send_query_sync_seqn().await?;
-                if self.state.committed.sync_seqn != agent_sync_seqn {
-                    return Err(anyhow::anyhow!(
-                        "Unexpected sync_seqn after failed commit with ENOSPC"
-                    ));
-                }
-
-                // Return early to not account for the commit in the statistics.
-                return Ok(());
-            }
-            crate::message::CommitOutcome::UnknownFailure => {
-                return Err(anyhow::anyhow!("Commit failed due to unknown reasons"));
-            }
+        if is_applied {
+            self.ensure_changeset_applied(&rr, &changeset).await?;
+            self.state.commit(snapshot);
+        } else {
+            self.ensure_changeset_reverted(&rr, &changeset).await?;
         }
-
-        self.n_successfull_commit += 1;
-        self.tot_commit_time += elapsed;
-
-        // Sample the agent to make sure the changeset was correctly applied.
-        let agent_sync_seqn = rr.send_query_sync_seqn().await?;
-        if snapshot.sync_seqn != agent_sync_seqn {
-            return Err(anyhow::anyhow!("Unexpected sync_seqn after commit"));
-        }
-        self.ensure_changeset_applied(rr, &changeset).await?;
-
-        self.state.commit(snapshot);
 
         Ok(())
     }
 
-    /// Commit a changeset and induce a crash.
-    async fn exercise_commit_crashing(
-        &mut self,
-        rr: &comms::RequestResponse,
-    ) -> anyhow::Result<()> {
-        trace!("exercising commit crash");
-
-        // Generate a changeset and the associated snapshot. Ask the agent to commit the changeset.
-        let (snapshot, changeset) = self.state.gen_commit();
-
+    fn get_crash_delay(&self) -> Duration {
         // The agent should crash after `crash_delay`ns.
         // If no data avaible crash after 300ms.
         let mut crash_delay_millis = self
@@ -519,34 +514,55 @@ impl Workload {
         // Crash a little bit earlier than the average commit time to increase the
         // possibilities of crashing during sync.
         crash_delay_millis = (crash_delay_millis as f64 * 0.98) as u64;
+        Duration::from_millis(crash_delay_millis)
+    }
 
-        rr.send_request(crate::message::ToAgent::Commit(
-            crate::message::CommitPayload {
-                changeset: changeset.clone(),
-                should_crash: Some(Duration::from_millis(crash_delay_millis)),
-            },
-        ))
-        .await?;
+    async fn ensure_outcome_validity(
+        &mut self,
+        rr: &comms::RequestResponse,
+        outcome: &crate::message::Outcome,
+    ) -> Result<()> {
+        match outcome {
+            crate::message::Outcome::Success => {
+                // The operation was successful.
+                if self.enabled_enospc {
+                    return Err(anyhow::anyhow!("Operation should have failed with ENOSPC"));
+                }
+            }
+            crate::message::Outcome::StorageFull => {
+                if !self.enabled_enospc {
+                    return Err(anyhow::anyhow!("Operation should have succeeded"));
+                }
 
-        self.wait_for_crash().await?;
+                // At this point, we expect the agent will have its NOMT instance poisoned.
+                //
+                // But we still should be able to make the sync_seqn and the kv queries.
+                let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+                if self.state.committed.sync_seqn != agent_sync_seqn {
+                    return Err(anyhow::anyhow!(
+                        "Unexpected sync_seqn after failed operation with ENOSPC"
+                    ));
+                }
 
-        // Spawns a new agent and checks whether the commit was applied to the database and if so
-        // we commit the snapshot to the state.
-        self.spawn_new_agent().await?;
-        let rr = self.agent.as_ref().unwrap().rr().clone();
-        let seqno = rr.send_query_sync_seqn().await?;
-        if seqno == snapshot.sync_seqn {
-            self.ensure_changeset_applied(&rr, &changeset).await?;
-            self.state.commit(snapshot);
-        } else {
-            info!(
-                "commit. seqno ours: {}, theirs: {}",
-                snapshot.sync_seqn, seqno
-            );
-            self.ensure_changeset_reverted(&rr, &changeset).await?;
+                // Now we instruct the agent to re-open NOMT and check if the sync_seqn is still the same.
+                // We will reuse the same process.
+                self.ensure_agent_open_db().await?;
+
+                // Verify that the sync_seqn is still the same for the second time.
+                let agent_sync_seqn = rr.send_query_sync_seqn().await?;
+                if self.state.committed.sync_seqn != agent_sync_seqn {
+                    return Err(anyhow::anyhow!(
+                        "Unexpected sync_seqn after failed operation with ENOSPC"
+                    ));
+                }
+            }
+            crate::message::Outcome::UnknownFailure(err) => {
+                return Err(anyhow::anyhow!(
+                    "Operation failed due to unknown reasons: {}",
+                    err
+                ));
+            }
         }
-
-        self.ensure_snapshot_validity(&rr).await?;
         Ok(())
     }
 
