@@ -1,9 +1,13 @@
 use crate::{backend::Transaction, timer::Timer, workload::Workload};
 use fxhash::FxHashMap;
 use nomt::{
-    hasher::Blake3Hasher, trie::KeyPath, KeyReadWrite, Nomt, Options, Overlay, Session,
+    hasher::{NodeHasher, ValueHasher, Blake3Hasher}, trie::{KeyPath, NodeKind, Node, LeafData, InternalData}, KeyReadWrite, Nomt, Options, Overlay, Session,
     SessionParams, WitnessMode,
 };
+use p3_field::{FieldAlgebra, PrimeField32};
+use p3_koala_bear::KoalaBear;
+use p3_symmetric::PseudoCompressionFunction;
+use rand::SeedableRng;
 use sha2::Digest;
 use std::{
     collections::{hash_map::Entry, VecDeque},
@@ -13,7 +17,7 @@ use std::{
 const NOMT_DB_FOLDER: &str = "nomt_db";
 
 pub struct NomtDB {
-    nomt: Nomt<Blake3Hasher>,
+    nomt: Nomt<Poseidon2KoalaBear>,
     overlay_window_capacity: usize,
     overlay_window: Mutex<VecDeque<Overlay>>,
 }
@@ -210,13 +214,13 @@ impl NomtDB {
 
 struct Tx<'a> {
     timer: Option<&'a mut Timer>,
-    session: &'a Session<Blake3Hasher>,
+    session: &'a Session<Poseidon2KoalaBear>,
     access: FxHashMap<KeyPath, KeyReadWrite>,
 }
 
 impl<'a> Transaction for Tx<'a> {
     fn read(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        let key_path = sha2::Sha256::digest(key).into();
+        let key_path = koalabear_friendly_keypath(sha2::Sha256::digest(key).into());
         let _timer_guard_read = self.timer.as_mut().map(|t| t.record_span("read"));
 
         match self.access.entry(key_path) {
@@ -232,7 +236,7 @@ impl<'a> Transaction for Tx<'a> {
     }
 
     fn note_read(&mut self, key: &[u8], value: Option<Vec<u8>>) {
-        let key_path = sha2::Sha256::digest(key).into();
+        let key_path = koalabear_friendly_keypath(sha2::Sha256::digest(key).into());
 
         match self.access.entry(key_path) {
             Entry::Occupied(mut o) => {
@@ -246,7 +250,7 @@ impl<'a> Transaction for Tx<'a> {
     }
 
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) {
-        let key_path = sha2::Sha256::digest(key).into();
+        let key_path = koalabear_friendly_keypath(sha2::Sha256::digest(key).into());
         let value = value.map(|v| v.to_vec());
 
         match self.access.entry(key_path) {
@@ -260,5 +264,210 @@ impl<'a> Transaction for Tx<'a> {
 
         self.session.warm_up(key_path);
         self.session.preserve_prior_value(key_path);
+    }
+}
+
+/// The KoalaBear prime: 2^31 - 2^24 + 1 (source: plonky3)
+const KOALABEAR_PRIME: u32 = KoalaBear::ORDER_U32;
+
+// we truncate key-paths to 240 bits and treat a key-path as 8 packed 30-bit strings. which always
+// fit into 8 koalabear field elements without losing precision.
+fn koalabear_friendly_keypath(mut key_path: KeyPath) -> KeyPath {
+    key_path[30] = 0;
+    key_path[31] = 0;
+    key_path
+}
+
+// given a 32-byte array, transform it such that every 32-bit word within it (little-endian) is
+// taken modulo the koalabear prime.
+fn koalabear_friendly_hash(mut arr: [u8; 32]) -> [u8; 32] {
+    for i in 0..8 {
+        let start = i * 4;
+        let end = start + 4;
+        let word = u32::from_le_bytes(arr[start..end].try_into().unwrap()) % KOALABEAR_PRIME;
+        arr[start..end].copy_from_slice(&word.to_le_bytes());
+    }
+
+    arr
+}
+
+fn pack_koalabear_hash(hash: [KoalaBear; 8]) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    for (i, elem) in hash.into_iter().enumerate() {
+        let start = i * 4;
+        let end = start + 4;
+        let word = elem.as_canonical_u32();
+        bytes[start..end].copy_from_slice(&u32::to_le_bytes(word));
+    }
+    bytes
+}
+
+// parse a byte-string as 8 koalabear field items. assume that all 4-bit words (little-endian) are
+// within range.
+fn unpack_koalabear_hash(bytes: &[u8]) -> [KoalaBear; 8] {
+    let mut field_elems = [KoalaBear::new(0); 8];
+    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+        field_elems[i] = unpack_le_koalabear(chunk.try_into().unwrap());
+    }
+
+    field_elems
+}
+
+// unpack a little-endian KoalaBear field element from 4 bytes.
+fn unpack_le_koalabear(bytes: [u8; 4]) -> KoalaBear {
+    KoalaBear::from_canonical_u32(u32::from_le_bytes(bytes))
+}
+
+// parse a keypath (32 bytes with only 30 occupied) into 8 u32s containing the 30-bit (big-endian) expansion of each.
+fn unpack_koalabear_keypath(bytes: &[u8]) -> [KoalaBear; 8] {
+    assert_eq!(bytes.len(), 32);
+
+    let mut field_elems = [KoalaBear::new(0); 8];
+
+    let mut word = 0u64;
+    let mut leftover_bits = 0;
+
+    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+        word <<= 32;
+        word += u32::from_be_bytes(chunk.try_into().unwrap()) as u64;
+
+        leftover_bits += 2;
+
+        // the high 30 bits of 'word' are the field element.
+        field_elems[i] = KoalaBear::from_canonical_u32((word >> leftover_bits) as u32);
+        // mask out so only the leftover bits remain
+        word &= (1 << leftover_bits) - 1
+    }
+
+    field_elems
+}
+
+// The seed for a ChaCha20 CSPRNG used to generate round constants for the Poseidon2 hash function.
+// Note that these constants need to be kept the same each time.
+//
+// The official Poseidon2 generator script, linked in the paper, is here:
+// https://extgit.isec.tugraz.at/krypto/hadeshash/-/blob/master/code/generate_params_poseidon.sage
+//
+// Note that it randomly generates these constants (with a no-good awful CSPRNG that infinite loops
+// on my machine). But my main takeaway here is that it's fine to generate these randomly and they
+// don't need to be specially chosen.
+//
+// Plonky3 gives you the option to generate them randomly from any RNG, so we use ChaCha20 because
+// it's pretty good.
+//
+// I got these from /dev/random.
+const POSEIDON2_CONSTANT_SEED: [u8; 32] = [
+    181, 70, 200, 56, 24, 112, 39, 225, 208, 76, 36, 0, 67, 63, 174, 118, 109, 44, 40, 227, 250,
+    226, 108, 70, 237, 113, 109, 73, 54, 51, 74, 169,
+];
+
+lazy_static::lazy_static! {
+    // 16-field-element permutation wrapped in a truncation.
+    // this takes only the first 8 elements of the poseidon2 hash.
+    static ref POSEIDON_HASHER: p3_symmetric::TruncatedPermutation<p3_koala_bear::Poseidon2KoalaBear<16>, 2, 8, 16> = {
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed(POSEIDON2_CONSTANT_SEED);
+        let poseidon_perm = p3_koala_bear::Poseidon2KoalaBear::new_from_rng_128(&mut rng);
+
+        // the Poseidon2 paper (section 3.1) indicates that compression by truncation is valid
+        p3_symmetric::TruncatedPermutation::new(poseidon_perm)
+    };
+}
+
+// based on https://github.com/Plonky3/Plonky3/blob/48f785cc32fbc9e5134082a01a1a73cadbe9ace7/examples/src/types.rs#L43
+struct Poseidon2KoalaBear;
+
+impl ValueHasher for Poseidon2KoalaBear {
+    fn hash_value(data: &[u8]) -> [u8; 32] {
+        // hash values with blake3 and then take each 32-bit word modulo the koalabear prime.
+        koalabear_friendly_hash(<Blake3Hasher as ValueHasher>::hash_value(data))
+    }
+}
+
+// we hash the nodes and then label them as leaf/internal based on whether they are quadratic
+// residues. see comment on LegendreSymbol.
+impl NodeHasher for Poseidon2KoalaBear {
+    fn hash_leaf(leaf: &LeafData) -> [u8; 32] {
+        let keypath_elems = unpack_koalabear_keypath(&leaf.key_path);
+        let value_elems = unpack_koalabear_hash(&leaf.value_hash);
+        let mut hash = POSEIDON_HASHER.compress([keypath_elems, value_elems]);
+
+        // label leaf nodes by ensuring the first element of the hash is a quadratic residue
+        hash[0] = make_residue(hash[0]);
+        pack_koalabear_hash(hash)
+    }
+
+    fn hash_internal(internal: &InternalData) -> [u8; 32] {
+        let left_elems = unpack_koalabear_hash(&internal.left);
+        let right_elems = unpack_koalabear_hash(&internal.right);
+        let mut hash = POSEIDON_HASHER.compress([left_elems, right_elems]);
+
+        // label internal nodes by ensuring the first element of the hash is a quadratic nonresidue.
+        hash[0] = make_nonresidue(hash[0]);
+        pack_koalabear_hash(hash)
+    }
+
+    fn node_kind(node: &Node) -> NodeKind {
+        let elem = unpack_le_koalabear(node[0..4].try_into().unwrap());
+        match legendre_symbol(elem) {
+            LegendreSymbol::Zero => NodeKind::Terminator,
+            LegendreSymbol::Residue => NodeKind::Leaf,
+            LegendreSymbol::NonResidue => NodeKind::Internal,
+        }
+    }
+}
+
+// note: "new" != "from_canonical_u32" - it puts them into montgomery form (x << 32 mod p).
+//
+// however, the residue property is preserved because the bitshift for montgomery form is 32 and
+// 32 happens to be a residue in KoalaBear. if it were not a residue, we would just flip these.
+const KNOWN_KOALABEAR_RESIDUE: KoalaBear = KoalaBear::new(1);
+const KNOWN_KOALABEAR_NONRESIDUE: KoalaBear = KoalaBear::new(3);
+
+// The Legendre Symbol of a field element.
+//
+// Quadratic residues are analogous to even/odd numbers in a prime field.
+// other than 0, exactly half the elements of the field will be residues and half are non-residues
+//
+// under multiplication, they behave just like evens/odds as well.
+// residue * residue = residue,
+// non-residue * non-residue = residue,
+// non-residue * residue = non-residue
+enum LegendreSymbol {
+    // The field element is zero.
+    Zero,
+    // The field element is a quadratic residue (it is the square of at least one other element)
+    Residue,
+    // The field element is not a quadratic residue.
+    NonResidue,
+}
+
+fn legendre_symbol(x: KoalaBear) -> LegendreSymbol {
+    let residue = x.exp_u64((KOALABEAR_PRIME as u64 - 1) / 2);
+
+    if residue == KoalaBear::ZERO {
+        assert_eq!(x, KoalaBear::ZERO);
+        LegendreSymbol::Zero
+    } else if residue == KoalaBear::ONE {
+        LegendreSymbol::Residue
+    } else {
+        LegendreSymbol::NonResidue
+    }
+}
+
+// Given a field element, force it to be a quadratic residue.
+fn make_residue(x: KoalaBear) -> KoalaBear {
+    match legendre_symbol(x) {
+        LegendreSymbol::Zero => KNOWN_KOALABEAR_RESIDUE,
+        LegendreSymbol::Residue => x,
+        LegendreSymbol::NonResidue => x * KNOWN_KOALABEAR_NONRESIDUE,
+    }
+}
+
+// Given a field element, force it to be a quadratic non-residue.
+fn make_nonresidue(x: KoalaBear) -> KoalaBear {
+    match legendre_symbol(x) {
+        LegendreSymbol::Zero => KNOWN_KOALABEAR_NONRESIDUE,
+        LegendreSymbol::Residue => x * KNOWN_KOALABEAR_NONRESIDUE,
+        LegendreSymbol::NonResidue => x,
     }
 }
