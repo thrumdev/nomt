@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, SessionParams, Value, WitnessMode};
+use nomt::{
+    trie::KeyPath, Blake3Hasher, KeyReadWrite, Nomt, Options, SessionParams, Value, WitnessMode,
+};
 
 fuzz_target!(|run: Run| {
     let db = open_db(run.commit_concurrency);

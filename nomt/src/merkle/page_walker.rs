@@ -46,7 +46,7 @@ use bitvec::prelude::*;
 use nomt_core::{
     page::DEPTH,
     page_id::{PageId, ROOT_PAGE_ID},
-    trie::{self, KeyPath, Node, NodeHasher, NodeHasherExt, NodeKind, ValueHash, TERMINATOR},
+    trie::{self, KeyPath, Node, NodeHasher, NodeKind, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
     update::WriteNode,
 };
@@ -230,7 +230,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
         self.prev_node = Some(node);
 
-        assert!(!trie::is_internal(&node));
+        assert!(!trie::is_internal::<H>(&node));
 
         let start_position = self.position.clone();
 
@@ -247,9 +247,9 @@ impl<H: NodeHasher> PageWalker<H> {
                 // we assume pages are not necessarily zeroed. therefore, there might be
                 // some garbage in the sibling slot we need to clear out.
                 let zero_sibling = if self.position.peek_last_bit() {
-                    trie::is_terminator(&internal_data.left)
+                    trie::is_terminator::<H>(&internal_data.left)
                 } else {
-                    trie::is_terminator(&internal_data.right)
+                    trie::is_terminator::<H>(&internal_data.right)
                 };
 
                 if zero_sibling {
@@ -454,7 +454,7 @@ impl<H: NodeHasher> PageWalker<H> {
         let sibling = self.sibling_node();
         let bit = self.position.peek_last_bit();
 
-        match (NodeKind::of(&node), NodeKind::of(&sibling)) {
+        match (NodeKind::of::<H>(&node), NodeKind::of::<H>(&sibling)) {
             (NodeKind::Terminator, NodeKind::Terminator) => {
                 // compact terminators.
                 trie::TERMINATOR
@@ -602,8 +602,8 @@ impl<H: NodeHasher> PageWalker<H> {
 #[cfg(test)]
 mod tests {
     use super::{
-        trie, BucketInfo, Node, NodeHasherExt, Output, PageSet, PageWalker, TriePosition,
-        UpdatedPage, ROOT_PAGE_ID,
+        trie, BucketInfo, Node, NodeHasher, Output, PageSet, PageWalker, TriePosition, UpdatedPage,
+        ROOT_PAGE_ID,
     };
     use crate::{
         io::PagePool,

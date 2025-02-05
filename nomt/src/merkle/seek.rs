@@ -47,9 +47,9 @@ impl SeekRequest {
         key: KeyPath,
         root: Node,
     ) -> SeekRequest {
-        let state = if trie::is_terminator(&root) {
+        let state = if trie::is_terminator::<H>(&root) {
             RequestState::Completed(None)
-        } else if trie::is_leaf(&root) {
+        } else if trie::is_leaf::<H>(&root) {
             RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &TriePosition::new())
         } else {
             RequestState::Seeking
@@ -133,14 +133,14 @@ impl SeekRequest {
                 self.siblings.push(page.node(self.position.sibling_index()));
             }
 
-            if trie::is_leaf(&cur_node) {
+            if trie::is_leaf::<H>(&cur_node) {
                 self.state =
                     RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
                 if let RequestState::FetchingLeaf(_, _) = self.state {
                     do_leaf_fetch = true;
                 }
                 break;
-            } else if trie::is_terminator(&cur_node) {
+            } else if trie::is_terminator::<H>(&cur_node) {
                 self.state = RequestState::Completed(None);
                 return;
             }

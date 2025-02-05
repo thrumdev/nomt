@@ -11,7 +11,7 @@ use merkle::{UpdatePool, Updater};
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
-    trie::{self, InternalData, NodeHasher, NodeHasherExt, ValueHash, TERMINATOR},
+    trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeKind, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
 };
 use overlay::{LiveOverlay, OverlayMarker};
@@ -22,7 +22,7 @@ use store::{Store, ValueTransaction};
 // CARGO HACK: silence lint; this is used in integration tests
 
 pub use nomt_core::proof;
-pub use nomt_core::trie::{KeyPath, LeafData, Node, NodeKind, NodePreimage};
+pub use nomt_core::trie;
 pub use options::{Options, PanicOnSyncMode};
 pub use overlay::{InvalidAncestors, Overlay};
 pub use store::HashTableUtilization;
@@ -777,11 +777,38 @@ pub trait ValueHasher {
 pub struct Blake3Hasher;
 
 impl NodeHasher for Blake3Hasher {
-    fn hash_node(data: &NodePreimage) -> [u8; 32] {
-        blake3::hash(data).into()
+    fn hash_leaf(data: &trie::LeafData) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&data.key_path);
+        hasher.update(&data.value_hash);
+        let mut hash: [u8; 32] = hasher.finalize().into();
+
+        // Label with MSB
+        hash[0] |= 0b10000000;
+        hash
+    }
+
+    fn hash_internal(data: &trie::InternalData) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&data.left);
+        hasher.update(&data.right);
+        let mut hash: [u8; 32] = hasher.finalize().into();
+
+        // Label with MSB
+        hash[0] &= 0b01111111;
+        hash
+    }
+
+    fn node_kind(node: &Node) -> NodeKind {
+        if node[0] >> 7 == 1 {
+            NodeKind::Leaf
+        } else if node == &TERMINATOR {
+            NodeKind::Terminator
+        } else {
+            NodeKind::Internal
+        }
     }
 }
-
 impl ValueHasher for Blake3Hasher {
     fn hash_value(data: &[u8]) -> [u8; 32] {
         blake3::hash(data).into()

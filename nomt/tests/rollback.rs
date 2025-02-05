@@ -1,5 +1,5 @@
 use hex_literal::hex;
-use nomt::{Blake3Hasher, KeyPath, KeyReadWrite, Nomt, Options, SessionParams, Value};
+use nomt::{trie::KeyPath, Blake3Hasher, KeyReadWrite, Nomt, Options, SessionParams, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,

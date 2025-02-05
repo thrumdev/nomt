@@ -13,10 +13,11 @@
 //!
 //! All node preimages are 512 bits.
 
-/// A node in the binary trie. In this schema, it is always 256 bits and is the hash of an
-/// underlying structure, represented as [`NodePreimage`].
+/// A node in the binary trie. In this schema, it is always 256 bits and is the hash of either
+/// an [`LeafData`] or [`InternalData`], or zeroed if it's a [`TERMINATOR`].
 ///
-/// The first bit of the [`Node`] is used to indicate the kind of node
+/// [`Node`]s are labeled by the [`NodeHasher`] used to indicate whether they are leaves or internal
+/// nodes. Typically, this is done by setting the MSB.
 pub type Node = [u8; 32];
 
 /// The path to a key. All paths have a 256 bit fixed length.
@@ -24,12 +25,6 @@ pub type KeyPath = [u8; 32];
 
 /// The hash of a value. In this schema, it is always 256 bits.
 pub type ValueHash = [u8; 32];
-
-/// The preimage of a node. In this schema, it is always 512 bits.
-///
-/// Note that this encoding itself does not contain information about
-/// whether the node is a leaf or internal node.
-pub type NodePreimage = [u8; 64];
 
 /// The terminator hash is a special node hash value denoting an empty sub-tree.
 /// Concretely, when this appears at a given location in the trie,
@@ -39,18 +34,18 @@ pub type NodePreimage = [u8; 64];
 pub const TERMINATOR: Node = [0u8; 32];
 
 /// Whether the node hash indicates the node is a leaf.
-pub fn is_leaf(hash: &Node) -> bool {
-    hash[0] >> 7 == 1
+pub fn is_leaf<H: NodeHasher>(hash: &Node) -> bool {
+    H::node_kind(hash) == NodeKind::Leaf
 }
 
 /// Whether the node hash indicates the node is an internal node.
-pub fn is_internal(hash: &Node) -> bool {
-    hash[0] >> 7 == 0 && !is_terminator(&hash)
+pub fn is_internal<H: NodeHasher>(hash: &Node) -> bool {
+    H::node_kind(hash) == NodeKind::Internal
 }
 
 /// Whether the node holds the special `EMPTY_SUBTREE` value.
-pub fn is_terminator(hash: &Node) -> bool {
-    hash == &TERMINATOR
+pub fn is_terminator<H: NodeHasher>(hash: &Node) -> bool {
+    H::node_kind(hash) == NodeKind::Terminator
 }
 
 /// The kind of a node.
@@ -66,14 +61,8 @@ pub enum NodeKind {
 
 impl NodeKind {
     /// Get the kind of the provided node.
-    pub fn of(node: &Node) -> Self {
-        if is_leaf(node) {
-            NodeKind::Leaf
-        } else if is_terminator(node) {
-            NodeKind::Terminator
-        } else {
-            NodeKind::Internal
-        }
+    pub fn of<H: NodeHasher>(node: &Node) -> Self {
+        H::node_kind(node)
     }
 }
 
@@ -84,16 +73,6 @@ pub struct InternalData {
     pub left: Node,
     /// The hash of the right child of this node.
     pub right: Node,
-}
-
-impl InternalData {
-    /// Encode the internal node.
-    pub fn encode(&self) -> NodePreimage {
-        let mut node = [0u8; 64];
-        node[0..32].copy_from_slice(&self.left[..]);
-        node[32..64].copy_from_slice(&self.right[..]);
-        node
-    }
 }
 
 /// The data of a leaf node.
@@ -112,63 +91,24 @@ pub struct LeafData {
     pub value_hash: ValueHash,
 }
 
-impl LeafData {
-    /// Encode the leaf node.
-    pub fn encode(&self) -> NodePreimage {
-        let mut node = [0u8; 64];
-        self.encode_into(&mut node[..]);
-        node
-    }
-
-    /// Encode the leaf node into the given slice. It must have length at least 64 or this panics.
-    pub fn encode_into(&self, buf: &mut [u8]) {
-        buf[0..32].copy_from_slice(&self.key_path[..]);
-        buf[32..64].copy_from_slice(&self.value_hash[..]);
-    }
-
-    /// Decode the leaf node. Fails if the provided slice is not 64 bytes.
-    pub fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() != 64 {
-            None
-        } else {
-            let mut leaf = LeafData {
-                key_path: Default::default(),
-                value_hash: Default::default(),
-            };
-            leaf.key_path.copy_from_slice(&buf[..32]);
-            leaf.value_hash.copy_from_slice(&buf[32..]);
-            Some(leaf)
-        }
-    }
-}
-
 /// A trie node hash function specialized for 64 bytes of data.
+///
+/// Note that it is illegal for the produced hash to equal [0; 32], as this value is reserved
+/// for the terminator node.
+///
+/// A node hasher should domain-separate internal and leaf nodes in some specific way. The
+/// recommended approach for binary hashes is to set the MSB to 0 or 1 depending on the node kind.
+/// However, for other kinds of hashes (e.g. Poseidon2 or other algebraic hashes), other labeling
+/// schemes may be required.
 pub trait NodeHasher {
-    /// Hash a node, encoded as exactly 64 bytes of data. This should not
-    /// domain-separate the hash.
-    fn hash_node(data: &NodePreimage) -> [u8; 32];
+    /// Hash a leaf. This should domain-separate the hash
+    /// according to the node kind.
+    fn hash_leaf(data: &LeafData) -> [u8; 32];
+
+    /// Hash an internal node. This should domain-separate
+    /// the hash according to the node kind.
+    fn hash_internal(data: &InternalData) -> [u8; 32];
+
+    /// Get the kind of the given node.
+    fn node_kind(node: &Node) -> NodeKind;
 }
-
-pub trait NodeHasherExt: NodeHasher {
-    /// Hash an internal node. This returns a domain-separated hash.
-    fn hash_internal(internal: &InternalData) -> Node {
-        let data = internal.encode();
-        let mut hash = Self::hash_node(&data);
-
-        // set msb to 0.
-        hash[0] &= 0b01111111;
-        hash
-    }
-
-    /// Hash a leaf node. This returns a domain-separated hash.
-    fn hash_leaf(leaf: &LeafData) -> Node {
-        let data = leaf.encode();
-        let mut hash = Self::hash_node(&data);
-
-        // set msb to 1
-        hash[0] |= 0b10000000;
-        hash
-    }
-}
-
-impl<T: NodeHasher> NodeHasherExt for T {}
