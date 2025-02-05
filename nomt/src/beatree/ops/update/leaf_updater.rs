@@ -88,7 +88,12 @@ pub enum DigestResult {
 
 /// A callback which takes ownership of newly created leaves.
 pub trait HandleNewLeaf {
-    fn handle_new_leaf(&mut self, separator: Key, node: LeafNode, cutoff: Option<Key>);
+    fn handle_new_leaf(
+        &mut self,
+        separator: Key,
+        node: LeafNode,
+        cutoff: Option<Key>,
+    ) -> std::io::Result<()>;
 }
 
 pub struct LeafUpdater {
@@ -153,7 +158,7 @@ impl LeafUpdater {
     // If `NeedsMerge` is returned, `ops` are prepopulated with the merged values and
     // separator_override is set.
     // If `Finished` is returned, `ops` is guaranteed empty and separator_override is empty.
-    pub fn digest(&mut self, new_leaves: &mut impl HandleNewLeaf) -> DigestResult {
+    pub fn digest(&mut self, new_leaves: &mut impl HandleNewLeaf) -> std::io::Result<DigestResult> {
         // no cells are going to be deleted from this point onwards - this keeps everything.
         self.keep_up_to(None, |_| {});
 
@@ -161,30 +166,30 @@ impl LeafUpdater {
         // leaf of the bulk split first rather than pushing the ops onwards. probably irrelevant
         // in practice; bulk splits are rare.
         if self.gauge.body_size() > LEAF_BULK_SPLIT_THRESHOLD {
-            self.try_build_leaves(new_leaves, LEAF_BULK_SPLIT_TARGET)
+            self.try_build_leaves(new_leaves, LEAF_BULK_SPLIT_TARGET)?
         }
 
         // If the gauge is over LEAF_NODE_BODY_SIZE at least one node
         // respecting the half-full requirement will always be created.
         // There are cases where this will create two leaves.
         if self.gauge.body_size() > LEAF_NODE_BODY_SIZE {
-            self.try_build_leaves(new_leaves, self.gauge.body_size() / 2)
+            self.try_build_leaves(new_leaves, self.gauge.body_size() / 2)?
         }
 
         if self.gauge.body_size() == 0 {
             self.separator_override = None;
 
-            DigestResult::Finished
+            Ok(DigestResult::Finished)
         } else if self.gauge.body_size() >= LEAF_MERGE_THRESHOLD || self.cutoff.is_none() {
             let node = self.build_leaf(&self.ops);
             let separator = self.separator();
 
-            new_leaves.handle_new_leaf(separator, node, self.cutoff);
+            new_leaves.handle_new_leaf(separator, node, self.cutoff)?;
 
             self.ops.clear();
             self.gauge = LeafGauge::default();
             self.separator_override = None;
-            DigestResult::Finished
+            Ok(DigestResult::Finished)
         } else {
             if self.separator_override.is_none() {
                 // UNWRAP: if cutoff exists, then base must too.
@@ -196,7 +201,7 @@ impl LeafUpdater {
             self.prepare_merge_ops();
 
             // UNWRAP: protected above.
-            DigestResult::NeedsMerge(self.cutoff.unwrap())
+            Ok(DigestResult::NeedsMerge(self.cutoff.unwrap()))
         }
     }
 
@@ -240,7 +245,11 @@ impl LeafUpdater {
     }
 
     // Attempt to build as many leaves as possible with the specified body size target
-    fn try_build_leaves(&mut self, new_leaves: &mut impl HandleNewLeaf, target: usize) {
+    fn try_build_leaves(
+        &mut self,
+        new_leaves: &mut impl HandleNewLeaf,
+        target: usize,
+    ) -> std::io::Result<()> {
         let mut start = 0;
         while let Some(item_count) = self.consume_and_update_until(start, target) {
             let leaf_ops = &self.ops[start..][..item_count];
@@ -264,11 +273,12 @@ impl LeafUpdater {
                 separator,
                 new_node,
                 self.separator_override.or(self.cutoff),
-            );
+            )?;
             start += item_count;
         }
 
         self.ops.drain(..start);
+        Ok(())
     }
 
     /// The separator of the next leaf that will be built.
@@ -930,7 +940,7 @@ mod tests {
         let tot_body_size = updater.gauge.body_size();
         let midpoint = tot_body_size / 2;
 
-        updater.try_build_leaves(&mut new_leaves, midpoint);
+        updater.try_build_leaves(&mut new_leaves, midpoint).unwrap();
 
         let leaf_1 = &new_leaves.inner.get(&[0; 32]).unwrap().0;
         assert_eq!(leaf_1.n(), 3);
@@ -955,7 +965,9 @@ mod tests {
         // it's not possible to end up in an  to overfull scenario on the first
         // created leaf.
 
-        updater.try_build_leaves(&mut new_leaves, updater.gauge.body_size() / 2);
+        updater
+            .try_build_leaves(&mut new_leaves, updater.gauge.body_size() / 2)
+            .unwrap();
         assert_eq!(new_leaves.inner.len(), 1);
     }
 
@@ -973,7 +985,7 @@ mod tests {
         let tot_body_size = updater.gauge.body_size();
         let midpoint = tot_body_size / 2;
 
-        updater.try_build_leaves(&mut new_leaves, midpoint);
+        updater.try_build_leaves(&mut new_leaves, midpoint).unwrap();
 
         // A leaf is perfectly created.
         let leaf_1 = &new_leaves.inner.get(&[0; 32]).unwrap().0;

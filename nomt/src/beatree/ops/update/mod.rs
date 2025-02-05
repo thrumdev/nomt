@@ -1,4 +1,3 @@
-use anyhow::Result;
 use crossbeam_channel::Receiver;
 use imbl::OrdMap;
 use threadpool::ThreadPool;
@@ -14,6 +13,7 @@ use crate::beatree::{
     ops::get_key,
     Key, SyncData, ValueChange,
 };
+use crate::error::InfallibleTaskResult;
 use crate::io::{IoHandle, PagePool};
 
 mod branch_ops;
@@ -54,7 +54,7 @@ pub fn update(
     io_handle: IoHandle,
     thread_pool: ThreadPool,
     workers: usize,
-) -> Result<(SyncData, Index, Receiver<()>)> {
+) -> std::io::Result<(SyncData, Index, Receiver<InfallibleTaskResult<()>>)> {
     let leaf_reader = StoreReader::new(leaf_store.clone(), page_pool.clone());
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
@@ -90,19 +90,27 @@ pub fn update(
     total_io += ln_freelist_pages.len();
     total_io += bbn_freelist_pages.len();
 
-    crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages)?;
-    crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages)?;
+    crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages);
+    crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages);
 
+    // make sure that all write request succeeded.
     for _ in 0..total_io {
-        io_handle.recv()?;
+        // UNWRAP: we receive only what we sent. No `RecvErr` expected.
+        io_handle.recv().unwrap().result?;
     }
 
     let (tx, rx) = crossbeam_channel::bounded(1);
     thread_pool.execute(move || {
-        leaf_stage_outputs.post_io_work.run(&leaf_cache);
-        drop(branch_stage_outputs.post_io_drop);
-        leaf_cache.evict();
-        let _ = tx.send(());
+        let mut task_result: InfallibleTaskResult<()> =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                leaf_stage_outputs.post_io_work.run(&leaf_cache);
+                drop(branch_stage_outputs.post_io_drop);
+                leaf_cache.evict();
+            }))
+            .into();
+
+        task_result.with_context("panic in beatree offloaded non-critical sync work".to_string());
+        let _ = tx.send(task_result);
     });
 
     Ok((
