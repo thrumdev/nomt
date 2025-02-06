@@ -680,12 +680,9 @@ fn hash_page_id(page_id: &PageId, seed: &[u8; 16]) -> u64 {
 }
 
 fn hash_raw_page_id(page_id: [u8; 32], seed: &[u8; 16]) -> u64 {
-    let mut buf = [0u8; 8];
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&page_id);
-    hasher.update(&seed[..]);
-    buf.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
-    u64::from_le_bytes(buf)
+    // UNWRAP: 8 byte slice can always be transformed into 8 byte array.
+    let seed_u64 = u64::from_be_bytes(seed[..8].try_into().unwrap());
+    twox_hash::xxhash3_64::Hasher::oneshot_with_seed(seed_u64, &page_id)
 }
 
 #[derive(Clone, Copy)]

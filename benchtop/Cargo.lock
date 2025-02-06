@@ -2239,7 +2239,6 @@ dependencies = [
  "ahash 0.8.11",
  "anyhow",
  "bitvec",
- "blake3",
  "cfg-if",
  "crossbeam",
  "crossbeam-channel",
@@ -2256,6 +2255,7 @@ dependencies = [
  "slab",
  "thread_local",
  "threadpool",
+ "twox-hash 2.1.0",
 ]
 
 [[package]]
@@ -3607,7 +3607,7 @@ dependencies = [
  "digest 0.10.7",
  "sha2 0.10.8",
  "sha3",
- "twox-hash",
+ "twox-hash 1.6.3",
 ]
 
 [[package]]
@@ -3621,7 +3621,7 @@ dependencies = [
  "digest 0.10.7",
  "sha2 0.10.8",
  "sha3",
- "twox-hash",
+ "twox-hash 1.6.3",
 ]
 
 [[package]]
@@ -4309,6 +4309,15 @@ dependencies = [
  "digest 0.10.7",
  "rand",
  "static_assertions",
+]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7b17f197b3050ba473acf9181f7b1d3b66d1cf7356c6cc57886662276e65908"
+dependencies = [
+ "rand",
 ]
 
 [[package]]
