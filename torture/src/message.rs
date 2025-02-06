@@ -166,7 +166,12 @@ pub enum ToSupervisor {
     CommitResponse {
         /// The time it took for the operation to complete.
         elapsed: Duration,
-        /// The outcome of the operation.
+        /// The outcome of the commit.
+        outcome: Outcome,
+    },
+    /// The response to a completed rollback request.
+    RollbackResponse {
+        /// The outcome of the rollback.
         outcome: Outcome,
     },
     /// The response to a query for a key-value pair.

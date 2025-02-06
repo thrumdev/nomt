@@ -624,13 +624,21 @@ impl Workload {
         snapshot: Snapshot,
     ) -> anyhow::Result<()> {
         trace!("exercising rollback of {} commits", n_commits_to_rollback);
-        rr.send_request(crate::message::ToAgent::Rollback(
-            crate::message::RollbackPayload {
-                n_commits: n_commits_to_rollback,
-                should_crash: None,
-            },
-        ))
-        .await?;
+        let ToSupervisor::RollbackResponse { outcome } = rr
+            .send_request(crate::message::ToAgent::Rollback(
+                crate::message::RollbackPayload {
+                    n_commits: n_commits_to_rollback,
+                    should_crash: None,
+                },
+            ))
+            .await?
+        else {
+            return Err(anyhow::anyhow!(
+                "RollbackCommit did not execute successfully"
+            ));
+        };
+
+        self.ensure_outcome_validity(rr, &outcome).await?;
 
         let agent_sync_seqn = rr.send_query_sync_seqn().await?;
         if agent_sync_seqn != self.state.committed.sync_seqn + 1 {
