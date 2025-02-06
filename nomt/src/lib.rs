@@ -49,6 +49,7 @@ mod rw_pass_cell;
 mod seglog;
 mod store;
 mod sys;
+mod task;
 
 mod io;
 
