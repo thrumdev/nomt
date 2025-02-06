@@ -29,18 +29,18 @@ pub fn chunk(
     leaf_writer: &SyncAllocator,
     page_pool: &PagePool,
     io_handle: &IoHandle,
-) -> anyhow::Result<(Vec<PageNumber>, usize)> {
+) -> std::io::Result<(Vec<PageNumber>, usize)> {
     assert!(!value.is_empty());
 
     let total_pages = total_needed_pages(value.len());
     let cell_pages = std::cmp::min(total_pages, MAX_OVERFLOW_CELL_NODE_POINTERS);
     let cell = (0..cell_pages)
         .map(|_| leaf_writer.allocate())
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect::<std::io::Result<Vec<_>>>()?;
     let other_pages = (0..total_pages)
         .skip(cell_pages)
         .map(|_| leaf_writer.allocate())
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect::<std::io::Result<Vec<_>>>()?;
 
     let all_pages = cell.iter().cloned().chain(other_pages.iter().cloned());
     let mut to_write = other_pages.iter().cloned();

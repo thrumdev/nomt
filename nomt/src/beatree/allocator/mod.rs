@@ -191,7 +191,7 @@ impl SyncAllocator {
     /// allocated.
     ///
     /// This returns an error when setting the length of the file fails.
-    pub fn allocate(&self) -> anyhow::Result<PageNumber> {
+    pub fn allocate(&self) -> std::io::Result<PageNumber> {
         let allocation_index = self.inner.allocations.fetch_add(1, Ordering::Relaxed);
         let sync = self.inner.sync();
 
@@ -260,7 +260,7 @@ impl Drop for SyncAllocatorInner {
 // page of the file.
 //
 // returns an error when growing the file fails.
-fn grow(file: &File, page: PageNumber) -> anyhow::Result<PageNumber> {
+fn grow(file: &File, page: PageNumber) -> std::io::Result<PageNumber> {
     let next_bump = page.0.next_multiple_of(GROW_STORE_BY_PAGES);
     file.set_len(next_bump as u64 * PAGE_SIZE as u64)?;
     Ok(PageNumber(next_bump))
@@ -291,7 +291,7 @@ impl SyncFinisher {
         self,
         page_pool: &PagePool,
         freed: Vec<PageNumber>,
-    ) -> anyhow::Result<(Vec<(PageNumber, FatPage)>, StoreMeta)> {
+    ) -> std::io::Result<(Vec<(PageNumber, FatPage)>, StoreMeta)> {
         // Block on `sync_finish`.
         // UNWRAP: `SyncAllocator` sends the guard when dropped. We assume it is not leaked.
         let Finish {

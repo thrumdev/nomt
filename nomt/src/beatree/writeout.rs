@@ -11,7 +11,7 @@ pub fn submit_freelist_write(
     io_handle: &IoHandle,
     store: &Store,
     free_list_pages: Vec<(PageNumber, FatPage)>,
-) -> anyhow::Result<()> {
+) {
     for (pn, page) in free_list_pages {
         io_handle
             .send(crate::io::IoCommand {
@@ -20,6 +20,4 @@ pub fn submit_freelist_write(
             })
             .unwrap();
     }
-
-    Ok(())
 }

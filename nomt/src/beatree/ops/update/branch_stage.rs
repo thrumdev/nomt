@@ -1,15 +1,17 @@
-use anyhow::Context;
 use std::ops::Range;
 use std::sync::Arc;
 use threadpool::ThreadPool;
 
-use crate::beatree::{
-    allocator::{PageNumber, SyncAllocator},
-    branch::node::BranchNode,
-    index::Index,
-    Key,
-};
 use crate::io::{IoCommand, IoHandle, IoKind, PagePool};
+use crate::{
+    beatree::{
+        allocator::{PageNumber, SyncAllocator},
+        branch::node::BranchNode,
+        index::Index,
+        Key,
+    },
+    task::{join_task, spawn_task},
+};
 
 use super::branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
 use super::extend_range_protocol::{
@@ -46,7 +48,7 @@ pub fn run(
     changeset: Vec<(Key, Option<PageNumber>)>,
     thread_pool: ThreadPool,
     num_workers: usize,
-) -> anyhow::Result<BranchStageOutput> {
+) -> std::io::Result<BranchStageOutput> {
     if changeset.is_empty() {
         return Ok(BranchStageOutput::default());
     }
@@ -60,7 +62,7 @@ pub fn run(
     let num_workers = workers.len();
     let (worker_result_tx, worker_result_rx) = crossbeam_channel::bounded(num_workers);
 
-    for (worker_id, worker_params) in workers.into_iter().enumerate() {
+    for worker_params in workers.into_iter() {
         let bbn_index = bbn_index.clone();
         let bbn_writer = bbn_writer.clone();
         let page_pool = page_pool.clone();
@@ -68,24 +70,24 @@ pub fn run(
         let changeset = changeset.clone();
 
         let worker_result_tx = worker_result_tx.clone();
-        thread_pool.execute(move || {
-            let output_or_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // passing the large `Arc` values by reference ensures that they are dropped at the
-                // end of this scope, not the end of `run_worker`.
-                Ok(run_worker(
-                    bbn_index,
-                    bbn_writer,
-                    page_pool,
-                    io_handle,
-                    &*changeset,
-                    worker_params,
-                ))
-            }));
-            let output = output_or_panic
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("panic in branch stage: {:?}", e)))
-                .with_context(|| format!("worker {} erred out", worker_id));
-            let _ = worker_result_tx.send(output);
-        });
+
+        let branch_stage_worker_task = move || {
+            // passing the large `Arc` values by reference ensures that they are dropped at the
+            // end of this scope, not the end of `run_worker`.
+            run_worker(
+                bbn_index,
+                bbn_writer,
+                page_pool,
+                io_handle,
+                &*changeset,
+                worker_params,
+            )
+        };
+        spawn_task(
+            &thread_pool,
+            branch_stage_worker_task,
+            worker_result_tx.clone(),
+        );
     }
 
     // we don't want to block other sync steps on deallocating these memory regions.
@@ -94,8 +96,7 @@ pub fn run(
     let mut output = BranchStageOutput::default();
 
     for _ in 0..num_workers {
-        // UNWRAP: results are always sent unless worker panics.
-        let worker_output = worker_result_rx.recv()??;
+        let worker_output = join_task(&worker_result_rx)?;
         apply_bbn_changes(bbn_index, &mut output, worker_output);
     }
 
@@ -286,7 +287,7 @@ fn run_worker(
     io_handle: IoHandle,
     changeset: &[(Key, Option<PageNumber>)],
     mut worker_params: WorkerParams<BranchNode>,
-) -> BranchWorkerOutput {
+) -> std::io::Result<BranchWorkerOutput> {
     let mut branch_updater = BranchUpdater::new(page_pool, None, None);
     let mut pending_left_request = None;
     let mut has_extended_range = false;
@@ -315,7 +316,7 @@ fn run_worker(
             // to respond to the left neighbor. However, we should only respond if we are sure that
             // we will not introduce changed items with smaller separators later on.
             let k = if let BranchDigestResult::NeedsMerge(cutoff) =
-                branch_updater.digest(&mut new_branch_state)
+                branch_updater.digest(&mut new_branch_state)?
             {
                 // If we are dealing with a NeedsMerge, there is a high probability that the `branch_updater`
                 // has a new pending branch which still needs to be constructed with a separator smaller
@@ -351,7 +352,8 @@ fn run_worker(
         branch_updater.ingest(*key, *op);
     }
 
-    while let BranchDigestResult::NeedsMerge(cutoff) = branch_updater.digest(&mut new_branch_state)
+    while let BranchDigestResult::NeedsMerge(cutoff) =
+        branch_updater.digest(&mut new_branch_state)?
     {
         has_extended_range = false;
         if worker_params
@@ -400,9 +402,9 @@ fn run_worker(
         }
     }
 
-    BranchWorkerOutput {
+    Ok(BranchWorkerOutput {
         branches_tracker: new_branch_state.branches_tracker,
-    }
+    })
 }
 
 struct NewBranchHandler {
@@ -412,16 +414,19 @@ struct NewBranchHandler {
 }
 
 impl super::branch_updater::HandleNewBranch for NewBranchHandler {
-    fn handle_new_branch(&mut self, key: Key, mut bbn: BranchNode, cutoff: Option<Key>) {
+    fn handle_new_branch(
+        &mut self,
+        key: Key,
+        mut bbn: BranchNode,
+        cutoff: Option<Key>,
+    ) -> std::io::Result<()> {
         let fd = self.bbn_writer.store_fd();
 
-        // TODO: handle error
-        let page_number = self.bbn_writer.allocate().unwrap();
+        let page_number = self.bbn_writer.allocate()?;
 
         bbn.set_bbn_pn(page_number.0);
         let bbn = Arc::new(bbn);
 
-        // TODO: handle error
         let page = bbn.page();
         self.io_handle
             .send(IoCommand {
@@ -431,5 +436,6 @@ impl super::branch_updater::HandleNewBranch for NewBranchHandler {
             .expect("I/O Pool Down");
 
         self.branches_tracker.insert(key, bbn, cutoff, page_number);
+        Ok(())
     }
 }
