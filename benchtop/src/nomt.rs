@@ -109,7 +109,7 @@ impl NomtDB {
         let mut actual_access: Vec<_> = access.into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
 
-        let finished = session.finish(actual_access);
+        let finished = session.finish(actual_access).unwrap();
         if self.overlay_window_capacity == 0 {
             finished.commit(&self.nomt).unwrap();
         } else {
@@ -183,7 +183,7 @@ impl NomtDB {
             .collect();
         actual_access.sort_by_key(|(k, _)| *k);
 
-        let finished = session.finish(actual_access);
+        let finished = session.finish(actual_access).unwrap();
         if self.overlay_window_capacity == 0 {
             finished.commit(&self.nomt).unwrap();
         } else {

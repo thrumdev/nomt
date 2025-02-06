@@ -558,16 +558,11 @@ impl PageLoader {
     /// Note that the page loaded by the I/O pool may be a misprobe. You must use
     /// [`PageLoad::try_complete`] to verify whether the hash-table probe has completed or must be
     /// tried again.
-    pub fn probe(
-        &self,
-        load: &mut PageLoad,
-        io_handle: &IoHandle,
-        user_data: u64,
-    ) -> anyhow::Result<bool> {
+    pub fn probe(&self, load: &mut PageLoad, io_handle: &IoHandle, user_data: u64) -> bool {
         let bucket = loop {
             match load.probe_sequence.next(&self.meta_map) {
                 ProbeResult::Tombstone(_) => continue,
-                ProbeResult::Empty(_) => return Ok(false),
+                ProbeResult::Empty(_) => return false,
                 ProbeResult::PossibleHit(bucket) => break BucketIndex(bucket),
             }
         };
@@ -580,13 +575,10 @@ impl PageLoader {
             user_data,
         };
 
-        match io_handle.send(command) {
-            Ok(()) => {
-                load.state = PageLoadState::Submitted;
-                Ok(true)
-            }
-            Err(_) => anyhow::bail!("I/O pool hangup"),
-        }
+        // UNWRAP: I/O pool is not expected to hangup.
+        io_handle.send(command).unwrap();
+        load.state = PageLoadState::Submitted;
+        true
     }
 }
 

@@ -22,6 +22,7 @@ use crate::{
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
     store::{BucketIndex, DirtyPage, SharedMaybeBucketIndex, Store},
+    task::{join_task, spawn_task, TaskResult},
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
@@ -214,7 +215,7 @@ impl Updater {
         self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
-    ) -> UpdateHandle {
+    ) -> std::io::Result<UpdateHandle> {
         if let Some(ref warm_up) = self.warm_up {
             let _ = warm_up.finish_tx.send(());
         }
@@ -229,9 +230,8 @@ impl Updater {
         let shard_regions = (0..num_workers).map(ShardIndex::Shard).collect::<Vec<_>>();
 
         // receive warm-ups from worker.
-        // TODO: handle error better.
         let (warm_ups, warm_page_set) = if let Some(ref warm_up) = self.warm_up {
-            let output = warm_up.output_rx.recv().unwrap();
+            let output = join_task(&warm_up.output_rx)?;
             (output.paths, Some(output.pages))
         } else {
             (HashMap::new(), None)
@@ -262,11 +262,11 @@ impl Updater {
             spawn_updater::<H>(&self.worker_tp, params, worker_tx.clone());
         }
 
-        UpdateHandle {
+        Ok(UpdateHandle {
             shared,
             worker_rx,
             num_workers,
-        }
+        })
     }
 }
 
@@ -462,7 +462,7 @@ impl UpdateShared {
 struct WarmUpHandle {
     finish_tx: Sender<()>,
     warmup_tx: Sender<WarmUpCommand>,
-    output_rx: Receiver<WarmUpOutput>,
+    output_rx: Receiver<TaskResult<std::io::Result<WarmUpOutput>>>,
 }
 
 fn spawn_warm_up<H: HashAlgorithm>(
@@ -473,7 +473,11 @@ fn spawn_warm_up<H: HashAlgorithm>(
     let (output_tx, output_rx) = channel::bounded(1);
     let (finish_tx, finish_rx) = channel::bounded(1);
 
-    worker_tp.execute(move || worker::run_warm_up::<H>(params, warmup_rx, finish_rx, output_tx));
+    spawn_task(
+        &worker_tp,
+        move || worker::run_warm_up::<H>(params, warmup_rx, finish_rx),
+        output_tx,
+    );
 
     WarmUpHandle {
         warmup_tx,
