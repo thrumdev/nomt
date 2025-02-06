@@ -736,25 +736,20 @@ impl fuser::Filesystem for Trick {
             reply.error(libc::ENOENT);
             return;
         };
+        if container.count() > 0 {
+            // Note that VFS should not allow removing a non-empty directory and so
+            // we do not expect here to encounter one.
+            //
+            // When you do `rm -rf` on a directory, the kernel will first remove all the
+            // entries in the directory and then remove the directory itself. So we should
+            // not encounter a non-empty directory here.
+            return reply.error(libc::ENOTEMPTY);
+        }
         // Remove the tree entry corresponding to the removed inode.
-        let container = self
-            .tree
+        self.tree
             .ino_to_container
             .remove(&removed_ino)
             .unwrap_or_else(|| panic!("container was not present"));
-        for (_, item_ino) in container.iter() {
-            match self.lookup_inode(item_ino) {
-                None => {
-                    panic!("container entry is not registered")
-                }
-                Some(inode_data) if inode_data.is_dir() => {
-                    panic!("unexpected nested directory");
-                }
-                Some(_) => {
-                    self.remove_inode(item_ino);
-                }
-            }
-        }
         self.remove_inode(removed_ino);
         reply.ok();
     }
