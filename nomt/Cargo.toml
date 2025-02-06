@@ -16,7 +16,7 @@ nomt-core = { path = "../core", default-features = false, features = ["std"] }
 parking_lot = { version = "0.12.3", features = ["arc_lock", "send_guard"] }
 threadpool = "1.8.1"
 bitvec = { version = "1" }
-blake3 = "1.5.1"
+twox-hash = "2.1.0"
 fxhash = "0.2.1"
 dashmap = "5.5.3"
 crossbeam = "0.8.4"
@@ -46,6 +46,7 @@ criterion = "0.3"
 lazy_static = "1.5.0"
 hex = "0.4.3"
 quickcheck = "1.0.3"
+blake3 = "1.5.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
