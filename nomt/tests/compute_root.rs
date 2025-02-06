@@ -1,7 +1,7 @@
 mod common;
 
 use common::Test;
-use nomt::{trie::NodeKind, Blake3Hasher};
+use nomt::{hasher::Blake3Hasher, trie::NodeKind};
 
 #[test]
 fn root_on_empty_db() {

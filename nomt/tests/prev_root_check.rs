@@ -1,4 +1,4 @@
-use nomt::{Blake3Hasher, KeyReadWrite, Nomt, Options, SessionParams};
+use nomt::{hasher::Blake3Hasher, KeyReadWrite, Nomt, Options, SessionParams};
 use std::path::PathBuf;
 
 /// Setup a NOMT with the given path, rollback enabled, and the given commit concurrency.

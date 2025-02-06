@@ -12,7 +12,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = { version = "1.0.81", features = ["backtrace"] }
-nomt-core = { path = "../core", features = ["std"] }
+nomt-core = { path = "../core", default-features = false, features = ["std"] }
 parking_lot = { version = "0.12.3", features = ["arc_lock", "send_guard"] }
 threadpool = "1.8.1"
 bitvec = { version = "1" }
@@ -55,6 +55,9 @@ name = "beatree"
 harness = false
 
 [features]
+default = ["blake3-hasher", "sha2-hasher"]
 benchmarks = ["dep:criterion"]
 fuzz = []
 borsh = ["dep:borsh", "nomt-core/borsh"]
+blake3-hasher = ["nomt-core/blake3-hasher"]
+sha2-hasher = ["nomt-core/sha2-hasher"]

@@ -13,6 +13,8 @@
 //!
 //! All node preimages are 512 bits.
 
+use crate::hasher::NodeHasher;
+
 /// A node in the binary trie. In this schema, it is always 256 bits and is the hash of either
 /// an [`LeafData`] or [`InternalData`], or zeroed if it's a [`TERMINATOR`].
 ///
@@ -89,26 +91,4 @@ pub struct LeafData {
     pub key_path: KeyPath,
     /// The hash of the value carried in this leaf.
     pub value_hash: ValueHash,
-}
-
-/// A trie node hash function specialized for 64 bytes of data.
-///
-/// Note that it is illegal for the produced hash to equal [0; 32], as this value is reserved
-/// for the terminator node.
-///
-/// A node hasher should domain-separate internal and leaf nodes in some specific way. The
-/// recommended approach for binary hashes is to set the MSB to 0 or 1 depending on the node kind.
-/// However, for other kinds of hashes (e.g. Poseidon2 or other algebraic hashes), other labeling
-/// schemes may be required.
-pub trait NodeHasher {
-    /// Hash a leaf. This should domain-separate the hash
-    /// according to the node kind.
-    fn hash_leaf(data: &LeafData) -> [u8; 32];
-
-    /// Hash an internal node. This should domain-separate
-    /// the hash according to the node kind.
-    fn hash_internal(data: &InternalData) -> [u8; 32];
-
-    /// Get the kind of the given node.
-    fn node_kind(node: &Node) -> NodeKind;
 }

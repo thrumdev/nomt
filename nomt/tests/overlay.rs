@@ -3,7 +3,7 @@ mod common;
 use common::Test;
 
 fn expected_root(items: Vec<([u8; 32], Vec<u8>)>) -> nomt_core::trie::Node {
-    nomt_core::update::build_trie::<nomt::Blake3Hasher>(
+    nomt_core::update::build_trie::<nomt::hasher::Blake3Hasher>(
         0,
         items
             .into_iter()

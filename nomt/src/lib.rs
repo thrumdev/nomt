@@ -9,9 +9,10 @@ use std::{mem, sync::Arc};
 
 use merkle::{UpdatePool, Updater};
 use nomt_core::{
+    hasher::{NodeHasher, ValueHasher},
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
-    trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, NodeKind, ValueHash, TERMINATOR},
+    trie::{InternalData, KeyPath, LeafData, Node, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
 };
 use overlay::{LiveOverlay, OverlayMarker};
@@ -21,6 +22,7 @@ use store::{Store, ValueTransaction};
 
 // CARGO HACK: silence lint; this is used in integration tests
 
+pub use nomt_core::hasher;
 pub use nomt_core::proof;
 pub use nomt_core::trie;
 pub use options::{Options, PanicOnSyncMode};
@@ -767,56 +769,11 @@ impl Overlay {
     }
 }
 
-/// A hasher for arbitrary-length values.
-pub trait ValueHasher {
-    /// Hash an arbitrary-length value.
-    fn hash_value(value: &[u8]) -> [u8; 32];
-}
-
-/// A hash algorithm that uses Blake3 for both nodes and values.
-pub struct Blake3Hasher;
-
-impl NodeHasher for Blake3Hasher {
-    fn hash_leaf(data: &trie::LeafData) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&data.key_path);
-        hasher.update(&data.value_hash);
-        let mut hash: [u8; 32] = hasher.finalize().into();
-
-        // Label with MSB
-        hash[0] |= 0b10000000;
-        hash
-    }
-
-    fn hash_internal(data: &trie::InternalData) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&data.left);
-        hasher.update(&data.right);
-        let mut hash: [u8; 32] = hasher.finalize().into();
-
-        // Label with MSB
-        hash[0] &= 0b01111111;
-        hash
-    }
-
-    fn node_kind(node: &Node) -> NodeKind {
-        if node[0] >> 7 == 1 {
-            NodeKind::Leaf
-        } else if node == &TERMINATOR {
-            NodeKind::Terminator
-        } else {
-            NodeKind::Internal
-        }
-    }
-}
-impl ValueHasher for Blake3Hasher {
-    fn hash_value(data: &[u8]) -> [u8; 32] {
-        blake3::hash(data).into()
-    }
-}
-
 /// A marker trait for hash functions usable with NOMT. The type must support both hashing nodes as
 /// well as values.
+///
+/// This is automatically implemented for types implementing
+/// both [`NodeHasher`] and [`ValueHasher`].
 pub trait HashAlgorithm: ValueHasher + NodeHasher {}
 
 impl<T: ValueHasher + NodeHasher> HashAlgorithm for T {}
@@ -885,7 +842,7 @@ fn compute_root_node<H: HashAlgorithm>(page_cache: &PageCache, store: &Store) ->
 
 #[cfg(test)]
 mod tests {
-    use crate::Blake3Hasher;
+    use crate::hasher::Blake3Hasher;
 
     #[test]
     fn session_is_sync() {

@@ -6,7 +6,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use nomt::{
-    trie::KeyPath, Blake3Hasher, KeyReadWrite, Nomt, Options, SessionParams, Value, WitnessMode,
+    hasher::Blake3Hasher, trie::KeyPath, KeyReadWrite, Nomt, Options, SessionParams, Value,
+    WitnessMode,
 };
 
 fuzz_target!(|run: Run| {

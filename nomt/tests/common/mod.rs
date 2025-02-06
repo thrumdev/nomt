@@ -30,7 +30,7 @@ pub fn expected_root(accounts: u64) -> Node {
         .map(|a| (a, *blake3::hash(&1000u64.to_le_bytes()).as_bytes()))
         .collect::<Vec<_>>();
     ops.sort_unstable_by_key(|(a, _)| *a);
-    nomt_core::update::build_trie::<nomt::Blake3Hasher>(0, ops, |_| {})
+    nomt_core::update::build_trie::<nomt::hasher::Blake3Hasher>(0, ops, |_| {})
 }
 
 fn opts(path: PathBuf) -> Options {
@@ -41,8 +41,8 @@ fn opts(path: PathBuf) -> Options {
 }
 
 pub struct Test {
-    nomt: Nomt<nomt::Blake3Hasher>,
-    session: Option<Session<nomt::Blake3Hasher>>,
+    nomt: Nomt<nomt::hasher::Blake3Hasher>,
+    session: Option<Session<nomt::hasher::Blake3Hasher>>,
     access: HashMap<KeyPath, KeyReadWrite>,
 }
 

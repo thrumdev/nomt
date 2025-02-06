@@ -1088,6 +1088,7 @@ dependencies = [
  "borsh",
  "hex",
  "ruint",
+ "sha2",
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
 use crate::{backend::Transaction, timer::Timer, workload::Workload};
 use fxhash::FxHashMap;
 use nomt::{
-    trie::KeyPath, Blake3Hasher, KeyReadWrite, Nomt, Options, Overlay, Session, SessionParams,
-    WitnessMode,
+    hasher::Blake3Hasher, trie::KeyPath, KeyReadWrite, Nomt, Options, Overlay, Session,
+    SessionParams, WitnessMode,
 };
 use sha2::Digest;
 use std::{
