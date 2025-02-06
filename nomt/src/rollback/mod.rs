@@ -16,11 +16,16 @@ use std::{
     sync::Arc,
 };
 
-use crate::overlay::LiveOverlay;
+use crate::{
+    overlay::LiveOverlay,
+    task::TaskResult,
+    task::{join_task, spawn_task},
+};
 use crossbeam::channel::Sender;
+use crossbeam_channel::Receiver;
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use threadpool::ThreadPool;
 
 use self::reverse_delta_worker::{DeltaBuilderCommand, LoadValueAsync, StoreLoadValueAsync};
@@ -118,8 +123,8 @@ impl Rollback {
             },
         )?;
         let shared = Arc::new(Shared {
-            worker_tp: ThreadPool::new(ROLLBACK_TP_SIZE),
-            sync_tp: ThreadPool::new(1),
+            worker_tp: ThreadPool::with_name("rollback-worker".into(), ROLLBACK_TP_SIZE),
+            sync_tp: ThreadPool::with_name("rollback-sync".into(), 1),
             in_memory: Mutex::new(in_memory),
             seglog: Mutex::new(seglog),
             max_rollback_log_len: max_rollback_log_len as usize,
@@ -277,24 +282,28 @@ impl Rollback {
 
 pub struct SyncController {
     rollback: Rollback,
-    wd: Arc<Mutex<Option<WriteoutData>>>,
-    wd_cv: Arc<Condvar>,
-    post_meta: Arc<Mutex<Option<std::io::Result<()>>>>,
-    post_meta_cv: Arc<Condvar>,
+    writeout_data: Option<WriteoutData>,
+    // The channel to send the result of the writeout task. Option is to allow `take`.
+    writeout_result_tx: Option<Sender<TaskResult<WriteoutData>>>,
+    // The channel to receive the result of the writeout task.
+    writeout_result_rx: Receiver<TaskResult<WriteoutData>>,
+    // The channel to send the result of the post meta task. Option is to allow `take`.
+    post_meta_result_tx: Option<Sender<TaskResult<std::io::Result<()>>>>,
+    // The channel to receive the result of the post meta task.
+    post_meta_result_rx: Receiver<TaskResult<std::io::Result<()>>>,
 }
 
 impl SyncController {
     fn new(rollback: Rollback) -> Self {
-        let wd = Arc::new(Mutex::new(None));
-        let wd_cv = Arc::new(Condvar::new());
-        let post_meta = Arc::new(Mutex::new(None));
-        let post_meta_cv = Arc::new(Condvar::new());
+        let (writeout_result_tx, writeout_result_rx) = crossbeam_channel::bounded(1);
+        let (post_meta_result_tx, post_meta_result_rx) = crossbeam_channel::bounded(1);
         Self {
             rollback,
-            wd,
-            wd_cv,
-            post_meta,
-            post_meta_cv,
+            writeout_data: None,
+            writeout_result_tx: Some(writeout_result_tx),
+            writeout_result_rx,
+            post_meta_result_tx: Some(post_meta_result_tx),
+            post_meta_result_rx,
         }
     }
 
@@ -304,51 +313,44 @@ impl SyncController {
     pub fn begin_sync(&mut self) {
         let tp = self.rollback.shared.sync_tp.clone();
         let rollback = self.rollback.clone();
-        let wd = self.wd.clone();
-        let wd_cv = self.wd_cv.clone();
-        tp.execute(move || {
-            let writeout_data = rollback.writeout_start();
-            let _ = wd.lock().replace(writeout_data);
-            wd_cv.notify_one();
-        });
+        // UNWRAP: safe because begin_sync is called only once.
+        let writeout_result_tx = self.writeout_result_tx.take().unwrap();
+        spawn_task(&tp, move || rollback.writeout_start(), writeout_result_tx);
     }
 
     /// Wait for the rollback writeout to complete. Returns the new rollback live range
     /// `(start_live, end_live)`.
     ///
     /// This should be called by the sync thread. Blocking.
-    pub fn wait_pre_meta(&self) -> (u64, u64) {
-        let mut wd = self.wd.lock();
-        self.wd_cv.wait_while(&mut wd, |wd| wd.is_none());
-        // UNWRAP: we checked above that `wd` is not `None`.
-        let wd = wd.as_ref().unwrap();
-        (wd.rollback_start_live, wd.rollback_end_live)
+    pub fn wait_pre_meta(&mut self) -> (u64, u64) {
+        let wd_result = join_task(&self.writeout_result_rx);
+        let res = (wd_result.rollback_start_live, wd_result.rollback_end_live);
+        self.writeout_data.replace(wd_result);
+        res
     }
 
     /// This should be called after the meta has been updated.
     ///
     /// This function doesn't block.
-    pub fn post_meta(&self) {
+    pub fn post_meta(&mut self) {
         let tp = self.rollback.shared.sync_tp.clone();
-        let wd = self.wd.lock().take().unwrap();
-        let post_meta = self.post_meta.clone();
-        let post_meta_cv = self.post_meta_cv.clone();
+        // UNWRAP: `writeout_data` is being set to `Some` in `wait_pre_meta`.
+        let wd = self.writeout_data.as_ref().unwrap();
         let rollback = self.rollback.clone();
-        tp.execute(move || {
-            let result =
-                rollback.writeout_end(wd.prune_to_new_start_live, wd.prune_to_new_end_live);
-            let _ = post_meta.lock().replace(result);
-            post_meta_cv.notify_one();
-        });
+        let prune_to_new_start_live = wd.prune_to_new_start_live;
+        let prune_to_new_end_live = wd.prune_to_new_end_live;
+        // UNWRAP: safe because post_meta is called only once.
+        let post_meta_result_tx = self.post_meta_result_tx.take().unwrap();
+        spawn_task(
+            &tp,
+            move || rollback.writeout_end(prune_to_new_start_live, prune_to_new_end_live),
+            post_meta_result_tx,
+        );
     }
 
     /// Wait until the post-meta writeout completes.
     pub fn wait_post_meta(&self) -> std::io::Result<()> {
-        let mut post_meta = self.post_meta.lock();
-        self.post_meta_cv
-            .wait_while(&mut post_meta, |post_meta| post_meta.is_none());
-        // UNWRAP: we checked above that `post_meta` is not `None`.
-        post_meta.take().unwrap()
+        join_task(&self.post_meta_result_rx)
     }
 }
 
