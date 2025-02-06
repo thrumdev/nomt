@@ -1,3 +1,16 @@
+//! Trickfs — an experimental file system that is made for testing.
+//!
+//! The goal of this piece of code is a file system that can be used for
+//! testing the behavior of other programs under certain conditions, such as:
+//!
+//! - Returning errors on certain operations. Prominently, `ENOSPC` — no space left on device.
+//! - Simulating slow or fast operations.
+//! - Returning corrupted data.
+//! - Detecting reading not fsync-ed data, etc.
+//!
+//! Currently, this file system is implemented as in-memory, the storage is backed by `mmap`ed
+//! memory. Only bare-bone operations are implemented, only those that are actually used by NOMT.
+
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
