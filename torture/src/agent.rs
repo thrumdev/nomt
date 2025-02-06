@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
-use nomt::{Blake3Hasher, Nomt, SessionParams};
+use nomt::{hasher::Blake3Hasher, Nomt, SessionParams};
 use std::future::Future;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc, time::Duration};

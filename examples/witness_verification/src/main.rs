@@ -1,47 +1,5 @@
 use anyhow::Result;
-use nomt_core::{
-    proof,
-    trie::{self, LeafData, Node, NodeHasher, NodeKind, TERMINATOR},
-};
-
-// Hash nodes using blake3. The Hasher below will be utilized in the witness
-// verification stage and must conform to the hash used in the commitment
-// phase and subsequently during witness creation
-pub struct Blake3Hasher;
-
-impl NodeHasher for Blake3Hasher {
-    fn hash_leaf(data: &trie::LeafData) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&data.key_path);
-        hasher.update(&data.value_hash);
-        let mut hash: [u8; 32] = hasher.finalize().into();
-
-        // Label with MSB
-        hash[0] |= 0b10000000;
-        hash
-    }
-
-    fn hash_internal(data: &trie::InternalData) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&data.left);
-        hasher.update(&data.right);
-        let mut hash: [u8; 32] = hasher.finalize().into();
-
-        // Label with MSB
-        hash[0] &= 0b01111111;
-        hash
-    }
-
-    fn node_kind(node: &Node) -> NodeKind {
-        if node[0] >> 7 == 1 {
-            NodeKind::Leaf
-        } else if node == &TERMINATOR {
-            NodeKind::Terminator
-        } else {
-            NodeKind::Internal
-        }
-    }
-}
+use nomt_core::{hasher::Blake3Hasher, proof, trie::LeafData};
 
 fn main() -> Result<()> {
     // The witness produced in the example `commit_batch` will be used

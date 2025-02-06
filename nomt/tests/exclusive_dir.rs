@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use nomt::{Blake3Hasher, Nomt, Options};
+use nomt::{hasher::Blake3Hasher, Nomt, Options};
 
 fn setup_nomt(path: &str, should_clean_up: bool) -> anyhow::Result<Nomt<Blake3Hasher>> {
     let path = {

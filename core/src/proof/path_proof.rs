@@ -1,6 +1,7 @@
 //! Proving and verifying inclusion, non-inclusion, and updates to the trie.
 
-use crate::trie::{self, InternalData, KeyPath, LeafData, Node, NodeHasher, NodeKind, TERMINATOR};
+use crate::hasher::NodeHasher;
+use crate::trie::{self, InternalData, KeyPath, LeafData, Node, NodeKind, TERMINATOR};
 use crate::trie_pos::TriePosition;
 
 use bitvec::prelude::*;

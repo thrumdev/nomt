@@ -3,11 +3,12 @@
 //! the inclusion of all provided path proofs.
 
 use crate::{
+    hasher::NodeHasher,
     proof::{
         path_proof::{hash_path, shared_bits},
         KeyOutOfScope, PathProof, PathProofTerminal,
     },
-    trie::{InternalData, KeyPath, LeafData, Node, NodeHasher, TERMINATOR},
+    trie::{InternalData, KeyPath, LeafData, Node, TERMINATOR},
 };
 
 #[cfg(not(feature = "std"))]
@@ -497,8 +498,9 @@ mod tests {
     use super::{verify, MultiProof};
 
     use crate::{
+        hasher::{Blake3Hasher, NodeHasher},
         proof::{PathProof, PathProofTerminal},
-        trie::{self, InternalData, LeafData, Node, NodeHasher, NodeKind, TERMINATOR},
+        trie::{InternalData, LeafData, TERMINATOR},
         trie_pos::TriePosition,
     };
 
@@ -882,43 +884,6 @@ mod tests {
                 sibling15, sibling17, sibling19, sibling20, sibling22, sibling24
             ]
         );
-    }
-
-    /// Hash nodes with blake3.
-    pub struct Blake3Hasher;
-
-    impl NodeHasher for Blake3Hasher {
-        fn hash_leaf(data: &trie::LeafData) -> [u8; 32] {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&data.key_path);
-            hasher.update(&data.value_hash);
-            let mut hash: [u8; 32] = hasher.finalize().into();
-
-            // Label with MSB
-            hash[0] |= 0b10000000;
-            hash
-        }
-
-        fn hash_internal(data: &trie::InternalData) -> [u8; 32] {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&data.left);
-            hasher.update(&data.right);
-            let mut hash: [u8; 32] = hasher.finalize().into();
-
-            // Label with MSB
-            hash[0] &= 0b01111111;
-            hash
-        }
-
-        fn node_kind(node: &Node) -> NodeKind {
-            if node[0] >> 7 == 1 {
-                NodeKind::Leaf
-            } else if node == &TERMINATOR {
-                NodeKind::Terminator
-            } else {
-                NodeKind::Internal
-            }
-        }
     }
 
     #[test]

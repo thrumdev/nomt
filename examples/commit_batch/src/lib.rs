@@ -1,5 +1,7 @@
 use anyhow::Result;
-use nomt::{Blake3Hasher, KeyReadWrite, Nomt, Options, Root, SessionParams, Witness, WitnessMode};
+use nomt::{
+    hasher::Blake3Hasher, KeyReadWrite, Nomt, Options, Root, SessionParams, Witness, WitnessMode,
+};
 use sha2::Digest;
 
 const NOMT_DB_FOLDER: &str = "nomt_db";

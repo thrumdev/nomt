@@ -1,6 +1,7 @@
 //! Trie update logic helpers.
 
-use crate::trie::{self, KeyPath, LeafData, Node, NodeHasher, ValueHash};
+use crate::hasher::NodeHasher;
+use crate::trie::{self, KeyPath, LeafData, Node, ValueHash};
 
 use bitvec::prelude::*;
 

@@ -1,7 +1,7 @@
 mod common;
 
 use common::Test;
-use nomt::{proof, trie::LeafData, Blake3Hasher};
+use nomt::{hasher::Blake3Hasher, proof, trie::LeafData};
 
 #[test]
 fn produced_witness_validity() {

@@ -44,9 +44,10 @@
 
 use bitvec::prelude::*;
 use nomt_core::{
+    hasher::NodeHasher,
     page::DEPTH,
     page_id::{PageId, ROOT_PAGE_ID},
-    trie::{self, KeyPath, Node, NodeHasher, NodeKind, ValueHash, TERMINATOR},
+    trie::{self, KeyPath, Node, NodeKind, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
     update::WriteNode,
 };
@@ -606,10 +607,10 @@ mod tests {
         ROOT_PAGE_ID,
     };
     use crate::{
+        hasher::Blake3Hasher,
         io::PagePool,
         page_cache::{Page, PageMut},
         page_diff::PageDiff,
-        Blake3Hasher,
     };
     use bitvec::prelude::*;
     use imbl::HashMap;
