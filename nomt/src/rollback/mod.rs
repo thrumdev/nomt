@@ -18,8 +18,7 @@ use std::{
 
 use crate::{
     overlay::LiveOverlay,
-    task::TaskResult,
-    task::{join_task, spawn_task},
+    task::{join_task, spawn_task, TaskResult},
 };
 use crossbeam::channel::Sender;
 use crossbeam_channel::Receiver;
@@ -144,10 +143,12 @@ impl Rollback {
     // generality is primarily for testing.
     fn delta_builder_inner(&self, store: impl LoadValueAsync) -> ReverseDeltaBuilder {
         let priors = Arc::new(DashMap::new());
-        let command_tx = reverse_delta_worker::start(store, &self.shared.worker_tp, priors.clone());
+        let (command_tx, worker_result_rx, completion_worker_result_rx) =
+            reverse_delta_worker::start(store, &self.shared.worker_tp, priors.clone());
         ReverseDeltaBuilder {
             command_tx,
-            tp: self.shared.worker_tp.clone(),
+            worker_result_rx,
+            completion_worker_result_rx,
             priors,
         }
     }
@@ -365,7 +366,8 @@ struct WriteoutData {
 
 pub struct ReverseDeltaBuilder {
     command_tx: Sender<DeltaBuilderCommand>,
-    tp: ThreadPool,
+    worker_result_rx: Receiver<TaskResult<()>>,
+    completion_worker_result_rx: Receiver<TaskResult<()>>,
     /// The values of the keys that should be preserved at commit time for this delta.
     ///
     /// Before the commit takes place, the set contains tentative values.
@@ -426,7 +428,8 @@ impl ReverseDeltaBuilder {
         // Wait for the load worker to join. After this point, priors contains the final set of
         // values to be preserved.
         drop(self.command_tx);
-        let _ = self.tp.join();
+        join_task(&self.worker_result_rx);
+        join_task(&self.completion_worker_result_rx);
 
         // UNWRAP: At this point, `fresh_priors` is unique because the worker thread has joined.
         // At this point, fresh_priors is fully populated with all lookups submitted in the loop.

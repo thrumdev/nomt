@@ -9,6 +9,7 @@ use crate::{
     beatree::{self, AsyncLookup, OverflowPageInfo, ReadTransaction},
     io::{FatPage, IoHandle},
     overlay::LiveOverlay,
+    task::{spawn_task, TaskResult},
 };
 
 /// A trait for asynchronously loading values from the store.
@@ -64,13 +65,20 @@ pub(super) fn start(
     store: impl LoadValueAsync,
     tp: &ThreadPool,
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
-) -> Sender<DeltaBuilderCommand> {
+) -> (
+    Sender<DeltaBuilderCommand>,
+    Receiver<TaskResult<()>>,
+    Receiver<TaskResult<()>>,
+) {
     let (command_tx, command_rx) = crossbeam::channel::unbounded();
     let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
+    let (worker_result_tx, worker_result_rx) = crossbeam::channel::unbounded();
+    let (completion_worker_result_tx, completion_worker_result_rx) =
+        crossbeam::channel::unbounded();
 
     let next_fn = store.build_next();
 
-    tp.execute({
+    let worker_task = {
         let priors = priors.clone();
         move || {
             let worker = ReverseDeltaWorker {
@@ -84,10 +92,16 @@ pub(super) fn start(
             };
             run(worker, command_rx, completion_rx)
         }
-    });
-    tp.execute(move || reverse_delta_completion_worker(completion_tx, next_fn));
+    };
+    spawn_task(&tp, worker_task, worker_result_tx);
 
-    command_tx
+    spawn_task(
+        &tp,
+        move || reverse_delta_completion_worker(completion_tx, next_fn),
+        completion_worker_result_tx,
+    );
+
+    (command_tx, worker_result_rx, completion_worker_result_rx)
 }
 
 const TARGET_OVERFLOW_REQUESTS: usize = 128;
