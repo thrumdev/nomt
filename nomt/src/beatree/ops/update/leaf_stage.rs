@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use anyhow::Context;
 use imbl::OrdMap;
 use threadpool::ThreadPool;
 
@@ -24,6 +23,7 @@ use crate::beatree::{
     Key, ValueChange,
 };
 use crate::io::{IoCommand, IoHandle, IoKind, IoPool};
+use crate::task::{join_task, spawn_task};
 
 /// Tracker of all changes that happen to leaves during an update
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
@@ -88,7 +88,7 @@ pub fn run(
     changeset: OrdMap<Key, ValueChange>,
     thread_pool: ThreadPool,
     num_workers: usize,
-) -> anyhow::Result<LeafStageOutput> {
+) -> std::io::Result<LeafStageOutput> {
     if changeset.is_empty() {
         return Ok(LeafStageOutput::default());
     }
@@ -110,7 +110,7 @@ pub fn run(
             }
             ValueChange::Delete => Ok((*k, None)),
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect::<std::io::Result<Vec<_>>>()?;
 
     assert!(num_workers >= 1);
     let workers = prepare_workers(bbn_index, &changeset, num_workers);
@@ -122,7 +122,7 @@ pub fn run(
     let num_workers = workers.len();
     let (worker_result_tx, worker_result_rx) = crossbeam_channel::bounded(num_workers);
 
-    for (worker_id, worker_params) in workers.into_iter().enumerate() {
+    for worker_params in workers.into_iter() {
         let bbn_index = bbn_index.clone();
         let leaf_cache = leaf_cache.clone();
         let leaf_reader = leaf_reader.clone();
@@ -145,7 +145,7 @@ pub fn run(
 
             // passing the large `Arc` values by reference ensures that they are dropped at the
             // end of this scope, not the end of `run_worker`.
-            Ok(run_worker(
+            run_worker(
                 bbn_index,
                 &*leaf_cache,
                 leaf_reader,
@@ -154,18 +154,15 @@ pub fn run(
                 &mut prepared_leaves_iter,
                 &*changeset,
                 worker_params,
-            ))
+            )
         };
 
         let worker_result_tx = worker_result_tx.clone();
-        thread_pool.execute(move || {
-            let output_or_panic =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| leaf_stage_worker_task()));
-            let output = output_or_panic
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("panic in leaf stage: {:?}", e)))
-                .with_context(|| format!("worker {} erred out", worker_id));
-            let _ = worker_result_tx.send(output);
-        });
+        spawn_task(
+            &thread_pool,
+            leaf_stage_worker_task,
+            worker_result_tx.clone(),
+        );
     }
 
     // we don't want to block other sync steps on deallocating these memory regions.
@@ -175,7 +172,7 @@ pub fn run(
     output.submitted_io += overflow_io;
 
     for _ in 0..num_workers {
-        let worker_output = worker_result_rx.recv()??;
+        let worker_output = join_task(&worker_result_rx)?;
         apply_worker_changes(&leaf_reader, &mut output, worker_output);
     }
 
@@ -520,7 +517,7 @@ fn run_worker(
     prepared_leaves: &mut PreparedLeafIter,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
     mut worker_params: WorkerParams<LeafNode>,
-) -> LeafWorkerOutput {
+) -> std::io::Result<LeafWorkerOutput> {
     let mut leaf_updater = LeafUpdater::new(leaf_reader.page_pool().clone(), None, None);
     let mut overflow_deleted = Vec::new();
     let mut pending_left_request = None;
@@ -553,7 +550,7 @@ fn run_worker(
             // to respond to the left neighbor. However, we should only respond if we are sure that
             // we will not introduce changed items with smaller separators later on.
             let k = if let LeafDigestResult::NeedsMerge(cutoff) =
-                leaf_updater.digest(&mut new_leaf_state)
+                leaf_updater.digest(&mut new_leaf_state)?
             {
                 // If we are dealing with a NeedsMerge, there is a high probability that the leaf updater
                 // has a new pending leaf which still needs to be constructed with a separator smaller
@@ -600,7 +597,7 @@ fn run_worker(
         leaf_updater.ingest(*key, value_change, overflow, delete_overflow);
     }
 
-    while let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut new_leaf_state) {
+    while let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut new_leaf_state)? {
         has_extended_range = false;
         if worker_params
             .range
@@ -651,10 +648,10 @@ fn run_worker(
         }
     }
 
-    LeafWorkerOutput {
+    Ok(LeafWorkerOutput {
         leaves_tracker: new_leaf_state.leaves_tracker,
         overflow_deleted,
-    }
+    })
 }
 
 struct NewLeafHandler {
@@ -664,14 +661,17 @@ struct NewLeafHandler {
 }
 
 impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
-    fn handle_new_leaf(&mut self, key: Key, leaf: LeafNode, cutoff: Option<Key>) {
+    fn handle_new_leaf(
+        &mut self,
+        key: Key,
+        leaf: LeafNode,
+        cutoff: Option<Key>,
+    ) -> std::io::Result<()> {
         let leaf = Arc::new(leaf);
         let fd = self.leaf_writer.store_fd();
 
-        // TODO: handle error
-        let page_number = self.leaf_writer.allocate().unwrap();
+        let page_number = self.leaf_writer.allocate()?;
 
-        // TODO: handle error
         let page = leaf.inner.page();
         self.io_handle
             .send(IoCommand {
@@ -681,6 +681,7 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
             .expect("I/O Pool Down");
 
         self.leaves_tracker.insert(key, leaf, cutoff, page_number);
+        Ok(())
     }
 }
 
@@ -700,7 +701,7 @@ fn preload_and_prepare(
     bbn_index: &Index,
     io_pool: &IoPool,
     changeset: impl IntoIterator<Item = Key>,
-) -> anyhow::Result<Vec<PreparedLeaf>> {
+) -> std::io::Result<Vec<PreparedLeaf>> {
     let io_handle = io_pool.make_handle();
 
     let mut changeset_leaves: Vec<PreparedLeaf> = Vec::new();

@@ -69,7 +69,12 @@ pub enum DigestResult {
 
 /// A callback which takes ownership of newly created leaves.
 pub trait HandleNewBranch {
-    fn handle_new_branch(&mut self, separator: Key, node: BranchNode, cutoff: Option<Key>);
+    fn handle_new_branch(
+        &mut self,
+        separator: Key,
+        node: BranchNode,
+        cutoff: Option<Key>,
+    ) -> std::io::Result<()>;
 }
 
 pub struct BranchUpdater {
@@ -108,7 +113,10 @@ impl BranchUpdater {
         }
     }
 
-    pub fn digest(&mut self, new_branches: &mut impl HandleNewBranch) -> DigestResult {
+    pub fn digest(
+        &mut self,
+        new_branches: &mut impl HandleNewBranch,
+    ) -> std::io::Result<DigestResult> {
         self.keep_up_to(None);
 
         // note: if we need a merge, it'd be more efficient to attempt to combine it with the last
@@ -116,15 +124,15 @@ impl BranchUpdater {
         // in practice; bulk splits are rare.
 
         if self.ops_tracker.body_size() > BRANCH_BULK_SPLIT_THRESHOLD {
-            self.try_split(new_branches, BRANCH_BULK_SPLIT_TARGET);
+            self.try_split(new_branches, BRANCH_BULK_SPLIT_TARGET)?;
         }
 
         if self.ops_tracker.body_size() > BRANCH_NODE_BODY_SIZE {
-            self.try_split(new_branches, self.ops_tracker.body_size() / 2);
+            self.try_split(new_branches, self.ops_tracker.body_size() / 2)?;
         }
 
         if self.ops_tracker.body_size() == 0 {
-            DigestResult::Finished
+            Ok(DigestResult::Finished)
         } else if self.ops_tracker.body_size() >= BRANCH_MERGE_THRESHOLD || self.cutoff.is_none() {
             let base = self.base.as_ref();
             let page_pool = &self.page_pool;
@@ -132,14 +140,14 @@ impl BranchUpdater {
 
             let node = build_branch(base, page_pool, &ops, &gauge);
             let separator = op_first_key(base, &ops[0]);
-            new_branches.handle_new_branch(separator, node, self.cutoff);
+            new_branches.handle_new_branch(separator, node, self.cutoff)?;
 
-            DigestResult::Finished
+            Ok(DigestResult::Finished)
         } else {
             self.ops_tracker.prepare_merge_ops(self.base.as_ref());
 
             // UNWRAP: protected above.
-            DigestResult::NeedsMerge(self.cutoff.unwrap())
+            Ok(DigestResult::NeedsMerge(self.cutoff.unwrap()))
         }
     }
 
@@ -194,7 +202,11 @@ impl BranchUpdater {
     }
 
     // Try to perform a split of the current available ops with a target branch node size.
-    fn try_split(&mut self, new_branches: &mut impl HandleNewBranch, target: usize) {
+    fn try_split(
+        &mut self,
+        new_branches: &mut impl HandleNewBranch,
+        target: usize,
+    ) -> std::io::Result<()> {
         let base = self.base.as_ref();
         while let Some((ops, gauge)) = self
             .ops_tracker
@@ -202,8 +214,9 @@ impl BranchUpdater {
         {
             let node = build_branch(base, &self.page_pool, &ops, &gauge);
             let separator = op_first_key(base, &ops[0]);
-            new_branches.handle_new_branch(separator, node, self.cutoff);
+            new_branches.handle_new_branch(separator, node, self.cutoff)?;
         }
+        Ok(())
     }
 }
 
@@ -552,8 +565,14 @@ pub mod tests {
     }
 
     impl HandleNewBranch for TestHandleNewBranch {
-        fn handle_new_branch(&mut self, separator: Key, node: BranchNode, cutoff: Option<Key>) {
+        fn handle_new_branch(
+            &mut self,
+            separator: Key,
+            node: BranchNode,
+            cutoff: Option<Key>,
+        ) -> std::io::Result<()> {
             self.inner.insert(separator, (node, cutoff));
+            Ok(())
         }
     }
 
@@ -705,7 +724,7 @@ pub mod tests {
         let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(250), Some(9999.into()));
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -734,7 +753,7 @@ pub mod tests {
         let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(251), Some(9999.into()));
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -764,7 +783,7 @@ pub mod tests {
         let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(n), Some(PageNumber(n as u32)));
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -800,7 +819,7 @@ pub mod tests {
         let mut new_branches = TestHandleNewBranch::default();
 
         updater.ingest(key(250), None);
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -847,7 +866,7 @@ pub mod tests {
         for i in 1..n {
             updater.ingest(key(i), None);
         }
-        let DigestResult::NeedsMerge(_) = updater.digest(&mut new_branches) else {
+        let DigestResult::NeedsMerge(_) = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -858,7 +877,7 @@ pub mod tests {
             }),
             None,
         );
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -888,7 +907,7 @@ pub mod tests {
         for i in 0..500 {
             updater.ingest(key(i), None);
         }
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -913,7 +932,7 @@ pub mod tests {
         for i in 0..499 {
             updater.ingest(key(i), None);
         }
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -957,7 +976,7 @@ pub mod tests {
         // delete the last item, causing a situation where prefix compression needs to be
         // disabled.
         updater.ingest(key(n - 1), None);
-        let DigestResult::NeedsMerge(_) = updater.digest(&mut new_branches) else {
+        let DigestResult::NeedsMerge(_) = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -968,7 +987,7 @@ pub mod tests {
             }),
             None,
         );
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
 
@@ -1038,7 +1057,7 @@ pub mod tests {
         // in body_size with and without stop_prefix_compression leave a lot of space for
         // non compressed keys.
         let mut new_branches = TestHandleNewBranch::default();
-        let DigestResult::NeedsMerge(cutoff) = updater.digest(&mut new_branches) else {
+        let DigestResult::NeedsMerge(cutoff) = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
         assert_eq!(cutoff, expected_cutoff);
@@ -1076,7 +1095,7 @@ pub mod tests {
 
         // All ops are expected to perfectly fit in only the left
         let mut new_branches = TestHandleNewBranch::default();
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
         assert_eq!(new_branches.inner.len(), 1);
@@ -1117,7 +1136,7 @@ pub mod tests {
         // non compressed keys to reach the half full requirement, but cutoff is none
         // and thus the node is constructed anyway.
         let mut new_branches = TestHandleNewBranch::default();
-        let DigestResult::Finished = updater.digest(&mut new_branches) else {
+        let DigestResult::Finished = updater.digest(&mut new_branches).unwrap() else {
             panic!()
         };
         assert_eq!(new_branches.inner.len(), 1);

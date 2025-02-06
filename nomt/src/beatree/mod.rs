@@ -1,7 +1,7 @@
 use allocator::{Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use imbl::OrdMap;
 
 use leaf::node::MAX_LEAF_VALUE_SIZE;
@@ -11,7 +11,10 @@ use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
 use std::{fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
-use crate::io::{fsyncer::Fsyncer, FatPage, IoHandle, IoPool, PagePool};
+use crate::{
+    io::{fsyncer::Fsyncer, FatPage, IoHandle, IoPool, PagePool},
+    task::{join_task, spawn_task, TaskResult},
+};
 
 pub mod iterator;
 
@@ -169,6 +172,7 @@ impl Tree {
         //
         // That will exclude any other syncs from happening. This is a long running operation.
         let sync = self.sync.lock_arc();
+        let (begin_sync_result_tx, begin_sync_result_rx) = crossbeam_channel::bounded(1);
         SyncController {
             inner: Arc::new(SharedSyncController {
                 sync,
@@ -178,6 +182,8 @@ impl Tree {
                 bbn_index: Mutex::new(None),
                 pre_swap_rx: Mutex::new(None),
             }),
+            begin_sync_result_tx: Some(begin_sync_result_tx),
+            begin_sync_result_rx,
         }
     }
 
@@ -227,7 +233,7 @@ impl Tree {
         sync: &Sync,
         shared: &Arc<RwLock<Shared>>,
         read_transaction_counter: &ReadTransactionCounter,
-    ) -> (SyncData, Index, Receiver<()>) {
+    ) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
         // Take the shared lock. Briefly.
         let staged_changeset;
         let bbn_index;
@@ -311,7 +317,6 @@ impl Tree {
                 sync.tp.clone(),
                 sync.commit_concurrency,
             )
-            .unwrap()
         }
     }
 
@@ -407,6 +412,10 @@ pub fn create(db_dir: impl AsRef<Path>) -> anyhow::Result<()> {
 /// If [`Self::wait_pre_meta`] returns an error, the sync process has failed and the controller
 /// should be discarded.
 pub struct SyncController {
+    // The channel to send the result of the begin sync task. Option is to allow `take`.
+    begin_sync_result_tx: Option<Sender<TaskResult<std::io::Result<()>>>>,
+    // The channel to receive the result of the begin sync task.
+    begin_sync_result_rx: Receiver<TaskResult<std::io::Result<()>>>,
     inner: Arc<SharedSyncController>,
 }
 
@@ -416,7 +425,7 @@ struct SharedSyncController {
     read_transaction_counter: ReadTransactionCounter,
     sync_data: Mutex<Option<SyncData>>,
     bbn_index: Mutex<Option<Index>>,
-    pre_swap_rx: Mutex<Option<Receiver<()>>>,
+    pre_swap_rx: Mutex<Option<Receiver<TaskResult<()>>>>,
 }
 
 impl SyncController {
@@ -430,10 +439,11 @@ impl SyncController {
         changeset: impl IntoIterator<Item = (Key, ValueChange)> + Send + 'static,
     ) {
         let inner = self.inner.clone();
-        self.inner.sync.tp.execute(move || {
+        let begin_sync_task = move || {
             Tree::commit(&inner.shared, changeset);
+
             let (out_meta, out_bbn_index, out_pre_swap_rx) =
-                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_counter);
+                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_counter)?;
 
             let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
@@ -449,7 +459,12 @@ impl SyncController {
 
             inner.sync.bbn_fsync.fsync();
             inner.sync.ln_fsync.fsync();
-        });
+            Ok(())
+        };
+
+        // UNWRAP: safe because begin_sync is called only once.
+        let begin_sync_result_tx = self.begin_sync_result_tx.take().unwrap();
+        spawn_task(&self.inner.sync.tp, begin_sync_task, begin_sync_result_tx);
     }
 
     /// Waits for the writes to the tree to be synced to disk which allows the caller to proceed
@@ -457,6 +472,7 @@ impl SyncController {
     ///
     /// This must be called after [`Self::begin_sync`].
     pub fn wait_pre_meta(&mut self) -> std::io::Result<SyncData> {
+        join_task(&self.begin_sync_result_rx)?;
         self.inner.sync.bbn_fsync.wait()?;
         self.inner.sync.ln_fsync.wait()?;
 
@@ -471,11 +487,7 @@ impl SyncController {
     /// thread. Blocking.
     pub fn post_meta(&mut self) {
         let pre_swap_rx = self.inner.pre_swap_rx.lock().take().unwrap();
-
-        // UNWRAP: the offloaded non-critical sync work is infallible and may fail only if it
-        // panics.
-        let () = pre_swap_rx.recv().unwrap();
-
+        join_task(&pre_swap_rx);
         let bbn_index = self.inner.bbn_index.lock().take().unwrap();
         Tree::finish_sync(&self.inner.shared, bbn_index);
     }
