@@ -76,7 +76,7 @@ pub trait BinaryHash {
 /// the space 2^256, i.e. all 256 bit outputs are valid and inputs are uniformly distributed.
 ///
 /// Functions like Sha2/Blake3/Keccak/Groestl all meet these criteria.
-pub struct BinaryHasher<H>(std::marker::PhantomData<H>);
+pub struct BinaryHasher<H>(core::marker::PhantomData<H>);
 
 impl<H: BinaryHash> ValueHasher for BinaryHasher<H> {
     fn hash_value(value: &[u8]) -> [u8; 32] {

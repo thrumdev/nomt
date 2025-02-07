@@ -15,7 +15,7 @@ use crate::{
 use alloc::{vec, vec::Vec};
 
 use bitvec::prelude::*;
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 
 /// This struct includes the terminal node and its depth
 #[derive(Debug, Clone)]
