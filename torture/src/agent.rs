@@ -110,12 +110,12 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 should_crash: None,
             }) => {
                 let start = std::time::Instant::now();
-                agent.rollback(n_commits).await?;
+                let outcome = agent.rollback(n_commits).await;
                 tracing::info!("rollback took {}ms", start.elapsed().as_millis());
                 stream
                     .send(Envelope {
                         reqno,
-                        message: ToSupervisor::Ack,
+                        message: ToSupervisor::RollbackResponse { outcome },
                     })
                     .await?;
             }
@@ -311,11 +311,26 @@ impl Agent {
         outcome
     }
 
-    async fn rollback(&mut self, n_commits: usize) -> Result<()> {
+    async fn rollback(&mut self, n_commits: usize) -> Outcome {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
-        tokio::task::block_in_place(|| nomt.rollback(n_commits))?;
-        Ok(())
+
+        // Perform the rollback.
+        let commit_result = tokio::task::block_in_place(|| nomt.rollback(n_commits));
+
+        // Classify the result into one of the outcome.
+        let outcome = match commit_result {
+            Ok(()) => Outcome::Success,
+            Err(ref err) if is_enospc(err) => Outcome::StorageFull,
+            Err(err) => Outcome::UnknownFailure(err.to_string()),
+        };
+
+        // Log the outcome if it was not successful.
+        if !matches!(outcome, Outcome::Success) {
+            trace!("unsuccessful rollback: {:?}", outcome);
+        }
+
+        outcome
     }
 
     fn query(&mut self, key: message::Key) -> Result<Option<message::Value>> {
