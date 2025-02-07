@@ -294,7 +294,7 @@ impl Agent {
         }
 
         // Perform the commit.
-        let commit_result = tokio::task::block_in_place(|| session.finish(actuals).commit(&nomt));
+        let commit_result = tokio::task::block_in_place(|| session.finish(actuals)?.commit(&nomt));
 
         // Classify the result into one of the outcome bins.
         let outcome = match commit_result {

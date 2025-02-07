@@ -20,12 +20,7 @@ impl PageLoader {
     ///
     /// This returns `Ok(true)` if the page request has been submitted and a completion will be
     /// coming. `Ok(false)` means that the page is guaranteed to be fresh.
-    pub fn probe(
-        &self,
-        load: &mut PageLoad,
-        io_handle: &IoHandle,
-        user_data: u64,
-    ) -> anyhow::Result<bool> {
+    pub fn probe(&self, load: &mut PageLoad, io_handle: &IoHandle, user_data: u64) -> bool {
         self.inner.probe(load, io_handle, user_data)
     }
 }

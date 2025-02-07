@@ -231,7 +231,7 @@ impl Store {
         let io_handle = self.io_pool().make_handle();
         let mut page_load = page_loader.start_load(page_id);
         loop {
-            if !page_loader.probe(&mut page_load, &io_handle, 0)? {
+            if !page_loader.probe(&mut page_load, &io_handle, 0) {
                 return Ok(None);
             }
 
