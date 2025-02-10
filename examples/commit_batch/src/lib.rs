@@ -58,7 +58,7 @@ impl NomtDB {
         // The final step in handling a session involves committing all changes
         // to update the trie structure and obtaining the new root of the trie,
         // along with a witness and the witnessed operations.
-        let mut finished = session.finish(actual_access);
+        let mut finished = session.finish(actual_access).unwrap();
 
         // This field is set because the finished session was configured with
         // `WitnessMode::read_write`.
