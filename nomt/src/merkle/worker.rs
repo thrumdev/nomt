@@ -66,10 +66,11 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
 ) {
     let page_loader = params.store.page_loader();
     let io_handle = params.store.io_pool().make_handle();
+    let page_pool = params.store.io_pool().page_pool().clone();
     let page_io_receiver = io_handle.receiver().clone();
 
     // We always run with `WithoutDependents` here, and the mode is adjusted later, during `update`.
-    let page_set = PageSet::new(io_handle.page_pool().clone(), None);
+    let page_set = PageSet::new(page_pool, None);
 
     let seeker = Seeker::<H>::new(
         params.root,
