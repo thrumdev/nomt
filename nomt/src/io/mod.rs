@@ -3,7 +3,13 @@ std::compile_error!("NOMT only supports Unix-based OSs");
 
 use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError};
 use page_pool::Page;
-use std::{fmt, fs::File, os::fd::RawFd, sync::Arc};
+use std::{
+    fmt,
+    fs::File,
+    os::fd::RawFd,
+    sync::{Arc, Weak},
+};
+use threadpool::ThreadPool;
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -97,31 +103,49 @@ struct IoPacket {
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
 pub fn start_io_pool(io_workers: usize, iopoll: bool, page_pool: PagePool) -> IoPool {
-    let sender = platform::start_io_worker(page_pool.clone(), io_workers, iopoll);
-    IoPool { sender, page_pool }
+    let io_workers_tp = ThreadPool::with_name("io-worker".to_string(), io_workers);
+    let sender = platform::start_io_worker(page_pool.clone(), &io_workers_tp, io_workers, iopoll);
+    let sender = Some(Arc::new(sender));
+    IoPool {
+        sender,
+        page_pool,
+        io_workers_tp,
+    }
 }
 
 #[cfg(test)]
 pub fn start_test_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
-    let sender = platform::start_io_worker(page_pool.clone(), io_workers, false);
-    IoPool { sender, page_pool }
+    start_io_pool(io_workers, false, page_pool)
 }
 
 /// A manager for the broader I/O pool. This can be used to create new I/O handles.
-///
-/// Dropping this does not close any outstanding I/O handles or shut down I/O workers.
-#[derive(Clone)]
 pub struct IoPool {
-    sender: Sender<IoPacket>,
+    /// Sender to send I/O commands to the I/O workers.
+    ///
+    /// Every IoHandle is created with a weak reference to this sender, the only one non-transient
+    /// strong reference is held by this struct. We say "non-transient" because the channel might
+    /// occasionally be upgraded when sending message.
+    ///
+    /// Upon shutdown, this only reference is dropped by `take`ing it, causing the channel to close
+    /// and the I/O workers to shut down.
+    sender: Option<Arc<Sender<IoPacket>>>,
     page_pool: PagePool,
+    io_workers_tp: ThreadPool,
 }
 
 impl IoPool {
     /// Create a new I/O handle.
+    ///
+    /// This will panic if the I/O pool has been shut down.
     pub fn make_handle(&self) -> IoHandle {
         let (completion_sender, completion_receiver) = crossbeam_channel::unbounded();
+        let sender = self
+            .sender
+            .as_ref()
+            .expect("call to make_handle after shutdown");
+        let sender = Arc::downgrade(sender);
         IoHandle {
-            io_pool: self.clone(),
+            sender,
             completion_sender,
             completion_receiver,
         }
@@ -129,6 +153,17 @@ impl IoPool {
 
     pub fn page_pool(&self) -> &PagePool {
         &self.page_pool
+    }
+
+    /// Initiate the shutdown procedure.
+    ///
+    /// This will return only after all the I/O workers are shut down.
+    pub fn shutdown(&mut self) {
+        // There is only a single strong reference to the sender, dropping it will close the
+        // channel, causing the I/O workers to shut down.
+        let sender = self.sender.take().unwrap();
+        drop(sender);
+        self.io_workers_tp.join();
     }
 }
 
@@ -143,7 +178,7 @@ impl IoPool {
 /// This is safe to use across multiple threads, but care must be taken by the user for correctness.
 #[derive(Clone)]
 pub struct IoHandle {
-    io_pool: IoPool,
+    sender: Weak<Sender<IoPacket>>,
     completion_sender: Sender<CompleteIo>,
     completion_receiver: Receiver<CompleteIo>,
 }
@@ -151,8 +186,11 @@ pub struct IoHandle {
 impl IoHandle {
     /// Send an I/O command. This fails if the channel has hung up, but does not block the thread.
     pub fn send(&self, command: IoCommand) -> Result<(), SendError<IoCommand>> {
-        self.io_pool
-            .sender
+        let sender = match self.sender.upgrade() {
+            Some(sender) => sender,
+            None => return Err(SendError(command)),
+        };
+        sender
             .send(IoPacket {
                 command,
                 completion_sender: self.completion_sender.clone(),
@@ -176,8 +214,19 @@ impl IoHandle {
         &self.completion_receiver
     }
 
-    pub fn io_pool(&self) -> &IoPool {
-        &self.io_pool
+    /// Creates a new handle that can be used to submit I/O commands.
+    ///
+    /// Unlike [`Self::clone`] this creates a new handle that can be used independently of the
+    /// original handle.
+    ///
+    /// This will panic if the I/O pool has been shut down.
+    pub fn make_new_sibiling_handle(&self) -> IoHandle {
+        let (completion_sender, completion_receiver) = crossbeam_channel::unbounded();
+        IoHandle {
+            sender: self.sender.clone(),
+            completion_sender,
+            completion_receiver,
+        }
     }
 }
 

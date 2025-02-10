@@ -3,6 +3,7 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
 use std::collections::VecDeque;
+use threadpool::ThreadPool;
 
 const RING_CAPACITY: u32 = 128;
 
@@ -14,30 +15,33 @@ struct PendingIo {
     completion_sender: Sender<CompleteIo>,
 }
 
-pub fn start_io_worker(page_pool: PagePool, io_workers: usize, iopoll: bool) -> Sender<IoPacket> {
+pub fn start_io_worker(
+    page_pool: PagePool,
+    io_workers_tp: &ThreadPool,
+    io_workers: usize,
+    iopoll: bool,
+) -> Sender<IoPacket> {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
-    start_workers(page_pool, command_rx, io_workers, iopoll);
+    start_workers(page_pool, io_workers_tp, command_rx, io_workers, iopoll);
 
     command_tx
 }
 
 fn start_workers(
     page_pool: PagePool,
+    io_workers_tp: &ThreadPool,
     command_rx: Receiver<IoPacket>,
     io_workers: usize,
     iopoll: bool,
 ) {
-    for i in 0..io_workers {
-        let _ = std::thread::Builder::new()
-            .name(format!("io_worker-{i}"))
-            .spawn({
-                let page_pool = page_pool.clone();
-                let command_rx = command_rx.clone();
-                move || run_worker(page_pool, command_rx, iopoll)
-            })
-            .unwrap();
+    for _ in 0..io_workers {
+        io_workers_tp.execute({
+            let page_pool = page_pool.clone();
+            let command_rx = command_rx.clone();
+            move || run_worker(page_pool, command_rx, iopoll)
+        });
     }
 }
 
