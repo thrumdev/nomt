@@ -1,20 +1,29 @@
-use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PAGE_SIZE};
+use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PagePool, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender};
 
-pub fn start_io_worker(io_workers: usize, _iopoll: bool) -> Sender<IoPacket> {
+pub fn start_io_worker(page_pool: PagePool, io_workers: usize, _iopoll: bool) -> Sender<IoPacket> {
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
     for _ in 0..io_workers {
-        spawn_worker_thread(command_rx.clone());
+        spawn_worker_thread(page_pool.clone(), command_rx.clone());
     }
 
     command_tx
 }
 
-fn spawn_worker_thread(command_rx: Receiver<IoPacket>) {
+fn spawn_worker_thread(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
     let work = move || loop {
         let Ok(packet) = command_rx.recv() else {
-            break;
+            // Why the `drop` here?
+            //
+            // `command_rx` receives the IoPacket's which are ultimately parameterized by buffers.
+            // Those buffers are allocated in the `page_pool`. If the `page_pool` is deallocated
+            // before this worker thread is done, that's a use-after-free.
+            //
+            // So in other words, we plumb `page_pool` all the way here and drop it here only to
+            // ensure safety.
+            drop(page_pool);
+            return;
         };
         let complete = execute(packet.command);
         let _ = packet.completion_sender.send(complete);
