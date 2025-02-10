@@ -1,4 +1,4 @@
-use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PAGE_SIZE};
+use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PagePool, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
@@ -14,26 +14,34 @@ struct PendingIo {
     completion_sender: Sender<CompleteIo>,
 }
 
-pub fn start_io_worker(io_workers: usize, iopoll: bool) -> Sender<IoPacket> {
+pub fn start_io_worker(page_pool: PagePool, io_workers: usize, iopoll: bool) -> Sender<IoPacket> {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
-    start_workers(command_rx, io_workers, iopoll);
+    start_workers(page_pool, command_rx, io_workers, iopoll);
 
     command_tx
 }
 
-fn start_workers(command_rx: Receiver<IoPacket>, io_workers: usize, iopoll: bool) {
+fn start_workers(
+    page_pool: PagePool,
+    command_rx: Receiver<IoPacket>,
+    io_workers: usize,
+    iopoll: bool,
+) {
     for i in 0..io_workers {
-        let command_rx = command_rx.clone();
         let _ = std::thread::Builder::new()
             .name(format!("io_worker-{i}"))
-            .spawn(move || run_worker(command_rx, iopoll))
+            .spawn({
+                let page_pool = page_pool.clone();
+                let command_rx = command_rx.clone();
+                move || run_worker(page_pool, command_rx, iopoll)
+            })
             .unwrap();
     }
 }
 
-fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
+fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>, iopoll: bool) {
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring_builder = IoUring::<squeue::Entry, cqueue::Entry>::builder();
@@ -46,6 +54,9 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
 
     let (submitter, mut submit_queue, mut complete_queue) = ring.split();
     let mut retries = VecDeque::<IoPacket>::new();
+
+    // Indicates whether the worker detected that it should shutdown.
+    let mut shutdown = false;
 
     loop {
         // 1. process completions.
@@ -82,6 +93,17 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
                 let complete = CompleteIo { command, result };
                 let _ = completion_sender.send(complete);
             }
+        } else if shutdown {
+            // No pending IOs and we are shutting down. That means we can exit the worker.
+            //
+            // Why the `drop` here? Well, recall that the iou accepts commands parametrized with
+            // buffers. These buffers are allocated in the page pool. If the page pool is dropped
+            // before the ring is dropped, then that's a use-after-free.
+            //
+            // So in other words, we plumb `page_pool` all the way here and drop it here only to
+            // ensure safety.
+            drop(page_pool);
+            return;
         }
 
         // 2. accept new I/O requests when slab has space & submission queue is not full.
@@ -97,13 +119,19 @@ fn run_worker(command_rx: Receiver<IoPacket>, iopoll: bool) {
                 // block on new I/O if nothing in-flight.
                 match command_rx.recv() {
                     Ok(command) => command,
-                    Err(_) => break, // disconnected
+                    Err(_) => {
+                        shutdown = true;
+                        break;
+                    }
                 }
             } else {
                 match command_rx.try_recv() {
                     Ok(command) => command,
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break, // TODO: wait on pending I/O?
+                    Err(TryRecvError::Disconnected) => {
+                        shutdown = true;
+                        break;
+                    }
                 }
             };
 
