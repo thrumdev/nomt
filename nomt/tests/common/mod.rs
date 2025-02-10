@@ -121,7 +121,7 @@ impl Test {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        let mut finished = session.finish(actual_access);
+        let mut finished = session.finish(actual_access).unwrap();
         let root = finished.root();
         let witness = finished.take_witness().unwrap();
         finished.commit(&self.nomt).unwrap();
@@ -136,7 +136,7 @@ impl Test {
         let session = mem::take(&mut self.session).unwrap();
         let mut actual_access: Vec<_> = mem::take(&mut self.access).into_iter().collect();
         actual_access.sort_by_key(|(k, _)| *k);
-        let mut finished = session.finish(actual_access);
+        let mut finished = session.finish(actual_access).unwrap();
         let witness = finished.take_witness().unwrap();
 
         self.session = Some(

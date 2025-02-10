@@ -42,10 +42,12 @@ fn test_rollback_disabled() {
     );
 
     let session = nomt.begin_session(SessionParams::default());
-    let finished = session.finish(vec![(
-        hex!("0000000000000000000000000000000000000000000000000000000000000001"),
-        KeyReadWrite::Write(Some(vec![1])),
-    )]);
+    let finished = session
+        .finish(vec![(
+            hex!("0000000000000000000000000000000000000000000000000000000000000001"),
+            KeyReadWrite::Write(Some(vec![1])),
+        )])
+        .unwrap();
     finished.commit(&nomt).unwrap();
 
     let result = nomt.rollback(1);
@@ -63,10 +65,12 @@ fn test_rollback_to_initial() {
     );
 
     let session = nomt.begin_session(SessionParams::default());
-    let finished = session.finish(vec![(
-        hex!("0000000000000000000000000000000000000000000000000000000000000001"),
-        KeyReadWrite::Write(Some(vec![1])),
-    )]);
+    let finished = session
+        .finish(vec![(
+            hex!("0000000000000000000000000000000000000000000000000000000000000001"),
+            KeyReadWrite::Write(Some(vec![1])),
+        )])
+        .unwrap();
     finished.commit(&nomt).unwrap();
 
     assert_eq!(
@@ -186,7 +190,7 @@ impl TestPlan {
                 operations.push((key.clone(), KeyReadWrite::Write(None)));
             }
             operations.sort_by_key(|(key, _)| key.clone());
-            let finished = session.finish(operations);
+            let finished = session.finish(operations).unwrap();
             finished.commit(&nomt).unwrap();
             let post_root = nomt.root();
             expected_roots.push(post_root.into_inner());
@@ -212,7 +216,7 @@ impl TestPlan {
                 operations.push((key.clone(), KeyReadWrite::Write(None)));
             }
             operations.sort_by_key(|(key, _)| key.clone());
-            let finished = session.finish(operations);
+            let finished = session.finish(operations).unwrap();
             finished.commit(&nomt).unwrap();
         }
     }
@@ -428,10 +432,12 @@ fn test_rollback_change_history() {
     let session = nomt.begin_session(SessionParams::default());
     let new_key = KeyPath::from([0xAA; 32]);
     let new_value = vec![0xBB; 32];
-    let finished = session.finish(vec![(
-        new_key,
-        KeyReadWrite::Write(Some(new_value.clone())),
-    )]);
+    let finished = session
+        .finish(vec![(
+            new_key,
+            KeyReadWrite::Write(Some(new_value.clone())),
+        )])
+        .unwrap();
     finished.commit(&nomt).unwrap();
 
     // Verify the new state
@@ -461,10 +467,12 @@ fn test_rollback_read_then_write() {
     let session = nomt.begin_session(SessionParams::default());
     let key = KeyPath::from([0xAA; 32]);
     let original_value = vec![0xBB; 32];
-    let finished = session.finish(vec![(
-        key,
-        KeyReadWrite::Write(Some(original_value.clone())),
-    )]);
+    let finished = session
+        .finish(vec![(
+            key,
+            KeyReadWrite::Write(Some(original_value.clone())),
+        )])
+        .unwrap();
     finished.commit(&nomt).unwrap();
 
     // Then, create a new commit with a read-then-write actual specifying the **wrong** prior value.
@@ -474,10 +482,12 @@ fn test_rollback_read_then_write() {
     let session = nomt.begin_session(SessionParams::default());
     assert_eq!(session.read(key).unwrap(), Some(original_value.clone()));
     let new_value = vec![0xCC; 32];
-    let finished = session.finish(vec![(
-        key,
-        KeyReadWrite::ReadThenWrite(None, Some(new_value.clone())),
-    )]);
+    let finished = session
+        .finish(vec![(
+            key,
+            KeyReadWrite::ReadThenWrite(None, Some(new_value.clone())),
+        )])
+        .unwrap();
     finished.commit(&nomt).unwrap();
 
     // Rollback and expect the value from the ReadThenWrite operation to be restored.

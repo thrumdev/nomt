@@ -419,7 +419,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        sess.finish(actuals).commit(&self)?;
+        sess.finish(actuals)?.commit(&self)?;
 
         Ok(())
     }
@@ -583,7 +583,10 @@ impl<T: HashAlgorithm> Session<T> {
     /// considered within the finished session.
     ///
     /// This function blocks until the merkle root and changeset are computed.
-    pub fn finish(mut self, actuals: Vec<(KeyPath, KeyReadWrite)>) -> FinishedSession {
+    pub fn finish(
+        mut self,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
+    ) -> anyhow::Result<FinishedSession> {
         if cfg!(debug_assertions) {
             // Check that the actuals are sorted by key path.
             for i in 1..actuals.len() {
@@ -616,14 +619,14 @@ impl<T: HashAlgorithm> Session<T> {
         }
 
         let merkle_output = merkle_update_handle.join();
-        FinishedSession {
+        Ok(FinishedSession {
             value_transaction: tx,
             merkle_output,
             rollback_delta,
             parent_overlay: self.overlay,
             prev_root: self.prev_root,
             take_global_guard: self.access_guard.is_some(),
-        }
+        })
     }
 }
 
