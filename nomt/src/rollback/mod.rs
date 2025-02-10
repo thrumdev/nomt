@@ -83,6 +83,10 @@ impl InMemory {
         self.log.pop_back()
     }
 
+    fn pop_front(&mut self) -> Option<(RecordId, Delta)> {
+        self.log.pop_front()
+    }
+
     // Returns the total number of deltas, including the staged one.
     fn total_len(&self) -> usize {
         self.log.len()
@@ -242,7 +246,7 @@ impl Rollback {
         }
 
         let prune_to_new_start_live = if in_memory.total_len() > self.shared.max_rollback_log_len {
-            Some(in_memory.pop_back().unwrap().0.next().0)
+            Some(in_memory.pop_front().unwrap().0.next().0)
         } else {
             None
         };
