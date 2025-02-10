@@ -10,7 +10,7 @@
 //! Updates are performed while the next fetch is pending, unless all fetches in
 //! the range have completed.
 
-use crossbeam::channel::{Receiver, Select, Sender, TryRecvError};
+use crossbeam::channel::{Receiver, Select, TryRecvError};
 
 use nomt_core::{
     page_id::ROOT_PAGE_ID,
@@ -62,8 +62,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     params: WarmUpParams,
     warmup_rx: Receiver<WarmUpCommand>,
     finish_rx: Receiver<()>,
-    output_tx: Sender<WarmUpOutput>,
-) {
+) -> std::io::Result<WarmUpOutput> {
     let page_loader = params.store.page_loader();
     let io_handle = params.store.io_pool().make_handle();
     let page_io_receiver = io_handle.receiver().clone();
@@ -81,14 +80,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
         true,
     );
 
-    let result = warm_up_phase(page_io_receiver, seeker, page_set, warmup_rx, finish_rx);
-
-    match result {
-        Err(_) => return,
-        Ok(res) => {
-            let _ = output_tx.send(res);
-        }
-    }
+    warm_up_phase(page_io_receiver, seeker, page_set, warmup_rx, finish_rx)
 }
 
 pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Result<WorkerOutput> {
@@ -130,7 +122,7 @@ fn warm_up_phase<H: HashAlgorithm>(
     mut page_set: PageSet,
     warmup_rx: Receiver<WarmUpCommand>,
     finish_rx: Receiver<()>,
-) -> anyhow::Result<WarmUpOutput> {
+) -> std::io::Result<WarmUpOutput> {
     let mut select_all = Select::new();
     let warmup_idx = select_all.recv(&warmup_rx);
     let finish_idx = select_all.recv(&finish_rx);
@@ -148,14 +140,14 @@ fn warm_up_phase<H: HashAlgorithm>(
             continue;
         }
 
-        seeker.submit_all(&mut page_set)?;
+        seeker.submit_all(&mut page_set);
         if !seeker.has_room() {
             // block on interrupt or next page ready.
             let index = select_no_work.ready();
             if index == finish_no_work_idx {
                 match finish_rx.try_recv() {
                     Err(TryRecvError::Empty) => continue,
-                    Err(e) => anyhow::bail!(e),
+                    Err(_) => panic!("Warm-Up worker, unexpected failure of the finish channel",),
                     Ok(()) => break,
                 }
             } else if index == page_no_work_idx {
@@ -169,14 +161,14 @@ fn warm_up_phase<H: HashAlgorithm>(
             if index == finish_idx {
                 match finish_rx.try_recv() {
                     Err(TryRecvError::Empty) => continue,
-                    Err(e) => anyhow::bail!(e),
+                    Err(_) => panic!("Warm-Up worker, unexpected failure of the finish channel",),
                     Ok(()) => break,
                 }
             } else if index == warmup_idx {
                 let warm_up_command = match warmup_rx.try_recv() {
                     Ok(command) => command,
                     Err(TryRecvError::Empty) => continue,
-                    Err(e) => anyhow::bail!(e),
+                    Err(_) => panic!("Warm-Up worker, unexpected failure of the warmup channel"),
                 };
 
                 seeker.push(warm_up_command.key_path);
@@ -193,7 +185,7 @@ fn warm_up_phase<H: HashAlgorithm>(
             warm_ups.insert(result.key, result);
             continue;
         }
-        seeker.submit_all(&mut page_set)?;
+        seeker.submit_all(&mut page_set);
         if seeker.has_live_requests() {
             seeker.recv_page(&mut page_set)?;
         }
@@ -496,7 +488,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                 }
             }
 
-            seeker.submit_all(page_set)?;
+            seeker.submit_all(page_set);
             if !seeker.has_room() && seeker.has_live_requests() {
                 // no way to push work until at least one page fetch has concluded.
                 seeker.recv_page(page_set)?;
@@ -515,7 +507,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                     }
                 } else {
                     seeker.push(self.shared.read_write[next_push].0);
-                    seeker.submit_all(page_set)?;
+                    seeker.submit_all(page_set);
                 }
             }
 

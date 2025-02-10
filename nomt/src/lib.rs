@@ -609,7 +609,7 @@ impl<T: HashAlgorithm> Session<T> {
 
         let merkle_update_handle = self
             .merkle_updater
-            .update_and_prove::<T>(compact_actuals, self.witness_mode.0);
+            .update_and_prove::<T>(compact_actuals, self.witness_mode.0)?;
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {

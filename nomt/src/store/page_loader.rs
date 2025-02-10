@@ -14,18 +14,12 @@ impl PageLoader {
     }
 
     /// Advance the state of the given page load, blocking the current thread.
-    /// Fails if the I/O pool is down.
     ///
-    /// Panics if the page load needs a completion.
+    /// Panics if the page load needs a completion or if the I/O pool is down.
     ///
-    /// This returns `Ok(true)` if the page request has been submitted and a completion will be
-    /// coming. `Ok(false)` means that the page is guaranteed to be fresh.
-    pub fn probe(
-        &self,
-        load: &mut PageLoad,
-        io_handle: &IoHandle,
-        user_data: u64,
-    ) -> anyhow::Result<bool> {
+    /// This returns `true` if the page request has been submitted and a completion will be
+    /// coming. `false` means that the page is guaranteed to be fresh.
+    pub fn probe(&self, load: &mut PageLoad, io_handle: &IoHandle, user_data: u64) -> bool {
         self.inner.probe(load, io_handle, user_data)
     }
 }
