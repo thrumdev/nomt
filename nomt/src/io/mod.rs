@@ -176,10 +176,6 @@ impl IoHandle {
         &self.completion_receiver
     }
 
-    pub fn page_pool(&self) -> &PagePool {
-        &self.io_pool.page_pool
-    }
-
     pub fn io_pool(&self) -> &IoPool {
         &self.io_pool
     }

@@ -568,7 +568,7 @@ impl PageLoader {
 
         let data_page_index = self.shared.store.data_page_index(bucket.0);
 
-        let page = io_handle.page_pool().alloc_fat_page();
+        let page = self.shared.page_pool.alloc_fat_page();
         let command = IoCommand {
             kind: IoKind::Read(self.shared.ht_fd.as_raw_fd(), data_page_index, page),
             user_data,
