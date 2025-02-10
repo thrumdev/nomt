@@ -329,14 +329,12 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Try to submit as many requests as possible.
-    pub fn submit_all(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
+    pub fn submit_all(&mut self, page_set: &mut PageSet) {
         if !self.has_room() {
-            return Ok(());
+            return;
         }
-        self.submit_idle_page_loads()?;
-        self.submit_idle_key_path_requests(page_set)?;
-
-        Ok(())
+        self.submit_idle_page_loads();
+        self.submit_idle_key_path_requests(page_set);
     }
 
     /// Take the result of a complete request.
@@ -365,7 +363,7 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Try to process the next I/O. Does not block the current thread.
-    pub fn try_recv_page(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
+    pub fn try_recv_page(&mut self, page_set: &mut PageSet) -> std::io::Result<()> {
         if let Ok(io) = self.io_handle.try_recv() {
             self.handle_completion(page_set, io)?;
         }
@@ -374,8 +372,11 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Block on processing the next I/O. Blocks the current thread.
-    pub fn recv_page(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
-        let io = self.io_handle.recv()?;
+    ///
+    /// Panics if the I/O pool is down.
+    pub fn recv_page(&mut self, page_set: &mut PageSet) -> std::io::Result<()> {
+        // UNWRAP: I/O pool is not expected to hangup.
+        let io = self.io_handle.recv().unwrap();
         self.handle_completion(page_set, io)?;
         Ok(())
     }
@@ -393,35 +394,31 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     // resubmit all idle page loads until no more remain.
-    fn submit_idle_page_loads(&mut self) -> anyhow::Result<()> {
+    fn submit_idle_page_loads(&mut self) {
         while let Some(slab_index) = self.idle_page_loads.pop_front() {
-            self.submit_idle_page_load(slab_index)?;
+            self.submit_idle_page_load(slab_index);
         }
-
-        Ok(())
     }
 
     // submit the next page for each idle key path request until backpressuring or no more progress
     // can be made.
-    fn submit_idle_key_path_requests(&mut self, page_set: &mut PageSet) -> anyhow::Result<()> {
+    fn submit_idle_key_path_requests(&mut self, page_set: &mut PageSet) {
         while self.has_room() {
             match self.idle_requests.pop_front() {
-                None => return Ok(()),
+                None => return,
                 Some(request_index) => {
-                    self.submit_key_path_request(page_set, request_index)?;
+                    self.submit_key_path_request(page_set, request_index);
                 }
             }
         }
-
-        Ok(())
     }
 
     // submit a page load which is currently in the slab, but idle.
-    fn submit_idle_page_load(&mut self, slab_index: usize) -> anyhow::Result<()> {
+    fn submit_idle_page_load(&mut self, slab_index: usize) {
         if let IoRequest::Merkle(ref mut page_load) = self.io_slab[slab_index] {
             if !self
                 .page_loader
-                .probe(page_load, &self.io_handle, slab_index as u64)?
+                .probe(page_load, &self.io_handle, slab_index as u64)
             {
                 // PANIC: seek should really never reach fresh pages. we only request a page if
                 // we seek to an internal node above it, and in that case the page really should
@@ -434,18 +431,12 @@ impl<H: HashAlgorithm> Seeker<H> {
                 unreachable!()
             }
         }
-
-        Ok(())
     }
 
     // submit the next page for this key path request.
-    fn submit_key_path_request(
-        &mut self,
-        page_set: &mut PageSet,
-        request_index: usize,
-    ) -> anyhow::Result<()> {
+    fn submit_key_path_request(&mut self, page_set: &mut PageSet, request_index: usize) {
         let i = if request_index < self.processed {
-            return Ok(());
+            return;
         } else {
             request_index - self.processed
         };
@@ -484,7 +475,8 @@ impl<H: HashAlgorithm> Seeker<H> {
                     let load = self.page_loader.start_load(page_id.clone());
                     vacant_entry.insert(vec![request_index]);
                     let slab_index = self.io_slab.insert(IoRequest::Merkle(load));
-                    return self.submit_idle_page_load(slab_index);
+                    self.submit_idle_page_load(slab_index);
+                    return;
                 }
                 IoQuery::LeafPage(page_number) => {
                     let vacant_entry = match self.io_waiters.entry(IoQuery::LeafPage(page_number)) {
@@ -511,17 +503,15 @@ impl<H: HashAlgorithm> Seeker<H> {
 
                             vacant_entry.insert(vec![request_index]);
                             assert_eq!(slab_index, self.io_slab.insert(IoRequest::Leaf(leaf_load)));
-                            return Ok(());
+                            return;
                         }
                     }
                 }
             }
         }
-
-        Ok(())
     }
 
-    fn handle_completion(&mut self, page_set: &mut PageSet, io: CompleteIo) -> anyhow::Result<()> {
+    fn handle_completion(&mut self, page_set: &mut PageSet, io: CompleteIo) -> std::io::Result<()> {
         io.result?;
         let slab_index = io.command.user_data as usize;
 
