@@ -1,17 +1,27 @@
 use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PagePool, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender};
+use threadpool::ThreadPool;
 
-pub fn start_io_worker(page_pool: PagePool, io_workers: usize, _iopoll: bool) -> Sender<IoPacket> {
+pub fn start_io_worker(
+    page_pool: PagePool,
+    io_workers_tp: &ThreadPool,
+    io_workers: usize,
+    _iopoll: bool,
+) -> Sender<IoPacket> {
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
     for _ in 0..io_workers {
-        spawn_worker_thread(page_pool.clone(), command_rx.clone());
+        spawn_worker_thread(page_pool.clone(), io_workers_tp, command_rx.clone());
     }
 
     command_tx
 }
 
-fn spawn_worker_thread(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+fn spawn_worker_thread(
+    page_pool: PagePool,
+    io_workers_tp: &ThreadPool,
+    command_rx: Receiver<IoPacket>,
+) {
     let work = move || loop {
         let Ok(packet) = command_rx.recv() else {
             // Why the `drop` here?
@@ -29,10 +39,7 @@ fn spawn_worker_thread(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
         let _ = packet.completion_sender.send(complete);
     };
 
-    std::thread::Builder::new()
-        .name("nomt-io-worker".to_string())
-        .spawn(work)
-        .unwrap();
+    io_workers_tp.execute(work);
 }
 
 fn execute(mut command: IoCommand) -> CompleteIo {

@@ -22,7 +22,7 @@ use crate::beatree::{
     },
     Key, ValueChange,
 };
-use crate::io::{IoCommand, IoHandle, IoKind, IoPool};
+use crate::io::{IoCommand, IoHandle, IoKind};
 use crate::task::{join_task, spawn_task};
 
 /// Tracker of all changes that happen to leaves during an update
@@ -135,7 +135,7 @@ pub fn run(
                 &leaf_cache,
                 &leaf_reader,
                 &bbn_index,
-                io_handle.io_pool(),
+                io_handle.make_new_sibiling_handle(),
                 changeset[worker_params.op_range.clone()]
                     .iter()
                     .map(|(k, _)| *k),
@@ -699,11 +699,9 @@ fn preload_and_prepare(
     leaf_cache: &LeafCache,
     leaf_reader: &StoreReader,
     bbn_index: &Index,
-    io_pool: &IoPool,
+    io_handle: IoHandle,
     changeset: impl IntoIterator<Item = Key>,
 ) -> std::io::Result<Vec<PreparedLeaf>> {
-    let io_handle = io_pool.make_handle();
-
     let mut changeset_leaves: Vec<PreparedLeaf> = Vec::new();
     let mut submissions = 0;
     for key in changeset {

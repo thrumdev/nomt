@@ -44,8 +44,7 @@ struct Shared {
     rollback: Option<Rollback>,
     io_pool: IoPool,
     meta_fd: File,
-    #[allow(unused)]
-    flock: flock::Flock,
+    flock: Option<flock::Flock>,
     poisoned: AtomicBool,
 
     // Retained for the lifetime of the store.
@@ -199,7 +198,7 @@ impl Store {
                 io_pool,
                 _db_dir_fd: db_dir_fd,
                 meta_fd,
-                flock,
+                flock: Some(flock),
                 poisoned: false.into(),
             }),
         })
@@ -309,6 +308,18 @@ impl Store {
             return Err(e);
         }
         Ok(())
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // `Shared` is dropped, meaning no more commits are expected. Therefore, we can
+        // wait for IO workers to finish their work and then drop the flock. The order is important
+        // because we need to ensure that the flock is only dropped after the IO workers are done.
+        // Otherwise, these IO workers might still be writing to the files while another process
+        // acquired the flock.
+        self.io_pool.shutdown();
+        drop(self.flock.take());
     }
 }
 
