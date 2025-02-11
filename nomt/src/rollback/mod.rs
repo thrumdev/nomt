@@ -293,10 +293,6 @@ impl Rollback {
 pub struct SyncController {
     rollback: Rollback,
     writeout_data: Option<WriteoutData>,
-    // The channel to send the result of the writeout task. Option is to allow `take`.
-    writeout_result_tx: Option<Sender<TaskResult<WriteoutData>>>,
-    // The channel to receive the result of the writeout task.
-    writeout_result_rx: Receiver<TaskResult<WriteoutData>>,
     // The channel to send the result of the post meta task. Option is to allow `take`.
     post_meta_result_tx: Option<Sender<TaskResult<std::io::Result<()>>>>,
     // The channel to receive the result of the post meta task.
@@ -305,13 +301,10 @@ pub struct SyncController {
 
 impl SyncController {
     fn new(rollback: Rollback) -> Self {
-        let (writeout_result_tx, writeout_result_rx) = crossbeam_channel::bounded(1);
         let (post_meta_result_tx, post_meta_result_rx) = crossbeam_channel::bounded(1);
         Self {
             rollback,
             writeout_data: None,
-            writeout_result_tx: Some(writeout_result_tx),
-            writeout_result_rx,
             post_meta_result_tx: Some(post_meta_result_tx),
             post_meta_result_rx,
         }
@@ -320,22 +313,12 @@ impl SyncController {
     /// Begins the sync process.
     ///
     /// This function doesn't block.
-    pub fn begin_sync(&mut self) {
-        let tp = self.rollback.shared.sync_tp.clone();
-        let rollback = self.rollback.clone();
-        // UNWRAP: safe because begin_sync is called only once.
-        let writeout_result_tx = self.writeout_result_tx.take().unwrap();
-        spawn_task(&tp, move || rollback.writeout_start(), writeout_result_tx);
-    }
-
-    /// Wait for the rollback writeout to complete. Returns the new rollback live range
-    /// `(start_live, end_live)`.
     ///
-    /// This should be called by the sync thread. Blocking.
-    pub fn wait_pre_meta(&mut self) -> (u64, u64) {
-        let wd_result = join_task(&self.writeout_result_rx);
-        let res = (wd_result.rollback_start_live, wd_result.rollback_end_live);
-        self.writeout_data.replace(wd_result);
+    /// Returns the new rollback live range `(start_live, end_live)`.
+    pub fn begin_sync(&mut self) -> (u64, u64) {
+        let wa = self.rollback.writeout_start();
+        let res = (wa.rollback_start_live, wa.rollback_end_live);
+        self.writeout_data.replace(wa);
         res
     }
 
