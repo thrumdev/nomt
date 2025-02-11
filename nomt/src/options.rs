@@ -28,6 +28,7 @@ pub struct Options {
     /// Whether to prepopulate the upper layers of the page cache on startup.
     /// This incurs some I/O on startup but leads to predictable worst-case performance.
     pub(crate) prepopulate_page_cache: bool,
+    pub(crate) page_cache_upper_levels: usize,
 }
 
 impl Options {
@@ -52,6 +53,7 @@ impl Options {
             page_cache_size: 256,
             leaf_cache_size: 256,
             prepopulate_page_cache: false,
+            page_cache_upper_levels: 2,
         }
     }
 
@@ -139,6 +141,8 @@ impl Options {
 
     /// Sets the size of the page cache in MiB.
     ///
+    /// This does not count the memory used by the upper levels of the page
+    /// cache. See [`Self::page_cache_upper_levels`]
     /// Rounded down to the nearest byte multiple of 4096.
     ///
     /// Default: 256MiB.
@@ -155,12 +159,24 @@ impl Options {
         self.leaf_cache_size = leaf_cache_size;
     }
 
-    /// Sets whether to prepopulate the upper layers of the page cache on startup.
+    /// Sets whether to prepopulate the upper levels of the page cache on startup.
+    /// Has no effect if [`Options::page_cache_upper_levels`] is set to 0.
     ///
     /// This incurs some I/O on startup but leads to predictable worst-case performance.
     /// Default: false
     pub fn prepopulate_page_cache(&mut self, prepopulate: bool) {
         self.prepopulate_page_cache = prepopulate;
+    }
+
+    /// Sets the number of upper levels of the page tree to keep permanently
+    /// cached.
+    ///
+    /// Each level adds 64x the RAM burden of the previous.
+    /// Level 1 uses ≈256KiB, level 2 ≈16MiB, level 3 ≈1GiB.
+    ///
+    /// Default: 2
+    pub fn page_cache_upper_levels(&mut self, upper_levels: usize) {
+        self.page_cache_upper_levels = upper_levels;
     }
 }
 
