@@ -279,7 +279,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         if o.prepopulate_page_cache {
             let io_handle = store.io_pool().make_handle();
-            merkle::prepopulate_cache(io_handle, &page_cache, &store, 3)?;
+            merkle::prepopulate_cache(io_handle, &page_cache, &store, o.page_cache_upper_levels)?;
         }
 
         Ok(Self {

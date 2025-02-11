@@ -21,9 +21,6 @@ use std::{collections::HashMap, fmt, num::NonZeroUsize, sync::Arc};
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
-// The fixed number of levels we always preserve in-memory.
-const FIXED_LEVELS: usize = 3;
-
 fn read_node(data: &FatPage, index: usize) -> Node {
     assert!(index < NODES_PER_PAGE, "index out of bounds");
     let start = index * 32;
@@ -155,8 +152,8 @@ struct CacheShardLocked {
 }
 
 impl CacheShardLocked {
-    fn get(&mut self, page_id: &PageId) -> Option<&CacheEntry> {
-        if page_id.depth() <= FIXED_LEVELS {
+    fn get(&mut self, fixed_levels: usize, page_id: &PageId) -> Option<&CacheEntry> {
+        if page_id.depth() <= fixed_levels {
             self.fixed_level_cache.get(page_id)
         } else {
             self.cached.get(page_id)
@@ -165,26 +162,27 @@ impl CacheShardLocked {
 
     fn get_or_insert(
         &mut self,
+        fixed_levels: usize,
         page_id: PageId,
         entry: impl FnOnce() -> CacheEntry,
     ) -> &CacheEntry {
-        if page_id.depth() <= FIXED_LEVELS {
+        if page_id.depth() <= fixed_levels {
             &*self.fixed_level_cache.entry(page_id).or_insert_with(entry)
         } else {
             self.cached.get_or_insert(page_id, entry)
         }
     }
 
-    fn insert(&mut self, page_id: PageId, entry: CacheEntry) {
-        if page_id.depth() <= FIXED_LEVELS {
+    fn insert(&mut self, fixed_levels: usize, page_id: PageId, entry: CacheEntry) {
+        if page_id.depth() <= fixed_levels {
             self.fixed_level_cache.insert(page_id, entry);
         } else {
             self.cached.put(page_id, entry);
         }
     }
 
-    fn remove(&mut self, page_id: &PageId) {
-        if page_id.depth() <= FIXED_LEVELS {
+    fn remove(&mut self, fixed_levels: usize, page_id: &PageId) {
+        if page_id.depth() <= fixed_levels {
             self.fixed_level_cache.remove(page_id);
         } else {
             self.cached.pop(page_id);
@@ -203,6 +201,7 @@ struct Shared {
     shards: Vec<CacheShard>,
     root_page: RwLock<Option<CacheEntry>>,
     page_rw_pass_domain: RwPassDomain,
+    fixed_levels: usize,
     metrics: Metrics,
 }
 
@@ -302,6 +301,7 @@ impl PageCache {
                 root_page: RwLock::new(root_page_entry),
                 page_rw_pass_domain: domain,
                 metrics: metrics.into().unwrap_or(Metrics::new(false)),
+                fixed_levels: o.page_cache_upper_levels,
             }),
         }
     }
@@ -339,7 +339,7 @@ impl PageCache {
         };
 
         let mut shard = self.shard(shard_index).locked.lock();
-        match shard.get(&page_id) {
+        match shard.get(self.shared.fixed_levels, &page_id) {
             Some(cache_item) => Some((
                 Page {
                     inner: cache_item.page_data.clone(),
@@ -396,8 +396,9 @@ impl PageCache {
         };
 
         let mut shard = self.shard(shard_index).locked.lock();
-        let cache_entry =
-            shard.get_or_insert(page_id, || CacheEntry::init(page.inner, bucket_index));
+        let cache_entry = shard.get_or_insert(self.shared.fixed_levels, page_id, || {
+            CacheEntry::init(page.inner, bucket_index)
+        });
 
         Page {
             inner: cache_entry.page_data.clone(),
@@ -428,10 +429,13 @@ impl PageCache {
             let shard_index = self.shard_index_for(&page_id).unwrap();
 
             if let Some((page, bucket_index)) = maybe_page {
-                shard_guards[shard_index]
-                    .insert(page_id.clone(), CacheEntry::init(page.inner, bucket_index));
+                shard_guards[shard_index].insert(
+                    self.shared.fixed_levels,
+                    page_id.clone(),
+                    CacheEntry::init(page.inner, bucket_index),
+                );
             } else {
-                shard_guards[shard_index].remove(&page_id)
+                shard_guards[shard_index].remove(self.shared.fixed_levels, &page_id)
             }
         }
     }
