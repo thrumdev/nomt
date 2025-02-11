@@ -273,7 +273,7 @@ impl SegmentedLog {
     /// # Panics
     ///
     /// The new live range must be a subset of the old live range.
-    pub fn prune_back(&mut self, new_start_live: RecordId) -> std::io::Result<()> {
+    pub fn prune_oldest(&mut self, new_start_live: RecordId) -> std::io::Result<()> {
         if new_start_live.is_nil() {
             self.start_live = RecordId::nil();
             self.end_live = RecordId::nil();
@@ -329,7 +329,7 @@ impl SegmentedLog {
     ///
     /// It's possible to return remove all items from the log, i.e. to reset the log to an empty
     /// state, by setting the new live end to zero. That would update the live range to `(0, 0)`.
-    pub fn prune_front(&mut self, new_end_live: RecordId) -> std::io::Result<()> {
+    pub fn prune_recent(&mut self, new_end_live: RecordId) -> std::io::Result<()> {
         if new_end_live.is_nil() {
             self.start_live = RecordId::nil();
             self.end_live = RecordId::nil();
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_back() -> Result<()> {
+    fn prune_oldest() -> Result<()> {
         let h = TestHarness::new()?;
         h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
@@ -1212,22 +1212,22 @@ mod tests {
         h.assert_segment_file_count(3)?;
 
         // Prune 1 record.
-        log.prune_back(2.into())?;
+        log.prune_oldest(2.into())?;
         h.assert_segment_file_count(2)?;
 
         // Prune 1 more record.
-        log.prune_back(3.into())?;
+        log.prune_oldest(3.into())?;
         h.assert_segment_file_count(1)?;
 
         // Prune the last record. Ensure that the head segment is not truncated.
-        log.prune_back(3.into())?;
+        log.prune_oldest(3.into())?;
         h.assert_segment_file_count(1)?;
 
         Ok(())
     }
 
     #[test]
-    fn prune_front() -> Result<()> {
+    fn prune_recent() -> Result<()> {
         let h = TestHarness::new()?;
         h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
@@ -1236,11 +1236,11 @@ mod tests {
         h.assert_segment_file_count(3)?;
 
         // Prune 1 record.
-        log.prune_front(2.into())?;
+        log.prune_recent(2.into())?;
         h.assert_segment_file_count(2)?;
 
         // Prune 1 more record.
-        log.prune_front(1.into())?;
+        log.prune_recent(1.into())?;
         h.assert_segment_file_count(1)?;
 
         Ok(())
@@ -1300,31 +1300,31 @@ mod tests {
     }
 
     #[test]
-    fn test_live_range_prune_back() -> Result<()> {
+    fn test_live_range_prune_oldest() -> Result<()> {
         let h = TestHarness::new()?;
         h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
-        log.prune_back(2.into())?;
+        log.prune_oldest(2.into())?;
         assert_eq!(log.live_range(), (RecordId::from(2), RecordId::from(2)));
         Ok(())
     }
 
     #[test]
-    fn test_live_range_prune_front() -> Result<()> {
+    fn test_live_range_prune_recent() -> Result<()> {
         let h = TestHarness::new()?;
         h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
-        log.prune_front(1.into())?;
+        log.prune_recent(1.into())?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(1)));
         Ok(())
     }
 
     #[test]
-    fn test_prune_front_segment_choice() -> Result<()> {
+    fn test_prune_recent_segment_choice() -> Result<()> {
         let h = TestHarness::new()?;
         h.new_segment(1)?
             .write_record(1, &[1u8; 10])?
@@ -1346,32 +1346,32 @@ mod tests {
 
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 9)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(9)));
-        log.prune_front(5.into())?;
+        log.prune_recent(5.into())?;
 
         Ok(())
     }
 
     #[test]
-    fn test_live_range_prune_front_to_empty() -> Result<()> {
+    fn test_live_range_prune_recent_to_empty() -> Result<()> {
         let h = TestHarness::new()?;
         h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
-        log.prune_front(0.into())?;
+        log.prune_recent(0.into())?;
         assert_eq!(log.live_range(), (RecordId::nil(), RecordId::nil()));
         h.assert_segment_file_count(0)?;
         Ok(())
     }
 
     #[test]
-    fn test_live_range_prune_back_to_empty() -> Result<()> {
+    fn test_live_range_prune_oldest_to_empty() -> Result<()> {
         let h = TestHarness::new()?;
         h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
-        log.prune_back(0.into())?;
+        log.prune_oldest(0.into())?;
         assert_eq!(log.live_range(), (RecordId::nil(), RecordId::nil()));
         h.assert_segment_file_count(0)?;
         Ok(())
