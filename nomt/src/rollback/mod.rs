@@ -24,7 +24,7 @@ use crossbeam::channel::Sender;
 use crossbeam_channel::Receiver;
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use threadpool::ThreadPool;
 
 use self::reverse_delta_worker::{DeltaBuilderCommand, LoadValueAsync, StoreLoadValueAsync};
@@ -75,15 +75,15 @@ impl InMemory {
     }
 
     /// Push a delta into the in-memory cache.
-    fn push_back(&mut self, record_id: RecordId, delta: Delta) {
+    fn push_recent(&mut self, record_id: RecordId, delta: Delta) {
         self.log.push_back((record_id, delta));
     }
 
-    fn pop_back(&mut self) -> Option<(RecordId, Delta)> {
+    fn pop_recent(&mut self) -> Option<(RecordId, Delta)> {
         self.log.pop_back()
     }
 
-    fn pop_front(&mut self) -> Option<(RecordId, Delta)> {
+    fn pop_oldest(&mut self) -> Option<(RecordId, Delta)> {
         self.log.pop_front()
     }
 
@@ -121,7 +121,7 @@ impl Rollback {
             |record_id, payload| {
                 let mut cursor = Cursor::new(payload);
                 let delta = Delta::decode(&mut cursor)?;
-                in_memory.push_back(record_id, delta);
+                in_memory.push_recent(record_id, delta);
                 Ok(())
             },
         )?;
@@ -168,7 +168,7 @@ impl Rollback {
         let mut seglog = self.shared.seglog.lock();
 
         let record_id = seglog.append(&delta_bytes)?;
-        in_memory.push_back(record_id, delta);
+        in_memory.push_recent(record_id, delta);
         Ok(())
     }
 
@@ -196,7 +196,7 @@ impl Rollback {
             //
             // UNWRAP: we checked above that `n` is greater or equal to the total number of deltas
             //         and `n` is strictly decreasing.
-            let (record_id, delta) = in_memory.pop_back().unwrap();
+            let (record_id, delta) = in_memory.pop_recent().unwrap();
             earliest_record_id = Some(record_id);
             for (key, value) in delta.priors {
                 traceback.insert(key, value);
@@ -246,7 +246,7 @@ impl Rollback {
         }
 
         let prune_to_new_start_live = if in_memory.total_len() > self.shared.max_rollback_log_len {
-            Some(in_memory.pop_front().unwrap().0.next().0)
+            Some(in_memory.pop_oldest().unwrap().0.next().0)
         } else {
             None
         };
@@ -275,13 +275,18 @@ impl Rollback {
     ) -> std::io::Result<()> {
         if let Some(new_start_live) = new_start_live {
             let mut seglog = self.shared.seglog.lock();
-            seglog.prune_back(new_start_live.into())?;
+            seglog.prune_oldest(new_start_live.into())?;
         }
         if let Some(new_end_live) = new_end_live {
             let mut seglog = self.shared.seglog.lock();
-            seglog.prune_front(new_end_live.into())?;
+            seglog.prune_recent(new_end_live.into())?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn seglog(&self) -> MutexGuard<SegmentedLog> {
+        self.shared.seglog.lock()
     }
 }
 

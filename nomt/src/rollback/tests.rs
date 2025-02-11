@@ -277,3 +277,73 @@ fn delta_builder_doesnt_load_read_then_write_priors() {
         &Some(b"prior_value".to_vec())
     );
 }
+
+#[test]
+fn rollback_writeout_start_and_end() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_dir_path = temp_dir.path().join("db");
+    std::fs::create_dir_all(&db_dir_path).unwrap();
+    let db_dir_fd = OpenOptions::new()
+        .read(true)
+        .open(db_dir_path.clone())
+        .unwrap();
+    let store = MockStore::new();
+
+    let rollback =
+        Rollback::read(MAX_ROLLBACK_LOG_LEN, db_dir_path, Arc::new(db_dir_fd), 0, 0).unwrap();
+
+    // fill the rollback with the max amount of deltas + 1
+    for _ in 0..MAX_ROLLBACK_LOG_LEN + 1 {
+        let builder = rollback.delta_builder_inner(store.async_reader());
+        let delta = builder.finalize(&[]);
+        rollback.commit(delta).unwrap();
+    }
+
+    // expected prune of oldest delta
+    let wa = rollback.writeout_start();
+    assert_eq!(wa.rollback_start_live, 1);
+    assert_eq!(wa.rollback_end_live, 101);
+    assert_eq!(wa.prune_to_new_start_live, Some(2));
+    assert_eq!(wa.prune_to_new_end_live, None);
+
+    rollback
+        .writeout_end(wa.prune_to_new_start_live, wa.prune_to_new_end_live)
+        .unwrap();
+    let (rollback_start_live, rollback_end_live) = rollback.seglog().live_range();
+    assert_eq!(rollback_start_live, 2.into());
+    assert_eq!(rollback_end_live, 101.into());
+
+    // expected prune of oldest delta
+    let builder = rollback.delta_builder_inner(store.async_reader());
+    let delta = builder.finalize(&[]);
+    rollback.commit(delta).unwrap();
+
+    let wa = rollback.writeout_start();
+    assert_eq!(wa.rollback_start_live, 2);
+    assert_eq!(wa.rollback_end_live, 102);
+    assert_eq!(wa.prune_to_new_start_live, Some(3));
+    assert_eq!(wa.prune_to_new_end_live, None);
+
+    rollback
+        .writeout_end(wa.prune_to_new_start_live, wa.prune_to_new_end_live)
+        .unwrap();
+    let (rollback_start_live, rollback_end_live) = rollback.seglog().live_range();
+    assert_eq!(rollback_start_live, 3.into());
+    assert_eq!(rollback_end_live, 102.into());
+
+    rollback.truncate(5).unwrap();
+
+    // expected prune of 5 newest deltas
+    let wa = rollback.writeout_start();
+    assert_eq!(wa.rollback_start_live, 3);
+    assert_eq!(wa.rollback_end_live, 97);
+    assert_eq!(wa.prune_to_new_start_live, None);
+    assert_eq!(wa.prune_to_new_end_live, Some(97));
+
+    rollback
+        .writeout_end(Some(wa.rollback_start_live), Some(wa.rollback_end_live))
+        .unwrap();
+    let (rollback_start_live, rollback_end_live) = rollback.seglog().live_range();
+    assert_eq!(rollback_start_live, 3.into());
+    assert_eq!(rollback_end_live, 97.into());
+}
