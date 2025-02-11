@@ -276,6 +276,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         let root_page = store.load_page(ROOT_PAGE_ID)?;
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
         let root = compute_root_node::<T>(&page_cache, &store);
+
+        if o.prepopulate_page_cache {
+            let io_handle = store.io_pool().make_handle();
+            merkle::prepopulate_cache(io_handle, &page_cache, &store, 3)?;
+        }
+
         Ok(Self {
             merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
             page_cache,

@@ -25,6 +25,9 @@ pub struct Options {
     /// The maximum size of the leaf cache specified in MiB, rounded down
     /// to the nearest byte multiple of [`crate::io::PAGE_SIZE`].
     pub(crate) leaf_cache_size: usize,
+    /// Whether to prepopulate the upper layers of the page cache on startup.
+    /// This incurs some I/O on startup but leads to predictable worst-case performance.
+    pub(crate) prepopulate_page_cache: bool,
 }
 
 impl Options {
@@ -48,6 +51,7 @@ impl Options {
             preallocate_ht: true,
             page_cache_size: 256,
             leaf_cache_size: 256,
+            prepopulate_page_cache: false,
         }
     }
 
@@ -149,6 +153,14 @@ impl Options {
     /// Default: 256MiB.
     pub fn leaf_cache_size(&mut self, leaf_cache_size: usize) {
         self.leaf_cache_size = leaf_cache_size;
+    }
+
+    /// Sets whether to prepopulate the upper layers of the page cache on startup.
+    ///
+    /// This incurs some I/O on startup but leads to predictable worst-case performance.
+    /// Default: false
+    pub fn prepopulate_page_cache(&mut self, prepopulate: bool) {
+        self.prepopulate_page_cache = prepopulate;
     }
 }
 

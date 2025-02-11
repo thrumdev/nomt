@@ -27,11 +27,13 @@ use crate::{
 };
 use threadpool::ThreadPool;
 
+mod cache_prepopulate;
 mod page_set;
 mod page_walker;
 mod seek;
 mod worker;
 
+pub use cache_prepopulate::prepopulate as prepopulate_cache;
 pub use page_walker::UpdatedPage;
 
 /// Updated pages produced by update workers.
