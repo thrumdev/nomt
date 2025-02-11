@@ -156,6 +156,11 @@ impl PageId {
         &self.path[..]
     }
 
+    /// Get the depth of the page ID. The depth of the [`ROOT_PAGE_ID`] is 0.
+    pub fn depth(&self) -> usize {
+        self.path.len()
+    }
+
     /// Construct the Child PageId given the previous PageId and the child index.
     ///
     /// Child index must be a 6 bit integer, two most significant bits must be zero.
