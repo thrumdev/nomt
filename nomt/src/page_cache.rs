@@ -14,12 +14,15 @@ use nomt_core::{
     trie::Node,
 };
 use parking_lot::{Mutex, RwLock};
-use std::{fmt, num::NonZeroUsize, sync::Arc};
+use std::{collections::HashMap, fmt, num::NonZeroUsize, sync::Arc};
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
 // of the rootless sub-binary tree stored in a page following this formula:
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
+
+// The fixed number of levels we always preserve in-memory.
+const FIXED_LEVELS: usize = 3;
 
 fn read_node(data: &FatPage, index: usize) -> Node {
     assert!(index < NODES_PER_PAGE, "index out of bounds");
@@ -146,11 +149,50 @@ struct CacheShard {
 }
 
 struct CacheShardLocked {
+    // storage for pages in the levels of the tree which we always cache.
+    fixed_level_cache: HashMap<PageId, CacheEntry, FxBuildHasher>,
     cached: LruCache<PageId, CacheEntry, FxBuildHasher>,
 }
 
 impl CacheShardLocked {
+    fn get(&mut self, page_id: &PageId) -> Option<&CacheEntry> {
+        if page_id.depth() <= FIXED_LEVELS {
+            self.fixed_level_cache.get(page_id)
+        } else {
+            self.cached.get(page_id)
+        }
+    }
+
+    fn get_or_insert(
+        &mut self,
+        page_id: PageId,
+        entry: impl FnOnce() -> CacheEntry,
+    ) -> &CacheEntry {
+        if page_id.depth() <= FIXED_LEVELS {
+            &*self.fixed_level_cache.entry(page_id).or_insert_with(entry)
+        } else {
+            self.cached.get_or_insert(page_id, entry)
+        }
+    }
+
+    fn insert(&mut self, page_id: PageId, entry: CacheEntry) {
+        if page_id.depth() <= FIXED_LEVELS {
+            self.fixed_level_cache.insert(page_id, entry);
+        } else {
+            self.cached.put(page_id, entry);
+        }
+    }
+
+    fn remove(&mut self, page_id: &PageId) {
+        if page_id.depth() <= FIXED_LEVELS {
+            self.fixed_level_cache.remove(page_id);
+        } else {
+            self.cached.pop(page_id);
+        }
+    }
+
     fn evict(&mut self, limit: NonZeroUsize) {
+        // preserve everything in the fixed level cache, removing only the variable cache.
         while self.cached.len() > limit.get() {
             let _ = self.cached.pop_lru();
         }
@@ -216,6 +258,7 @@ fn make_shards(num_shards: usize, page_cache_size: usize) -> Vec<CacheShard> {
         .map(|(region, count)| CacheShard {
             region,
             locked: Mutex::new(CacheShardLocked {
+                fixed_level_cache: HashMap::with_hasher(FxBuildHasher::default()),
                 cached: LruCache::unbounded_with_hasher(FxBuildHasher::default()),
             }),
             // UNWRAP: both factors are non-zero
@@ -296,7 +339,7 @@ impl PageCache {
         };
 
         let mut shard = self.shard(shard_index).locked.lock();
-        match shard.cached.get(&page_id) {
+        match shard.get(&page_id) {
             Some(cache_item) => Some((
                 Page {
                     inner: cache_item.page_data.clone(),
@@ -353,9 +396,8 @@ impl PageCache {
         };
 
         let mut shard = self.shard(shard_index).locked.lock();
-        let cache_entry = shard
-            .cached
-            .get_or_insert(page_id, || CacheEntry::init(page.inner, bucket_index));
+        let cache_entry =
+            shard.get_or_insert(page_id, || CacheEntry::init(page.inner, bucket_index));
 
         Page {
             inner: cache_entry.page_data.clone(),
@@ -387,11 +429,10 @@ impl PageCache {
 
             if let Some((page, bucket_index)) = maybe_page {
                 shard_guards[shard_index]
-                    .cached
-                    .put(page_id.clone(), CacheEntry::init(page.inner, bucket_index))
+                    .insert(page_id.clone(), CacheEntry::init(page.inner, bucket_index));
             } else {
-                shard_guards[shard_index].cached.pop(&page_id)
-            };
+                shard_guards[shard_index].remove(&page_id)
+            }
         }
     }
 
