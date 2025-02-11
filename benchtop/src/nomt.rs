@@ -26,6 +26,8 @@ impl NomtDB {
         hashtable_buckets: Option<u32>,
         page_cache_size: Option<usize>,
         leaf_cache_size: Option<usize>,
+        page_cache_upper_levels: usize,
+        prepopulate_page_cache: bool,
         overlay_window_capacity: usize,
     ) -> Self {
         let nomt_db_folder =
@@ -50,6 +52,8 @@ impl NomtDB {
         if let Some(buckets) = hashtable_buckets {
             opts.hashtable_buckets(buckets);
         }
+        opts.page_cache_upper_levels(page_cache_upper_levels);
+        opts.prepopulate_page_cache(prepopulate_page_cache);
 
         let nomt = Nomt::open(opts).unwrap();
         Self {

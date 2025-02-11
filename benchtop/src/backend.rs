@@ -23,6 +23,8 @@ impl Backend {
         hashtable_buckets: Option<u32>,
         page_cache_size: Option<usize>,
         leaf_cache_size: Option<usize>,
+        page_cache_upper_levels: usize,
+        prepopulate_page_cache: bool,
         overlay_window_length: usize,
     ) -> DB {
         match self {
@@ -34,6 +36,8 @@ impl Backend {
                 hashtable_buckets,
                 page_cache_size,
                 leaf_cache_size,
+                page_cache_upper_levels,
+                prepopulate_page_cache,
                 overlay_window_length,
             )),
             Backend::SpTrie => DB::SpTrie(SpTrieDB::open(reset)),
