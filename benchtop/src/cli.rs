@@ -150,6 +150,18 @@ pub struct WorkloadParams {
     #[arg(long = "page-cache-size")]
     pub page_cache_size: Option<usize>,
 
+    /// The number of upper levels of the NOMT page tree to keep permanently cached.
+    /// Only used with the Nomt backend.
+    #[arg(long = "page-cache-upper-levels")]
+    #[clap(default_value = "3")]
+    pub page_cache_upper_levels: usize,
+
+    /// Whether to prepopulate the page cache with the upper levels of the page tree in NOMT.
+    /// Only used with the Nomt backend.
+    #[arg(long = "prepopulate-page-cache")]
+    #[clap(default_value = "true")]
+    pub prepopulate_page_cache: bool,
+
     /// The size of the leaf cache used in NOMT to store Beatree leaves, measured in MiB.
     /// Only used with the Nomt backend.
     #[arg(long = "leaf-cache-size")]
