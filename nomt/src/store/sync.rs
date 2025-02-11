@@ -47,16 +47,13 @@ impl Sync {
 
         bitbox_sync.begin_sync(sync_seqn, page_cache, updated_pages);
         beatree_sync.begin_sync(value_tx);
-        if let Some(ref mut rollback) = rollback_sync {
-            rollback.begin_sync();
-        }
+        let (rollback_start_live, rollback_end_live) = match rollback_sync {
+            Some(ref mut rollback) => rollback.begin_sync(),
+            None => (0, 0),
+        };
 
         bitbox_sync.wait_pre_meta()?;
         let beatree_meta_wd = beatree_sync.wait_pre_meta()?;
-        let (rollback_start_live, rollback_end_live) = match rollback_sync {
-            Some(ref mut rollback) => rollback.wait_pre_meta(),
-            None => (0, 0),
-        };
 
         if let Some(PanicOnSyncMode::PostWal) = self.panic_on_sync {
             panic!("panic_on_sync is true (post-wal)")
