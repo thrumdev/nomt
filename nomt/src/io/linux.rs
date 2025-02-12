@@ -13,6 +13,7 @@ const SQPOLL_IDLE: &'static str = "SQPOLL_IDLE";
 const SINGLE_ISSUER: &'static str = "SINGLE_ISSUER";
 const COOP_TASKRUN: &'static str = "COOP_TASKRUN";
 const DEFER_TASKRUN: &'static str = "DEFER_TASKRUN";
+const REGISTER_FILES: &'static str = "REGISTER_FILES";
 
 fn is_true(env_var: &'static str) -> bool {
     std::env::var(env_var)
@@ -83,6 +84,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
     if dbg!(is_true(DEFER_TASKRUN)) {
         ring_builder.setup_defer_taskrun();
     }
+    let is_register_files = is_true(REGISTER_FILES);
     let is_defer_taskrun = is_true(DEFER_TASKRUN);
 
     let mut ring = ring_builder
