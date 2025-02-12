@@ -880,7 +880,7 @@ impl Workload {
                 assert!(matches!(outcome, OpenOutcome::Success));
             }
             OpenOutcome::UnknownFailure(err) => {
-                panic!("unexpected open outcome: {:?}", err);
+                return Err(anyhow::anyhow!("unexpected open outcome: {:?}", err));
             }
         }
 
