@@ -19,12 +19,11 @@ pub fn start_io_worker(
     page_pool: PagePool,
     io_workers_tp: &ThreadPool,
     io_workers: usize,
-    iopoll: bool,
 ) -> Sender<IoPacket> {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
-    start_workers(page_pool, io_workers_tp, command_rx, io_workers, iopoll);
+    start_workers(page_pool, io_workers_tp, command_rx, io_workers);
 
     command_tx
 }
@@ -34,25 +33,20 @@ fn start_workers(
     io_workers_tp: &ThreadPool,
     command_rx: Receiver<IoPacket>,
     io_workers: usize,
-    iopoll: bool,
 ) {
     for _ in 0..io_workers {
         io_workers_tp.execute({
             let page_pool = page_pool.clone();
             let command_rx = command_rx.clone();
-            move || run_worker(page_pool, command_rx, iopoll)
+            move || run_worker(page_pool, command_rx)
         });
     }
 }
 
-fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>, iopoll: bool) {
+fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
-    let mut ring_builder = IoUring::<squeue::Entry, cqueue::Entry>::builder();
-    if iopoll {
-        ring_builder.setup_iopoll();
-    }
-    let mut ring = ring_builder
+    let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 

@@ -70,26 +70,20 @@ impl Store {
 
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
-                // iopoll does not play nice with FUSE and tmpfs. A symptom is ENOSUPP.
                 // O_DIRECT is not supported on tmpfs.
-                let iopoll: bool;
                 let o_direct: bool;
                 match crate::sys::linux::fs_check(&db_dir_fd) {
                     Ok(fsck) => {
-                        iopoll = !(fsck.is_fuse() || fsck.is_tmpfs());
                         o_direct = !fsck.is_tmpfs();
                     },
                     Err(_) => {
-                        iopoll = false;
                         o_direct = false;
                     },
                 }
-            } else {
-                let iopoll = true;
             }
         }
 
-        let io_pool = io::start_io_pool(o.io_workers, iopoll, page_pool.clone());
+        let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
 
         let meta_fd = {
             let mut options = OpenOptions::new();

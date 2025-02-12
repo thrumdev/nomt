@@ -6,7 +6,6 @@ pub fn start_io_worker(
     page_pool: PagePool,
     io_workers_tp: &ThreadPool,
     io_workers: usize,
-    _iopoll: bool,
 ) -> Sender<IoPacket> {
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
