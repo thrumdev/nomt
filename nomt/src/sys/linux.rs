@@ -26,11 +26,6 @@ impl FsCheck {
     pub fn is_tmpfs(&self) -> bool {
         self.stat.f_type == libc::TMPFS_MAGIC
     }
-
-    /// Returns true if the filesystem is backed by FUSE.
-    pub fn is_fuse(&self) -> bool {
-        self.stat.f_type == libc::FUSE_SUPER_MAGIC
-    }
 }
 
 /// fallocate changes the size of the file to the given length if it's less than the current size.
