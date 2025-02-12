@@ -16,7 +16,7 @@ pub fn prepopulate(
     page_cache: &PageCache,
     store: &Store,
     levels: usize,
-) -> anyhow::Result<()> {
+) -> std::io::Result<()> {
     let page_loader = store.page_loader();
     let mut loads = Vec::new();
 
@@ -29,7 +29,8 @@ pub fn prepopulate(
 
     // wait on I/O results.
     while completed < loads.len() {
-        let complete_io = io_handle.recv()?;
+        // UNWRAP: I/O pool is not expected to hangup.
+        let complete_io = io_handle.recv().unwrap();
         complete_io.result?;
         let load_index = complete_io.command.user_data as usize;
         let load = &mut loads[load_index];
@@ -61,7 +62,7 @@ fn dispatch_recursive(
     io_handle: &IoHandle,
     loads: &mut Vec<PageLoad>,
     levels_remaining: usize,
-) -> anyhow::Result<()> {
+) -> std::io::Result<()> {
     if levels_remaining == 0 {
         return Ok(());
     }
