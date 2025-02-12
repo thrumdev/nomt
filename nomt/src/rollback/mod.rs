@@ -24,7 +24,7 @@ use crossbeam::channel::Sender;
 use crossbeam_channel::Receiver;
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use threadpool::ThreadPool;
 
 use self::reverse_delta_worker::{DeltaBuilderCommand, LoadValueAsync, StoreLoadValueAsync};
@@ -285,7 +285,7 @@ impl Rollback {
     }
 
     #[cfg(test)]
-    pub fn seglog(&self) -> MutexGuard<SegmentedLog> {
+    pub fn seglog(&self) -> parking_lot::MutexGuard<SegmentedLog> {
         self.shared.seglog.lock()
     }
 }
