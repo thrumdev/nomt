@@ -3,6 +3,7 @@ std::compile_error!("NOMT only supports Unix-based OSs");
 
 use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError};
 use page_pool::Page;
+use platform::RegisterFiles;
 use std::{
     fmt,
     fs::File,
@@ -102,19 +103,26 @@ struct IoPacket {
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
-pub fn start_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
+pub fn start_io_pool(io_workers: usize, page_pool: PagePool) -> (IoPool, Option<RegisterFiles>) {
     let io_workers_tp = ThreadPool::with_name("io-worker".to_string(), io_workers);
-    let sender = platform::start_io_worker(page_pool.clone(), &io_workers_tp, io_workers);
+    let (sender, maybe_register_files) =
+        platform::start_io_worker(page_pool.clone(), &io_workers_tp, io_workers);
     let sender = Some(Arc::new(sender));
-    IoPool {
-        sender,
-        page_pool,
-        io_workers_tp,
-    }
+    (
+        IoPool {
+            sender,
+            page_pool,
+            io_workers_tp,
+        },
+        maybe_register_files,
+    )
 }
 
 #[cfg(test)]
-pub fn start_test_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
+pub fn start_test_io_pool(
+    io_workers: usize,
+    page_pool: PagePool,
+) -> (IoPool, Option<RegisterFiles>) {
     start_io_pool(io_workers, page_pool)
 }
 

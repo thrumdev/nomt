@@ -1,8 +1,13 @@
 use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PagePool, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
-use io_uring::{cqueue, opcode, squeue, types, IoUring};
+use io_uring::{cqueue, opcode, register, squeue, types, IoUring};
+use parking_lot::{Condvar, Mutex};
 use slab::Slab;
-use std::collections::VecDeque;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    os::fd::RawFd,
+    sync::Arc,
+};
 use threadpool::ThreadPool;
 
 const RING_CAPACITY: &'static str = "RING_CAPACITY";
@@ -38,13 +43,21 @@ pub fn start_io_worker(
     page_pool: PagePool,
     io_workers_tp: &ThreadPool,
     io_workers: usize,
-) -> Sender<IoPacket> {
+) -> (Sender<IoPacket>, Option<RegisterFiles>) {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
 
-    start_workers(page_pool, io_workers_tp, command_rx, io_workers);
+    let register_files = RegisterFiles::new();
 
-    command_tx
+    start_workers(
+        page_pool,
+        io_workers_tp,
+        command_rx,
+        io_workers,
+        register_files.clone(),
+    );
+
+    (command_tx, Some(register_files))
 }
 
 fn start_workers(
@@ -52,36 +65,38 @@ fn start_workers(
     io_workers_tp: &ThreadPool,
     command_rx: Receiver<IoPacket>,
     io_workers: usize,
+    rf: RegisterFiles,
 ) {
     for _ in 0..io_workers {
         io_workers_tp.execute({
             let page_pool = page_pool.clone();
             let command_rx = command_rx.clone();
-            move || run_worker(page_pool, command_rx)
+            let rf = rf.clone();
+            move || run_worker(page_pool, command_rx, rf)
         });
     }
 }
 
-fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
+fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>, register_files: RegisterFiles) {
     let max_in_flight = get_usize(MAX_IN_FLIGHT);
     let mut pending: Slab<PendingIo> = Slab::with_capacity(max_in_flight);
 
     let ring_capacity = get_usize(RING_CAPACITY);
     let mut ring_builder = IoUring::<squeue::Entry, cqueue::Entry>::builder();
 
-    if dbg!(is_true(IOPOLL)) {
+    if is_true(IOPOLL) {
         ring_builder.setup_iopoll();
     }
-    if dbg!(is_true(SQPOLL)) {
+    if is_true(SQPOLL) {
         ring_builder.setup_sqpoll(get_usize(SQPOLL_IDLE) as u32);
     }
-    if dbg!(is_true(SINGLE_ISSUER)) {
+    if is_true(SINGLE_ISSUER) {
         ring_builder.setup_single_issuer();
     }
-    if dbg!(is_true(COOP_TASKRUN)) {
+    if is_true(COOP_TASKRUN) {
         ring_builder.setup_coop_taskrun();
     }
-    if dbg!(is_true(DEFER_TASKRUN)) {
+    if is_true(DEFER_TASKRUN) {
         ring_builder.setup_defer_taskrun();
     }
     let is_register_files = is_true(REGISTER_FILES);
@@ -96,6 +111,20 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
 
     // Indicates whether the worker detected that it should shutdown.
     let mut shutdown = false;
+
+    let maybe_registered_map = if is_register_files {
+        let files = register_files.wait_registration();
+        let map: BTreeMap<i32, u32> = files
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(i, fd)| (fd, i as u32))
+            .collect();
+        submitter.register_files(&files).unwrap();
+        Some(map)
+    } else {
+        None
+    };
 
     loop {
         // 1. process completions.
@@ -185,8 +214,13 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
                 completion_sender: next_io.completion_sender,
             });
 
-            let entry = submission_entry(&mut pending.get_mut(pending_index).unwrap().command)
-                .user_data(pending_index as u64);
+            let entry = if let Some(ref map) = maybe_registered_map {
+                submission_entry_fixed(&mut pending.get_mut(pending_index).unwrap().command, map)
+                    .user_data(pending_index as u64)
+            } else {
+                submission_entry(&mut pending.get_mut(pending_index).unwrap().command)
+                    .user_data(pending_index as u64)
+            };
 
             // unwrap: known not full
             unsafe { submit_queue.push(&entry).unwrap() };
@@ -226,5 +260,70 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
+    }
+}
+
+fn submission_entry_fixed(command: &mut IoCommand, map: &BTreeMap<i32, u32>) -> squeue::Entry {
+    match command.kind {
+        IoKind::Read(fd, page_index, ref mut page) => opcode::Read::new(
+            types::Fixed(*map.get(&fd).unwrap()),
+            page.as_mut_ptr(),
+            PAGE_SIZE as u32,
+        )
+        .offset(page_index * PAGE_SIZE as u64)
+        .build(),
+        IoKind::Write(fd, page_index, ref page) => opcode::Write::new(
+            types::Fixed(*map.get(&fd).unwrap()),
+            page.as_ptr(),
+            PAGE_SIZE as u32,
+        )
+        .offset(page_index * PAGE_SIZE as u64)
+        .build(),
+        IoKind::WriteArc(fd, page_index, ref page) => {
+            let page: &[u8] = &*page;
+            opcode::Write::new(
+                types::Fixed(*map.get(&fd).unwrap()),
+                page.as_ptr(),
+                PAGE_SIZE as u32,
+            )
+            .offset(page_index * PAGE_SIZE as u64)
+            .build()
+        }
+        IoKind::WriteRaw(fd, page_index, ref page) => opcode::Write::new(
+            types::Fixed(*map.get(&fd).unwrap()),
+            page.as_ptr(),
+            PAGE_SIZE as u32,
+        )
+        .offset(page_index * PAGE_SIZE as u64)
+        .build(),
+    }
+}
+
+#[derive(Clone)]
+pub struct RegisterFiles {
+    files: Arc<Mutex<Option<Vec<RawFd>>>>,
+    cv: Arc<Condvar>,
+}
+
+impl RegisterFiles {
+    pub fn new() -> Self {
+        Self {
+            files: Arc::new(Mutex::new(None)),
+            cv: Arc::new(Condvar::new()),
+        }
+    }
+
+    pub fn regsiter(&self, files: &[RawFd]) {
+        let _ = self.files.lock().replace(files.to_vec());
+        // TODO: make sure to awake all waiting threads
+        // I should pas shere the number of io uring threads
+        self.cv.notify_all();
+    }
+
+    pub fn wait_registration(self) -> Vec<RawFd> {
+        let mut files = self.files.lock();
+        self.cv.wait_while(&mut files, |files| files.is_none());
+        // UNWRAP: files has just been checked to be `Some`.
+        files.take().unwrap()
     }
 }
