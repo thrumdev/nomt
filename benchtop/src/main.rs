@@ -122,53 +122,114 @@ pub fn run(params: RunParams) -> Result<()> {
         Ok(())
     };
 
+    let mut exec_multiple_sizes = || -> Result<()> {
+        println!("   --- RING_CAPACITY: 128, MAX_IN_FLIGHT: 128");
+        std::env::set_var("RING_CAPACITY", "128");
+        std::env::set_var("MAX_IN_FLIGHT", "128");
+        exec_n_times()?;
+
+        println!("   --- RING_CAPACITY: 1024, MAX_IN_FLIGHT: 1024");
+        std::env::set_var("RING_CAPACITY", "1024");
+        std::env::set_var("MAX_IN_FLIGHT", "1024");
+        exec_n_times()?;
+
+        println!("   --- RING_CAPACITY: 1024, MAX_IN_FLIGHT: 2048");
+        std::env::set_var("RING_CAPACITY", "1024");
+        std::env::set_var("MAX_IN_FLIGHT", "2048");
+        exec_n_times()?;
+
+        println!("   --- RING_CAPACITY: 2048, MAX_IN_FLIGHT: 2048");
+        std::env::set_var("RING_CAPACITY", "1024");
+        std::env::set_var("MAX_IN_FLIGHT", "2048");
+        exec_n_times()?;
+
+        println!("   --- RING_CAPACITY: 2048, MAX_IN_FLIGHT: 4096");
+        std::env::set_var("RING_CAPACITY", "2048");
+        std::env::set_var("MAX_IN_FLIGHT", "4096");
+        exec_n_times()?;
+
+        println!("   --- RING_CAPACITY: 2048, MAX_IN_FLIGHT: 4096");
+        std::env::set_var("RING_CAPACITY", "2048");
+        std::env::set_var("MAX_IN_FLIGHT", "4096");
+        exec_n_times()?;
+
+        println!("   --- RING_CAPACITY: 16384, MAX_IN_FLIGHT: 16384");
+        std::env::set_var("RING_CAPACITY", "16384");
+        std::env::set_var("MAX_IN_FLIGHT", "16384");
+        exec_n_times()?;
+        Ok(())
+    };
+
     println!("\n\n --- NO FEATURES");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
 
     println!("\n\n --- IOPOLL");
     std::env::set_var("IOPOLL", "true");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
     std::env::remove_var("IOPOLL");
 
     println!("\n\n --- SQPOLL - 5ms idle");
     std::env::set_var("SQPOLL", "true");
     std::env::set_var("SQPOLL_IDLE", "5");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
     std::env::remove_var("SQPOLL");
     std::env::remove_var("SQPOLL_IDLE");
 
     println!("\n\n --- SQPOLL - 10ms idle");
     std::env::set_var("SQPOLL", "true");
     std::env::set_var("SQPOLL_IDLE", "10");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
     std::env::remove_var("SQPOLL");
     std::env::remove_var("SQPOLL_IDLE");
 
     println!("\n\n --- SQPOLL - 50ms idle");
     std::env::set_var("SQPOLL", "true");
     std::env::set_var("SQPOLL_IDLE", "50");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
     std::env::remove_var("SQPOLL");
     std::env::remove_var("SQPOLL_IDLE");
 
     println!("\n\n --- SINGLE_ISSUER");
     std::env::set_var("SINGLE_ISSUER", "true");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
     std::env::remove_var("SINGLE_ISSUER");
+
+    println!("\n\n --- REGISTER_FILES");
+    std::env::set_var("REGISTER_FILES", "true");
+    exec_multiple_sizes()?;
+    std::env::remove_var("REGISTER_FILES");
 
     println!("\n\n --- SINGLE_ISSUER + COOP_TASKRUN");
     std::env::set_var("SINGLE_ISSUER", "true");
     std::env::set_var("COOP_TASKRUN", "true");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
     std::env::remove_var("SINGLE_ISSUER");
     std::env::remove_var("COOP_TASKRUN");
+
+    println!("\n\n --- SINGLE_ISSUER + COOP_TASKRUN + REGISTER_FILES");
+    std::env::set_var("SINGLE_ISSUER", "true");
+    std::env::set_var("COOP_TASKRUN", "true");
+    std::env::set_var("REGISTER_FILES", "true");
+    exec_multiple_sizes()?;
+    std::env::remove_var("SINGLE_ISSUER");
+    std::env::remove_var("COOP_TASKRUN");
+    std::env::remove_var("REGISTER_FILES");
 
     println!("\n\n --- SINGLE_ISSUER + DEFER_TASKRUN");
     std::env::set_var("SINGLE_ISSUER", "true");
     std::env::set_var("DEFER_TASKRUN", "true");
-    exec_n_times()?;
+    exec_multiple_sizes()?;
     std::env::remove_var("SINGLE_ISSUER");
     std::env::remove_var("DEFER_TASKRUN");
+
+    println!("\n\n --- SINGLE_ISSUER + DEFER_TASKRUN + REGISTER_FILES");
+    std::env::set_var("SINGLE_ISSUER", "true");
+    std::env::set_var("DEFER_TASKRUN", "true");
+    std::env::set_var("REGISTER_FILES", "true");
+    exec_multiple_sizes()?;
+    std::env::remove_var("SINGLE_ISSUER");
+    std::env::remove_var("DEFER_TASKRUN");
+    std::env::remove_var("REGISTER_FILES");
 
     Ok(())
 }
