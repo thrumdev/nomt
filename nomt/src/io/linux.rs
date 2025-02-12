@@ -5,10 +5,28 @@ use slab::Slab;
 use std::collections::VecDeque;
 use threadpool::ThreadPool;
 
-const RING_CAPACITY: u32 = 128;
+const RING_CAPACITY: &'static str = "RING_CAPACITY";
+const MAX_IN_FLIGHT: &'static str = "MAX_IN_FLIGHT";
+const IOPOLL: &'static str = "IOPOLL";
+const SQPOLL: &'static str = "SQPOLL";
+const SQPOLL_IDLE: &'static str = "SQPOLL_IDLE";
+const SINGLE_ISSUER: &'static str = "SINGLE_ISSUER";
+const COOP_TASKRUN: &'static str = "COOP_TASKRUN";
+const DEFER_TASKRUN: &'static str = "DEFER_TASKRUN";
 
-// max number of inflight requests is bounded by the slab.
-const MAX_IN_FLIGHT: usize = RING_CAPACITY as usize;
+fn is_true(env_var: &'static str) -> bool {
+    std::env::var(env_var)
+        .ok()
+        .map(|no_shrinking| no_shrinking.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
+fn get_usize(env_var: &'static str) -> usize {
+    std::env::var(env_var)
+        .ok()
+        .map(|var| var.parse::<usize>().unwrap())
+        .unwrap_or(128)
+}
 
 struct PendingIo {
     command: IoCommand,
@@ -44,10 +62,31 @@ fn start_workers(
 }
 
 fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
-    let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
+    let max_in_flight = get_usize(MAX_IN_FLIGHT);
+    let mut pending: Slab<PendingIo> = Slab::with_capacity(max_in_flight);
 
-    let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
-        .build(RING_CAPACITY)
+    let ring_capacity = get_usize(RING_CAPACITY);
+    let mut ring_builder = IoUring::<squeue::Entry, cqueue::Entry>::builder();
+
+    if dbg!(is_true(IOPOLL)) {
+        ring_builder.setup_iopoll();
+    }
+    if dbg!(is_true(SQPOLL)) {
+        ring_builder.setup_sqpoll(get_usize(SQPOLL_IDLE) as u32);
+    }
+    if dbg!(is_true(SINGLE_ISSUER)) {
+        ring_builder.setup_single_issuer();
+    }
+    if dbg!(is_true(COOP_TASKRUN)) {
+        ring_builder.setup_coop_taskrun();
+    }
+    if dbg!(is_true(DEFER_TASKRUN)) {
+        ring_builder.setup_defer_taskrun();
+    }
+    let is_defer_taskrun = is_true(DEFER_TASKRUN);
+
+    let mut ring = ring_builder
+        .build(ring_capacity as u32)
         .expect("Error building io_uring");
 
     let (submitter, mut submit_queue, mut complete_queue) = ring.split();
@@ -60,6 +99,11 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
         // 1. process completions.
         if !pending.is_empty() {
             complete_queue.sync();
+            if is_defer_taskrun {
+                unsafe {
+                    let _ = submitter.enter::<()>(0, 0, 1 /* IORING_ENTER_GETEVENTS */, None);
+                }
+            }
             while let Some(completion_event) = complete_queue.next() {
                 if pending.get(completion_event.user_data() as usize).is_none() {
                     continue;
@@ -108,7 +152,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
         let mut to_submit = false;
 
         submit_queue.sync();
-        while pending.len() < MAX_IN_FLIGHT && !submit_queue.is_full() {
+        while pending.len() < max_in_flight && !submit_queue.is_full() {
             let next_io = if !retries.is_empty() {
                 // re-apply partially failed reads and writes
                 // unwrap: known not empty
@@ -151,7 +195,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
             submit_queue.sync();
         }
 
-        let wait = if pending.len() == MAX_IN_FLIGHT { 1 } else { 0 };
+        let wait = if pending.len() == max_in_flight { 1 } else { 0 };
 
         submitter.submit_and_wait(wait).unwrap();
     }
