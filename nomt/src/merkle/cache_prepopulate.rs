@@ -44,7 +44,7 @@ pub fn prepopulate(
             );
         } else {
             // misprobe. try again.
-            if !page_loader.probe(load, &io_handle, complete_io.command.user_data)? {
+            if !page_loader.probe(load, &io_handle, complete_io.command.user_data) {
                 // guaranteed empty.
                 completed += 1;
             }
@@ -76,7 +76,7 @@ fn dispatch_recursive(
         let mut page_load = page_loader.start_load(child_page_id.clone());
 
         let next_index = loads.len() as u64;
-        if page_loader.probe(&mut page_load, io_handle, next_index)? {
+        if page_loader.probe(&mut page_load, io_handle, next_index) {
             // probe has been dispatched.
             loads.push(page_load);
             dispatch_recursive(
