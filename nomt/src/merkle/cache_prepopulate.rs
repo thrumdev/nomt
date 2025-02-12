@@ -1,5 +1,7 @@
 //! Utility for prepopulating the first N layers of the cache.
 
+use std::io;
+
 use crate::{
     io::IoHandle,
     page_cache::{PageCache, PageMut},
@@ -16,7 +18,7 @@ pub fn prepopulate(
     page_cache: &PageCache,
     store: &Store,
     levels: usize,
-) -> anyhow::Result<()> {
+) -> io::Result<()> {
     let page_loader = store.page_loader();
     let mut loads = Vec::new();
 
@@ -29,7 +31,8 @@ pub fn prepopulate(
 
     // wait on I/O results.
     while completed < loads.len() {
-        let complete_io = io_handle.recv()?;
+        // UNWRAP: we don't expect the I/O pool to go down. fatal error.
+        let complete_io = io_handle.recv().expect("I/O Pool Down");
         complete_io.result?;
         let load_index = complete_io.command.user_data as usize;
         let load = &mut loads[load_index];
@@ -61,7 +64,7 @@ fn dispatch_recursive(
     io_handle: &IoHandle,
     loads: &mut Vec<PageLoad>,
     levels_remaining: usize,
-) -> anyhow::Result<()> {
+) -> io::Result<()> {
     if levels_remaining == 0 {
         return Ok(());
     }
