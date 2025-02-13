@@ -18,8 +18,8 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
 
 use crate::message::{
-    self, CommitOutcome, CommitPayload, Envelope, InitOutcome, KeyValueChange, OpenOutcome,
-    OpenPayload, RollbackPayload, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
+    self, CommitPayload, Envelope, InitOutcome, KeyValueChange, OpenOutcome, OpenPayload, Outcome,
+    RollbackPayload, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
 };
 
 /// The entrypoint for the agent.
@@ -277,7 +277,7 @@ impl Agent {
         OpenOutcome::Success
     }
 
-    async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> CommitOutcome {
+    async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Outcome {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
         let session = nomt.begin_session(SessionParams::default());
@@ -298,13 +298,13 @@ impl Agent {
 
         // Classify the result into one of the outcome bins.
         let outcome = match commit_result {
-            Ok(()) => CommitOutcome::Success,
-            Err(ref err) if is_enospc(err) => CommitOutcome::StorageFull,
-            Err(_) => CommitOutcome::UnknownFailure,
+            Ok(()) => Outcome::Success,
+            Err(ref err) if is_enospc(err) => Outcome::StorageFull,
+            Err(err) => Outcome::UnknownFailure(err.to_string()),
         };
 
         // Log the outcome if it was not successful.
-        if !matches!(outcome, CommitOutcome::Success) {
+        if !matches!(outcome, Outcome::Success) {
             trace!("unsuccessful commit: {:?}", outcome);
         }
 
