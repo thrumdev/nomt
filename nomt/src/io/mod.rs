@@ -102,9 +102,9 @@ struct IoPacket {
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
 /// of handles.
-pub fn start_io_pool(io_workers: usize, iopoll: bool, page_pool: PagePool) -> IoPool {
+pub fn start_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
     let io_workers_tp = ThreadPool::with_name("io-worker".to_string(), io_workers);
-    let sender = platform::start_io_worker(page_pool.clone(), &io_workers_tp, io_workers, iopoll);
+    let sender = platform::start_io_worker(page_pool.clone(), &io_workers_tp, io_workers);
     let sender = Some(Arc::new(sender));
     IoPool {
         sender,
@@ -115,7 +115,7 @@ pub fn start_io_pool(io_workers: usize, iopoll: bool, page_pool: PagePool) -> Io
 
 #[cfg(test)]
 pub fn start_test_io_pool(io_workers: usize, page_pool: PagePool) -> IoPool {
-    start_io_pool(io_workers, false, page_pool)
+    start_io_pool(io_workers, page_pool)
 }
 
 /// A manager for the broader I/O pool. This can be used to create new I/O handles.
