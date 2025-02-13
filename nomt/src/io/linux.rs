@@ -47,6 +47,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
     let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
+        .setup_single_issuer()
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 
