@@ -38,8 +38,7 @@ impl Sync {
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) -> anyhow::Result<()> {
-        self.sync_seqn += 1;
-        let sync_seqn = self.sync_seqn;
+        let sync_seqn = self.sync_seqn + 1;
 
         let mut bitbox_sync = bitbox.sync();
         let mut beatree_sync = beatree.sync();
@@ -73,6 +72,7 @@ impl Sync {
             rollback_end_live,
         };
         Meta::write(&shared.io_pool.page_pool(), &shared.meta_fd, &new_meta)?;
+        self.sync_seqn += 1;
 
         if let Some(PanicOnSyncMode::PostMeta) = self.panic_on_sync {
             panic!("panic_on_sync is true (post-meta)");
@@ -88,7 +88,6 @@ impl Sync {
         if let Some(ref rollback) = rollback_sync {
             rollback.wait_post_meta()?;
         }
-
         Ok(())
     }
 }
