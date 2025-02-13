@@ -237,8 +237,9 @@ impl Rollback {
 
         // NOTE: for now, if there is a pending truncate, we ignore everything else.
         if let Some(pending_truncate) = pending_truncate {
+            let rollback_start_live = std::cmp::min(seglog.live_range().0 .0, pending_truncate);
             return WriteoutData {
-                rollback_start_live: seglog.live_range().0 .0,
+                rollback_start_live,
                 rollback_end_live: pending_truncate,
                 prune_to_new_start_live: None,
                 prune_to_new_end_live: Some(pending_truncate),
