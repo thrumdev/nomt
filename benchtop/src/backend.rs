@@ -1,4 +1,10 @@
-use crate::{nomt::NomtDB, sov_db::SovDB, sp_trie::SpTrieDB, timer::Timer, workload::Workload};
+use crate::{nomt::NomtDB, timer::Timer, workload::Workload};
+
+#[cfg(feature = "sov-db")]
+use crate::sov_db::SovDB;
+
+#[cfg(feature = "sp-trie")]
+use crate::sp_trie::SpTrieDB;
 
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum Backend {
@@ -28,7 +34,12 @@ impl Backend {
         overlay_window_length: usize,
     ) -> DB {
         match self {
-            Backend::SovDB => DB::Sov(SovDB::open(reset)),
+            Backend::SovDB => {
+                #[cfg(not(feature = "sov-db"))]
+                panic!("benchtop not compiled with feature sov-db. rebuild");
+                #[cfg(feature = "sov-db")]
+                DB::Sov(SovDB::open(reset))
+            }
             Backend::Nomt => DB::Nomt(NomtDB::open(
                 reset,
                 commit_concurrency,
@@ -40,7 +51,12 @@ impl Backend {
                 prepopulate_page_cache,
                 overlay_window_length,
             )),
-            Backend::SpTrie => DB::SpTrie(SpTrieDB::open(reset)),
+            Backend::SpTrie => {
+                #[cfg(not(feature = "sp-trie"))]
+                panic!("benchtop not compiled with feature sp-trie. rebuild");
+                #[cfg(feature = "sp-trie")]
+                DB::SpTrie(SpTrieDB::open(reset))
+            }
         }
     }
 }
@@ -59,7 +75,9 @@ pub trait Transaction {
 
 /// A wrapper around all databases implemented in this tool.
 pub enum DB {
+    #[cfg(feature = "sov-db")]
     Sov(SovDB),
+    #[cfg(feature = "sp-trie")]
     SpTrie(SpTrieDB),
     Nomt(NomtDB),
 }
@@ -81,7 +99,9 @@ impl DB {
             }
             let timer = timer.as_deref_mut();
             match self {
+                #[cfg(feature = "sov-db")]
                 DB::Sov(db) => db.execute(timer, workload),
+                #[cfg(feature = "sp-trie")]
                 DB::SpTrie(db) => db.execute(timer, workload),
                 DB::Nomt(db) => db.execute(timer, workload),
             }
@@ -107,9 +127,11 @@ impl DB {
             }
             let timer = timer.as_deref_mut();
             match self {
+                #[cfg(feature = "sov-db")]
                 DB::Sov(_) => {
                     anyhow::bail!("parallel execution is only supported with the NOMT backend.")
                 }
+                #[cfg(feature = "sp-trie")]
                 DB::SpTrie(_) => {
                     anyhow::bail!("parallel execution is only supported with the NOMT backend.")
                 }
@@ -124,6 +146,7 @@ impl DB {
     pub fn print_metrics(&self) {
         match self {
             DB::Nomt(db) => db.print_metrics(),
+            #[cfg(any(feature = "sp-trie", feature = "sov-db"))]
             _ => (),
         }
     }
