@@ -324,6 +324,6 @@ impl RegisterFiles {
         let mut files = self.files.lock();
         self.cv.wait_while(&mut files, |files| files.is_none());
         // UNWRAP: files has just been checked to be `Some`.
-        files.take().unwrap()
+        files.as_ref().unwrap().clone()
     }
 }
