@@ -138,21 +138,6 @@ pub fn run(params: RunParams) -> Result<()> {
         std::env::set_var("MAX_IN_FLIGHT", "2048");
         exec_n_times()?;
 
-        println!("   --- RING_CAPACITY: 2048, MAX_IN_FLIGHT: 2048");
-        std::env::set_var("RING_CAPACITY", "1024");
-        std::env::set_var("MAX_IN_FLIGHT", "2048");
-        exec_n_times()?;
-
-        println!("   --- RING_CAPACITY: 2048, MAX_IN_FLIGHT: 4096");
-        std::env::set_var("RING_CAPACITY", "2048");
-        std::env::set_var("MAX_IN_FLIGHT", "4096");
-        exec_n_times()?;
-
-        println!("   --- RING_CAPACITY: 2048, MAX_IN_FLIGHT: 4096");
-        std::env::set_var("RING_CAPACITY", "2048");
-        std::env::set_var("MAX_IN_FLIGHT", "4096");
-        exec_n_times()?;
-
         println!("   --- RING_CAPACITY: 16384, MAX_IN_FLIGHT: 16384");
         std::env::set_var("RING_CAPACITY", "16384");
         std::env::set_var("MAX_IN_FLIGHT", "16384");
@@ -167,20 +152,6 @@ pub fn run(params: RunParams) -> Result<()> {
     std::env::set_var("IOPOLL", "true");
     exec_multiple_sizes()?;
     std::env::remove_var("IOPOLL");
-
-    println!("\n\n --- SQPOLL - 5ms idle");
-    std::env::set_var("SQPOLL", "true");
-    std::env::set_var("SQPOLL_IDLE", "5");
-    exec_multiple_sizes()?;
-    std::env::remove_var("SQPOLL");
-    std::env::remove_var("SQPOLL_IDLE");
-
-    println!("\n\n --- SQPOLL - 10ms idle");
-    std::env::set_var("SQPOLL", "true");
-    std::env::set_var("SQPOLL_IDLE", "10");
-    exec_multiple_sizes()?;
-    std::env::remove_var("SQPOLL");
-    std::env::remove_var("SQPOLL_IDLE");
 
     println!("\n\n --- SQPOLL - 50ms idle");
     std::env::set_var("SQPOLL", "true");
