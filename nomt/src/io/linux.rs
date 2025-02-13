@@ -5,7 +5,7 @@ use slab::Slab;
 use std::collections::VecDeque;
 use threadpool::ThreadPool;
 
-const RING_CAPACITY: u32 = 128;
+const RING_CAPACITY: u32 = 1024;
 
 // max number of inflight requests is bounded by the slab.
 const MAX_IN_FLIGHT: usize = RING_CAPACITY as usize;
