@@ -2,8 +2,12 @@ mod backend;
 mod cli;
 mod custom_workload;
 mod nomt;
+
+#[cfg(feature = "sov-db")]
 mod sov_db;
+#[cfg(feature = "sp-trie")]
 mod sp_trie;
+
 mod timer;
 mod transfer_workload;
 mod workload;
