@@ -187,15 +187,16 @@ impl FreeList {
         // append the released free list pages
         to_push.extend(self.released_portions.drain(..));
 
-        if had_pops && to_push.is_empty() {
+        let pages = if had_pops && to_push.is_empty() {
             // note: empty vec when head is empty.
-            return self.encode_head(page_pool).into_iter().collect();
-        }
-
-        let new_pages = self.preallocate(&mut to_push, bump);
-        let pages = self.push_and_encode(page_pool, &to_push, new_pages);
-        // preallocate pops, therefore, we must set it back.
-        self.pop = false;
+            self.encode_head(page_pool).into_iter().collect()
+        } else {
+            let new_pages = self.preallocate(&mut to_push, bump);
+            let pages = self.push_and_encode(page_pool, &to_push, new_pages);
+            // preallocate pops, therefore, we must set it back.
+            self.pop = false;
+            pages
+        };
 
         let (len, fragmented) = len_and_fragmented(&self.portions);
         self.len = len;
