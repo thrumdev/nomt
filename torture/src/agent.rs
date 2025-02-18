@@ -29,13 +29,6 @@ pub async fn run(input: UnixStream) -> Result<()> {
     let pid = std::process::id();
     trace!(pid, "Child process started");
 
-    // Make the process non-dumpable.
-    //
-    // We expect this process to abort on a crash, so we don't want to leave lots of core dumps
-    // behind.
-    #[cfg(target_os = "linux")]
-    nix::sys::prctl::set_dumpable(false)?;
-
     let mut stream = Stream::new(input);
     let workdir = initialize(&mut stream).await?;
     let mut agent = Agent::new();

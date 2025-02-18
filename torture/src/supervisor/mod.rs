@@ -17,6 +17,7 @@ use workload::Workload;
 mod cli;
 mod comms;
 mod controller;
+mod pbt;
 mod workload;
 
 /// The entrypoint for the supervisor part of the program.

@@ -26,3 +26,4 @@ hex = "0.4.3"
 futures-util = "0.3.31"
 clap = { version = "4.5.23", features = ["derive"] }
 trickfs = { path = "../trickfs" }
+which = "4"
