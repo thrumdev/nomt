@@ -13,6 +13,7 @@ use crate::{
         cli::WorkloadParams,
         comms,
         controller::{self, SpawnedAgentController},
+        pbt,
     },
 };
 
@@ -352,6 +353,13 @@ impl Workload {
             Some(r) => r,
             None => Ok(()),
         };
+
+        // If the workload timed out, we assume it's deadlocked. In that case it would be useful
+        // to collect the stack trace of the agent.
+        if matches!(result, Err(ref e) if is_err_timeout_like(e)) {
+            self.collect_and_display_backtrace().await;
+        }
+
         // Irregardless of the result or if the workload was cancelled, we need to release the
         // resources.
         self.teardown().await;
@@ -906,6 +914,23 @@ impl Workload {
         Ok(())
     }
 
+    /// Collects the stack trace of the agent and prints it if available.
+    async fn collect_and_display_backtrace(&self) {
+        if let Some(agent) = self.agent.as_ref() {
+            if let Some(agent_pid) = agent.pid() {
+                let filename = self.workdir.path().join("backtrace.txt");
+                match pbt::collect_process_backtrace(&filename, agent_pid).await {
+                    Ok(()) => {
+                        tracing::info!("Backtrace collected in {}", filename.display());
+                    }
+                    Err(err) => {
+                        tracing::warn!("Failed to collect backtrace: {}", err);
+                    }
+                };
+            }
+        }
+    }
+
     /// Release potentially held resources.
     async fn teardown(&mut self) {
         if let Some(agent) = self.agent.take() {
@@ -922,4 +947,9 @@ impl Workload {
     pub fn into_workdir(self) -> TempDir {
         self.workdir
     }
+}
+
+/// Returns true if the error is a timeout error.
+fn is_err_timeout_like(e: &anyhow::Error) -> bool {
+    e.is::<tokio::time::error::Elapsed>()
 }

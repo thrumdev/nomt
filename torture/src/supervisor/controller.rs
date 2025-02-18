@@ -83,6 +83,17 @@ impl SpawnedAgentController {
     pub fn rr(&self) -> &comms::RequestResponse {
         &self.rr
     }
+
+    /// Returns the PID of the agent process.
+    ///
+    /// Returns `None` if the agent is torn down.
+    pub fn pid(&self) -> Option<u32> {
+        if self.torn_down.load(Ordering::Relaxed) {
+            None
+        } else {
+            self.child.id()
+        }
+    }
 }
 
 /// Spawns an agent process creating a controller.
