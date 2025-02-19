@@ -1,7 +1,27 @@
-use clap::{Args, Parser};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Execute multiple operations on NOMT looking for errors.
+    Torture(TortureParams),
+    /// Reapply a commit which failed on top of an already existing db.
+    Reapply(ReapplyCommitParams),
+}
+
+#[derive(Parser, Debug)]
+pub struct ReapplyCommitParams {
+    /// Workload directory where a dumped failed commit is expected to be found.
+    pub workload_dir: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct TortureParams {
     /// The 8-byte seed to use for the random number generator.
     ///
     /// If not provided, a random seed will be generated.

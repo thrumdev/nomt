@@ -143,7 +143,7 @@ pub enum InitOutcome {
 }
 
 /// Elaboration on the opening the database result inside of [`ToSupervisor::OpenResponse`].
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum OpenOutcome {
     /// The agent successfully opened the database.
     Success,

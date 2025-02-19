@@ -149,7 +149,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
             }
             ToAgent::Open(open_params) => {
                 tracing::info!("opening the database");
-                let outcome = agent.perform_open(&workdir, open_params).await;
+                let outcome = agent.perform_open(&workdir, Some(open_params)).await;
                 stream
                     .send(Envelope {
                         reqno,
@@ -243,16 +243,20 @@ async fn initialize(stream: &mut Stream) -> Result<PathBuf> {
     }
 }
 
-struct Agent {
+pub struct Agent {
     nomt: Option<Nomt<Blake3Hasher>>,
 }
 
 impl Agent {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { nomt: None }
     }
 
-    async fn perform_open(&mut self, workdir: &Path, open_params: OpenPayload) -> OpenOutcome {
+    pub async fn perform_open(
+        &mut self,
+        workdir: &Path,
+        open_params: Option<OpenPayload>,
+    ) -> OpenOutcome {
         if let Some(nomt) = self.nomt.take() {
             tracing::trace!("dropping the existing NOMT instance");
             drop(nomt);
@@ -260,13 +264,15 @@ impl Agent {
 
         let mut o = nomt::Options::new();
         o.path(workdir.join("nomt_db"));
-        o.bitbox_seed(open_params.bitbox_seed);
-        o.hashtable_buckets(500_000);
-        if let Some(n_commits) = open_params.rollback {
-            o.rollback(true);
-            o.max_rollback_log_len(n_commits);
-        } else {
-            o.rollback(false);
+        if let Some(open_params) = open_params {
+            o.bitbox_seed(open_params.bitbox_seed);
+            o.hashtable_buckets(500_000);
+            if let Some(n_commits) = open_params.rollback {
+                o.rollback(true);
+                o.max_rollback_log_len(n_commits);
+            } else {
+                o.rollback(false);
+            }
         }
         let nomt = match tokio::task::block_in_place(|| Nomt::open(o)) {
             Ok(nomt) => nomt,
@@ -277,7 +283,7 @@ impl Agent {
         OpenOutcome::Success
     }
 
-    async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Outcome {
+    pub async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Outcome {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
         let session = nomt.begin_session(SessionParams::default());
@@ -321,7 +327,7 @@ impl Agent {
         rollback_outcome
     }
 
-    fn query(&mut self, key: message::Key) -> Result<Option<message::Value>> {
+    pub fn query(&mut self, key: message::Key) -> Result<Option<message::Value>> {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
         let value = nomt.read(key)?;
