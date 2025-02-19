@@ -117,4 +117,11 @@ pub struct WorkloadParams {
     #[clap(default_value = "false")]
     #[arg(long = "trickfs")]
     pub trickfs: bool,
+
+    /// Folder that will be used as the working directory by the Supervisor.
+    /// It will contain all workload folders.
+    ///
+    /// It does not work in conjunction with `trickfs` option.
+    #[arg(long = "workdir", conflicts_with = "trickfs")]
+    pub workdir: Option<String>,
 }

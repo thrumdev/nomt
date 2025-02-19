@@ -2,7 +2,6 @@ use anyhow::Result;
 use imbl::OrdMap;
 use rand::{distributions::WeightedIndex, prelude::*};
 use std::time::Duration;
-use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
@@ -13,6 +12,7 @@ use crate::{
         cli::WorkloadParams,
         comms,
         controller::{self, SpawnedAgentController},
+        WorkloadDir,
     },
 };
 
@@ -240,7 +240,7 @@ impl WorkloadState {
 /// it behaves.
 pub struct Workload {
     /// Working directory for this particular workload.
-    workdir: TempDir,
+    workload_dir: WorkloadDir,
     /// The handle to the trickfs FUSE FS.
     ///
     /// `Some` until the workload is torn down.
@@ -288,7 +288,7 @@ struct ScheduledRollback {
 impl Workload {
     pub fn new(
         seed: u64,
-        workdir: TempDir,
+        workload_dir: WorkloadDir,
         workload_params: &WorkloadParams,
         workload_id: u64,
     ) -> anyhow::Result<Self> {
@@ -318,14 +318,14 @@ impl Workload {
         #[cfg(target_os = "linux")]
         let trick_handle = workload_params
             .trickfs
-            .then(|| trickfs::spawn_trick(&workdir.path()))
+            .then(|| trickfs::spawn_trick(&workload_dir.path()))
             .transpose()?;
 
         #[cfg(not(target_os = "linux"))]
         let trick_handle = None;
 
         Ok(Self {
-            workdir,
+            workload_dir,
             trick_handle,
             agent: None,
             iterations: workload_params.iterations,
@@ -841,12 +841,11 @@ impl Workload {
     async fn spawn_new_agent(&mut self) -> anyhow::Result<()> {
         assert!(self.agent.is_none());
         controller::spawn_agent_into(&mut self.agent).await?;
-        let workdir = self.workdir.path().display().to_string();
         let outcome = self
             .agent
             .as_mut()
             .unwrap()
-            .init(workdir, self.workload_id)
+            .init(self.workload_dir.path(), self.workload_id)
             .await?;
         if let InitOutcome::Success = outcome {
             ()
@@ -919,7 +918,7 @@ impl Workload {
     }
 
     /// Return the working directory.
-    pub fn into_workdir(self) -> TempDir {
-        self.workdir
+    pub fn into_workload_dir(self) -> WorkloadDir {
+        self.workload_dir
     }
 }
