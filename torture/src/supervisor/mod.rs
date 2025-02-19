@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, WorkloadParams};
+use cli::{Cli, ReapplyCommitParams, WorkloadParams};
 use tempfile::TempDir;
 use tokio::{
     signal::unix::{signal, SignalKind},
@@ -33,16 +33,22 @@ pub async fn run() -> Result<()> {
     crate::logging::init_supervisor();
 
     let cli = Cli::parse();
-    let seed = cli.seed.unwrap_or_else(rand::random);
+    let torture_params = match cli.command {
+        cli::Commands::Reapply(ReapplyCommitParams { workload_dir }) => {
+            return apply_failed_changeset(workload_dir).await
+        }
+        cli::Commands::Torture(torture_params) => torture_params,
+    };
 
+    let seed = torture_params.seed.unwrap_or_else(rand::random);
     // Create a cancellation token and spawn the control loop task passing the token to it and
     // wait until the control loop task finishes or the user interrupts it.
     let ct = CancellationToken::new();
     let control_loop_jh = task::spawn(control_loop(
         ct.clone(),
         seed,
-        cli.workload_params,
-        cli.flag_limit,
+        torture_params.workload_params,
+        torture_params.flag_limit,
     ));
     match join_interruptable(control_loop_jh, ct).await {
         ExitReason::Finished => {
@@ -289,6 +295,34 @@ async fn control_loop(
     }
     for flag in flags {
         print_flag(&flag);
+    }
+    Ok(())
+}
+
+async fn apply_failed_changeset(workdir: String) -> Result<()> {
+    let mut agent = super::agent::Agent::new();
+    let path = std::path::Path::new(&workdir);
+    let outcome = agent.perform_open(path, None).await;
+    anyhow::ensure!(
+        outcome == crate::message::OpenOutcome::Success,
+        "Open failed."
+    );
+    let changeset = load_changest(path)?;
+    let outcome = agent.commit(changeset.clone()).await;
+    anyhow::ensure!(
+        outcome == crate::message::Outcome::Success,
+        "Commit failed."
+    );
+    for change in changeset {
+        match change {
+            KeyValueChange::Insert(key, value) if agent.query(key)?.as_ref() != Some(&value) => {
+                return Err(anyhow::anyhow!("Inserted item not present after commit"));
+            }
+            KeyValueChange::Delete(key) if agent.query(key)?.is_some() => {
+                return Err(anyhow::anyhow!("Deleted item still present after commit"));
+            }
+            _ => (),
+        }
     }
     Ok(())
 }
