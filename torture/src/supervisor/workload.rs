@@ -12,7 +12,7 @@ use crate::{
         cli::WorkloadParams,
         comms,
         controller::{self, SpawnedAgentController},
-        WorkloadDir,
+        dump_changest, WorkloadDir,
     },
 };
 
@@ -467,6 +467,7 @@ impl Workload {
             }
         } else {
             let ToSupervisor::CommitResponse { elapsed, outcome } = commit_response else {
+                dump_changest(&changeset, self.workload_dir.path())?;
                 return Err(anyhow::anyhow!("Commit did not execute successfully"));
             };
 
@@ -486,6 +487,7 @@ impl Workload {
             } else if snapshot.sync_seqn == agent_sync_seqn {
                 true
             } else {
+                dump_changest(&changeset, self.workload_dir.path())?;
                 return Err(anyhow::anyhow!("Unexpected sync_seqn after commit"));
             }
         };
@@ -716,9 +718,11 @@ impl Workload {
                 KeyValueChange::Insert(key, value)
                     if rr.send_request_query(*key).await?.as_ref() != Some(&value) =>
                 {
+                    dump_changest(&changeset, self.workload_dir.path())?;
                     return Err(anyhow::anyhow!("Inserted item not present after commit"));
                 }
                 KeyValueChange::Delete(key) if rr.send_request_query(*key).await?.is_some() => {
+                    dump_changest(&changeset, self.workload_dir.path())?;
                     return Err(anyhow::anyhow!("Deleted item still present after commit"));
                 }
                 _ => (),

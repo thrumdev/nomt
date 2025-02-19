@@ -1,6 +1,7 @@
 //! The supervisor part. Spawns and manages agents. Assigns work to agents.
 
 use std::{
+    io::Write,
     path::{Path, PathBuf},
     process::exit,
 };
@@ -17,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace_span, warn, Instrument};
 
 use workload::Workload;
+
+use crate::message::KeyValueChange;
 
 mod cli;
 mod comms;
@@ -288,4 +291,25 @@ async fn control_loop(
         print_flag(&flag);
     }
     Ok(())
+}
+
+fn dump_changest(changeset: &Vec<KeyValueChange>, path: String) -> anyhow::Result<()> {
+    let file_path = std::path::Path::new(&path).join("failed_changeset");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(file_path)?;
+    let bytes = bincode::serialize(changeset)?;
+    file.write_all(&bytes)?;
+    Ok(())
+}
+
+fn load_changest(path: &std::path::Path) -> anyhow::Result<Vec<KeyValueChange>> {
+    let file_path = path.join("failed_changeset");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .create(false)
+        .open(file_path)?;
+    let changeset = bincode::deserialize_from(file)?;
+    Ok(changeset)
 }
