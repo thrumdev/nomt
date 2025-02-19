@@ -2,7 +2,6 @@ use anyhow::Result;
 use imbl::OrdMap;
 use rand::{distributions::WeightedIndex, prelude::*};
 use std::time::Duration;
-use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
@@ -13,7 +12,7 @@ use crate::{
         cli::WorkloadParams,
         comms,
         controller::{self, SpawnedAgentController},
-        pbt,
+        pbt, WorkloadDir,
     },
 };
 
@@ -240,8 +239,8 @@ impl WorkloadState {
 /// arises from the fact that as part of the workload we need to crash the agent to check how
 /// it behaves.
 pub struct Workload {
-    /// Working directory for this particular workload.
-    workdir: TempDir,
+    /// Directory used by this workload.
+    workload_dir: WorkloadDir,
     /// The handle to the trickfs FUSE FS.
     ///
     /// `Some` until the workload is torn down.
@@ -295,7 +294,7 @@ struct ScheduledRollback {
 impl Workload {
     pub fn new(
         seed: u64,
-        workdir: TempDir,
+        workload_dir: WorkloadDir,
         workload_params: &WorkloadParams,
         workload_id: u64,
     ) -> anyhow::Result<Self> {
@@ -325,14 +324,14 @@ impl Workload {
         #[cfg(target_os = "linux")]
         let trick_handle = workload_params
             .trickfs
-            .then(|| trickfs::spawn_trick(&workdir.path()))
+            .then(|| trickfs::spawn_trick(&workload_dir.path()))
             .transpose()?;
 
         #[cfg(not(target_os = "linux"))]
         let trick_handle = None;
 
         Ok(Self {
-            workdir,
+            workload_dir,
             trick_handle,
             agent: None,
             rr: None,
@@ -843,12 +842,14 @@ impl Workload {
         assert!(self.agent.is_none());
         controller::spawn_agent_into(&mut self.agent).await?;
         self.rr = Some(self.agent.as_ref().unwrap().rr().clone());
-        let workdir = self.workdir.path().display().to_string();
         let outcome = self
             .agent
             .as_mut()
             .unwrap()
-            .init(workdir, self.workload_id)
+            .init(
+                self.workload_dir.path().display().to_string(),
+                self.workload_id,
+            )
             .await?;
         if let InitOutcome::Success = outcome {
             ()
@@ -916,7 +917,7 @@ impl Workload {
     async fn collect_and_display_backtrace(&self) {
         if let Some(agent) = self.agent.as_ref() {
             if let Some(agent_pid) = agent.pid() {
-                let filename = self.workdir.path().join("backtrace.txt");
+                let filename = &self.workload_dir.path().join("backtrace.txt");
                 match pbt::collect_process_backtrace(&filename, agent_pid).await {
                     Ok(()) => {
                         tracing::info!("Backtrace collected in {}", filename.display());
@@ -942,9 +943,9 @@ impl Workload {
         }
     }
 
-    /// Return the working directory.
-    pub fn into_workdir(self) -> TempDir {
-        self.workdir
+    /// Return the workload directory.
+    pub fn into_workload_dir(self) -> WorkloadDir {
+        self.workload_dir
     }
 }
 
