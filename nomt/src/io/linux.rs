@@ -154,7 +154,14 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
 
         let wait = if pending.len() == MAX_IN_FLIGHT { 1 } else { 0 };
 
-        submitter.submit_and_wait(wait).unwrap();
+        // Do submit handling EINTR.
+        loop {
+            match submitter.submit_and_wait(wait) {
+                Ok(_submitted) => break,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => (),
+                other @ Err(_) => panic!("unexpected error: {:?}", other),
+            }
+        }
     }
 }
 
