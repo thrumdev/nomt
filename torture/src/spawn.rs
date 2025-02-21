@@ -28,39 +28,56 @@ use tracing::trace;
 /// We pick a high number to avoid conflicts with other file descriptors.
 const CANARY_SOCKET_FD: RawFd = 1000;
 
+/// Check whether the given file descriptor is valid.
+fn is_valid_fd(fd: RawFd) -> bool {
+    unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+}
+
+/// Check whether the file descriptor is set to non-blocking mode.
+fn is_nonblocking(fd: RawFd) -> bool {
+    unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK == libc::O_NONBLOCK }
+}
+
+/// Check if the file descriptor corresponds to a Unix domain socket.
+/// In our case, we're verifying that the socket type is SOCK_STREAM.
+fn is_unix_socket(fd: RawFd) -> bool {
+    let mut sock_type: libc::c_int = 0;
+    let mut type_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut sock_type as *mut _ as *mut _,
+            &mut type_len,
+        ) == 0
+            && sock_type == libc::SOCK_STREAM
+    }
+}
+
 /// Checks for evidence that this process is a child of a parent process that spawned it.
 ///
 /// Returns a UnixStream if the process is a child, otherwise returns None.
+///
+/// Panics if called more than once.
 pub fn am_spawned() -> Option<UnixStream> {
     static CALLED: AtomicBool = AtomicBool::new(false);
-
-    // Only take ownership of the fd if we haven't already
     if CALLED.swap(true, Ordering::SeqCst) {
+        // This function should not be called more than once to protect against multiple ownership
+        // of the file descriptor.
+        panic!();
+    }
+
+    if !is_valid_fd(CANARY_SOCKET_FD) {
         return None;
     }
 
-    let is_valid_fd = unsafe { libc::fcntl(CANARY_SOCKET_FD, libc::F_GETFD) != -1 };
-    if !is_valid_fd {
-        return None;
+    if !is_unix_socket(CANARY_SOCKET_FD) {
+        panic!("not unix socket");
     }
 
-    // Check if it's actually a Unix domain socket
-    let mut type_: libc::c_int = 0;
-    let mut type_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-
-    let is_unix_socket = unsafe {
-        libc::getsockopt(
-            CANARY_SOCKET_FD,
-            libc::SOL_SOCKET,
-            libc::SO_TYPE,
-            &mut type_ as *mut _ as *mut _,
-            &mut type_len,
-        ) == 0
-            && type_ == libc::SOCK_STREAM
-    };
-
-    if !is_unix_socket {
-        return None;
+    if !is_nonblocking(CANARY_SOCKET_FD) {
+        panic!("non blocking");
     }
 
     let stream = unsafe {
@@ -77,6 +94,11 @@ pub fn am_spawned() -> Option<UnixStream> {
 
 pub fn spawn_child() -> Result<(Child, UnixStream)> {
     let (sock1, sock2) = UnixStream::pair()?;
+
+    // Those sockets are going to be used in tokio and as such they should be both set to
+    // non-blocking mode.
+    sock1.set_nonblocking(true)?;
+    sock2.set_nonblocking(true)?;
 
     let child = spawn_child_with_sock(sock2.as_raw_fd())?;
     drop(sock2); // Close parent's end in child
