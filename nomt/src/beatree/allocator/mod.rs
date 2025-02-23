@@ -256,12 +256,16 @@ impl Drop for SyncAllocatorInner {
     }
 }
 
-// grow the file to accommodate writes to the page with the given number. returns the new boundary
-// page of the file.
-//
-// returns an error when growing the file fails.
+/// Grow the file to include the given page number.
+///
+/// The file is extended to the next chunk boundary defined by
+/// GROW_STORE_BY_PAGES.
+///
+/// If `page` is already aligned, an extra chunk is added.
+///
+/// Returns the new boundary (the last accessible page) or an I/O error.
 fn grow(file: &File, page: PageNumber) -> std::io::Result<PageNumber> {
-    let next_bump = page.0.next_multiple_of(GROW_STORE_BY_PAGES);
+    let next_bump = (page.0 + GROW_STORE_BY_PAGES - 1).next_multiple_of(GROW_STORE_BY_PAGES);
     file.set_len(next_bump as u64 * PAGE_SIZE as u64)?;
     Ok(PageNumber(next_bump))
 }
