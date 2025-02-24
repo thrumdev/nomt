@@ -364,6 +364,7 @@ impl Workload {
         // If the workload timed out, we assume it's deadlocked. In that case it would be useful
         // to collect the stack trace of the agent.
         if matches!(result, Err(ref e) if is_err_timeout_like(e)) {
+            info!("workload timed out, collecting backtrace");
             self.collect_and_display_backtrace().await;
         }
 
