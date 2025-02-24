@@ -43,23 +43,16 @@ pub async fn run() -> Result<()> {
             exit(0);
         }
         ExitReason::Error(error) => {
-            error!("Error occured: {:?}", error);
+            error!("Error occurred in supervisor's control_loop: {:?}", error);
             exit(1);
         }
         ExitReason::Panic(panic_box) => {
             // The `Any` payload from a panic
-            let panic_string = if let Some(s) = panic_box.downcast_ref::<&str>() {
-                Some(s.to_string())
-            } else if let Some(s) = panic_box.downcast_ref::<String>() {
-                Some(s.clone())
-            } else {
-                None
-            };
-            if let Some(s) = panic_string {
-                error!("Panic occured: {}", s);
-            } else {
-                error!("Panic occured (no message)");
-            }
+            let panic_string = crate::panic::panic_to_string(
+                "Panic occurred in supervisor's control_loop:",
+                panic_box,
+            );
+            error!("{}", panic_string);
             exit(2);
         }
         ExitReason::Interrupted => {

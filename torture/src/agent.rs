@@ -17,9 +17,12 @@ use tokio_stream::StreamExt as _;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
 
-use crate::message::{
-    self, CommitPayload, Envelope, InitOutcome, KeyValueChange, OpenOutcome, OpenPayload, Outcome,
-    RollbackPayload, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
+use crate::{
+    message::{
+        self, CommitPayload, Envelope, InitOutcome, KeyValueChange, OpenOutcome, OpenPayload,
+        Outcome, RollbackPayload, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
+    },
+    panic::panic_to_err,
 };
 
 /// The entrypoint for the agent.
@@ -261,7 +264,7 @@ impl Agent {
         } else {
             o.rollback(false);
         }
-        let nomt = match tokio::task::block_in_place(|| Nomt::open(o)) {
+        let nomt = match block_in_place(|| Nomt::open(o), "Panic opening nomt") {
             Ok(nomt) => nomt,
             Err(ref err) if is_enospc(err) => return OpenOutcome::StorageFull,
             Err(ref err) => return OpenOutcome::UnknownFailure(err.to_string()),
@@ -287,7 +290,8 @@ impl Agent {
         }
 
         // Perform the commit.
-        let commit_result = tokio::task::block_in_place(|| session.finish(actuals)?.commit(&nomt));
+        let commit_result =
+            block_in_place(|| session.finish(actuals)?.commit(&nomt), "Panic in commit");
         let commit_outcome = classify_result(commit_result);
 
         // Log the outcome if it was not successful.
@@ -303,7 +307,8 @@ impl Agent {
         let nomt = self.nomt.as_ref().unwrap();
 
         // Perform the rollback.
-        let rollback_result = tokio::task::block_in_place(|| nomt.rollback(n_commits));
+
+        let rollback_result = block_in_place(|| nomt.rollback(n_commits), "Panic in rollback");
         let rollback_outcome = classify_result(rollback_result);
 
         // Log the outcome if it was not successful.
@@ -326,6 +331,20 @@ impl Agent {
         let nomt = self.nomt.as_ref().unwrap();
         nomt.sync_seqn()
     }
+}
+
+/// Runs the provided blocking function on the current thread without
+/// blocking the executor, handling panics and returning them as stringified errors
+/// along with the specified `panic_context`.
+fn block_in_place<F, R>(task: F, panic_context: &str) -> anyhow::Result<R>
+where
+    R: Send,
+    F: FnOnce() -> anyhow::Result<R> + Send,
+{
+    tokio::task::block_in_place(|| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()))
+            .unwrap_or_else(|e| panic_to_err(panic_context, e))
+    })
 }
 
 /// Classify an operation result into one of the outcome.

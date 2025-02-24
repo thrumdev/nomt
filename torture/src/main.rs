@@ -4,6 +4,7 @@ use tokio::net::UnixStream;
 mod agent;
 mod logging;
 mod message;
+mod panic;
 mod spawn;
 mod supervisor;
 
