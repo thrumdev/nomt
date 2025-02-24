@@ -84,7 +84,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     warm_up_phase(page_io_receiver, seeker, page_set, warmup_rx, finish_rx)
 }
 
-pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> anyhow::Result<WorkerOutput> {
+pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> std::io::Result<WorkerOutput> {
     let UpdateParams {
         page_cache,
         page_pool,
@@ -206,7 +206,7 @@ fn update<H: HashAlgorithm>(
     command: UpdateCommand,
     warm_ups: Arc<HashMap<KeyPath, Seek>>,
     warm_page_set: Option<FrozenSharedPageSet>,
-) -> anyhow::Result<WorkerOutput> {
+) -> std::io::Result<WorkerOutput> {
     let UpdateCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
 
@@ -444,7 +444,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         output: &mut WorkerOutput,
         page_set: &mut PageSet,
         warm_ups: Arc<HashMap<KeyPath, Seek>>,
-    ) -> anyhow::Result<Option<WritePass<ShardIndex>>> {
+    ) -> std::io::Result<Option<WritePass<ShardIndex>>> {
         let mut start_index = self.range_start;
         let mut pushes = 0;
         let mut skips = 0;

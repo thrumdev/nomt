@@ -14,7 +14,10 @@ use nomt_core::{
 };
 use seek::Seek;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{mpsc::RecvError, Arc},
+};
 
 use crate::{
     io::PagePool,
@@ -275,13 +278,13 @@ impl Updater {
 /// A handle for waiting on the results of a commit operation.
 pub struct UpdateHandle {
     shared: Arc<UpdateShared>,
-    worker_rx: Receiver<anyhow::Result<WorkerOutput>>,
+    worker_rx: Receiver<TaskResult<std::io::Result<WorkerOutput>>>,
     num_workers: usize,
 }
 
 impl UpdateHandle {
     /// Wait on the results of the commit operation.
-    pub fn join(self) -> Output {
+    pub fn join(self) -> std::io::Result<Output> {
         let mut new_root = None;
 
         let mut maybe_witness = self.shared.witness.then_some(Witness {
@@ -297,12 +300,9 @@ impl UpdateHandle {
         let mut path_proof_offset = 0;
         let mut witnessed_start = 0;
 
-        let mut received_outputs = 0;
-        for output in self.worker_rx.into_iter() {
-            // TODO: handle error better.
-            let output = output.unwrap();
+        for _ in 0..self.num_workers {
+            let output = join_task(&self.worker_rx)?;
 
-            received_outputs += 1;
             if let Some(root) = output.root {
                 assert!(new_root.is_none());
                 new_root = Some(root);
@@ -357,15 +357,12 @@ impl UpdateHandle {
             }
         }
 
-        // TODO: handle error when a worker dies unexpectedly.
-        assert_eq!(self.num_workers, received_outputs);
-
         // UNWRAP: one thread always produces the root.
-        Output {
+        Ok(Output {
             root: new_root.unwrap(),
             updated_pages: UpdatedPages(updated_pages),
             witness: maybe_witness,
-        }
+        })
     }
 }
 
@@ -491,18 +488,10 @@ fn spawn_warm_up<H: HashAlgorithm>(
 fn spawn_updater<H: HashAlgorithm>(
     worker_tp: &ThreadPool,
     params: worker::UpdateParams,
-    output_tx: Sender<anyhow::Result<WorkerOutput>>,
+    output_tx: Sender<TaskResult<std::io::Result<WorkerOutput>>>,
 ) {
     let worker_id = params.worker_id;
-    worker_tp.execute(move || {
-        let output_or_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            worker::run_update::<H>(params)
-        }));
-        let output = output_or_panic
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("panic in updater: {:?}", e)))
-            .with_context(|| format!("worker {} erred out", worker_id));
-        let _ = output_tx.send(output);
-    });
+    spawn_task(&worker_tp, || worker::run_update::<H>(params), output_tx);
 }
 
 fn get_in_memory_page(
