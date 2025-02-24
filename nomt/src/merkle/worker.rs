@@ -48,7 +48,6 @@ pub(super) struct UpdateParams {
     pub warm_ups: Arc<HashMap<KeyPath, Seek>>,
     pub warm_page_set: Option<FrozenSharedPageSet>,
     pub command: UpdateCommand,
-    pub worker_id: usize,
 }
 
 pub(super) struct WarmUpParams {
