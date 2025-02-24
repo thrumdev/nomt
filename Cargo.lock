@@ -1076,7 +1076,7 @@ dependencies = [
  "libc",
  "loom",
  "lru",
- "nomt-core",
+ "nomt-core 1.0.0-preview (registry+https://github.com/rust-lang/crates.io-index)",
  "parking_lot",
  "quickcheck",
  "rand",
@@ -1091,6 +1091,21 @@ dependencies = [
 [[package]]
 name = "nomt-core"
 version = "1.0.0-preview"
+dependencies = [
+ "arrayvec",
+ "bitvec",
+ "blake3",
+ "borsh",
+ "hex",
+ "ruint",
+ "sha2",
+]
+
+[[package]]
+name = "nomt-core"
+version = "1.0.0-preview"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49c1275c158d1d4cb93868142f53c2eb323b09b682ae361bb1d27ab7a6e3e19c"
 dependencies = [
  "arrayvec",
  "bitvec",
@@ -2203,7 +2218,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "commit-batch",
- "nomt-core",
+ "nomt-core 1.0.0-preview",
 ]
 
 [[package]]
