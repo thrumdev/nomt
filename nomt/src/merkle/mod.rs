@@ -2,7 +2,6 @@
 //!
 //! This splits the work of warming-up and performing the trie update across worker threads.
 
-use anyhow::Context;
 use crossbeam::channel::{self, Receiver, Sender};
 use page_set::FrozenSharedPageSet;
 use parking_lot::Mutex;
@@ -14,10 +13,7 @@ use nomt_core::{
 };
 use seek::Seek;
 
-use std::{
-    collections::HashMap,
-    sync::{mpsc::RecvError, Arc},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     io::PagePool,
@@ -248,7 +244,7 @@ impl Updater {
 
         let (worker_tx, worker_rx) = crossbeam_channel::bounded(num_workers);
 
-        for (worker_id, write_pass) in worker_passes.into_iter().enumerate() {
+        for write_pass in worker_passes.into_iter() {
             let command = UpdateCommand {
                 shared: shared.clone(),
                 write_pass: write_pass.into_envelope(),
@@ -262,7 +258,6 @@ impl Updater {
                 warm_ups: warm_ups.clone(),
                 warm_page_set: warm_page_set.clone(),
                 command,
-                worker_id,
             };
             spawn_updater::<H>(&self.worker_tp, params, worker_tx.clone());
         }
@@ -490,7 +485,6 @@ fn spawn_updater<H: HashAlgorithm>(
     params: worker::UpdateParams,
     output_tx: Sender<TaskResult<std::io::Result<WorkerOutput>>>,
 ) {
-    let worker_id = params.worker_id;
     spawn_task(&worker_tp, || worker::run_update::<H>(params), output_tx);
 }
 
