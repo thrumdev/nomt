@@ -300,6 +300,7 @@ impl UpdateHandle {
         let mut received_outputs = 0;
         for output in self.worker_rx.into_iter() {
             // TODO: handle error better.
+            //panic!("fake update worker failure");
             let output = output.unwrap();
 
             received_outputs += 1;

@@ -287,7 +287,11 @@ impl Agent {
         }
 
         // Perform the commit.
-        let commit_result = tokio::task::block_in_place(|| session.finish(actuals)?.commit(&nomt));
+        let commit_result = tokio::task::block_in_place(|| {
+            let s = session.finish(actuals)?;
+            panic!("panic within block in place");
+            s.commit(&nomt)
+        });
         let commit_outcome = classify_result(commit_result);
 
         // Log the outcome if it was not successful.
