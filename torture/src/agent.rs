@@ -257,7 +257,13 @@ impl Agent {
         let mut o = nomt::Options::new();
         o.path(workdir.join("nomt_db"));
         o.bitbox_seed(open_params.bitbox_seed);
-        o.hashtable_buckets(500_000);
+        o.hashtable_buckets(open_params.hashtable_buckets);
+        o.warm_up(open_params.warm_up);
+        o.preallocate_ht(open_params.preallocate_ht);
+        o.page_cache_size(open_params.page_cache_size);
+        o.leaf_cache_size(open_params.leaf_cache_size);
+        o.prepopulate_page_cache(open_params.prepopulate_page_cache);
+        o.page_cache_upper_levels(open_params.page_cache_upper_levels);
         if let Some(n_commits) = open_params.rollback {
             o.rollback(true);
             o.max_rollback_log_len(n_commits);
