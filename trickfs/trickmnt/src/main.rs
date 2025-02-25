@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let handle = trickfs::spawn_trick(args.mountpoint).unwrap();
+    let handle = trickfs::spawn_trick(args.mountpoint, 0).unwrap();
     waitline();
     drop(handle);
 
