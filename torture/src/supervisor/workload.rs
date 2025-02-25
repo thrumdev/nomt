@@ -2,6 +2,7 @@ use anyhow::Result;
 use imbl::OrdMap;
 use rand::{distributions::WeightedIndex, prelude::*};
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
@@ -12,7 +13,7 @@ use crate::{
         cli::WorkloadParams,
         comms,
         controller::{self, SpawnedAgentController},
-        pbt, WorkloadDir,
+        pbt,
     },
 };
 
@@ -246,7 +247,7 @@ impl WorkloadState {
 /// it behaves.
 pub struct Workload {
     /// Directory used by this workload.
-    workload_dir: WorkloadDir,
+    workload_dir: TempDir,
     /// The handle to the trickfs FUSE FS.
     ///
     /// `Some` until the workload is torn down.
@@ -302,7 +303,7 @@ struct ScheduledRollback {
 impl Workload {
     pub fn new(
         seed: u64,
-        workload_dir: WorkloadDir,
+        workload_dir: TempDir,
         workload_params: &WorkloadParams,
         workload_id: u64,
     ) -> anyhow::Result<Self> {
@@ -975,7 +976,7 @@ impl Workload {
     }
 
     /// Return the workload directory.
-    pub fn into_workload_dir(self) -> WorkloadDir {
+    pub fn into_workload_dir(self) -> TempDir {
         self.workload_dir
     }
 }
