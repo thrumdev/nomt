@@ -304,7 +304,7 @@ impl Workload {
     pub fn new(
         seed: u64,
         workload_dir: TempDir,
-        workload_params: &WorkloadParams,
+        workload_params: WorkloadParams,
         workload_id: u64,
     ) -> anyhow::Result<Self> {
         // TODO: Make the workload size configurable and more sophisticated.
