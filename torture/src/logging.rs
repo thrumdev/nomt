@@ -3,8 +3,8 @@ use std::path::Path;
 
 use tracing::level_filters::LevelFilter;
 use tracing::{span, Level};
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::{fmt, EnvFilter};
-use tracing_subscriber::{prelude::*, registry::Registry, Layer};
 
 const ENV_NAME_COMMON: &str = "TORTURE_ALL_LOG";
 const ENV_NAME_AGENT: &str = "TORTURE_AGENT_LOG";
@@ -57,7 +57,10 @@ fn env_filter(kind: Kind) -> EnvFilter {
     }
 }
 
-pub fn init_supervisor() {
+fn create_subscriber<W>(kind: Kind, writer: W, ansi: bool) -> impl tracing::Subscriber
+where
+    W: for<'writer> MakeWriter<'writer> + 'static + Sync + Send,
+{
     let format = fmt::format()
         .with_level(true)
         .with_target(false)
@@ -65,62 +68,39 @@ pub fn init_supervisor() {
         .with_thread_names(false)
         .compact()
         .with_timer(fmt::time::SystemTime::default());
-    let subscriber = fmt::Subscriber::builder()
-        .with_env_filter(env_filter(Kind::Supervisor))
-        .with_writer(io::stdout)
-        .with_ansi(istty())
-        .event_format(format)
-        .finish();
 
+    fmt::Subscriber::builder()
+        .with_env_filter(env_filter(kind))
+        .with_writer(writer)
+        .with_ansi(ansi)
+        .event_format(format)
+        .finish()
+}
+
+pub fn init_supervisor() {
+    let subscriber = create_subscriber(Kind::Supervisor, io::stdout, istty());
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set supervisor subscriber");
 }
 
-pub fn init_agent(agent_id: &str, workdir: &impl AsRef<Path>) {
-    // Console layer with ANSI colors
-    let console_layer = fmt::layer()
-        .with_writer(io::stdout)
-        .event_format(
-            fmt::format()
-                .with_level(true)
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .with_ansi(istty())
-                .compact()
-                .with_timer(fmt::time::SystemTime::default()),
-        )
-        .with_filter(env_filter(Kind::Agent));
-
-    // File layer with ANSI disabled
-    // TODO: this has an issue currently. While the ANSI is false the colors are not disabled
-    // everywhere.
-    let file = std::fs::File::options()
+pub fn workload_subscriber(workload_dir: &impl AsRef<Path>) -> impl tracing::Subscriber {
+    let log_file = std::fs::File::options()
         .create(true)
         .append(true)
-        .open(workdir.as_ref().join("agent.log"))
-        .unwrap();
+        .open(workload_dir.as_ref().join("log"))
+        .expect("Failed to create log file");
+    create_subscriber(Kind::Supervisor, log_file, false)
+}
 
-    // TODO: this has an issue currently. While the ANSI is false the colors are not disabled
-    // everywhere.
-    let file_layer = fmt::layer()
-        .with_writer(file)
-        .event_format(
-            fmt::format()
-                .with_level(true)
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .with_ansi(false)
-                .compact()
-                .with_timer(fmt::time::SystemTime::default()),
-        )
-        .with_filter(env_filter(Kind::Agent));
+pub fn init_agent(agent_id: &str, workload_dir: &impl AsRef<Path>) {
+    let log_file = std::fs::File::options()
+        .create(false)
+        .append(true)
+        .open(workload_dir.as_ref().join("log"))
+        .expect("Log file is expected to be created by the supervisor");
+    let subscriber = create_subscriber(Kind::Agent, log_file, false);
 
-    // Combine both layers in a single Subscriber
-    let subscriber = Registry::default().with(console_layer).with(file_layer);
-
-    // Set the global subscriber
+    // Set the agent global subscriber
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set agent subscriber");
 
     let pid = std::process::id();

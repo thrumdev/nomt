@@ -7,11 +7,12 @@ use clap::Parser;
 use cli::{Cli, WorkloadParams};
 use tokio::{
     signal::unix::{signal, SignalKind},
-    task::{self, JoinHandle},
+    task::{self, JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace_span, warn, Instrument};
+use tracing::{error, info, instrument::WithSubscriber, warn};
 
+use crate::logging;
 use workload::Workload;
 
 mod cli;
@@ -24,7 +25,7 @@ mod workload;
 ///
 /// This is not expected to return explicitly unless there was an error.
 pub async fn run() -> Result<()> {
-    crate::logging::init_supervisor();
+    logging::init_supervisor();
 
     let cli = Cli::parse();
     let seed = cli.seed.unwrap_or_else(rand::random);
@@ -157,7 +158,7 @@ pub struct InvestigationFlag {
 async fn run_workload(
     cancel_token: CancellationToken,
     seed: u64,
-    workload_params: &WorkloadParams,
+    workload_params: WorkloadParams,
     workload_id: u64,
 ) -> Result<Option<InvestigationFlag>> {
     let mut workload_dir_builder = tempfile::Builder::new();
@@ -173,9 +174,13 @@ async fn run_workload(
         workload_dir_builder.tempdir()
     }
     .expect("Failed to create a temp dir");
+    let workload_dir_path = workload_dir.path().to_path_buf();
 
     let mut workload = Workload::new(seed, workload_dir, workload_params, workload_id)?;
-    let result = workload.run(cancel_token).await;
+    let result = workload
+        .run(cancel_token)
+        .with_subscriber(logging::workload_subscriber(&workload_dir_path))
+        .await;
     match result {
         Ok(()) => Ok(None),
         Err(err) => Ok(Some(InvestigationFlag {
@@ -212,26 +217,43 @@ async fn control_loop(
     workload_params: WorkloadParams,
     flag_num_limit: usize,
 ) -> Result<()> {
+    info!("Starting control loop, seed={seed}.\n{NON_DETERMINISM_DISCLAIMER}");
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
-    // TODO: Run workloads in parallel. Make the concurrency factor configurable.
-    info!("Starting control loop, seed={seed}.\n{NON_DETERMINISM_DISCLAIMER}");
+    const MAX_PARALLEL_WORKLOADS: usize = 1;
+    let mut running_workloads = JoinSet::new();
+
     loop {
-        let workload_id = workload_cnt;
-        let workload_seed = seed + workload_cnt;
-        workload_cnt += 1;
-        let maybe_flag = run_workload(
-            cancel_token.clone(),
-            workload_seed,
-            &workload_params,
-            workload_id,
-        )
-        .instrument(trace_span!("workload", workload_id))
-        .await?;
+        // Collect any finished workload.
+        while let Some(maybe_flag) = running_workloads.try_join_next() {
+            if let Some(flag) = maybe_flag?? {
+                print_flag(&flag);
+                flags.push(flag);
+            }
+        }
+
+        while running_workloads.len() < MAX_PARALLEL_WORKLOADS {
+            let workload_id = workload_cnt;
+            let workload_seed = seed + workload_cnt;
+            workload_cnt += 1;
+
+            let _ = running_workloads.spawn(run_workload(
+                cancel_token.clone(),
+                workload_seed,
+                workload_params.clone(),
+                workload_id,
+            ));
+        }
+
+        // Here is safe to wait on a workload completion because if
+        // ctrl-c is received, the cancel_token will stop the workload
+        // and thus allow all workloads to conclude early.
+        let maybe_flag = running_workloads.join_next().await.unwrap()??;
         if let Some(flag) = maybe_flag {
             print_flag(&flag);
             flags.push(flag);
         }
+
         if cancel_token.is_cancelled() {
             break;
         }
@@ -240,6 +262,10 @@ async fn control_loop(
             break;
         }
     }
+
+    // Wait for active workloads to be cancelled properly.
+    running_workloads.join_all().await;
+
     for flag in flags {
         print_flag(&flag);
     }
