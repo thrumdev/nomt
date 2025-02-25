@@ -54,6 +54,15 @@ impl SpawnedAgentController {
             .send_request(crate::message::ToAgent::Open(crate::message::OpenPayload {
                 bitbox_seed,
                 rollback,
+                commit_concurrency: 6,
+                io_workers: 3,
+                hashtable_buckets: 500_000,
+                warm_up: false,
+                preallocate_ht: true,
+                page_cache_size: 256,
+                leaf_cache_size: 256,
+                prepopulate_page_cache: false,
+                page_cache_upper_levels: 2,
             }))
             .await?;
         match response {

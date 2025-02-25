@@ -56,6 +56,24 @@ pub struct OpenPayload {
     /// Whether the agent is supposed to handle rollbacks.
     /// If `Some`, the maximum number of supported blocks in a single rollback is specified.
     pub rollback: Option<u32>,
+    /// The number of commit workers.
+    pub commit_concurrency: usize,
+    /// The number of io_uring instances.
+    pub io_workers: usize,
+    /// The number of pages within the ht.
+    pub hashtable_buckets: u32,
+    /// Whether merkle page fetches should be warmed up while sessions are ongoing.
+    pub warm_up: bool,
+    /// Whether to preallocate the hashtable file.
+    pub preallocate_ht: bool,
+    /// The maximum size of the page cache.
+    pub page_cache_size: usize,
+    /// The maximum size of the leaf cache.
+    pub leaf_cache_size: usize,
+    /// Whether to prepopulate the upper layers of the page cache on startup.
+    pub prepopulate_page_cache: bool,
+    /// Number of upper layers contained in the cache.
+    pub page_cache_upper_levels: usize,
 }
 
 /// The parameters for the [`ToAgent::Commit`] message.
