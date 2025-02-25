@@ -1,15 +1,10 @@
 //! The supervisor part. Spawns and manages agents. Assigns work to agents.
 
-use std::{
-    path::{Path, PathBuf},
-    process::exit,
-};
+use std::{path::PathBuf, process::exit};
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, WorkloadParams};
-use rand::Rng;
-use tempfile::TempDir;
 use tokio::{
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle},
@@ -155,31 +150,6 @@ pub struct InvestigationFlag {
     reason: anyhow::Error,
 }
 
-/// Each worklaod will have a dedicated directory in which to store the
-/// NOMT instance and any other data. It can be a temporary directory
-/// or a directory within the manually specified `workdir`.
-pub enum WorkloadDir {
-    TempDir(TempDir),
-    Dir(PathBuf),
-}
-
-impl WorkloadDir {
-    fn path(&self) -> PathBuf {
-        match self {
-            WorkloadDir::TempDir(temp_dir) => temp_dir.path().into(),
-            WorkloadDir::Dir(p) => p.clone(),
-        }
-    }
-
-    // Will persist the TempDir in memory if called.
-    fn ensure_stable_path(self) -> PathBuf {
-        match self {
-            WorkloadDir::TempDir(temp_dir) => temp_dir.into_path(),
-            WorkloadDir::Dir(p) => p,
-        }
-    }
-}
-
 /// Run the workload until either it either finishes, errors or gets cancelled.
 ///
 /// Returns `None` if the investigation is not required (i.e. cancelled or succeeded), otherwise,
@@ -190,44 +160,29 @@ async fn run_workload(
     workload_params: &WorkloadParams,
     workload_id: u64,
 ) -> Result<Option<InvestigationFlag>> {
-    // Creates a temp or user specified dir for the working dir of the workload.
-    let mut to_clean_workload_dir = false;
-    let workload_dir = if workload_params.workdir.is_some() {
-        let workdir = workload_params.workdir.clone().unwrap();
-        let rand_chars: String = rand::thread_rng()
-            .sample_iter(&rand::distributions::Alphanumeric)
-            .take(6)
-            .map(char::from)
-            .collect();
-        let workload_path = Path::new(&workdir)
-            .join(format!("torture-{}-workload-{}", rand_chars, workload_id).as_str());
-        to_clean_workload_dir = true;
-        std::fs::create_dir_all(workload_path.clone()).unwrap();
-        WorkloadDir::Dir(workload_path.into())
+    let mut workload_dir_builder = tempfile::Builder::new();
+    workload_dir_builder.prefix("torture-");
+    let suffix = format!("-workload-{}", workload_id);
+    workload_dir_builder.suffix(&suffix);
+    let workload_dir = if let Some(ref workdir_path) = workload_params.workdir {
+        if !std::path::Path::new(&workdir_path).exists() {
+            anyhow::bail!("The workdir path does not exist");
+        }
+        workload_dir_builder.tempdir_in(workdir_path)
     } else {
-        let tempdir = tempfile::Builder::new()
-            .prefix("torture-")
-            .suffix(format!("-workload-{}", workload_id).as_str())
-            .tempdir()
-            .expect("Failed to create a temp dir");
-        WorkloadDir::TempDir(tempdir)
-    };
-    let workload_dir_path = workload_dir.path();
+        workload_dir_builder.tempdir()
+    }
+    .expect("Failed to create a temp dir");
 
     let mut workload = Workload::new(seed, workload_dir, workload_params, workload_id)?;
     let result = workload.run(cancel_token).await;
     match result {
-        Ok(()) => {
-            if to_clean_workload_dir {
-                // Clean the persistent db if the workload succeeded.
-                std::fs::remove_dir_all(workload_dir_path).unwrap();
-            }
-            Ok(None)
-        }
+        Ok(()) => Ok(None),
         Err(err) => Ok(Some(InvestigationFlag {
             seed,
             workload_id,
-            workdir: workload.into_workload_dir().ensure_stable_path(),
+            // `TempDir::into_path` persists the TempDir to disk.
+            workdir: workload.into_workload_dir().into_path(),
             reason: err,
         })),
     }
