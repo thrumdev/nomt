@@ -79,6 +79,12 @@ pub struct OpenPayload {
 /// The parameters for the [`ToAgent::Commit`] message.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommitPayload {
+    /// The set of keys that should be read.
+    pub reads: Vec<Key>,
+    /// The number of concurrent readers.
+    ///
+    /// It must be greater than 0.
+    pub read_concurrency: usize,
     /// The set of changes that the child should commit.
     ///
     /// There must be no duplicate keys in the set.
