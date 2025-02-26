@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
 
 use crate::{
-    message::{InitOutcome, KeyValueChange, OpenOutcome, ToSupervisor},
+    message::{InitOutcome, Key, KeyValueChange, OpenOutcome, ToSupervisor},
     supervisor::{
         cli::WorkloadParams,
         comms,
@@ -21,6 +21,8 @@ use crate::{
 /// of certain events happening.
 #[derive(Clone)]
 struct Biases {
+    /// The probability of reading an already existing key.
+    read_existing_key: f64,
     /// The probability of a delete operation as opposed to an insert operation.
     delete: f64,
     /// When generating a value, the probability of generating a value that will spill into the
@@ -74,6 +76,7 @@ impl Biases {
         let new_key_distribution = WeightedIndex::new((1usize..33).map(|x| (32 * 32) / x)).unwrap();
 
         Self {
+            read_existing_key: 0.8,
             delete: (delete as f64) / 100.0,
             overflow: (overflow as f64) / 100.0,
             new_key: (new_key as f64) / 100.0,
@@ -135,20 +138,21 @@ impl WorkloadState {
         bitbox_seed
     }
 
-    fn gen_commit(&mut self) -> (Snapshot, Vec<KeyValueChange>) {
+    fn gen_commit(&mut self) -> (Snapshot, Vec<Key>, Vec<KeyValueChange>) {
         let mut snapshot = self.committed.clone();
         snapshot.sync_seqn += 1;
 
-        let num_changes = if self.random_size {
+        let size = if self.random_size {
             self.rng.gen_range(0..self.size)
         } else {
             self.size
         };
-        let mut changes = Vec::with_capacity(num_changes);
+        let mut changes = Vec::with_capacity(size);
+        let reads = self.gen_reads(size);
 
         // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
         // using a hash set.
-        let mut used_keys = std::collections::HashSet::with_capacity(num_changes);
+        let mut used_keys = std::collections::HashSet::with_capacity(size);
         loop {
             let change = self.gen_key_value_change();
             if used_keys.contains(change.key()) {
@@ -159,14 +163,36 @@ impl WorkloadState {
             used_keys.insert(*change.key());
             changes.push(change);
 
-            if used_keys.len() >= num_changes {
+            if used_keys.len() >= size {
                 break;
             }
         }
 
         changes.sort_by(|a, b| a.key().cmp(&b.key()));
 
-        (snapshot, changes)
+        (snapshot, reads, changes)
+    }
+
+    fn gen_reads(&mut self, size: usize) -> Vec<Key> {
+        let mut reads = vec![];
+        let mut key = [0; 32];
+
+        // `threshold` after which we stop trying to read existing keys
+        // because there is a high chance that all have already been read.
+        let threshold = self.committed.state.len();
+        let mut known_keys = 0;
+        while reads.len() < size {
+            self.rng.fill_bytes(&mut key);
+            if known_keys < threshold && self.rng.gen_bool(self.biases.read_existing_key) {
+                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
+                    known_keys += 1;
+                    key.copy_from_slice(next_key);
+                }
+            }
+            reads.push(key.clone());
+        }
+
+        reads
     }
 
     /// Returns a KeyValueChange with a new key, a deleted or a modified one.
@@ -473,11 +499,13 @@ impl Workload {
         };
 
         // Generate a changeset and the associated snapshot
-        let (snapshot, changeset) = self.state.gen_commit();
+        let (snapshot, reads, changeset) = self.state.gen_commit();
         let commit_response = self
             .rr()
             .send_request(crate::message::ToAgent::Commit(
                 crate::message::CommitPayload {
+                    reads: reads,
+                    read_concurrency: 6,
                     changeset: changeset.clone(),
                     should_crash,
                 },

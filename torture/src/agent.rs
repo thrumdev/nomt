@@ -1,9 +1,11 @@
 use anyhow::{anyhow, bail, Result};
 use futures::SinkExt as _;
+use nomt::Session;
 use nomt::{hasher::Blake3Hasher, Nomt, SessionParams};
 use std::future::Future;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::task::JoinSet;
 use tokio::{
     io::{BufReader, BufWriter},
     net::{
@@ -17,6 +19,7 @@ use tokio_stream::StreamExt as _;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
 
+use crate::message::Key;
 use crate::{
     message::{
         self, CommitPayload, Envelope, InitOutcome, KeyValueChange, OpenOutcome, OpenPayload,
@@ -44,6 +47,8 @@ pub async fn run(input: UnixStream) -> Result<()> {
         let Envelope { reqno, message } = stream.recv().await?;
         match message {
             ToAgent::Commit(CommitPayload {
+                reads,
+                read_concurrency,
                 changeset,
                 should_crash: Some(crash_delay),
             }) => {
@@ -57,6 +62,8 @@ pub async fn run(input: UnixStream) -> Result<()> {
 
                 let task = async move {
                     let start = std::time::Instant::now();
+                    agent.begin_session();
+                    agent.read(reads, read_concurrency).await;
                     let _ = agent.commit(changeset).await;
                     let elapsed = start.elapsed();
                     tracing::info!("commit took {}ms", elapsed.as_millis());
@@ -66,10 +73,14 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 unreachable!();
             }
             ToAgent::Commit(CommitPayload {
+                reads,
+                read_concurrency,
                 changeset,
                 should_crash: None,
             }) => {
                 let start = std::time::Instant::now();
+                agent.begin_session();
+                agent.read(reads, read_concurrency).await;
                 let outcome = agent.commit(changeset).await;
                 let elapsed = start.elapsed();
                 tracing::info!("commit took {}ms", elapsed.as_millis());
@@ -241,15 +252,21 @@ async fn initialize(stream: &mut Stream) -> Result<PathBuf> {
 
 struct Agent {
     nomt: Option<Nomt<Blake3Hasher>>,
+    session: Option<Session<Blake3Hasher>>,
 }
 
 impl Agent {
     fn new() -> Self {
-        Self { nomt: None }
+        Self {
+            nomt: None,
+            session: None,
+        }
     }
 
     async fn perform_open(&mut self, workdir: &Path, open_params: OpenPayload) -> OpenOutcome {
         if let Some(nomt) = self.nomt.take() {
+            // Drop any pending session.
+            let _ = self.session.take();
             tracing::trace!("dropping the existing NOMT instance");
             drop(nomt);
         }
@@ -279,10 +296,48 @@ impl Agent {
         OpenOutcome::Success
     }
 
+    fn begin_session(&mut self) {
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        self.session
+            .replace(nomt.begin_session(SessionParams::default()));
+    }
+
+    async fn read(&mut self, reads: Vec<Key>, read_concurrency: usize) {
+        // UNWRAP: `read` is expected to be called after `begin_session`.
+        let session = Arc::new(self.session.take().unwrap());
+        let reads = Arc::new(reads);
+
+        let mut reads_task = JoinSet::<()>::new();
+        let reads_per_thread = reads.len() / read_concurrency;
+        for i in 0..read_concurrency {
+            let start = i * reads_per_thread;
+            let end = if i == read_concurrency - 1 {
+                reads.len()
+            } else {
+                (i + 1) * reads_per_thread
+            };
+            reads_task.spawn_blocking({
+                let reads = reads.clone();
+                let session = session.clone();
+                move || {
+                    for key in &reads[start..end] {
+                        let _res = session.read(*key).expect("read failed");
+                    }
+                }
+            });
+        }
+        reads_task.join_all().await;
+
+        self.session.replace(Arc::into_inner(session).unwrap());
+    }
+
     async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Outcome {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
-        let session = nomt.begin_session(SessionParams::default());
+        // UNWRAP: `commit` is expected to be called after `begin_session`.
+        let session = self.session.take().unwrap();
+
         let mut actuals = Vec::with_capacity(changeset.len());
         for change in changeset {
             match change {
