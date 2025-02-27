@@ -174,6 +174,10 @@ impl WorkloadConfiguration {
         })
     }
 
+    pub fn is_rollback_enable(&self) -> bool {
+        self.rollback > 0.0
+    }
+
     pub fn no_new_keys(&self) -> bool {
         self.new_key == 0.0
     }
