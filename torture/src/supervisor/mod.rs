@@ -1,10 +1,16 @@
 //! The supervisor part. Spawns and manages agents. Assigns work to agents.
 
-use std::{path::PathBuf, process::exit};
+use std::{
+    path::PathBuf,
+    process::exit,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, WorkloadParams};
+use resource::ResourceAllocator;
 use tokio::{
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle, JoinSet},
@@ -19,6 +25,7 @@ mod cli;
 mod comms;
 mod controller;
 mod pbt;
+mod resource;
 mod workload;
 
 /// The entrypoint for the supervisor part of the program.
@@ -151,6 +158,30 @@ pub struct InvestigationFlag {
     reason: anyhow::Error,
 }
 
+fn prepare_workload(
+    workdir_path: PathBuf,
+    seed: u64,
+    workload_params: WorkloadParams,
+    workload_id: u64,
+    resource_alloc: Arc<Mutex<ResourceAllocator>>,
+) -> Result<Workload> {
+    let mut workload_dir_builder = tempfile::Builder::new();
+    workload_dir_builder.prefix("torture-");
+    let suffix = format!("-workload-{}", workload_id);
+    workload_dir_builder.suffix(&suffix);
+    let workload_dir = workload_dir_builder
+        .tempdir_in(workdir_path)
+        .expect("Failed to create a temp dir");
+
+    Workload::new(
+        seed,
+        workload_dir,
+        workload_params,
+        workload_id,
+        resource_alloc.clone(),
+    )
+}
+
 /// Run the workload until either it either finishes, errors or gets cancelled.
 ///
 /// Returns `None` if the investigation is not required (i.e. cancelled or succeeded), otherwise,
@@ -158,29 +189,15 @@ pub struct InvestigationFlag {
 async fn run_workload(
     cancel_token: CancellationToken,
     seed: u64,
-    workload_params: WorkloadParams,
     workload_id: u64,
+    mut workload: Workload,
 ) -> Result<Option<InvestigationFlag>> {
-    let mut workload_dir_builder = tempfile::Builder::new();
-    workload_dir_builder.prefix("torture-");
-    let suffix = format!("-workload-{}", workload_id);
-    workload_dir_builder.suffix(&suffix);
-    let workload_dir = if let Some(ref workdir_path) = workload_params.workdir {
-        if !std::path::Path::new(&workdir_path).exists() {
-            anyhow::bail!("The workdir path does not exist");
-        }
-        workload_dir_builder.tempdir_in(workdir_path)
-    } else {
-        workload_dir_builder.tempdir()
-    }
-    .expect("Failed to create a temp dir");
-    let workload_dir_path = workload_dir.path().to_path_buf();
-
-    let mut workload = Workload::new(seed, workload_dir, workload_params, workload_id)?;
+    let workload_dir_path = workload.workload_dir_path();
     let result = workload
         .run(cancel_token)
         .with_subscriber(logging::workload_subscriber(&workload_dir_path))
         .await;
+
     match result {
         Ok(()) => Ok(None),
         Err(err) => Ok(Some(InvestigationFlag {
@@ -214,14 +231,33 @@ const NON_DETERMINISM_DISCLAIMER: &str = "torture is a non-deterministic fuzzer.
 async fn control_loop(
     cancel_token: CancellationToken,
     seed: u64,
-    workload_params: WorkloadParams,
+    mut workload_params: WorkloadParams,
     flag_num_limit: usize,
 ) -> Result<()> {
     info!("Starting control loop, seed={seed}.\n{NON_DETERMINISM_DISCLAIMER}");
     let mut flags = Vec::new();
     let mut workload_cnt = 0;
-    const MAX_PARALLEL_WORKLOADS: usize = 1;
     let mut running_workloads = JoinSet::new();
+
+    let workdir_path = if let Some(workdir_path) = workload_params.workdir.take() {
+        if !std::path::Path::new(&workdir_path).exists() {
+            anyhow::bail!("The workdir path does not exist");
+        }
+        PathBuf::from_str(&workdir_path).unwrap()
+    } else {
+        std::env::temp_dir()
+    };
+
+    // TODO: Currently reproducibility is broken, will be fixed in a follow up.
+    // In the vision of more complex resource allocation mechanisms
+    // and swarm testing, requiring a single seed that can reproduce also the
+    // preparation of a workload seems too big of a constraint.
+    // One way to enable reproducibility is to store all
+    // the workload data needed to just run it.
+    let resource_alloc = Arc::new(Mutex::new(ResourceAllocator::new(
+        workdir_path.clone(),
+        seed,
+    )?));
 
     loop {
         // Collect any finished workload.
@@ -232,19 +268,38 @@ async fn control_loop(
             }
         }
 
-        while running_workloads.len() < MAX_PARALLEL_WORKLOADS {
+        loop {
             let workload_id = workload_cnt;
             let workload_seed = seed + workload_cnt;
+
+            let res = prepare_workload(
+                workdir_path.clone(),
+                workload_seed,
+                workload_params.clone(),
+                workload_id,
+                resource_alloc.clone(),
+            );
+
+            let workload = match res {
+                Ok(workload) => workload,
+                Err(err) => {
+                    tracing::info!("{}", err.to_string());
+                    break;
+                }
+            };
+
             workload_cnt += 1;
 
             let _ = running_workloads.spawn(run_workload(
                 cancel_token.clone(),
                 workload_seed,
-                workload_params.clone(),
                 workload_id,
+                workload,
             ));
         }
 
+        // The maximum number of workload, based on available resources, has been spawned.
+        //
         // Here is safe to wait on a workload completion because if
         // ctrl-c is received, the cancel_token will stop the workload
         // and thus allow all workloads to conclude early.
