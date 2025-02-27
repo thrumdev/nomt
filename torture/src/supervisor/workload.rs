@@ -1,7 +1,10 @@
 use anyhow::Result;
 use imbl::OrdMap;
 use rand::{distributions::WeightedIndex, prelude::*};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
@@ -14,6 +17,7 @@ use crate::{
         comms,
         controller::{self, SpawnedAgentController},
         pbt,
+        resource::ResourceAllocator,
     },
 };
 
@@ -314,6 +318,10 @@ pub struct Workload {
     /// If `Some` there is rollback waiting to be applied,
     /// possibly alongside the delay after which the rollback process should panic.
     scheduled_rollback: Option<(ScheduledRollback, Option<Duration>)>,
+    /// ResourceAllocator is used to make sure that the workload that is being executed
+    /// does not exceed the assigned disk space and memory and to free the assigned
+    /// resources when it finishes.
+    resource_alloc: Arc<Mutex<ResourceAllocator>>,
 }
 
 /// Contains the information required to apply a rollback.
@@ -332,6 +340,7 @@ impl Workload {
         workload_dir: TempDir,
         workload_params: WorkloadParams,
         workload_id: u64,
+        resource_alloc: Arc<Mutex<ResourceAllocator>>,
     ) -> anyhow::Result<Self> {
         // TODO: Make the workload size configurable and more sophisticated.
         //
@@ -383,6 +392,7 @@ impl Workload {
             scheduled_rollback: None,
             enabled_enospc: false,
             enabled_latency: false,
+            resource_alloc,
         })
     }
 
@@ -415,6 +425,14 @@ impl Workload {
             self.run_iteration()
                 .instrument(trace_span!("iteration", iterno))
                 .await?;
+            if self.resource_alloc.lock().unwrap().is_exceeding_resources(
+                self.workload_id,
+                self.workload_dir.path(),
+                self.agent.as_ref().unwrap().pid().unwrap(),
+            ) {
+                tracing::info!("Maximum assigned resources reached");
+                break;
+            }
         }
         Ok(())
     }
