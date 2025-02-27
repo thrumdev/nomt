@@ -10,7 +10,7 @@ use std::{
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, WorkloadParams};
-use resource::ResourceAllocator;
+use resource::{ResourceAllocator, ResourceExhaustion};
 use tokio::{
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle, JoinSet},
@@ -23,6 +23,7 @@ use workload::Workload;
 
 mod cli;
 mod comms;
+mod config;
 mod controller;
 mod pbt;
 mod resource;
@@ -161,10 +162,9 @@ pub struct InvestigationFlag {
 fn prepare_workload(
     workdir_path: PathBuf,
     seed: u64,
-    workload_params: WorkloadParams,
     workload_id: u64,
     resource_alloc: Arc<Mutex<ResourceAllocator>>,
-) -> Result<Workload> {
+) -> Result<Workload, ResourceExhaustion> {
     let mut workload_dir_builder = tempfile::Builder::new();
     workload_dir_builder.prefix("torture-");
     let suffix = format!("-workload-{}", workload_id);
@@ -173,13 +173,7 @@ fn prepare_workload(
         .tempdir_in(workdir_path)
         .expect("Failed to create a temp dir");
 
-    Workload::new(
-        seed,
-        workload_dir,
-        workload_params,
-        workload_id,
-        resource_alloc.clone(),
-    )
+    Workload::new(seed, workload_dir, workload_id, resource_alloc.clone())
 }
 
 /// Run the workload until either it either finishes, errors or gets cancelled.
@@ -275,15 +269,14 @@ async fn control_loop(
             let res = prepare_workload(
                 workdir_path.clone(),
                 workload_seed,
-                workload_params.clone(),
                 workload_id,
                 resource_alloc.clone(),
             );
 
             let workload = match res {
                 Ok(workload) => workload,
-                Err(err) => {
-                    tracing::info!("{}", err.to_string());
+                Err(..) => {
+                    tracing::info!("ResourceExhaustion reached");
                     break;
                 }
             };
