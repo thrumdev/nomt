@@ -19,6 +19,7 @@ mod cli;
 mod comms;
 mod controller;
 mod pbt;
+mod resource;
 mod workload;
 
 /// The entrypoint for the supervisor part of the program.
