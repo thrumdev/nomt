@@ -697,17 +697,7 @@ impl Workload {
     ///
     /// If the agent has run out of storage, we will turn off the `ENOSPC` error and try again.
     async fn ensure_agent_open_db(&mut self) -> anyhow::Result<()> {
-        let rollback = if self.config.rollback > 0.0 {
-            Some(self.config.max_rollback_commits)
-        } else {
-            None
-        };
-        let outcome = self
-            .agent
-            .as_mut()
-            .unwrap()
-            .open(self.config.bitbox_seed, rollback)
-            .await?;
+        let outcome = self.agent.as_mut().unwrap().open(&self.config).await?;
 
         match outcome {
             OpenOutcome::Success => (),
@@ -723,12 +713,7 @@ impl Workload {
                     .unwrap()
                     .set_trigger_enospc(false);
 
-                let outcome = self
-                    .agent
-                    .as_mut()
-                    .unwrap()
-                    .open(self.config.bitbox_seed, rollback)
-                    .await?;
+                let outcome = self.agent.as_mut().unwrap().open(&self.config).await?;
                 assert!(matches!(outcome, OpenOutcome::Success));
             }
             OpenOutcome::UnknownFailure(err) => {
