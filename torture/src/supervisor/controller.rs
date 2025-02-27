@@ -1,6 +1,6 @@
 use crate::message::{InitOutcome, OpenOutcome};
 
-use super::comms;
+use super::{comms, config::WorkloadConfiguration};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::{net::UnixStream, process::Child};
@@ -48,21 +48,27 @@ impl SpawnedAgentController {
         }
     }
 
-    pub async fn open(&self, bitbox_seed: [u8; 16], rollback: Option<u32>) -> Result<OpenOutcome> {
+    pub async fn open(&self, config: &WorkloadConfiguration) -> Result<OpenOutcome> {
+        let rollback = if config.is_rollback_enable() {
+            Some(config.max_rollback_commits)
+        } else {
+            None
+        };
+
         let response = self
             .rr
             .send_request(crate::message::ToAgent::Open(crate::message::OpenPayload {
-                bitbox_seed,
+                bitbox_seed: config.bitbox_seed,
                 rollback,
-                commit_concurrency: 6,
-                io_workers: 3,
-                hashtable_buckets: 500_000,
-                warm_up: false,
-                preallocate_ht: true,
-                page_cache_size: 256,
-                leaf_cache_size: 256,
-                prepopulate_page_cache: false,
-                page_cache_upper_levels: 2,
+                commit_concurrency: config.commit_concurrency,
+                io_workers: config.io_workers,
+                hashtable_buckets: config.hashtable_buckets,
+                warm_up: config.warm_up,
+                preallocate_ht: config.preallocate_ht,
+                page_cache_size: config.page_cache_size,
+                leaf_cache_size: config.leaf_cache_size,
+                prepopulate_page_cache: config.prepopulate_page_cache,
+                page_cache_upper_levels: config.page_cache_upper_levels,
             }))
             .await?;
         match response {
