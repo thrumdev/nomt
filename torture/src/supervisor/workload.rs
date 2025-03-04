@@ -1,7 +1,8 @@
 use anyhow::Result;
 use imbl::OrdMap;
-use rand::prelude::*;
+use rand::{distributions::WeightedIndex, prelude::*};
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -12,9 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, trace_span, Instrument as _};
 
 use crate::{
-    message::{InitOutcome, Key, KeyValueChange, OpenOutcome, ToSupervisor},
+    message::{InitOutcome, Key, KeyValueChange, OpenOutcome, ToSupervisor, MAX_ENVELOPE_SIZE},
     supervisor::{
-        cli::WorkloadParams,
         comms,
         config::WorkloadConfiguration,
         controller::{self, SpawnedAgentController},
@@ -797,17 +797,30 @@ impl Workload {
         // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
         // using a hash set.
         let mut used_keys = std::collections::HashSet::with_capacity(changeset_size);
+        let mut new_keys = std::collections::HashSet::with_capacity(changeset_size);
+        let mut sum_value_size = 0;
+        let mut tot_items = 0;
         loop {
-            let change = self.gen_key_value_change();
-            if used_keys.contains(change.key()) {
-                continue;
+            let Some(change) = self.gen_key_value_change(&mut used_keys, &mut new_keys) else {
+                // Stop adding things to the changeset if `gen_key_value_change`
+                // cannot create a new change.
+                break;
+            };
+
+            if let Some(val) = change.value() {
+                sum_value_size += val.len();
+            }
+            tot_items += 1;
+
+            // Stop adding changes to the commit if we exceed 90% of MAX_ENVELOPE_SIZE.
+            if (sum_value_size + tot_items * 32) as f64 / MAX_ENVELOPE_SIZE as f64 > 0.9 {
+                break;
             }
 
             snapshot.state.insert(*change.key(), change.value());
-            used_keys.insert(*change.key());
             changes.push(change);
 
-            if used_keys.len() >= changeset_size {
+            if used_keys.len() + new_keys.len() >= changeset_size {
                 break;
             }
         }
@@ -837,48 +850,98 @@ impl Workload {
         reads
     }
 
-    /// Returns a KeyValueChange with a new key, a deleted or a modified one.
-    fn gen_key_value_change(&mut self) -> KeyValueChange {
-        let mut key = [0; 32];
-        // Generate a Delete KeyValueChange
-        if !self.committed.state.is_empty() && self.rng.gen_bool(self.config.delete) {
+    /// Returns None if there is no KeyValueChange that can be generated,
+    /// otherwise returns a KeyValueChange with a new key, a deleted or a modified one.
+    fn gen_key_value_change(
+        &mut self,
+        used_keys: &mut HashSet<[u8; 32]>,
+        new_keys: &mut HashSet<[u8; 32]>,
+    ) -> Option<KeyValueChange> {
+        let used_keys_len = used_keys.len();
+
+        let mut find_new_key = |rng: &mut rand_pcg::Pcg64| -> Key {
+            let mut key = [0; 32];
             loop {
-                self.rng.fill_bytes(&mut key);
-                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
-                    return KeyValueChange::Delete(*next_key);
+                rng.fill_bytes(&mut key);
+                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
+                    // This is the greatest key in the state,
+                    // there is no one else to share bits with.
+                    if new_keys.insert(key.clone()) {
+                        return key;
+                    } else {
+                        continue;
+                    }
+                };
+
+                let common_bytes = rng.sample(self.config.new_key_distribution.clone()) as usize;
+                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
+
+                if !self.committed.state.contains_key(&key) && new_keys.insert(key.clone()) {
+                    return key;
                 }
             }
-        }
+        };
 
-        // Generate a new key KeyValueChange
-        if self.committed.state.is_empty() {
-            self.rng.fill_bytes(&mut key);
-            return KeyValueChange::Insert(key, self.gen_value());
-        }
-
-        if self.rng.gen_bool(self.config.new_key) {
+        // Returns None if all present keys are already used.
+        let mut find_existing_key = |rng: &mut rand_pcg::Pcg64| -> Option<Key> {
+            let mut key = [0; 32];
+            rng.fill_bytes(&mut key);
+            let mut start_key = None;
+            // Starting from a random key, perform a circular linear search looking
+            // for an unused key to delete. This is never called if the committed state is empty,
+            // but we need to check that not all committed keys are already used.
             loop {
-                self.rng.fill_bytes(&mut key);
-
-                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
+                let Some((next_key, Some(_))) = self.committed.state.get_next(&key) else {
+                    key.copy_from_slice(&[0; 32]);
                     continue;
                 };
 
-                let common_bytes =
-                    self.rng.sample(self.config.new_key_distribution.clone()) as usize;
-                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
-
-                if !self.committed.state.contains_key(&key) {
-                    return KeyValueChange::Insert(key, self.gen_value());
+                match start_key {
+                    None => start_key = Some(next_key),
+                    Some(start_key) if start_key == next_key => break None,
+                    _ => (),
                 }
+
+                if used_keys.insert(*next_key) {
+                    break Some(*next_key);
+                }
+                key.copy_from_slice(next_key);
+            }
+        };
+
+        // If the committed state is empty or all present keys are used,
+        // and new keys cannot be created, than return None.
+        // Otherwise, if new keys can be created, always fall back into creating new keys.
+        if self.committed.state.is_empty() || used_keys_len == self.committed.state.len() {
+            if self.config.no_new_keys() {
+                return None;
+            } else {
+                let key = find_new_key(&mut self.rng);
+                return Some(KeyValueChange::Insert(key, self.gen_value()));
             }
         }
 
-        // Generate an update KeyValueChange
-        loop {
-            self.rng.fill_bytes(&mut key);
-            if let Some((next_key, _)) = self.committed.state.get_next(&key) {
-                return KeyValueChange::Insert(*next_key, self.gen_value());
+        let distr = WeightedIndex::new([
+            self.config.delete_key,
+            self.config.update_key,
+            self.config.new_key,
+        ])
+        .unwrap();
+
+        let change_type = self.rng.sample(distr);
+
+        match change_type {
+            0 => {
+                let key = find_existing_key(&mut self.rng)?;
+                Some(KeyValueChange::Delete(key))
+            }
+            1 => {
+                let key = find_existing_key(&mut self.rng)?;
+                Some(KeyValueChange::Insert(key, self.gen_value()))
+            }
+            _ => {
+                let key = find_new_key(&mut self.rng);
+                Some(KeyValueChange::Insert(key, self.gen_value()))
             }
         }
     }
