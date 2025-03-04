@@ -61,10 +61,11 @@ pub struct WorkloadConfiguration {
     pub read_concurrency: usize,
     /// The probability of reading an already existing key.
     pub read_existing_key: f64,
-    /// The probability of a delete operation as opposed to an insert operation.
-    pub delete: f64,
-    /// When generating a key, whether it should be one that was appeared somewhere or a brand new
-    /// key.
+    /// The weight of generating an update operation when constructing the changeset.
+    pub update_key: f64,
+    /// The weight of generating a deletion operation when constructing the changeset.
+    pub delete_key: f64,
+    /// The weight of generating an insertion operation when constructing the changeset.
     pub new_key: f64,
     /// When generating a value, the probability of generating a value that will spill into the
     /// overflow pages.
@@ -139,9 +140,10 @@ impl WorkloadConfiguration {
 
         Ok(Self {
             read_existing_key: 0.5,
-            delete: 0.0,
-            overflow: 0.0,
             new_key: 1.0,
+            delete_key: 0.0,
+            update_key: 0.0,
+            overflow: 0.0,
             rollback: 0.0,
             commit_crash: 0.0,
             rollback_crash: 0.0,
@@ -170,6 +172,10 @@ impl WorkloadConfiguration {
             page_cache_upper_levels: rng.gen_range(0..=MAX_PAGE_CACHE_UPPER_LEVELS),
             hashtable_buckets,
         })
+    }
+
+    pub fn no_new_keys(&self) -> bool {
+        self.new_key == 0.0
     }
 
     pub fn enable_ensure_snapshot(&mut self) {
