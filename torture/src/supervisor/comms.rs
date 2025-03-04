@@ -160,12 +160,7 @@ pub fn run(stream: UnixStream) -> (RequestResponse, impl Future<Output = anyhow:
         SymmetricalBincode::default(),
     );
 
-    // macOS is way slower for some reason. Workaround by increasing the timeout.
-    let timeout = if cfg!(target_os = "macos") {
-        Duration::from_secs(10)
-    } else {
-        Duration::from_secs(5)
-    };
+    let timeout = Duration::from_secs(20);
 
     let shared = Arc::new(Shared {
         reqno: AtomicU64::new(0),

@@ -41,6 +41,10 @@ struct Biases {
     enospc_on: f64,
     /// The probability of turning off the `ENOSPC` error.
     enospc_off: f64,
+    /// The probability of turning on the latency injector.
+    latency_on: f64,
+    /// The probability of turning off the latency injector.
+    latency_off: f64,
 }
 
 impl Biases {
@@ -78,6 +82,8 @@ impl Biases {
             new_key_distribution,
             enospc_on: 0.1,
             enospc_off: 0.2,
+            latency_on: 0.2,
+            latency_off: 0.3,
         }
     }
 }
@@ -272,6 +278,8 @@ pub struct Workload {
     ensure_snapshot: bool,
     /// Whether the trickfs is currently configured to return `ENOSPC` errors for every write.
     enabled_enospc: bool,
+    /// Whether the trickfs is currently configured to inject latency for every operation.
+    enabled_latency: bool,
     /// Whether to randomly sample the state after every crash or rollback.
     sample_snapshot: bool,
     /// The max number of commits involved in a rollback.
@@ -324,7 +332,7 @@ impl Workload {
         #[cfg(target_os = "linux")]
         let trick_handle = workload_params
             .trickfs
-            .then(|| trickfs::spawn_trick(&workload_dir.path()))
+            .then(|| trickfs::spawn_trick(&workload_dir.path(), seed))
             .transpose()?;
 
         #[cfg(not(target_os = "linux"))]
@@ -347,6 +355,7 @@ impl Workload {
             max_rollback_commits: workload_params.max_rollback_commits,
             scheduled_rollback: None,
             enabled_enospc: false,
+            enabled_latency: false,
         })
     }
 
@@ -413,6 +422,28 @@ impl Workload {
                     info!("setting ENOSPC");
                     self.enabled_enospc = true;
                     self.trick_handle.as_ref().unwrap().set_trigger_enospc(true);
+                }
+            }
+
+            if self.enabled_latency {
+                let should_turn_off = self.state.rng.gen_bool(self.state.biases.latency_off);
+                if should_turn_off {
+                    info!("unsetting latency injector");
+                    self.enabled_latency = false;
+                    self.trick_handle
+                        .as_ref()
+                        .unwrap()
+                        .set_trigger_latency_injector(false);
+                }
+            } else {
+                let should_turn_on = self.state.rng.gen_bool(self.state.biases.latency_on);
+                if should_turn_on {
+                    info!("setting latency injector");
+                    self.enabled_latency = true;
+                    self.trick_handle
+                        .as_ref()
+                        .unwrap()
+                        .set_trigger_latency_injector(true);
                 }
             }
         }
