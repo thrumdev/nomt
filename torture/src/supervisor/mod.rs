@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, WorkloadParams};
+use cli::{Cli, SwarmParams};
 use resource::{ResourceAllocator, ResourceExhaustion};
 use tokio::{
     signal::unix::{signal, SignalKind},
@@ -45,7 +45,7 @@ pub async fn run() -> Result<()> {
     let control_loop_jh = task::spawn(control_loop(
         ct.clone(),
         seed,
-        cli.workload_params,
+        cli.swarm_params,
         cli.flag_limit,
     ));
     match join_interruptable(control_loop_jh, ct).await {
@@ -226,7 +226,7 @@ const NON_DETERMINISM_DISCLAIMER: &str = "torture is a non-deterministic fuzzer.
 async fn control_loop(
     cancel_token: CancellationToken,
     seed: u64,
-    mut workload_params: WorkloadParams,
+    mut swarm_params: SwarmParams,
     flag_num_limit: usize,
 ) -> Result<()> {
     info!("Starting control loop, seed={seed}.\n{NON_DETERMINISM_DISCLAIMER}");
@@ -234,7 +234,7 @@ async fn control_loop(
     let mut workload_cnt = 0;
     let mut running_workloads = JoinSet::new();
 
-    let workdir_path = if let Some(workdir_path) = workload_params.workdir.take() {
+    let workdir_path = if let Some(workdir_path) = swarm_params.workdir.take() {
         if !std::path::Path::new(&workdir_path).exists() {
             anyhow::bail!("The workdir path does not exist");
         }
