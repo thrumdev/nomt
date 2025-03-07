@@ -1,7 +1,8 @@
 use anyhow::Result;
 use imbl::OrdMap;
-use rand::prelude::*;
+use rand::{distributions::WeightedIndex, prelude::*};
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -14,7 +15,6 @@ use tracing::{info, trace, trace_span, Instrument as _};
 use crate::{
     message::{InitOutcome, Key, KeyValueChange, OpenOutcome, ToSupervisor},
     supervisor::{
-        cli::WorkloadParams,
         comms,
         config::WorklaodConfiguration,
         controller::{self, SpawnedAgentController},
@@ -797,17 +797,18 @@ impl Workload {
         // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
         // using a hash set.
         let mut used_keys = std::collections::HashSet::with_capacity(changeset_size);
+        let mut new_keys = std::collections::HashSet::with_capacity(changeset_size);
         loop {
-            let change = self.gen_key_value_change();
-            if used_keys.contains(change.key()) {
-                continue;
-            }
+            let Some(change) = self.gen_key_value_change(&mut used_keys, &mut new_keys) else {
+                //Stop adding things to the changeset if `gen_key_value_change`
+                //cannot crete a new change.
+                break;
+            };
 
             snapshot.state.insert(*change.key(), change.value());
-            used_keys.insert(*change.key());
             changes.push(change);
 
-            if used_keys.len() >= changeset_size {
+            if used_keys.len() + new_keys.len() >= changeset_size {
                 break;
             }
         }
@@ -837,48 +838,83 @@ impl Workload {
         reads
     }
 
-    /// Returns a KeyValueChange with a new key, a deleted or a modified one.
-    fn gen_key_value_change(&mut self) -> KeyValueChange {
-        let mut key = [0; 32];
-        // Generate a Delete KeyValueChange
-        if !self.committed.state.is_empty() && self.rng.gen_bool(self.config.delete) {
+    /// Returns None if there is no KeyValueChange that can be generated,
+    /// otherwise returns a KeyValueChange with a new key, a deleted or a modified one.
+    fn gen_key_value_change(
+        &mut self,
+        used_keys: &mut HashSet<[u8; 32]>,
+        new_keys: &mut HashSet<[u8; 32]>,
+    ) -> Option<KeyValueChange> {
+        let find_new_key = |rng: &mut rand_pcg::Pcg64| {
+            let mut key = [0; 32];
             loop {
-                self.rng.fill_bytes(&mut key);
-                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
-                    return KeyValueChange::Delete(*next_key);
+                rng.fill_bytes(&mut key);
+                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
+                    // This is the greatest key in the state,
+                    // there is no one else to share bits with.
+                    return key;
+                };
+                let common_bytes = rng.sample(self.config.new_key_distribution.clone()) as usize;
+                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
+                if !self.committed.state.contains_key(&key) {
+                    break key;
                 }
             }
-        }
+        };
 
-        // Generate a new key KeyValueChange
-        if self.committed.state.is_empty() {
-            self.rng.fill_bytes(&mut key);
-            return KeyValueChange::Insert(key, self.gen_value());
-        }
-
-        if self.rng.gen_bool(self.config.new_key) {
+        let find_existing_key = |rng: &mut rand_pcg::Pcg64| -> Key {
+            let mut key = [0; 32];
+            rng.fill_bytes(&mut key);
+            // Starting from a random key do a circular linear search looking for an unused key to delete.
             loop {
-                self.rng.fill_bytes(&mut key);
-
-                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
+                let Some((next_key, Some(_))) = self.committed.state.get_next(&key) else {
+                    key.copy_from_slice(&[0; 32]);
                     continue;
                 };
-
-                let common_bytes =
-                    self.rng.sample(self.config.new_key_distribution.clone()) as usize;
-                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
-
-                if !self.committed.state.contains_key(&key) {
-                    return KeyValueChange::Insert(key, self.gen_value());
+                if !used_keys.contains(next_key) {
+                    break *next_key;
                 }
+                key.copy_from_slice(next_key);
+            }
+        };
+
+        // If the committed state is empty or all present keys are used,
+        // and new keys cannot be created, than return None.
+        // Otherwise, if new keys can be created, always fall back into creating new keys.
+        if !self.committed.state.is_empty() || used_keys.len() == self.committed.state.len() {
+            if self.config.new_key == 0.0 {
+                return None;
+            } else {
+                let key = find_new_key(&mut self.rng);
+                new_keys.insert(key.clone());
+                return Some(KeyValueChange::Insert(key, self.gen_value()));
             }
         }
 
-        // Generate an update KeyValueChange
-        loop {
-            self.rng.fill_bytes(&mut key);
-            if let Some((next_key, _)) = self.committed.state.get_next(&key) {
-                return KeyValueChange::Insert(*next_key, self.gen_value());
+        let distr = WeightedIndex::new([
+            self.config.delete_key,
+            self.config.update_key,
+            self.config.new_key,
+        ])
+        .unwrap();
+
+        let change_type = self.rng.sample(distr);
+
+        match change_type {
+            0 => {
+                let key = find_existing_key(&mut self.rng);
+                used_keys.insert(key.clone());
+                Some(KeyValueChange::Delete(key))
+            }
+            1 => {
+                let key = find_existing_key(&mut self.rng);
+                used_keys.insert(key.clone());
+                Some(KeyValueChange::Insert(key, self.gen_value()))
+            }
+            _ => {
+                let key = find_new_key(&mut self.rng);
+                new_keys.insert(key.clone());
+                Some(KeyValueChange::Insert(key, self.gen_value()))
             }
         }
     }
