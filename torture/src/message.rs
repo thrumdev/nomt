@@ -44,6 +44,10 @@ pub struct InitPayload {
     ///
     /// The directory must exist.
     pub workdir: String,
+    /// Whether the workload will be entirely executed on top of trickfs.
+    ///
+    /// If so, another directory called "trickfs" will be added to the workdir.
+    pub trickfs: bool,
 }
 
 /// The parameters for the [`ToAgent::Open`] message.
