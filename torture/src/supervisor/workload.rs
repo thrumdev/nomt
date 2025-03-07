@@ -119,7 +119,9 @@ impl Workload {
 
         #[cfg(target_os = "linux")]
         let trick_handle = if config.trickfs {
-            Some(trickfs::spawn_trick(&workload_dir.path(), seed).unwrap())
+            let trickfs_path = workload_dir.path().join("trickfs");
+            std::fs::create_dir(trickfs_path.clone()).unwrap();
+            Some(trickfs::spawn_trick(&trickfs_path, seed).unwrap())
         } else {
             None
         };
@@ -679,6 +681,7 @@ impl Workload {
             .init(
                 self.workload_dir.path().display().to_string(),
                 self.workload_id,
+                self.trick_handle.is_some(),
             )
             .await?;
         if let InitOutcome::Success = outcome {
@@ -781,8 +784,8 @@ impl Workload {
 
         // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
         // using a hash set.
-        let mut used_keys = std::collections::HashSet::with_capacity(changeset_size);
-        let mut new_keys = std::collections::HashSet::with_capacity(changeset_size);
+        let mut used_keys = HashSet::with_capacity(changeset_size);
+        let mut new_keys = HashSet::with_capacity(changeset_size);
         loop {
             let Some(change) = self.gen_key_value_change(&mut used_keys, &mut new_keys) else {
                 //Stop adding things to the changeset if `gen_key_value_change`
@@ -830,7 +833,7 @@ impl Workload {
         used_keys: &mut HashSet<[u8; 32]>,
         new_keys: &mut HashSet<[u8; 32]>,
     ) -> Option<KeyValueChange> {
-        let find_new_key = |rng: &mut rand_pcg::Pcg64| {
+        let find_new_key = |rng: &mut rand_pcg::Pcg64| -> Key {
             let mut key = [0; 32];
             loop {
                 rng.fill_bytes(&mut key);
@@ -839,10 +842,12 @@ impl Workload {
                     // there is no one else to share bits with.
                     return key;
                 };
+
                 let common_bytes = rng.sample(self.config.new_key_distribution.clone()) as usize;
                 key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
+
                 if !self.committed.state.contains_key(&key) {
-                    break key;
+                    return key;
                 }
             }
         };
@@ -850,7 +855,8 @@ impl Workload {
         let find_existing_key = |rng: &mut rand_pcg::Pcg64| -> Key {
             let mut key = [0; 32];
             rng.fill_bytes(&mut key);
-            // Starting from a random key do a circular linear search looking for an unused key to delete.
+            // Starting from a random key do a circular linear search looking
+            // for an unused key to delete.
             loop {
                 let Some((next_key, Some(_))) = self.committed.state.get_next(&key) else {
                     key.copy_from_slice(&[0; 32]);
