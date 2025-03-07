@@ -18,6 +18,7 @@ futures = "0.3.31"
 tempfile = "3.10"
 rand = "0.8.5"
 rand_pcg = "0.3.1"
+rand_distr = "0.4.3"
 imbl = "3.0.0"
 tokio-serde = { version = "0.9.0", features = ["bincode"] }
 tracing = { version = "0.1.41", features = ["attributes"] }
