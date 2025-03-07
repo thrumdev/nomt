@@ -119,7 +119,9 @@ impl Workload {
 
         #[cfg(target_os = "linux")]
         let trick_handle = if config.trickfs {
-            Some(trickfs::spawn_trick(&workload_dir.path(), seed).unwrap())
+            let trickfs_path = workload_dir.path().join("trickfs");
+            std::fs::create_dir(trickfs_path.clone()).unwrap();
+            Some(trickfs::spawn_trick(&trickfs_path, seed).unwrap())
         } else {
             None
         };
@@ -679,6 +681,7 @@ impl Workload {
             .init(
                 self.workload_dir.path().display().to_string(),
                 self.workload_id,
+                self.trick_handle.is_some(),
             )
             .await?;
         if let InitOutcome::Success = outcome {
@@ -781,8 +784,8 @@ impl Workload {
 
         // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
         // using a hash set.
-        let mut used_keys = std::collections::HashSet::with_capacity(changeset_size);
-        let mut new_keys = std::collections::HashSet::with_capacity(changeset_size);
+        let mut used_keys = HashSet::with_capacity(changeset_size);
+        let mut new_keys = HashSet::with_capacity(changeset_size);
         let mut sum_value_size = 0;
         let mut tot_items = 0;
         loop {

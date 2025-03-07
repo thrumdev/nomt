@@ -217,7 +217,8 @@ async fn crash_task(
 /// Returns an error if the message is not an Init message or if the message is not received
 /// within a certain time limit.
 async fn initialize(stream: &mut Stream) -> Result<PathBuf> {
-    const DEADLINE: Duration = Duration::from_secs(1);
+    // The supervisor can be busy initializing and handling multiple workloads at the same time.
+    const DEADLINE: Duration = Duration::from_secs(3);
     let Envelope { reqno, message } = match timeout(DEADLINE, stream.recv()).await {
         Ok(envelope) => envelope?,
         Err(Elapsed { .. }) => {
@@ -230,7 +231,16 @@ async fn initialize(stream: &mut Stream) -> Result<PathBuf> {
 
     crate::logging::init_agent(&init.id, &init.workdir);
 
-    let workdir = PathBuf::from(&init.workdir);
+    let mut workdir = PathBuf::from(&init.workdir);
+
+    // Add another directory to the workdir if trickfs is specified.
+    //
+    // This allows to mount trickfs on <workdir>/trickfs and keep all the log
+    // and reproducibility data within just <workdir>.
+    if init.trickfs {
+        workdir = workdir.join("trickfs");
+    }
+
     if !workdir.exists() {
         stream
             .send(Envelope {
