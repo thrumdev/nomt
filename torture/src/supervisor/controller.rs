@@ -31,13 +31,19 @@ impl Drop for SpawnedAgentController {
 }
 
 impl SpawnedAgentController {
-    pub async fn init(&mut self, workdir: String, workload_id: u64) -> Result<InitOutcome> {
+    pub async fn init(
+        &mut self,
+        workdir: String,
+        workload_id: u64,
+        trickfs: bool,
+    ) -> Result<InitOutcome> {
         let id = format!("agent-{}-{}", workload_id, self.agent_number);
         let response = self
             .rr
             .send_request(crate::message::ToAgent::Init(crate::message::InitPayload {
                 id,
                 workdir,
+                trickfs,
             }))
             .await?;
         match response {

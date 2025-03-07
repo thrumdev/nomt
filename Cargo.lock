@@ -1837,6 +1837,7 @@ dependencies = [
  "nix",
  "nomt",
  "rand",
+ "rand_distr",
  "rand_pcg",
  "serde",
  "tempfile",
