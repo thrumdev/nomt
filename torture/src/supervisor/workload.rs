@@ -672,7 +672,8 @@ impl Workload {
 
     async fn spawn_new_agent(&mut self) -> anyhow::Result<()> {
         assert!(self.agent.is_none());
-        controller::spawn_agent_into(&mut self.agent).await?;
+        let workload_dir_path = self.workload_dir_path();
+        controller::spawn_agent_into(&mut self.agent, workload_dir_path).await?;
         self.rr = Some(self.agent.as_ref().unwrap().rr().clone());
         let outcome = self
             .agent
