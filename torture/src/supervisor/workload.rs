@@ -3,7 +3,7 @@ use imbl::OrdMap;
 use rand::{distributions::WeightedIndex, prelude::*};
 use std::{
     collections::HashSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -19,11 +19,9 @@ use crate::{
         config::WorkloadConfiguration,
         controller::{self, SpawnedAgentController},
         pbt,
-        resource::ResourceAllocator,
+        resource::{self, AssignedResources, ResourceAllocator, ResourceExhaustion},
     },
 };
-
-use super::resource::ResourceExhaustion;
 
 /// Represents a snapshot of the state of the database.
 #[derive(Clone)]
@@ -38,6 +36,53 @@ impl Snapshot {
         Self {
             sync_seqn: 0,
             state: OrdMap::new(),
+        }
+    }
+}
+
+enum Resources {
+    /// Resource allocator that is used to assign and check resource usage.
+    Allocator(Arc<Mutex<ResourceAllocator>>),
+    /// Resources are already assigned.
+    Assigned(AssignedResources),
+}
+
+impl Resources {
+    fn free(&self, workload_id: u64) {
+        match self {
+            Resources::Allocator(resource_alloc) => {
+                // UNWRAP: The allocator is only used during the creation of the workload or
+                // upon completion or failure to free the allocated data.
+                resource_alloc.lock().unwrap().free(workload_id);
+            }
+            Resources::Assigned(_) => (),
+        }
+    }
+
+    fn is_exceeding_resources(
+        &self,
+        workload_id: u64,
+        workload_dir_path: &Path,
+        process_id: u32,
+    ) -> bool {
+        match self {
+            Resources::Allocator(resource_alloc) => resource_alloc
+                .lock()
+                .unwrap()
+                .is_exceeding_resources(workload_id, workload_dir_path, process_id),
+            Resources::Assigned(AssignedResources { disk, memory }) => {
+                resource::is_exceeding_resources(*disk, *memory, workload_dir_path, process_id)
+            }
+        }
+    }
+
+    fn assigned_resources(&self, workload_id: u64) -> AssignedResources {
+        match self {
+            Resources::Allocator(resource_alloc) => resource_alloc
+                .lock()
+                .unwrap()
+                .assigned_resources(workload_id),
+            Resources::Assigned(assigned_resources) => *assigned_resources,
         }
     }
 }
@@ -90,10 +135,9 @@ pub struct Workload {
     enabled_enospc: bool,
     /// Whether the trickfs is currently configured to inject latency for every operation.
     enabled_latency: bool,
-    /// ResourceAllocator is used to make sure that the workload that is being executed
-    /// does not exceed the assigned disk space and memory and to free the assigned
-    /// resources when it finishes.
-    resource_alloc: Arc<Mutex<ResourceAllocator>>,
+    /// Resources is used to make sure that the workload that is being executed
+    /// does not exceed the assigned disk space and memory.
+    resources: Resources,
 }
 
 /// Contains the information required to apply a rollback.
@@ -115,8 +159,51 @@ impl Workload {
     ) -> Result<Self, ResourceExhaustion> {
         let mut rng = rand_pcg::Pcg64::seed_from_u64(seed);
 
-        let config = WorkloadConfiguration::new(&mut rng, resource_alloc.clone(), workload_id)?;
+        let config = WorkloadConfiguration::new(&mut rng, workload_id, resource_alloc.clone())?;
 
+        Ok(Self::new_inner(
+            rng,
+            seed,
+            workload_dir,
+            workload_id,
+            config,
+            Resources::Allocator(resource_alloc),
+        ))
+    }
+
+    pub fn new_with_resources(
+        seed: u64,
+        workload_dir: TempDir,
+        workload_id: u64,
+        assigned_disk: u64,
+        assigned_memory: u64,
+    ) -> Self {
+        let mut rng = rand_pcg::Pcg64::seed_from_u64(seed);
+
+        let config =
+            WorkloadConfiguration::new_with_resources(&mut rng, assigned_disk, assigned_memory);
+
+        Self::new_inner(
+            rng,
+            seed,
+            workload_dir,
+            workload_id,
+            config,
+            Resources::Assigned(AssignedResources {
+                disk: assigned_disk,
+                memory: assigned_memory,
+            }),
+        )
+    }
+
+    fn new_inner(
+        rng: rand_pcg::Pcg64,
+        seed: u64,
+        workload_dir: TempDir,
+        workload_id: u64,
+        config: WorkloadConfiguration,
+        resources: Resources,
+    ) -> Self {
         #[cfg(target_os = "linux")]
         let trick_handle = if config.trickfs {
             let trickfs_path = workload_dir.path().join("trickfs");
@@ -129,7 +216,7 @@ impl Workload {
         #[cfg(not(target_os = "linux"))]
         let trick_handle = None;
 
-        Ok(Self {
+        Self {
             workload_dir,
             trick_handle,
             agent: None,
@@ -140,11 +227,11 @@ impl Workload {
             scheduled_rollback: None,
             enabled_enospc: false,
             enabled_latency: false,
-            resource_alloc,
+            resources,
             rng,
             committed: Snapshot::empty(),
             config,
-        })
+        }
     }
 
     /// Run the workload.
@@ -167,7 +254,7 @@ impl Workload {
         // Irregardless of the result or if the workload was cancelled, we need to release the
         // resources.
         self.teardown().await;
-        self.resource_alloc.lock().unwrap().free(self.workload_id);
+        self.resources.free(self.workload_id);
         result
     }
 
@@ -177,7 +264,8 @@ impl Workload {
             self.run_iteration()
                 .instrument(trace_span!("iteration", iterno))
                 .await?;
-            if self.resource_alloc.lock().unwrap().is_exceeding_resources(
+
+            if self.resources.is_exceeding_resources(
                 self.workload_id,
                 self.workload_dir.path(),
                 self.agent.as_ref().unwrap().pid().unwrap(),
@@ -770,6 +858,11 @@ impl Workload {
     /// Return the workload directory path.
     pub fn workload_dir_path(&self) -> PathBuf {
         self.workload_dir.path().to_path_buf()
+    }
+
+    /// Return the amount of assigned resources for the workload.
+    pub fn assigned_resources(&self) -> AssignedResources {
+        self.resources.assigned_resources(self.workload_id)
     }
 
     fn gen_commit(&mut self) -> (Snapshot, Vec<Key>, Vec<KeyValueChange>) {
