@@ -116,10 +116,9 @@ pub struct WorkloadConfiguration {
 }
 
 impl WorkloadConfiguration {
-    pub fn new(
+    fn new_inner(
         rng: &mut rand_pcg::Pcg64,
-        resource_alloc: Arc<Mutex<ResourceAllocator>>,
-        workload_id: u64,
+        avail_bytes: impl Fn(bool) -> Result<u64, ResourceExhaustation>,
     ) -> Result<Self, ResourceExhaustation> {
         let swarm_features = swarm::new_features_set(rng);
 
@@ -133,16 +132,7 @@ impl WorkloadConfiguration {
             })
             .is_some();
 
-        let avail_bytes = {
-            let mut allocator = resource_alloc.lock().unwrap();
-            if trickfs {
-                allocator.alloc_memory(workload_id)?;
-                allocator.assigned_memory(workload_id)
-            } else {
-                allocator.alloc(workload_id)?;
-                allocator.assigned_disk(workload_id)
-            }
-        };
+        let avail_bytes = avail_bytes(trickfs)?;
 
         let mut bitbox_seed = [0u8; 16];
         rng.fill_bytes(&mut bitbox_seed);
@@ -211,6 +201,39 @@ impl WorkloadConfiguration {
         }
 
         Ok(config)
+    }
+
+    pub fn new(
+        rng: &mut rand_pcg::Pcg64,
+        workload_id: u64,
+        resource_alloc: Arc<Mutex<ResourceAllocator>>,
+    ) -> Result<Self, ResourceExhaustation> {
+        let avail_bytes = |trickfs: bool| {
+            let mut allocator = resource_alloc.lock().unwrap();
+            if trickfs {
+                allocator.alloc_memory(workload_id)?;
+                Ok(allocator.assigned_resources(workload_id).memory)
+            } else {
+                allocator.alloc(workload_id)?;
+                Ok(allocator.assigned_resources(workload_id).disk)
+            }
+        };
+        Self::new_inner(rng, avail_bytes)
+    }
+
+    pub fn new_with_resources(
+        rng: &mut rand_pcg::Pcg64,
+        assigned_disk: u64,
+        assigned_memory: u64,
+    ) -> Self {
+        let avail_bytes = |trickfs: bool| {
+            if trickfs {
+                Ok(assigned_disk)
+            } else {
+                Ok(assigned_memory)
+            }
+        };
+        Self::new_inner(rng, avail_bytes).unwrap()
     }
 
     pub fn enable_ensure_snapshot(&mut self) {
