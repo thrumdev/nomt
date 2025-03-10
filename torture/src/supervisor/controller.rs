@@ -2,7 +2,10 @@ use crate::message::{InitOutcome, OpenOutcome};
 
 use super::{comms, config::WorkloadConfiguration};
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use tokio::{net::UnixStream, process::Child};
 
 /// A controller is responsible for overseeing a single agent process and handle its lifecycle.
@@ -121,10 +124,13 @@ impl SpawnedAgentController {
 ///
 /// The controller is placed in the `place` argument. `place` must be `None` when calling this
 /// function.
-pub async fn spawn_agent_into(place: &mut Option<SpawnedAgentController>) -> Result<()> {
+pub async fn spawn_agent_into(
+    place: &mut Option<SpawnedAgentController>,
+    output_path: PathBuf,
+) -> Result<()> {
     assert!(place.is_none(), "the controller must be empty");
 
-    let (child, sock) = crate::spawn::spawn_child()?;
+    let (child, sock) = crate::spawn::spawn_child(output_path)?;
 
     let stream = UnixStream::from_std(sock)?;
 
