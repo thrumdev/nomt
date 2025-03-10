@@ -9,8 +9,9 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, SwarmParams};
-use resource::{ResourceAllocator, ResourceExhaustion};
+use cli::{Cli, RunParams, SwarmParams};
+use resource::{AssignedResources, ResourceAllocator, ResourceExhaustion};
+use tempfile::TempDir;
 use tokio::{
     signal::unix::{signal, SignalKind},
     task::{self, JoinHandle, JoinSet},
@@ -36,18 +37,18 @@ mod workload;
 pub async fn run() -> Result<()> {
     logging::init_supervisor();
 
-    let cli = Cli::parse();
-    let seed = cli.seed.unwrap_or_else(rand::random);
-
     // Create a cancellation token and spawn the control loop task passing the token to it and
     // wait until the control loop task finishes or the user interrupts it.
     let ct = CancellationToken::new();
-    let control_loop_jh = task::spawn(control_loop(
-        ct.clone(),
-        seed,
-        cli.swarm_params,
-        cli.flag_limit,
-    ));
+
+    let cli = Cli::parse();
+    let swarm_params = match cli.command {
+        cli::Commands::Swarm(swarm_params) => swarm_params,
+        cli::Commands::Run(run_params) => return run_single_workload(ct, run_params).await,
+    };
+    let seed = rand::random();
+
+    let control_loop_jh = task::spawn(control_loop(ct.clone(), seed, swarm_params));
     match join_interruptable(control_loop_jh, ct).await {
         ExitReason::Finished => {
             exit(0);
@@ -153,6 +154,10 @@ async fn join_interruptable(
 pub struct InvestigationFlag {
     /// Seed used to generate the workload.
     seed: u64,
+    /// Amount of disk, in bytes, that was assigned to the workload.
+    assigned_disk: u64,
+    /// Amount of memory, in bytes, that was assigned to the workload.
+    assigned_memory: u64,
     workload_id: u64,
     /// The directory the agent was working in.
     workdir: PathBuf,
@@ -160,21 +165,14 @@ pub struct InvestigationFlag {
     reason: anyhow::Error,
 }
 
-fn prepare_workload(
-    workdir_path: PathBuf,
-    seed: u64,
-    workload_id: u64,
-    resource_alloc: Arc<Mutex<ResourceAllocator>>,
-) -> Result<Workload, ResourceExhaustion> {
+fn init_workload_dir(workdir_path: PathBuf, workload_id: u64) -> TempDir {
     let mut workload_dir_builder = tempfile::Builder::new();
     workload_dir_builder.prefix("torture-");
     let suffix = format!("-workload-{}", workload_id);
     workload_dir_builder.suffix(&suffix);
-    let workload_dir = workload_dir_builder
+    workload_dir_builder
         .tempdir_in(workdir_path)
-        .expect("Failed to create a temp dir");
-
-    Workload::new(seed, workload_dir, workload_id, resource_alloc.clone())
+        .expect("Failed to create a temp dir")
 }
 
 /// Run the workload until either it either finishes, errors or gets cancelled.
@@ -188,6 +186,7 @@ async fn run_workload(
     mut workload: Workload,
 ) -> Result<Option<InvestigationFlag>> {
     let workload_dir_path = workload.workload_dir_path();
+    let AssignedResources { disk, memory } = workload.assigned_resources();
     let result = workload
         .run(cancel_token)
         .with_subscriber(logging::workload_subscriber(&workload_dir_path))
@@ -198,6 +197,8 @@ async fn run_workload(
         Err(err) => Ok(Some(InvestigationFlag {
             seed,
             workload_id,
+            assigned_disk: disk,
+            assigned_memory: memory,
             // `TempDir::into_path` persists the TempDir to disk.
             workdir: workload.into_workload_dir().into_path(),
             reason: err,
@@ -207,9 +208,12 @@ async fn run_workload(
 
 fn print_flag(flag: &InvestigationFlag) {
     warn!(
-        "Flagged for investigation:\n  seed={seed}\n  workload_id={workload_id}\n  \
-        workdir={workdir}\n  reason={reason}",
+        "Flagged for investigation:\n  seed={seed}\n  assigned_disk={assigned_disk}\n  \
+         assigned_memory={assigned_memory}\n  workload_id={workload_id}\n  workdir={workdir}\n  \
+         reason={reason}",
         seed = flag.seed,
+        assigned_disk = flag.assigned_disk,
+        assigned_memory = flag.assigned_memory,
         workload_id = flag.workload_id,
         workdir = flag.workdir.display(),
         reason = flag.reason,
@@ -227,7 +231,6 @@ async fn control_loop(
     cancel_token: CancellationToken,
     seed: u64,
     mut swarm_params: SwarmParams,
-    flag_num_limit: usize,
 ) -> Result<()> {
     info!("Starting control loop, seed={seed}.\n{NON_DETERMINISM_DISCLAIMER}");
     let mut flags = Vec::new();
@@ -266,19 +269,15 @@ async fn control_loop(
         loop {
             let workload_id = workload_cnt;
             let workload_seed = seed + workload_cnt;
+            let workload_dir = init_workload_dir(workdir_path.clone(), workload_id);
 
-            let res = prepare_workload(
-                workdir_path.clone(),
+            let Ok(workload) = Workload::new(
                 workload_seed,
+                workload_dir,
                 workload_id,
                 resource_alloc.clone(),
-            );
-
-            let workload = match res {
-                Ok(workload) => workload,
-                Err(..) => {
-                    break;
-                }
+            ) else {
+                break;
             };
 
             workload_cnt += 1;
@@ -310,7 +309,7 @@ async fn control_loop(
         if cancel_token.is_cancelled() {
             break;
         }
-        if flags.len() >= flag_num_limit {
+        if flags.len() >= swarm_params.flag_limit {
             info!("Flag limit reached. Exiting.");
             break;
         }
@@ -324,6 +323,36 @@ async fn control_loop(
     }
 
     for flag in flags {
+        print_flag(&flag);
+    }
+    Ok(())
+}
+
+async fn run_single_workload(
+    cancel_token: CancellationToken,
+    mut run_params: RunParams,
+) -> Result<()> {
+    let workdir_path = if let Some(workdir_path) = run_params.workdir.take() {
+        if !std::path::Path::new(&workdir_path).exists() {
+            anyhow::bail!("The workdir path does not exist");
+        }
+        PathBuf::from(&workdir_path)
+    } else {
+        std::env::temp_dir()
+    };
+
+    let workload_dir = init_workload_dir(workdir_path.clone(), 0 /* workload_id */);
+
+    let workload = Workload::new_with_resources(
+        run_params.seed,
+        workload_dir,
+        0, /* workload_id */
+        run_params.assigned_disk,
+        run_params.assigned_memory,
+    );
+
+    let maybe_flag = run_workload(cancel_token.clone(), run_params.seed, 0, workload).await?;
+    if let Some(flag) = maybe_flag {
         print_flag(&flag);
     }
     Ok(())
