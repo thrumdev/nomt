@@ -255,6 +255,8 @@ async fn control_loop(
     let resource_alloc = Arc::new(Mutex::new(ResourceAllocator::new(
         workdir_path.clone(),
         seed,
+        swarm_params.max_disk,
+        swarm_params.max_memory,
     )?));
 
     loop {

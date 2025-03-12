@@ -27,6 +27,16 @@ pub struct SwarmParams {
     /// It will contain all workload folders.
     #[arg(long = "workdir")]
     pub workdir: Option<String>,
+
+    /// The maximum percentage of total disk space that torture will occupy.
+    #[clap(value_parser=clap::value_parser!(u8).range(1..=100))]
+    #[arg(long, default_value_t = 70)]
+    pub max_disk: u8,
+
+    /// The maximum percentage of total memory that torture will occupy.
+    #[clap(value_parser=clap::value_parser!(u8).range(1..=100))]
+    #[arg(long, default_value_t = 70)]
+    pub max_memory: u8,
 }
 
 #[derive(Clone, Debug, Args)]

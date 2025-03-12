@@ -6,14 +6,8 @@ use std::{
 
 use rand::{Rng, SeedableRng};
 
-/// The maximum percentage of total disk space that torture will occupy.
-const MAX_DISK_OCCUPANCY_RATIO: f64 = 0.7;
-
 /// 1GiB is the minimum amount of disk space that can be assigned to a workload.
 const MIN_ASSIGNED_DISK: u64 = 1 * (1 << 30);
-
-/// The maximum percentage of total memory that torture will occupy.
-const MAX_MEMORY_OCCUPANCY_RATIO: f64 = 0.8;
 
 /// 100MiB is the minimum amount of memory that can be assigned to a workload.
 const MIN_ASSIGNED_MEMORY: u64 = 250 * (1 << 20);
@@ -49,17 +43,24 @@ pub struct ResourceAllocator {
 impl ResourceAllocator {
     /// Creates a `ResourceAllocator` given the available disk space at the path of the workdir,
     /// where all workload data will be saved.
-    pub fn new(workdir_path: PathBuf, seed: u64) -> anyhow::Result<Self> {
+    pub fn new(
+        workdir_path: PathBuf,
+        seed: u64,
+        max_disk_occupancy_ratio: u8,
+        max_memory_occupancy_ratio: u8,
+    ) -> anyhow::Result<Self> {
+        let max_disk_occupancy_ratio = max_disk_occupancy_ratio as f64 / 100.0;
+        let max_memory_occupancy_ratio = max_memory_occupancy_ratio as f64 / 100.0;
         let (avail_disk, total_disk) = disk_info(&workdir_path);
         let occupied_disk = total_disk - avail_disk;
-        let max_disk_occupancy = (total_disk as f64 * MAX_DISK_OCCUPANCY_RATIO) as u64;
+        let max_disk_occupancy = (total_disk as f64 * max_disk_occupancy_ratio) as u64;
         let Some(max_disk_avail) = max_disk_occupancy.checked_sub(occupied_disk) else {
             anyhow::bail!("Free disk space is less than what was expected to be occupied at most");
         };
 
         let (avail_memory, total_memory) = mem_info();
         let occupied_memory = total_memory - avail_memory;
-        let max_memory_occupancy = (total_memory as f64 * MAX_MEMORY_OCCUPANCY_RATIO) as u64;
+        let max_memory_occupancy = (total_memory as f64 * max_memory_occupancy_ratio) as u64;
         let Some(max_memory_avail) = max_memory_occupancy.checked_sub(occupied_memory) else {
             anyhow::bail!("Free memory is less than what was expected to be occupied at most");
         };
@@ -82,7 +83,9 @@ impl ResourceAllocator {
             return Err(ResourceExhaustion::Disk);
         }
 
-        let assigned_disk = self.rng.gen_range(MIN_ASSIGNED_DISK..avail_disk);
+        // Force to allocate bigger chunk of memory initially.
+        let min = std::cmp::min(MIN_ASSIGNED_DISK, avail_disk / 2);
+        let assigned_disk = self.rng.gen_range(min..avail_disk);
 
         // Assign memory
         let mut avail_memory = self.max_memory_avail - self.total_assigned_memory;
@@ -178,9 +181,9 @@ impl ResourceAllocator {
 /// During resource allocation the `ResourceAllocator` could return the following errors.
 #[derive(Debug)]
 pub enum ResourceExhaustion {
-    /// `MAX_DISK_OCCUPANCY_RATIO` reached
+    /// max_disk_occupancy_ratio reached
     Disk,
-    /// `MAX_MEMORY_OCCUPANCY_RATIO` reached
+    /// max_memory_occupancy_ratio reached
     Memory,
 }
 
