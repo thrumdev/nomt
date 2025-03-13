@@ -1,16 +1,14 @@
-use std::sync::{Arc, Mutex};
-
-use rand::{distributions::WeightedIndex, Rng, RngCore};
-
 use super::{
     resource::ResourceAllocator,
     swarm::{self, SwarmFeatures},
     ResourceExhaustion,
 };
+use rand::{Rng, RngCore};
+use std::sync::{Arc, Mutex};
 
 /// Percentage of the assigned space to the workload that will be
 /// used by the hash table stored on disk.
-const HASH_TABLE_SIZE_RATIO_DISK: f64 = 0.8;
+const HASH_TABLE_SIZE_RATIO_DISK: f64 = 0.6;
 
 /// Percentage of the assigned space to the workload that will be
 /// used by the hash table stored in memory.
@@ -18,13 +16,10 @@ const HASH_TABLE_SIZE_RATIO_DISK: f64 = 0.8;
 /// This is smaller than `HASH_TABLE_SIZE_RATIO_DISK` becaues it accounts
 /// also for all the other things that need to be stored in memory,
 /// not only the workload directory.
-const HASH_TABLE_SIZE_RATIO_MEM: f64 = 0.5;
+const HASH_TABLE_SIZE_RATIO_MEM: f64 = 0.4;
 
 /// Maximum size of a single commit, combining reads and updates.
 const MAX_COMMIT_SIZE: usize = 200_000;
-
-/// Maximum number of times a workload is repeated
-const MAX_ITERATIONS: usize = 10_000;
 
 /// Maximum number of commit workers supported by nomt.
 const MAX_COMMIT_CONCURRENCY: usize = 64;
@@ -39,6 +34,13 @@ const MAX_IN_MEMORY_CACHE_SIZE: usize = 512;
 
 /// Maximum supported number of page cache upper levels.
 const MAX_PAGE_CACHE_UPPER_LEVELS: usize = 3;
+
+/// Maximum size of a value that fits in a leaf,
+/// after this threshold, overflow values will be used.
+pub const MAX_VALUE_LEN: usize = 1333;
+
+/// Maximum size of an overflow value.
+pub const MAX_OVERFLOW_VALUE_LEN: usize = 32 * 1024;
 
 #[derive(Debug)]
 pub struct WorkloadConfiguration {
@@ -66,6 +68,10 @@ pub struct WorkloadConfiguration {
     pub page_cache_upper_levels: usize,
     /// The average size of a commit, combining reads and updates.
     pub avg_commit_size: usize,
+    /// The average size of a generated value.
+    pub avg_value_len: usize,
+    /// The average size of a generated overflow value.
+    pub avg_overflow_value_len: usize,
     /// Percentage of `avg_commit_size` that will be designated for reads,
     /// the rest will be used by the changeset.
     pub reads: f64,
@@ -86,15 +92,12 @@ pub struct WorkloadConfiguration {
     pub ensure_changeset: bool,
     /// Whether to randomly sample the state after every crash or rollback.
     pub sample_snapshot: bool,
-    /// Distribution used when generating a new key to decide how many bytes needs to be shared
-    /// with an already existing key.
-    pub new_key_distribution: WeightedIndex<usize>,
     /// When executing a commit this is the probability of causing it to crash.
     pub commit_crash: f64,
     /// When executing a workload iteration ,this is the probability of executing a rollback.
     pub rollback: f64,
     /// The max number of commits involved in a rollback.
-    pub max_rollback_commits: u32,
+    pub max_rollback_commits: usize,
     /// When executing a rollback this is the probability of causing it to crash.
     pub rollback_crash: f64,
     /// Whether trickfs will be used or not.
@@ -137,30 +140,6 @@ impl WorkloadConfiguration {
         let mut bitbox_seed = [0u8; 16];
         rng.fill_bytes(&mut bitbox_seed);
 
-        let hashtable_size = if trickfs {
-            (avail_bytes as f64 * HASH_TABLE_SIZE_RATIO_MEM) as u64
-        } else {
-            (avail_bytes as f64 * HASH_TABLE_SIZE_RATIO_DISK) as u64
-        };
-        const PAGE_SIZE: u64 = 4096;
-        let hashtable_buckets = (hashtable_size / PAGE_SIZE) as u32;
-
-        // When generating a new key to be inserted in the database,
-        // this distribution will generate the key.
-        // There is a 25% chance that the key is completely random,
-        // half of the 25% chance that the first byte will be shared with an existing key,
-        // one third of the 25% chance that two bytes will be shared with an existing key,
-        // and so on.
-        //
-        // There are:
-        // + 25% probability of having a key with 0 shared bytes.
-        // + 48% probability of having a key with 1 to 9 shared bytes.
-        // + 27% probability of having a key with more than 10 shared bytes.
-        //
-        // UNWRAP: provided iterator is not empty, no item is lower than zero
-        // and the total sum is greater than one.
-        let new_key_distribution = WeightedIndex::new((1usize..33).map(|x| (32 * 32) / x)).unwrap();
-
         let mut config = Self {
             read_existing_key: 0.0,
             new_key: 0.0,
@@ -184,17 +163,76 @@ impl WorkloadConfiguration {
             warm_up: false,
             preallocate_ht: false,
             prepopulate_page_cache: false,
-            new_key_distribution,
             bitbox_seed,
-            iterations: rng.gen_range(1..=MAX_ITERATIONS),
             avg_commit_size: rng.gen_range(1..=(MAX_COMMIT_SIZE / 2)),
+            avg_value_len: rng.gen_range(1..=(MAX_VALUE_LEN / 2)),
+            avg_overflow_value_len: rng.gen_range(MAX_VALUE_LEN..=(MAX_OVERFLOW_VALUE_LEN / 2)),
             commit_concurrency: rng.gen_range(1..=MAX_COMMIT_CONCURRENCY),
             io_workers: rng.gen_range(1..=MAX_IO_WORKERS),
             page_cache_size: rng.gen_range(1..=MAX_IN_MEMORY_CACHE_SIZE),
             leaf_cache_size: rng.gen_range(1..=MAX_IN_MEMORY_CACHE_SIZE),
             page_cache_upper_levels: rng.gen_range(0..=MAX_PAGE_CACHE_UPPER_LEVELS),
-            hashtable_buckets,
+            // To avoid reaching Bucket Exhaustion, we limit the number of iterations
+            // with the worst case scenario of every iteration adding `avg_commit_size` new keys.
+            hashtable_buckets: 0,
+            iterations: 0,
         };
+
+        // Use only portion of the assigned bytes for the hash table.
+        let hashtable_ratio = if trickfs {
+            HASH_TABLE_SIZE_RATIO_MEM
+        } else {
+            HASH_TABLE_SIZE_RATIO_DISK
+        };
+
+        let hashtable_size = (avail_bytes as f64 * hashtable_ratio) as usize;
+        let hashtable_buckets = (hashtable_size / 4096) as u32;
+        config.hashtable_buckets = hashtable_buckets;
+
+        // Do not use the entire space left by the hashtable
+        // for the beatree and rollbacks, instead, leave some room for estimation error.
+        let bytes_left = (avail_bytes as usize - hashtable_size) as f64 * 0.8;
+
+        // Expected max size occupied by the rollback log.
+        let rollback_avg_value_len = (config.avg_value_len as f64 * (1. - config.overflow))
+            + (config.avg_overflow_value_len as f64 * config.overflow);
+        let rollback_size = config.max_rollback_commits as f64
+            * (config.avg_commit_size as f64 * rollback_avg_value_len);
+
+        let avg_leaf_page_usage = 4096. * (2. / 3.);
+        // Leaves do not store overflow values, just only store the overflow cell,
+        // which can be at most 96 bytes.
+        let avg_value_per_leaf: f64 =
+            ((1. - config.overflow) * config.avg_value_len as f64) + (config.overflow * 96.);
+        // The maximum integer number of leaves that can fit in a leaf.
+        let n_per_leaf: f64 = (avg_leaf_page_usage / (34. + avg_value_per_leaf)).floor();
+
+        // Estimate the number of items that can fit in the space left for leaves and bbns.
+        // Derivated from:
+        // bn_size = ln_size / 100, which is an overestimate of the size containing bbn nodes,
+        // both because we accounted also for pages that contain overflow values
+        // (which are not pointed to by bbns) and 100 is an underestimate of a branch node fanout.
+        // ln_size = (1 - overflow)*((n_items/n_per_leaf) * 4096) + overflow*(n_items * avg_overflow_value_len)
+        // and ln_size + bn_size = bytes_left - rollback_size
+        let bytes_per_item = ((((1. - config.overflow) * avg_leaf_page_usage) / n_per_leaf)
+            + (config.overflow * config.avg_overflow_value_len as f64))
+            * 1.01;
+        let mut n_items = ((bytes_left - rollback_size) / bytes_per_item) as u64;
+
+        // Given a uniform distribution and a usage of the hash table of 80%,
+        // estimate the number of items that can be inserted into the trie before reaching
+        // bucket exhaustion.
+        let max_hashtable_usage = hashtable_size as f64 * 0.80;
+        let max_item_page_tree =
+            64u64.pow((((63. * max_hashtable_usage) / 4096.) + 1.).log(64.).ceil() as u32 - 1);
+
+        // If the number of items that would fit in the beatree is greater
+        // than what could fit in the trie, than reduce them to a portion of max_item_page_tree.
+        if n_items > max_item_page_tree {
+            n_items = (max_item_page_tree as f64 * 0.8) as u64;
+        }
+
+        config.iterations = n_items as usize / config.avg_commit_size;
 
         for swarm_feature in swarm_features {
             config.apply_swarm_feature(rng, swarm_feature);
@@ -238,14 +276,15 @@ impl WorkloadConfiguration {
     ) -> Self {
         let avail_bytes = |trickfs: bool| {
             if trickfs {
-                Ok(assigned_disk)
-            } else {
                 Ok(assigned_memory)
+            } else {
+                Ok(assigned_disk)
             }
         };
         Self::new_inner(rng, avail_bytes).unwrap()
     }
 
+    #[allow(unused)]
     pub fn enable_ensure_snapshot(&mut self) {
         self.ensure_snapshot = true;
     }
