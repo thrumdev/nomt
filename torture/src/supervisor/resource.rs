@@ -6,11 +6,8 @@ use std::{
 
 use rand::{Rng, SeedableRng};
 
-/// 1GiB is the minimum amount of disk space that can be assigned to a workload.
-const MIN_ASSIGNED_DISK: u64 = 1 * (1 << 30);
-
-/// 100MiB is the minimum amount of memory that can be assigned to a workload.
-const MIN_ASSIGNED_MEMORY: u64 = 250 * (1 << 20);
+/// 1GiB is the minimum amount of space that can be assigned to a workload.
+const MIN_ASSIGNED_SPACE: u64 = 1 * (1 << 30);
 
 /// 5GiB is the maximum amount of memory that can be assigned to a workload
 /// which will use both disk and memory.
@@ -79,17 +76,17 @@ impl ResourceAllocator {
     pub fn alloc(&mut self, workload_id: u64) -> Result<(), ResourceExhaustion> {
         // Assign disk space
         let avail_disk = self.max_disk_avail - self.total_assigned_disk;
-        if avail_disk <= MIN_ASSIGNED_DISK {
+        if avail_disk <= MIN_ASSIGNED_SPACE {
             return Err(ResourceExhaustion::Disk);
         }
 
         // Force to allocate bigger chunk of memory initially.
-        let min = std::cmp::min(MIN_ASSIGNED_DISK, avail_disk / 2);
+        let min = std::cmp::min(MIN_ASSIGNED_SPACE, avail_disk / 2);
         let assigned_disk = self.rng.gen_range(min..avail_disk);
 
         // Assign memory
         let mut avail_memory = self.max_memory_avail - self.total_assigned_memory;
-        if avail_memory <= MIN_ASSIGNED_MEMORY {
+        if avail_memory <= MIN_ASSIGNED_SPACE {
             return Err(ResourceExhaustion::Memory);
         }
 
@@ -112,13 +109,14 @@ impl ResourceAllocator {
 
     pub fn alloc_memory(&mut self, workload_id: u64) -> Result<(), ResourceExhaustion> {
         let mut avail_memory = self.max_memory_avail - self.total_assigned_memory;
-        if avail_memory <= MIN_ASSIGNED_MEMORY {
+        if avail_memory <= MIN_ASSIGNED_SPACE {
             return Err(ResourceExhaustion::Memory);
         }
 
         avail_memory = std::cmp::min(avail_memory, MAX_ASSIGNED_ONLY_MEMORY);
-        let assigned_memory = self.rng.gen_range(MIN_ASSIGNED_MEMORY..avail_memory);
+        let assigned_memory = self.rng.gen_range(MIN_ASSIGNED_SPACE..avail_memory);
 
+        self.total_assigned_memory += assigned_memory;
         self.assigned.push((
             workload_id,
             AssignedResources {

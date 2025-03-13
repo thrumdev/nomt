@@ -160,7 +160,7 @@ pub fn run(stream: UnixStream) -> (RequestResponse, impl Future<Output = anyhow:
         SymmetricalBincode::default(),
     );
 
-    let timeout = Duration::from_secs(40);
+    let timeout = Duration::from_secs(60);
 
     let shared = Arc::new(Shared {
         reqno: AtomicU64::new(0),
