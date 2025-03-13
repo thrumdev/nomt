@@ -296,7 +296,7 @@ impl Agent {
         o.page_cache_upper_levels(open_params.page_cache_upper_levels);
         if let Some(n_commits) = open_params.rollback {
             o.rollback(true);
-            o.max_rollback_log_len(n_commits);
+            o.max_rollback_log_len(n_commits as u32);
         } else {
             o.rollback(false);
         }
