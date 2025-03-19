@@ -103,7 +103,7 @@ pub struct PageWalker<H> {
     updated_pages: Vec<UpdatedPage>,
 
     // the stack contains pages (ascending) which are descendants of the parent page, if any.
-    stack: Vec<UpdatedPage>,
+    stack: Vec<(UpdatedPage, u8)>,
 
     // the sibling stack contains the previous node values of siblings on the path to the current
     // position, annotated with their depths.
@@ -163,7 +163,6 @@ impl<H: NodeHasher> PageWalker<H> {
     /// Advance to a given trie position and place the given node at that position.
     ///
     /// It is the responsibility of the user to ensure that:
-    ///   - if this is a leaf node, the leaf data have been written to the two child positions.
     ///   - if this is an internal node, the two child positions hashed together create this node.
     ///   - if this is a terminal node, then nothing exists in the two child positions.
     ///
@@ -296,7 +295,7 @@ impl<H: NodeHasher> PageWalker<H> {
         // build_trie should always return us to the original position.
         if !self.position.is_root() {
             assert_eq!(
-                self.stack.last().unwrap().page_id,
+                self.stack.last().unwrap().0.page_id,
                 self.position.page_id().unwrap()
             );
         } else {
@@ -308,7 +307,8 @@ impl<H: NodeHasher> PageWalker<H> {
     fn up(&mut self) {
         if self.position.depth_in_page() == 1 {
             // UNWRAP: we never move up beyond the root / parent page.
-            let stack_item = self.stack.pop().unwrap();
+            let (stack_item, n_leaves) = self.stack.pop().unwrap();
+            //TODO !("handle n_leaves");
             self.updated_pages.push(stack_item);
         }
         self.position.up(1);
@@ -328,12 +328,17 @@ impl<H: NodeHasher> PageWalker<H> {
                         .unwrap()
                 };
 
-                self.stack.push(UpdatedPage {
-                    page_id: ROOT_PAGE_ID,
-                    page,
-                    diff: PageDiff::default(),
-                    bucket_info,
-                });
+                // TODO: handle page mut thinghy
+                let n_leaves = count_leaves::<H>(&page, self.position.clone());
+                self.stack.push((
+                    UpdatedPage {
+                        page_id: ROOT_PAGE_ID,
+                        page,
+                        diff: PageDiff::default(),
+                        bucket_info,
+                    },
+                    n_leaves,
+                ));
             } else if self.position.depth_in_page() == DEPTH {
                 // UNWRAP: the only legal positions are below the "parent" (root or parent_page)
                 //         and stack always contains all pages to position.
@@ -343,26 +348,34 @@ impl<H: NodeHasher> PageWalker<H> {
                 // UNWRAP: we never overflow the page stack.
                 let child_page_id = parent_page_id.child_page_id(child_page_index).unwrap();
 
-                let stack_item = if fresh {
+                let (stack_item, n_leaves) = if fresh {
                     let (page, bucket_info) = page_set.fresh(&child_page_id);
-                    UpdatedPage {
-                        page_id: child_page_id,
-                        page,
-                        diff: PageDiff::default(),
-                        bucket_info,
-                    }
+                    (
+                        UpdatedPage {
+                            page_id: child_page_id,
+                            page,
+                            diff: PageDiff::default(),
+                            bucket_info,
+                        },
+                        0,
+                    )
                 } else {
                     // UNWRAP: all pages on the path to the node should be in the cache.
                     let (page, bucket_info) = page_set.get(&child_page_id).unwrap();
-                    UpdatedPage {
-                        page_id: child_page_id,
-                        page: page.deep_copy(),
-                        diff: PageDiff::default(),
-                        bucket_info,
-                    }
+                    let n_leaves = count_leaves::<H>(&page, self.position.clone());
+                    dbg!(n_leaves);
+                    (
+                        UpdatedPage {
+                            page_id: child_page_id,
+                            page: page.deep_copy(),
+                            diff: PageDiff::default(),
+                            bucket_info,
+                        },
+                        n_leaves,
+                    )
                 };
 
-                self.stack.push(stack_item);
+                self.stack.push((stack_item, n_leaves));
             }
             self.position.down(bit);
         }
@@ -556,7 +569,8 @@ impl<H: NodeHasher> PageWalker<H> {
 
         self.position = position;
         let Some(page_id) = new_page_id else {
-            for stack_item in self.stack.drain(..) {
+            for (stack_item, n_leaves) in self.stack.drain(..) {
+                // TODO: logic about n_leaves, not put into the updted if below a threashold
                 self.updated_pages.push(stack_item);
             }
             return;
@@ -570,7 +584,7 @@ impl<H: NodeHasher> PageWalker<H> {
         let target = self
             .stack
             .last()
-            .map(|item| item.page_id.clone())
+            .map(|(item, _)| item.page_id.clone())
             .or(self.parent_page.as_ref().map(|p| p.clone()));
 
         let start_len = self.stack.len();
@@ -579,12 +593,17 @@ impl<H: NodeHasher> PageWalker<H> {
         while Some(&cur_ancestor) != target.as_ref() {
             // UNWRAP: all pages on the path to the terminal are present in the page set.
             let (page, bucket_info) = page_set.get(&cur_ancestor).unwrap();
-            self.stack.push(UpdatedPage {
-                page_id: cur_ancestor.clone(),
-                page: page.deep_copy(),
-                diff: PageDiff::default(),
-                bucket_info,
-            });
+            let n_leaves = count_leaves::<H>(&page, self.position.clone());
+            dbg!(n_leaves);
+            self.stack.push((
+                UpdatedPage {
+                    page_id: cur_ancestor.clone(),
+                    page: page.deep_copy(),
+                    diff: PageDiff::default(),
+                    bucket_info,
+                },
+                n_leaves,
+            ));
             push_count += 1;
 
             // stop pushing once we reach the root page.
@@ -598,6 +617,49 @@ impl<H: NodeHasher> PageWalker<H> {
         // make it ascending.
         self.stack[start_len..start_len + push_count].reverse();
     }
+}
+
+// Count the nuber of leaves present in a page.
+fn count_leaves<H: NodeHasher>(page: &Page, mut pos: TriePosition) -> u8 {
+    // A linear scan cannot be done becase the page could contain some gargabe.
+    let mut counter = 0;
+    let initial_depth = pos.depth();
+
+    // into left child
+    pos.down(false);
+
+    loop {
+        let node = page.node(pos.node_index());
+        if trie::is_internal::<H>(&node) && pos.depth_in_page() != DEPTH {
+            println!("is internal, going down: {}", pos.node_index());
+            pos.down(false);
+            continue;
+        }
+
+        if trie::is_leaf::<H>(&node) {
+            println!("is leaf: {}", pos.node_index());
+            counter += 1;
+        } else if pos.depth_in_page() != DEPTH {
+            // if we didn't reach the end of the page, it must be an internal node
+            println!("is terminator: {}", pos.node_index());
+            assert!(trie::is_terminator::<H>(&node));
+        }
+
+        // going up until I reach a leaf sibiling or the node I started from
+        while pos.depth() != initial_depth && pos.peek_last_bit() {
+            println!("going up: {}", pos.node_index());
+            pos.up(1);
+        }
+
+        if pos.depth() == initial_depth {
+            println!("reach initial depth");
+            break;
+        }
+
+        pos.sibling();
+        println!("moved to sibiling: {}", pos.node_index());
+    }
+    counter
 }
 
 #[cfg(test)]
@@ -1280,5 +1342,53 @@ mod tests {
             .collect();
         assert!(!diffs.get(&page_id_1).unwrap().cleared());
         assert!(!diffs.get(&page_id_2).unwrap().cleared());
+    }
+
+    #[test]
+    fn count_leaves() {
+        let root = trie::TERMINATOR;
+        let page_set = MockPageSet::default();
+
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, None);
+        walker.advance_and_replace(
+            &page_set,
+            TriePosition::new(),
+            vec![
+                (key_path![0, 0, 1, 0, 0, 0, 1], val(1)),
+                (key_path![0, 0, 1, 0, 0, 0, 0], val(2)),
+                (key_path![1, 0, 1, 0, 0, 0, 1], val(3)),
+                (key_path![1, 0, 1, 0, 0, 0, 0], val(4)),
+            ],
+        );
+
+        match walker.conclude() {
+            Output::Root(new_root, mut diffs) => {
+                assert_eq!(
+                    new_root,
+                    nomt_core::update::build_trie::<Blake3Hasher>(
+                        0,
+                        vec![
+                            (key_path![0, 0, 1, 0, 0, 0, 1], val(1)),
+                            (key_path![0, 0, 1, 0, 0, 0, 0], val(2)),
+                            (key_path![1, 0, 1, 0, 0, 0, 1], val(3)),
+                            (key_path![1, 0, 1, 0, 0, 0, 0], val(4)),
+                        ],
+                        |_| {}
+                    )
+                );
+                assert_eq!(diffs.len(), 3);
+                for updted_page in diffs.drain(..) {
+                    let UpdatedPage { page_id, page, .. } = updted_page;
+                    let n_leaves =
+                        super::count_leaves::<Blake3Hasher>(&(page.freeze()), TriePosition::new());
+                    if page_id == ROOT_PAGE_ID {
+                        assert_eq!(0, n_leaves);
+                    } else {
+                        assert_eq!(2, n_leaves);
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 }
