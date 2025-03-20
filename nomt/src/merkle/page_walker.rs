@@ -46,7 +46,7 @@
 
 use bitvec::prelude::*;
 use nomt_core::{
-    hasher::{Blake3Hasher, NodeHasher},
+    hasher::NodeHasher,
     page::DEPTH,
     page_id::{ChildPageIndex, PageId, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node, NodeKind, ValueHash, TERMINATOR},
@@ -95,9 +95,8 @@ pub struct UpdatedPage {
 /// Contains not only data related to the page itself but also all
 /// info related to respect the [`PAGE_ELISION_THRESHOLD`].
 struct StackPage {
-    // TODO: to use when we will stop commiting elided pages to disk
-    ///// Wether the page is fresh.
-    //fresh: bool,
+    /// Wether the page is fresh.
+    fresh: bool,
     /// The page this stack item is workin on.
     updated_page: UpdatedPage,
     /// If Some contains a counter of all the leaves present in the two subtrees
@@ -110,8 +109,9 @@ struct StackPage {
 }
 
 impl StackPage {
-    fn new(updated_page: UpdatedPage) -> Self {
+    fn new(updated_page: UpdatedPage, fresh: bool) -> Self {
         Self {
+            fresh,
             elided_childs: ElidedChilds::new(updated_page.page.elided_childs()),
             leaves_counter: Some(0),
             updated_page,
@@ -403,12 +403,15 @@ impl<H: NodeHasher> PageWalker<H> {
                         .unwrap()
                 };
 
-                self.stack.push(StackPage::new(UpdatedPage {
-                    page_id: ROOT_PAGE_ID,
-                    page,
-                    diff: PageDiff::default(),
-                    bucket_info,
-                }));
+                self.stack.push(StackPage::new(
+                    UpdatedPage {
+                        page_id: ROOT_PAGE_ID,
+                        page,
+                        diff: PageDiff::default(),
+                        bucket_info,
+                    },
+                    fresh,
+                ));
             } else if self.position.depth_in_page() == DEPTH {
                 // UNWRAP: the only legal positions are below the "parent" (root or parent_page)
                 //         and stack always contains all pages to position.
@@ -447,7 +450,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     }
                 };
 
-                self.stack.push(StackPage::new(updated_page));
+                self.stack.push(StackPage::new(updated_page, fresh));
             }
             self.position.down(bit);
         }
@@ -676,12 +679,15 @@ impl<H: NodeHasher> PageWalker<H> {
             // Doing it here anyway and just load the page if present, if not it will be
             // created on the fly later when it's time to traverse it.
             if let Some((page, bucket_info)) = page_set.get(&cur_ancestor) {
-                self.stack.push(StackPage::new(UpdatedPage {
-                    page_id: cur_ancestor.clone(),
-                    page: page.deep_copy(),
-                    diff: PageDiff::default(),
-                    bucket_info,
-                }));
+                self.stack.push(StackPage::new(
+                    UpdatedPage {
+                        page_id: cur_ancestor.clone(),
+                        page: page.deep_copy(),
+                        diff: PageDiff::default(),
+                        bucket_info,
+                    },
+                    false, /* fresh */
+                ));
                 push_count += 1;
             }
 
@@ -782,10 +788,15 @@ fn handle_elision_threshold<H: NodeHasher>(
             let child_index = page_id.child_index_at_level(page_id.depth() - 1);
             parent_stack_page.elided_childs.elide(child_index);
 
+            if !stack_page.fresh {
+                // if the page was not fresh fresh to elided the page we need to set it as cleared.
+                // TODO: uncomment this once elided page reconstruction is ready.
+                //stack_page.updated_page.diff.set_cleared();
+            }
+
+            // if the page was fresh to elided the page it just doesn't get pushed to updated_pages
+
             // TODO: remove this push once elided page reconstruction is ready.
-            // TODO: more coplex logic:
-            // if fresh -> do not push it
-            // if prev page existed -> clear the page and push
             metrics.count(crate::metrics::Metric::TotalHashTablePages);
             updated_pages.push(stack_page.updated_page);
             return;
