@@ -9,6 +9,8 @@ pub struct Metrics {
     metrics: Option<Arc<ActiveMetrics>>,
 }
 
+unsafe impl Send for Metrics {}
+
 /// Metrics that can be collected during execution
 #[derive(PartialEq, Eq, Hash)]
 pub enum Metric {
@@ -20,11 +22,18 @@ pub enum Metric {
     PageFetchTime,
     /// Timer used to record average value fetch time during reads
     ValueFetchTime,
+    /// Count every HashTable page created / modified. TODO bettercomment
+    TotalHashTablePages,
+    /// Counter of the number of hash table pages with fewer leaves
+    /// than the page elision threshold. TODO bettercomment
+    ElidedHashTablePages,
 }
 
 struct ActiveMetrics {
     page_requests: AtomicU64,
     page_cache_misses: AtomicU64,
+    elided_hashtable_pages: AtomicU64,
+    total_hashtable_pages: AtomicU64,
     page_fetch_time: Timer,
     value_fetch_time: Timer,
 }
@@ -37,6 +46,8 @@ impl Metrics {
                 Some(Arc::new(ActiveMetrics {
                     page_requests: AtomicU64::new(0),
                     page_cache_misses: AtomicU64::new(0),
+                    elided_hashtable_pages: AtomicU64::new(0),
+                    total_hashtable_pages: AtomicU64::new(0),
                     page_fetch_time: Timer::new(),
                     value_fetch_time: Timer::new(),
                 }))
@@ -54,6 +65,16 @@ impl Metrics {
             let counter = match metric {
                 Metric::PageRequests => &metrics.page_requests,
                 Metric::PageCacheMisses => &metrics.page_cache_misses,
+                Metric::ElidedHashTablePages => &metrics.elided_hashtable_pages,
+                Metric::TotalHashTablePages => {
+                    let counter = &metrics.total_hashtable_pages;
+                    let counter_value = counter.load(Ordering::Relaxed);
+                    if counter_value % 50_000 == 0 {
+                        let elided_counter = metrics.elided_hashtable_pages.load(Ordering::Relaxed);
+                        println!("({counter_value}, {elided_counter}),");
+                    }
+                    counter
+                }
                 _ => panic!("Specified metric is not a Counter"),
             };
 
@@ -80,6 +101,12 @@ impl Metrics {
     pub fn print(&self) {
         if let Some(ref metrics) = self.metrics {
             println!("metrics");
+
+            let elided_hashtable_pages = metrics.elided_hashtable_pages.load(Ordering::Relaxed);
+            println!("  elided pages          {}", elided_hashtable_pages);
+
+            let total_hashtable_pages = metrics.total_hashtable_pages.load(Ordering::Relaxed);
+            println!("  total pages           {}", total_hashtable_pages);
 
             let tot_page_requests = metrics.page_requests.load(Ordering::Relaxed);
             println!("  page requests         {}", tot_page_requests);

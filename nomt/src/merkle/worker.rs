@@ -83,7 +83,10 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
     warm_up_phase(page_io_receiver, seeker, page_set, warmup_rx, finish_rx)
 }
 
-pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> std::io::Result<WorkerOutput> {
+pub(super) fn run_update<H: HashAlgorithm>(
+    params: UpdateParams,
+    metrics: crate::metrics::Metrics,
+) -> std::io::Result<WorkerOutput> {
     let UpdateParams {
         page_cache,
         page_pool,
@@ -113,6 +116,7 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> std::io::Res
         command,
         warm_ups,
         warm_page_set,
+        metrics,
     )
 }
 
@@ -205,6 +209,7 @@ fn update<H: HashAlgorithm>(
     command: UpdateCommand,
     warm_ups: Arc<HashMap<KeyPath, Seek>>,
     warm_page_set: Option<FrozenSharedPageSet>,
+    metrics: crate::metrics::Metrics,
 ) -> std::io::Result<WorkerOutput> {
     let UpdateCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
@@ -213,7 +218,13 @@ fn update<H: HashAlgorithm>(
 
     let mut page_set = PageSet::new(page_pool, warm_page_set);
 
-    let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache);
+    let updater = RangeUpdater::<H>::new(
+        root,
+        shared.clone(),
+        write_pass,
+        &page_cache,
+        metrics.clone(),
+    );
 
     // one lucky thread gets the master write pass.
     match updater.update(&mut seeker, &mut output, &mut page_set, warm_ups)? {
@@ -222,7 +233,7 @@ fn update<H: HashAlgorithm>(
     };
 
     let pending_ops = shared.take_root_pending();
-    let mut root_page_updater = PageWalker::<H>::new(root, None);
+    let mut root_page_updater = PageWalker::<H>::new(root, None, metrics);
 
     // Ensure the root page updater holds the root page. It is possible that this worker did not
     // seek any keys, and therefore the root page would not have been populated yet.
@@ -280,6 +291,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         shared: Arc<UpdateShared>,
         write_pass: WritePass<ShardIndex>,
         page_cache: &PageCache,
+        metrics: crate::metrics::Metrics,
     ) -> Self {
         let region = match write_pass.region() {
             ShardIndex::Root => PageRegion::universe(),
@@ -302,7 +314,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             shared,
             write_pass,
             region,
-            page_walker: PageWalker::<H>::new(root, Some(ROOT_PAGE_ID)),
+            page_walker: PageWalker::<H>::new(root, Some(ROOT_PAGE_ID), metrics),
             range_start,
             range_end,
         }

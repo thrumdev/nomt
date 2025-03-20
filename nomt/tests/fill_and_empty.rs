@@ -110,3 +110,40 @@ fn fill_and_empty_64_commit_worker() {
         std::panic::resume_unwind(cause);
     }
 }
+
+#[test]
+fn fill_32() {
+    let mut rng = rand_pcg::Lcg64Xsh32::from_seed(seed());
+
+    let db_size = 1 << 20;
+    let commit_size = db_size / 16;
+
+    let mut items = std::collections::BTreeSet::new();
+    while items.len() < db_size as usize {
+        items.insert(rand_key(&mut rng));
+    }
+    let mut items: Vec<_> = items.into_iter().collect();
+    items.shuffle(&mut rng);
+
+    let mut t = Test::new_with_params(
+        format!("fill{}", 32), // name
+        16,
+        10_000_000, // hashtable_buckets
+        None,       // panic_on_sync
+        true,       //  cleanup_dir
+    );
+
+    // inserting all the values
+    let mut to_check = vec![];
+    for i in 0..db_size {
+        let key = items[i];
+        let value = vec![i as u8; 400];
+
+        to_check.push((key, value.clone()));
+        t.write(key, Some(value));
+
+        if (i + 1) % commit_size == 0 {
+            t.commit();
+        }
+    }
+}

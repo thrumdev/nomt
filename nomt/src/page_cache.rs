@@ -39,7 +39,7 @@ fn set_node(data: &mut FatPage, index: usize, node: Node) {
 
 /// A mutable page.
 pub struct PageMut {
-    inner: FatPage,
+    pub inner: FatPage,
 }
 
 impl PageMut {
