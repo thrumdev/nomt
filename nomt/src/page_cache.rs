@@ -77,6 +77,19 @@ impl PageMut {
     pub fn set_node(&mut self, index: usize, node: Node) {
         set_node(&mut self.inner, index, node)
     }
+
+    pub fn elided_childs(&self) -> u64 {
+        u64::from_le_bytes(
+            self.inner[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    pub fn set_elided_childs(&mut self, elided_childs: u64) {
+        self.inner[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32]
+            .copy_from_slice(&elided_childs.to_le_bytes());
+    }
 }
 
 impl From<FatPage> for PageMut {

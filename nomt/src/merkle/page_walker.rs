@@ -89,10 +89,59 @@ pub struct UpdatedPage {
     pub diff: PageDiff,
     /// The bucket info associated with the page.
     pub bucket_info: BucketInfo,
+}
+
+/// A page which currenlty stays in the stack of the page walker.
+/// Contains not only data related to the page itself but also all
+/// info related to respect the [`PAGE_ELISION_THRESHOLD`].
+struct StackPage {
+    /// The page this stack item is workin on.
+    updated_page: UpdatedPage,
     /// If Some contains a counter of all the leaves present in the two subtrees
     /// of the page. If the counter exceeds [`PAGE_ELISION_THRESHOLD`], we don't
     /// need to keep it updated, and it becomes None.
-    pub leaves_counter: Option<u64>,
+    leaves_counter: Option<u64>,
+    /// Bitfield used to keep track of which childs pages have been elided.
+    /// None if no child page has been elided.
+    // TODO: this could probably not being an option, dealing with it could make the code
+    // slower than simply storing all the time those 8 bytes into the page.
+    elided_childs: Option<ElidedChilds>,
+}
+
+impl StackPage {
+    fn new(updated_page: UpdatedPage) -> Self {
+        Self {
+            updated_page,
+            leaves_counter: Some(0),
+            elided_childs: None,
+        }
+    }
+}
+
+/// Bitfield used to note which child pages are elided, thus require
+/// on the fly reconstruction.
+pub struct ElidedChilds {
+    elided: u64,
+}
+
+impl ElidedChilds {
+    fn new(elided: u64) -> Self {
+        Self { elided }
+    }
+
+    /// Note a child at `child_index` as elided.
+    ///
+    /// Panics if `child_index` is bigger than [`nomt_core::page_id::MAX_CHILD_INDEX`].
+    fn elide(&mut self, child_index: u8) {
+        self.elided |= 1 << (child_index as u64);
+    }
+
+    /// Checks if the child at `child_index` is elided.
+    ///
+    /// Panics if `child_index` is bigger than [`nomt_core::page_id::MAX_CHILD_INDEX`].
+    fn is_elided(&self, child_index: u8) -> bool {
+        (self.elided >> child_index as u64) & 1 == 1
+    }
 }
 
 /// A set of pages that the page walker draws upon.
@@ -115,7 +164,7 @@ pub struct PageWalker<H> {
     updated_pages: Vec<UpdatedPage>,
 
     // the stack contains pages (ascending) which are descendants of the parent page, if any.
-    stack: Vec<UpdatedPage>,
+    stack: Vec<StackPage>,
 
     // the sibling stack contains the previous node values of siblings on the path to the current
     // position, annotated with their depths.
@@ -309,7 +358,7 @@ impl<H: NodeHasher> PageWalker<H> {
         // build_trie should always return us to the original position.
         if !self.position.is_root() {
             assert_eq!(
-                self.stack.last().unwrap().page_id,
+                self.stack.last().unwrap().updated_page.page_id,
                 self.position.page_id().unwrap()
             );
         } else {
@@ -346,17 +395,16 @@ impl<H: NodeHasher> PageWalker<H> {
                         .unwrap()
                 };
 
-                self.stack.push(UpdatedPage {
+                self.stack.push(StackPage::new(UpdatedPage {
                     page_id: ROOT_PAGE_ID,
                     page,
                     diff: PageDiff::default(),
                     bucket_info,
-                    leaves_counter: Some(0),
-                });
+                }));
             } else if self.position.depth_in_page() == DEPTH {
                 // UNWRAP: the only legal positions are below the "parent" (root or parent_page)
                 //         and stack always contains all pages to position.
-                let parent_page_id = &self.stack.last().unwrap().page_id;
+                let parent_page_id = &self.stack.last().unwrap().updated_page.page_id;
                 let child_page_index = self.position.child_page_index();
 
                 // UNWRAP: we never overflow the page stack.
@@ -369,7 +417,6 @@ impl<H: NodeHasher> PageWalker<H> {
                         page,
                         diff: PageDiff::default(),
                         bucket_info,
-                        leaves_counter: Some(0),
                     }
                 } else {
                     // UNWRAP: all pages on the path to the node should be in the cache.
@@ -379,11 +426,10 @@ impl<H: NodeHasher> PageWalker<H> {
                         page: page.deep_copy(),
                         diff: PageDiff::default(),
                         bucket_info,
-                        leaves_counter: Some(0),
                     }
                 };
 
-                self.stack.push(stack_item);
+                self.stack.push(StackPage::new(stack_item));
             }
             self.position.down(bit);
         }
@@ -517,14 +563,14 @@ impl<H: NodeHasher> PageWalker<H> {
     fn node(&self) -> Node {
         let node_index = self.position.node_index();
         let stack_top = self.stack.last().unwrap();
-        stack_top.page.node(node_index)
+        stack_top.updated_page.page.node(node_index)
     }
 
     // read the sibling node at the current position. panics if no current page.
     fn sibling_node(&self) -> Node {
         let node_index = self.position.sibling_index();
         let stack_top = self.stack.last().unwrap();
-        stack_top.page.node(node_index)
+        stack_top.updated_page.page.node(node_index)
     }
 
     // set a node in the current page at the given index. panics if no current page.
@@ -534,15 +580,15 @@ impl<H: NodeHasher> PageWalker<H> {
 
         // UNWRAP: if a node is being set, then a page in the stack must be present
         let stack_top = self.stack.last_mut().unwrap();
-        stack_top.page.set_node(node_index, node);
+        stack_top.updated_page.page.set_node(node_index, node);
 
         if self.position.is_first_layer_in_page()
             && node == TERMINATOR
             && sibling_node == TERMINATOR
         {
-            stack_top.diff.set_cleared();
+            stack_top.updated_page.diff.set_cleared();
         } else {
-            stack_top.diff.set_changed(node_index);
+            stack_top.updated_page.diff.set_changed(node_index);
         }
     }
 
@@ -550,9 +596,9 @@ impl<H: NodeHasher> PageWalker<H> {
     fn set_sibling(&mut self, node: Node) {
         let node_index = self.position.sibling_index();
         let stack_top = self.stack.last_mut().unwrap();
-        stack_top.page.set_node(node_index, node);
+        stack_top.updated_page.page.set_node(node_index, node);
 
-        stack_top.diff.set_changed(node_index);
+        stack_top.updated_page.diff.set_changed(node_index);
     }
 
     fn assert_page_in_scope(&self, page_id: Option<&PageId>) {
@@ -596,7 +642,7 @@ impl<H: NodeHasher> PageWalker<H> {
         let target = self
             .stack
             .last()
-            .map(|item| item.page_id.clone())
+            .map(|item| item.updated_page.page_id.clone())
             .or(self.parent_page.as_ref().map(|p| p.clone()));
 
         let start_len = self.stack.len();
@@ -605,13 +651,12 @@ impl<H: NodeHasher> PageWalker<H> {
         while Some(&cur_ancestor) != target.as_ref() {
             // UNWRAP: all pages on the path to the terminal are present in the page set.
             let (page, bucket_info) = page_set.get(&cur_ancestor).unwrap();
-            self.stack.push(UpdatedPage {
+            self.stack.push(StackPage::new(UpdatedPage {
                 page_id: cur_ancestor.clone(),
                 page: page.deep_copy(),
                 diff: PageDiff::default(),
                 bucket_info,
-                leaves_counter: Some(0),
-            });
+            }));
             push_count += 1;
 
             // stop pushing once we reach the root page.
@@ -667,47 +712,70 @@ fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
 }
 
 fn handle_elision_threshold<H: NodeHasher>(
-    stack_top: UpdatedPage,
-    stack: &mut Vec<UpdatedPage>,
+    mut stack_page: StackPage,
+    stack: &mut Vec<StackPage>,
     updated_pages: &mut Vec<UpdatedPage>,
     metrics: &mut crate::metrics::Metrics,
 ) {
-    if let Some(leaves_counter) = stack_top.leaves_counter {
-        let n_leaves = count_leaves::<H>(&stack_top.page);
+    if let Some(elided_childs) = stack_page.elided_childs {
+        stack_page
+            .updated_page
+            .page
+            .set_elided_childs(elided_childs.elided);
+    }
+
+    if let Some(leaves_counter) = stack_page.leaves_counter {
+        let n_leaves = count_leaves::<H>(&stack_page.updated_page.page);
 
         if stack.is_empty() {
             // If we pop the last page, even if it has less then the threshold,
             // it does not get elided. This will almost never happen but simplifies a lot the code.
             //println!("Pushind last page in stack");
+
             metrics.count(crate::metrics::Metric::TotalHashTablePages);
-            updated_pages.push(stack_top);
+            updated_pages.push(stack_page.updated_page);
 
             return;
         } else if n_leaves + leaves_counter < PAGE_ELISION_THRESHOLD {
             //println!("page with less than PAGE_ELISION_THRESHOLD");
             metrics.count(crate::metrics::Metric::ElidedHashTablePages);
-            let new_stack_top = stack.last_mut().unwrap();
-            if let Some(ref mut upper_leaves_in_childs) = new_stack_top.leaves_counter {
+            let parent_stack_page = stack.last_mut().unwrap();
+            if let Some(ref mut upper_leaves_in_childs) = parent_stack_page.leaves_counter {
                 *upper_leaves_in_childs += n_leaves + leaves_counter;
             }
 
-            // TODO: bitfield elision logic
+            // Elide current page from parent page.
+            let child_index = *stack_page
+                .updated_page
+                .page_id
+                .length_dependent_encoding()
+                .last()
+                .unwrap();
+            println!("eliding {child_index}");
+            let elided_childs = parent_stack_page
+                .elided_childs
+                .get_or_insert(ElidedChilds::new(0));
+            elided_childs.elide(child_index);
+
             // TODO: remove this push once elided page reconstruction is ready.
+            // TODO: more coplex logic:
+            // if fresh -> do not push it
+            // if prev page existed -> clear the page and push
             metrics.count(crate::metrics::Metric::TotalHashTablePages);
-            updated_pages.push(stack_top);
+            updated_pages.push(stack_page.updated_page);
             return;
         }
     }
 
     if !stack.is_empty() {
         // propagates the exceeded page elision threshold
-        let new_stack_top = stack.last_mut().unwrap();
-        new_stack_top.leaves_counter = None;
+        let parent_page = stack.last_mut().unwrap();
+        parent_page.leaves_counter = None;
     }
 
     //println!("page with more than PAGE_ELISION_THRESHOLD");
     metrics.count(crate::metrics::Metric::TotalHashTablePages);
-    updated_pages.push(stack_top);
+    updated_pages.push(stack_page.updated_page);
 }
 
 #[cfg(test)]
@@ -1396,6 +1464,7 @@ mod tests {
         assert!(!diffs.get(&page_id_2).unwrap().cleared());
     }
 
+    // TODO: this will break when I will stop pushing pages which are elided
     #[test]
     fn count_leaves() {
         let root = trie::TERMINATOR;
@@ -1488,98 +1557,66 @@ mod tests {
         let stack_top = walker.stack.last().unwrap();
         assert_eq!(stack_top.leaves_counter, Some(4));
 
-        match walker.conclude() {
-            Output::Root(_, mut diffs) => {
-                assert_eq!(diffs.len(), 3);
-                for updted_page in diffs.drain(..) {
-                    let UpdatedPage {
-                        page_id,
-                        page,
-                        leaves_counter,
-                        ..
-                    } = updted_page;
-                    if page_id == ROOT_PAGE_ID {
-                        let n_leaves = super::count_leaves::<Blake3Hasher>(&page);
-                        assert_eq!(5, n_leaves + leaves_counter.unwrap());
+        walker.compact_up(Some(TriePosition::new()));
+        let stack_top = walker.stack.last().unwrap();
+        let n_leaves = super::count_leaves::<Blake3Hasher>(&stack_top.updated_page.page);
+        assert_eq!(5, n_leaves + stack_top.leaves_counter.unwrap());
+    }
+
+    #[test]
+    fn elided_pages() {
+        let root = trie::TERMINATOR;
+        let page_set = MockPageSet::default();
+
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, None, Metrics::new(false));
+        walker.advance_and_replace(
+            &page_set,
+            TriePosition::new(),
+            vec![
+                // child page index: 0
+                (key_path![0, 0, 0, 0, 0, 0, 0], val(1)),
+                (key_path![0, 0, 0, 0, 0, 0, 1], val(2)),
+                // child page index: 8
+                (key_path![0, 0, 1, 0, 0, 0, 0], val(3)),
+                (key_path![0, 0, 1, 0, 0, 0, 1], val(4)),
+                // child page index: 16
+                (key_path![0, 1, 0, 0, 0, 0, 0], val(5)),
+                (key_path![0, 1, 0, 0, 0, 0, 1], val(6)),
+                // child page index: 40
+                (key_path![1, 0, 1, 0, 0, 0, 0], val(7)),
+                (key_path![1, 0, 1, 0, 0, 0, 1], val(8)),
+                // child page index: 48
+                (key_path![1, 1, 0, 0, 0, 0, 0], val(9)),
+                (key_path![1, 1, 0, 0, 0, 0, 1], val(10)),
+                // child page index: 63
+                (key_path![1, 1, 1, 1, 1, 1, 0], val(11)),
+                (key_path![1, 1, 1, 1, 1, 1, 1], val(12)),
+            ],
+        );
+
+        let Output::Root(new_root, updates) = walker.conclude() else {
+            panic!();
+        };
+
+        // TODO: this will succed once we stop pushing elided pages
+        //assert_eq!(updates.len(), 1);
+
+        // TODO: here we should expect *only* the root when we will push only updated pages.
+        for updated in updates {
+            if updated.page_id == ROOT_PAGE_ID {
+                let elided_childs = super::ElidedChilds::new(updated.page.elided_childs());
+
+                let expected_elided: std::collections::BTreeSet<u8> =
+                    vec![0, 8, 16, 40, 48, 63].into_iter().collect();
+
+                for i in 0..64 {
+                    if expected_elided.contains(&i) {
+                        assert!(elided_childs.is_elided(i));
+                    } else {
+                        assert!(!elided_childs.is_elided(i));
                     }
                 }
             }
-            _ => unreachable!(),
         }
     }
-
-    //#[test]
-    //fn count_cumulative_leaves_exceed_threshold() {
-    //let root = trie::TERMINATOR;
-    //let mut page_set = MockPageSet::default();
-    //
-    //let mut walker = PageWalker::<Blake3Hasher>::new(root, None, Metrics::new(false));
-    //walker.advance_and_replace(
-    //&page_set,
-    //trie_pos![0, 0, 1, 0],
-    //vec![
-    //(key_path![0, 0, 1, 0, 0, 0, 0, 0, 0], val(1)),
-    //(key_path![0, 0, 1, 0, 0, 0, 0, 0, 1], val(2)),
-    //(key_path![0, 0, 1, 0, 0, 0, 1], val(3)),
-    //(key_path![0, 0, 1, 0, 1], val(4)),
-    //],
-    //);
-    //let stack_top = walker.stack.last().unwrap();
-    //assert_eq!(stack_top.leaves_in_childs, Some(3));
-    //
-    //walker.advance_and_replace(
-    //&page_set,
-    //trie_pos![1, 0, 1, 1,],
-    //vec![
-    //(key_path![1, 0, 1, 1, 0], val(5)),
-    //(key_path![1, 0, 1, 1, 1, 0, 1, 0], val(6)),
-    //(key_path![1, 0, 1, 1, 1, 0, 1, 1, 0], val(7)),
-    //(key_path![1, 0, 1, 1, 1, 0, 1, 1, 1], val(8)),
-    //],
-    //);
-    //let stack_top = walker.stack.last().unwrap();
-    //assert_eq!(stack_top.leaves_in_childs, Some(6));
-    //
-    //let Output::Root(new_root, updates) = walker.conclude() else {
-    //panic!();
-    //};
-    //assert_eq!(updates.len(), 3);
-    //page_set.apply(updates);
-    //let mut walker = PageWalker::<Blake3Hasher>::new(new_root, None, Metrics::new(false));
-    //
-    //walker.advance_and_replace(&page_set, trie_pos![0, 0, 1, 0, 0, 0, 0, 0, 0], vec![]);
-    //walker.advance(trie_pos![1]);
-    //let stack_top = walker.stack.last().unwrap();
-    //assert_eq!(stack_top.leaves_in_childs, Some(2));
-    //
-    //walker.advance_and_replace(&page_set, trie_pos![1, 0, 1, 1, 0], vec![]);
-    //walker.advance(trie_pos![1, 0, 1, 1, 1, 0, 1]);
-    //let stack_top = walker.stack.last().unwrap();
-    //assert_eq!(stack_top.leaves_in_childs, Some(2));
-    //
-    //walker.advance_and_replace(&page_set, trie_pos![1, 0, 1, 1, 1, 0, 1, 0], vec![]);
-    //walker.advance(trie_pos![1, 1]);
-    //let stack_top = walker.stack.last().unwrap();
-    //assert_eq!(stack_top.leaves_in_childs, Some(4));
-    //
-    //match walker.conclude() {
-    //Output::Root(_, mut diffs) => {
-    //assert_eq!(diffs.len(), 3);
-    //for updted_page in diffs.drain(..) {
-    //let UpdatedPage {
-    //page_id,
-    //page,
-    //leaves_in_childs,
-    //..
-    //} = updted_page;
-    //if page_id == ROOT_PAGE_ID {
-    //let n_leaves =
-    //super::count_leaves::<Blake3Hasher>(&page, TriePosition::new(), false);
-    //assert_eq!(5, n_leaves + leaves_in_childs.unwrap());
-    //}
-    //}
-    //}
-    //_ => unreachable!(),
-    //}
-    //}
 }
