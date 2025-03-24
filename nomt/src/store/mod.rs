@@ -57,7 +57,8 @@ impl Store {
         let db_dir_fd;
         let flock;
 
-        if !o.path.exists() {
+        let should_create = !o.path.exists() || is_directory_empty(o.path.as_path())?;
+        if should_create {
             // NB: note TOCTOU here. Deemed acceptable for this case.
             (db_dir_fd, flock) = create(&page_pool, &o)?;
         } else {
@@ -405,4 +406,26 @@ fn create(page_pool: &PagePool, o: &crate::Options) -> anyhow::Result<(File, Flo
     // written to disk.
     db_dir_fd.sync_all()?;
     Ok((db_dir_fd, flock))
+}
+
+fn is_directory_empty(path: &std::path::Path) -> std::io::Result<bool> {
+    let mut entries = std::fs::read_dir(path)?;
+    Ok(entries.next().is_none())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn can_crate_in_empty_dir() {
+        let tempdir = tempfile::tempdir().unwrap();
+
+        let mut options = crate::Options::new();
+        options.path(tempdir.path());
+
+        let page_pool = PagePool::new();
+        let store = Store::open(&options, page_pool.clone()).unwrap();
+        assert!(!store.is_poisoned());
+    }
 }
