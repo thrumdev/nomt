@@ -15,9 +15,9 @@ bitvec = { version = "1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 ruint = { version = "1.12.1", default-features = false }
 arrayvec = { version = "0.7", default-features = false }
-borsh = { version = ">=1.4, <1.5.0", default-features = false, features = ["derive"], optional = true }
+borsh = { version = ">1.4", default-features = false, features = ["derive"], optional = true }
 blake3 = { version = "1.5.1", default-features = false, optional = true }
-sha2 = { version = "0.10.6" , default-features = false, optional = true }
+sha2 = { version = "0.10.6", default-features = false, optional = true }
 
 [dev-dependencies]
 blake3 = "1.5.1"
