@@ -58,6 +58,9 @@ impl Options {
     }
 
     /// Set the path to the directory where the trie is stored.
+    ///
+    /// If the directory does not exist or is empty, a new empty instance of the database will be
+    /// initialized in this directory.
     pub fn path(&mut self, path: impl Into<PathBuf>) {
         self.path = path.into();
     }
