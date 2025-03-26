@@ -415,7 +415,7 @@ fn is_directory_empty(path: &std::path::Path) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{PagePool, Store};
 
     #[test]
     fn can_crate_in_empty_dir() {
