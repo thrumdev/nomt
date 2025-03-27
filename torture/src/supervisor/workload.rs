@@ -1,7 +1,11 @@
 use anyhow::Result;
 use imbl::OrdMap;
 use rand::{distributions::WeightedIndex, prelude::*};
-use std::time::Duration;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tempfile::TempDir;
 use tokio::time::{error::Elapsed, timeout};
 use tokio_util::sync::CancellationToken;
@@ -14,6 +18,7 @@ use crate::{
         comms,
         controller::{self, SpawnedAgentController},
         pbt,
+        resource::ResourceAllocator,
     },
 };
 
@@ -314,6 +319,10 @@ pub struct Workload {
     /// If `Some` there is rollback waiting to be applied,
     /// possibly alongside the delay after which the rollback process should panic.
     scheduled_rollback: Option<(ScheduledRollback, Option<Duration>)>,
+    /// ResourceAllocator is used to make sure that the workload that is being executed
+    /// does not exceed the assigned disk space and memory and to free the assigned
+    /// resources when it finishes.
+    resource_alloc: Arc<Mutex<ResourceAllocator>>,
 }
 
 /// Contains the information required to apply a rollback.
@@ -332,7 +341,15 @@ impl Workload {
         workload_dir: TempDir,
         workload_params: WorkloadParams,
         workload_id: u64,
+        resource_alloc: Arc<Mutex<ResourceAllocator>>,
     ) -> anyhow::Result<Self> {
+        // TODO: make proper use of allocated resources.
+        {
+            let mut allocator = resource_alloc.lock().unwrap();
+            let _ = allocator.alloc(workload_id);
+            let _ = allocator.assigned_disk(workload_id);
+            let _ = allocator.assigned_memory(workload_id);
+        }
         // TODO: Make the workload size configurable and more sophisticated.
         //
         // Right now the workload size is a synonym for the number of iterations. We probably
@@ -383,6 +400,7 @@ impl Workload {
             scheduled_rollback: None,
             enabled_enospc: false,
             enabled_latency: false,
+            resource_alloc,
         })
     }
 
@@ -406,6 +424,7 @@ impl Workload {
         // Irregardless of the result or if the workload was cancelled, we need to release the
         // resources.
         self.teardown().await;
+        self.resource_alloc.lock().unwrap().free(self.workload_id);
         result
     }
 
@@ -415,6 +434,14 @@ impl Workload {
             self.run_iteration()
                 .instrument(trace_span!("iteration", iterno))
                 .await?;
+            if self.resource_alloc.lock().unwrap().is_exceeding_resources(
+                self.workload_id,
+                self.workload_dir.path(),
+                self.agent.as_ref().unwrap().pid().unwrap(),
+            ) {
+                tracing::info!("Maximum assigned resources reached");
+                break;
+            }
         }
         Ok(())
     }
@@ -1006,6 +1033,11 @@ impl Workload {
     /// Return the workload directory.
     pub fn into_workload_dir(self) -> TempDir {
         self.workload_dir
+    }
+
+    /// Return the workload directory path.
+    pub fn workload_dir_path(&self) -> PathBuf {
+        self.workload_dir.path().to_path_buf()
     }
 }
 
