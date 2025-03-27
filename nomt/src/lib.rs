@@ -204,6 +204,10 @@ impl KeyReadWrite {
 
 /// The root of the Merkle Trie.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Root([u8; 32]);
 
 impl Root {
@@ -241,6 +245,18 @@ impl std::fmt::Debug for Root {
         }
         write!(f, ")")?;
         Ok(())
+    }
+}
+
+impl AsRef<[u8]> for Root {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<[u8; 32]> for Root {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
     }
 }
 
