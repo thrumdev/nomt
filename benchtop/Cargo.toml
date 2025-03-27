@@ -29,7 +29,7 @@ libc = "0.2.155"
 sov-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk", optional = true }
 sov-schema-db = { git = "https://github.com/Sovereign-Labs/sovereign-sdk", optional = true }
 sov-prover-storage-manager = { git = "https://github.com/Sovereign-Labs/sovereign-sdk", optional = true }
-jmt = { git = "https://github.com/penumbra-zone/jmt.git", rev = "1d007e11cb68aa5ca13e9a5af4a12e6439d5f7b6", optional = true }
+jmt = { version = "0.11", optional = true }
 
 # sp-trie
 sp-trie = { version = "32.0.0", optional = true }
@@ -48,5 +48,5 @@ nomt = { path = "../nomt" }
 debug = true
 
 [features]
-sov-db=["dep:sov-db", "sov-schema-db", "sov-prover-storage-manager", "jmt" ]
-sp-trie=["dep:sp-trie", "sp-state-machine", "trie-db", "hash-db", "sp-core", "kvdb", "kvdb-rocksdb", "array-bytes" ]
+sov-db = ["dep:sov-db", "sov-schema-db", "sov-prover-storage-manager", "jmt"]
+sp-trie = ["dep:sp-trie", "sp-state-machine", "trie-db", "hash-db", "sp-core", "kvdb", "kvdb-rocksdb", "array-bytes"]
