@@ -27,6 +27,7 @@ mod config;
 mod controller;
 mod pbt;
 mod resource;
+mod swarm;
 mod workload;
 
 /// The entrypoint for the supervisor part of the program.
@@ -276,7 +277,6 @@ async fn control_loop(
             let workload = match res {
                 Ok(workload) => workload,
                 Err(..) => {
-                    tracing::info!("ResourceExhaustion reached");
                     break;
                 }
             };
@@ -317,7 +317,11 @@ async fn control_loop(
     }
 
     // Wait for active workloads to be cancelled properly.
-    running_workloads.join_all().await;
+    for workload_result in running_workloads.join_all().await {
+        if let Some(flag) = workload_result? {
+            flags.push(flag);
+        }
+    }
 
     for flag in flags {
         print_flag(&flag);

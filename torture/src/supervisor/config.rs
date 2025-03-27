@@ -2,11 +2,23 @@ use std::sync::{Arc, Mutex};
 
 use rand::{distributions::WeightedIndex, Rng, RngCore};
 
-use super::resource::{ResourceAllocator, ResourceExhaustion};
+use super::{
+    resource::ResourceAllocator,
+    swarm::{self, SwarmFeatures},
+    ResourceExhaustion,
+};
 
 /// Percentage of the assigned space to the workload that will be
-/// used by the hash table.
-const HASH_TABLE_SIZE_RATIO: f64 = 0.8;
+/// used by the hash table stored on disk.
+const HASH_TABLE_SIZE_RATIO_DISK: f64 = 0.8;
+
+/// Percentage of the assigned space to the workload that will be
+/// used by the hash table stored in memory.
+///
+/// This is smaller than `HASH_TABLE_SIZE_RATIO_DISK` becaues it accounts
+/// also for all the other things that need to be stored in memory,
+/// not only the workload directory.
+const HASH_TABLE_SIZE_RATIO_MEM: f64 = 0.5;
 
 /// Maximum size of a single commit, combining reads and updates.
 const MAX_COMMIT_SIZE: usize = 200_000;
@@ -109,16 +121,37 @@ impl WorkloadConfiguration {
         resource_alloc: Arc<Mutex<ResourceAllocator>>,
         workload_id: u64,
     ) -> Result<Self, ResourceExhaustion> {
-        let assigned_disk = {
+        let swarm_features = swarm::new_features_set(rng);
+
+        let trickfs = swarm_features
+            .iter()
+            .find(|feature| {
+                matches!(
+                    feature,
+                    SwarmFeatures::TrickfsENOSPC | SwarmFeatures::TrickfsLatencyInjection
+                )
+            })
+            .is_some();
+
+        let avail_bytes = {
             let mut allocator = resource_alloc.lock().unwrap();
-            allocator.alloc(workload_id)?;
-            allocator.assigned_disk(workload_id)
+            if trickfs {
+                allocator.alloc_memory(workload_id)?;
+                allocator.assigned_memory(workload_id)
+            } else {
+                allocator.alloc(workload_id)?;
+                allocator.assigned_disk(workload_id)
+            }
         };
 
         let mut bitbox_seed = [0u8; 16];
         rng.fill_bytes(&mut bitbox_seed);
 
-        let hashtable_size = (assigned_disk as f64 * HASH_TABLE_SIZE_RATIO) as u64;
+        let hashtable_size = if trickfs {
+            (avail_bytes as f64 * HASH_TABLE_SIZE_RATIO_MEM) as u64
+        } else {
+            (avail_bytes as f64 * HASH_TABLE_SIZE_RATIO_DISK) as u64
+        };
         const PAGE_SIZE: u64 = 4096;
         let hashtable_buckets = (hashtable_size / PAGE_SIZE) as u32;
 
@@ -138,31 +171,31 @@ impl WorkloadConfiguration {
         // and the total sum is greater than one.
         let new_key_distribution = WeightedIndex::new((1usize..33).map(|x| (32 * 32) / x)).unwrap();
 
-        Ok(Self {
-            read_existing_key: 0.5,
-            new_key: 1.0,
+        let mut config = Self {
+            read_existing_key: 0.0,
+            new_key: 0.0,
             delete_key: 0.0,
             update_key: 0.0,
             overflow: 0.0,
             rollback: 0.0,
             commit_crash: 0.0,
             rollback_crash: 0.0,
-            new_key_distribution,
-            trickfs: false,
+            trickfs,
             enospc_on: 0.0,
             enospc_off: 0.0,
             latency_on: 0.0,
             latency_off: 0.0,
-            bitbox_seed,
             ensure_changeset: false,
             ensure_snapshot: false,
             sample_snapshot: false,
             max_rollback_commits: 0,
-            reads: 0.1,
+            reads: 0.0,
             read_concurrency: 1,
             warm_up: false,
-            preallocate_ht: true,
+            preallocate_ht: false,
             prepopulate_page_cache: false,
+            new_key_distribution,
+            bitbox_seed,
             iterations: rng.gen_range(1..=MAX_ITERATIONS),
             avg_commit_size: rng.gen_range(1..=(MAX_COMMIT_SIZE / 2)),
             commit_concurrency: rng.gen_range(1..=MAX_COMMIT_CONCURRENCY),
@@ -171,7 +204,13 @@ impl WorkloadConfiguration {
             leaf_cache_size: rng.gen_range(1..=MAX_IN_MEMORY_CACHE_SIZE),
             page_cache_upper_levels: rng.gen_range(0..=MAX_PAGE_CACHE_UPPER_LEVELS),
             hashtable_buckets,
-        })
+        };
+
+        for swarm_feature in swarm_features {
+            config.apply_swarm_feature(rng, swarm_feature);
+        }
+
+        Ok(config)
     }
 
     pub fn is_rollback_enable(&self) -> bool {
@@ -188,5 +227,40 @@ impl WorkloadConfiguration {
 
     pub fn should_ensure_snapshot(&mut self) -> bool {
         self.ensure_snapshot
+    }
+
+    pub fn apply_swarm_feature(&mut self, rng: &mut rand_pcg::Pcg64, feature: SwarmFeatures) {
+        match feature {
+            SwarmFeatures::TrickfsENOSPC => {
+                self.enospc_on = rng.gen_range(0.01..=1.00);
+                self.enospc_off = rng.gen_range(0.01..=1.00);
+            }
+            SwarmFeatures::TrickfsLatencyInjection => {
+                self.latency_on = rng.gen_range(0.01..=1.00);
+                self.latency_off = rng.gen_range(0.01..=1.00);
+            }
+            SwarmFeatures::EnsureChangeset => self.ensure_changeset = true,
+            SwarmFeatures::SampleSnapshot => self.sample_snapshot = true,
+            SwarmFeatures::WarmUp => self.warm_up = true,
+            SwarmFeatures::PreallocateHt => self.preallocate_ht = true,
+            SwarmFeatures::Read => {
+                self.reads = rng.gen_range(0.01..1.00);
+                self.read_concurrency = rng.gen_range(1..=64);
+                self.read_existing_key = rng.gen_range(0.01..1.00);
+            }
+            SwarmFeatures::Rollback => {
+                self.rollback = rng.gen_range(0.01..1.00);
+                // During scheduling of rollbacks the lower bound is 1
+                // thus max must be at least 2 to avoid creating an empty range.
+                self.max_rollback_commits = rng.gen_range(2..100);
+            }
+            SwarmFeatures::RollbackCrash => self.rollback_crash = rng.gen_range(0.01..1.00),
+            SwarmFeatures::CommitCrash => self.commit_crash = rng.gen_range(0.01..1.00),
+            SwarmFeatures::PrepopulatePageCache => self.prepopulate_page_cache = true,
+            SwarmFeatures::NewKeys => self.new_key = rng.gen_range(0.01..=1.00),
+            SwarmFeatures::DeleteKeys => self.delete_key = rng.gen_range(0.01..=1.00),
+            SwarmFeatures::UpdateKeys => self.update_key = rng.gen_range(0.01..=1.00),
+            SwarmFeatures::OverflowValues => self.overflow = rng.gen_range(0.01..=1.00),
+        }
     }
 }
