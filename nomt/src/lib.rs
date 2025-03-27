@@ -248,6 +248,18 @@ impl std::fmt::Debug for Root {
     }
 }
 
+impl AsRef<[u8]> for Root {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<[u8; 32]> for Root {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+}
+
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt<T: HashAlgorithm> {
     merkle_update_pool: UpdatePool,
