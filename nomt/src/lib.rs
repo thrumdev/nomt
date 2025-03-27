@@ -204,6 +204,10 @@ impl KeyReadWrite {
 
 /// The root of the Merkle Trie.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Root([u8; 32]);
 
 impl Root {
