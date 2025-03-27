@@ -16,7 +16,7 @@ use crate::{
     message::{InitOutcome, Key, KeyValueChange, OpenOutcome, ToSupervisor, MAX_ENVELOPE_SIZE},
     supervisor::{
         comms,
-        config::WorkloadConfiguration,
+        config::{WorkloadConfiguration, MAX_VALUE_LEN},
         controller::{self, SpawnedAgentController},
         pbt,
         resource::{self, AssignedResources, ResourceAllocator, ResourceExhaustion},
@@ -943,19 +943,6 @@ impl Workload {
             let mut key = [0; 32];
             loop {
                 rng.fill_bytes(&mut key);
-                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
-                    // This is the greatest key in the state,
-                    // there is no one else to share bits with.
-                    if new_keys.insert(key.clone()) {
-                        return key;
-                    } else {
-                        continue;
-                    }
-                };
-
-                let common_bytes = rng.sample(self.config.new_key_distribution.clone()) as usize;
-                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
-
                 if !self.committed.state.contains_key(&key) && new_keys.insert(key.clone()) {
                     return key;
                 }
@@ -1020,9 +1007,10 @@ impl Workload {
         // MAX_LEAF_VALUE_SIZE is 1332,
         // thus every value size bigger than this will create an overflow value.
         let len = if self.rng.gen_bool(self.config.overflow) {
-            self.rng.gen_range(1333..32 * 1024)
+            self.rng
+                .gen_range(MAX_VALUE_LEN..(self.config.avg_overflow_value_len) * 2)
         } else {
-            self.rng.gen_range(1..1333)
+            self.rng.gen_range(1..(self.config.avg_value_len) * 2)
         };
         let mut value = vec![0; len];
         self.rng.fill_bytes(&mut value);

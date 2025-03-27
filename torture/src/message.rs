@@ -59,7 +59,7 @@ pub struct OpenPayload {
     pub bitbox_seed: [u8; 16],
     /// Whether the agent is supposed to handle rollbacks.
     /// If `Some`, the maximum number of supported blocks in a single rollback is specified.
-    pub rollback: Option<u32>,
+    pub rollback: Option<usize>,
     /// The number of commit workers.
     pub commit_concurrency: usize,
     /// The number of io_uring instances.
