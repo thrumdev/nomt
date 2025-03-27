@@ -1,6 +1,6 @@
 use anyhow::Result;
 use imbl::OrdMap;
-use rand::{distributions::WeightedIndex, prelude::*};
+use rand::prelude::*;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -16,86 +16,14 @@ use crate::{
     supervisor::{
         cli::WorkloadParams,
         comms,
+        config::WorkloadConfiguration,
         controller::{self, SpawnedAgentController},
         pbt,
         resource::ResourceAllocator,
     },
 };
 
-/// Biases is configuration for the workload generator. Its values are used to bias the probability
-/// of certain events happening.
-#[derive(Clone)]
-struct Biases {
-    /// The probability of reading an already existing key.
-    read_existing_key: f64,
-    /// The probability of a delete operation as opposed to an insert operation.
-    delete: f64,
-    /// When generating a value, the probability of generating a value that will spill into the
-    /// overflow pages.
-    overflow: f64,
-    /// When generating a key, whether it should be one that was appeared somewhere or a brand new
-    /// key.
-    new_key: f64,
-    /// Distribution used when generating a new key to decide how many bytes needs to be shared
-    /// with an already existing key.
-    new_key_distribution: WeightedIndex<usize>,
-    /// When executing a workload iteration ,this is the probability of executing a rollback.
-    rollback: f64,
-    /// When executing a commit this is the probability of causing it to crash.
-    commit_crash: f64,
-    /// When executing a rollback this is the probability of causing it to crash.
-    rollback_crash: f64,
-    /// The probability of turning on the `ENOSPC` error.
-    enospc_on: f64,
-    /// The probability of turning off the `ENOSPC` error.
-    enospc_off: f64,
-    /// The probability of turning on the latency injector.
-    latency_on: f64,
-    /// The probability of turning off the latency injector.
-    latency_off: f64,
-}
-
-impl Biases {
-    fn new(
-        delete: u8,
-        overflow: u8,
-        new_key: u8,
-        rollback: u8,
-        commit_crash: u8,
-        rollback_crash: u8,
-    ) -> Self {
-        // When generating a new key to be inserted in the database,
-        // this distribution will generate the key.
-        // There is a 25% chance that the key is completely random,
-        // half of the 25% chance that the first byte will be shared with an existing key,
-        // one third of the 25% chance that two bytes will be shared with an existing key,
-        // and so on.
-        //
-        // There are:
-        // + 25% probability of having a key with 0 shared bytes.
-        // + 48% probability of having a key with 1 to 9 shared bytes.
-        // + 27% probability of having a key with more than 10 shared bytes.
-        //
-        // UNWRAP: provided iterator is not empty, no item is lower than zero
-        // and the total sum is greater than one.
-        let new_key_distribution = WeightedIndex::new((1usize..33).map(|x| (32 * 32) / x)).unwrap();
-
-        Self {
-            read_existing_key: 0.8,
-            delete: (delete as f64) / 100.0,
-            overflow: (overflow as f64) / 100.0,
-            new_key: (new_key as f64) / 100.0,
-            rollback: (rollback as f64) / 100.0,
-            commit_crash: (commit_crash as f64) / 100.0,
-            rollback_crash: (rollback_crash as f64) / 100.0,
-            new_key_distribution,
-            enospc_on: 0.1,
-            enospc_off: 0.2,
-            latency_on: 0.2,
-            latency_off: 0.3,
-        }
-    }
-}
+use super::resource::ResourceExhaustion;
 
 /// Represents a snapshot of the state of the database.
 #[derive(Clone)]
@@ -114,162 +42,6 @@ impl Snapshot {
     }
 }
 
-struct WorkloadState {
-    rng: rand_pcg::Pcg64,
-    biases: Biases,
-    /// The number of items that each commit will contain in its changeset.
-    size: usize,
-    /// If true, the size of each commit will be within 0 and self.size,
-    /// otherwise it will always be workload-size.
-    random_size: bool,
-    /// All committed key values.
-    committed: Snapshot,
-}
-
-impl WorkloadState {
-    fn new(seed: u64, biases: Biases, size: usize, random_size: bool) -> Self {
-        Self {
-            rng: rand_pcg::Pcg64::seed_from_u64(seed),
-            biases,
-            size,
-            random_size,
-            committed: Snapshot::empty(),
-        }
-    }
-
-    fn gen_bitbox_seed(&mut self) -> [u8; 16] {
-        let mut bitbox_seed = [0u8; 16];
-        self.rng.fill_bytes(&mut bitbox_seed);
-        bitbox_seed
-    }
-
-    fn gen_commit(&mut self) -> (Snapshot, Vec<Key>, Vec<KeyValueChange>) {
-        let mut snapshot = self.committed.clone();
-        snapshot.sync_seqn += 1;
-
-        let size = if self.random_size {
-            self.rng.gen_range(0..self.size)
-        } else {
-            self.size
-        };
-        let mut changes = Vec::with_capacity(size);
-        let reads = self.gen_reads(size);
-
-        // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
-        // using a hash set.
-        let mut used_keys = std::collections::HashSet::with_capacity(size);
-        loop {
-            let change = self.gen_key_value_change();
-            if used_keys.contains(change.key()) {
-                continue;
-            }
-
-            snapshot.state.insert(*change.key(), change.value());
-            used_keys.insert(*change.key());
-            changes.push(change);
-
-            if used_keys.len() >= size {
-                break;
-            }
-        }
-
-        changes.sort_by(|a, b| a.key().cmp(&b.key()));
-
-        (snapshot, reads, changes)
-    }
-
-    fn gen_reads(&mut self, size: usize) -> Vec<Key> {
-        let mut reads = vec![];
-        let mut key = [0; 32];
-
-        // `threshold` after which we stop trying to read existing keys
-        // because there is a high chance that all have already been read.
-        let threshold = self.committed.state.len();
-        let mut known_keys = 0;
-        while reads.len() < size {
-            self.rng.fill_bytes(&mut key);
-            if known_keys < threshold && self.rng.gen_bool(self.biases.read_existing_key) {
-                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
-                    known_keys += 1;
-                    key.copy_from_slice(next_key);
-                }
-            }
-            reads.push(key.clone());
-        }
-
-        reads
-    }
-
-    /// Returns a KeyValueChange with a new key, a deleted or a modified one.
-    fn gen_key_value_change(&mut self) -> KeyValueChange {
-        let mut key = [0; 32];
-        // Generate a Delete KeyValueChange
-        if !self.committed.state.is_empty() && self.rng.gen_bool(self.biases.delete) {
-            loop {
-                self.rng.fill_bytes(&mut key);
-                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
-                    return KeyValueChange::Delete(*next_key);
-                }
-            }
-        }
-
-        // Generate a new key KeyValueChange
-        if self.committed.state.is_empty() {
-            self.rng.fill_bytes(&mut key);
-            return KeyValueChange::Insert(key, self.gen_value());
-        }
-
-        if self.rng.gen_bool(self.biases.new_key) {
-            loop {
-                self.rng.fill_bytes(&mut key);
-
-                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
-                    continue;
-                };
-
-                let common_bytes =
-                    self.rng.sample(self.biases.new_key_distribution.clone()) as usize;
-                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
-
-                if !self.committed.state.contains_key(&key) {
-                    return KeyValueChange::Insert(key, self.gen_value());
-                }
-            }
-        }
-
-        // Generate an update KeyValueChange
-        loop {
-            self.rng.fill_bytes(&mut key);
-            if let Some((next_key, _)) = self.committed.state.get_next(&key) {
-                return KeyValueChange::Insert(*next_key, self.gen_value());
-            }
-        }
-    }
-
-    fn gen_value(&mut self) -> Vec<u8> {
-        // MAX_LEAF_VALUE_SIZE is 1332,
-        // thus every value size bigger than this will create an overflow value.
-        let len = if self.rng.gen_bool(self.biases.overflow) {
-            self.rng.gen_range(1333..32 * 1024)
-        } else {
-            self.rng.gen_range(1..1333)
-        };
-        let mut value = vec![0; len];
-        self.rng.fill_bytes(&mut value);
-        value
-    }
-
-    fn rollback(&mut self, snapshot: Snapshot) {
-        // The application of a rollback counts as increased sync_seq.
-        self.committed.sync_seqn += 1;
-        self.committed.state = snapshot.state;
-    }
-
-    fn commit(&mut self, snapshot: Snapshot) {
-        self.committed = snapshot;
-    }
-}
-
 /// This is a struct that controls workload execution.
 ///
 /// A workload is a set of tasks that the agents should perform. We say agents, plural, because
@@ -277,6 +49,8 @@ impl WorkloadState {
 /// arises from the fact that as part of the workload we need to crash the agent to check how
 /// it behaves.
 pub struct Workload {
+    /// Source of randomness for the workload.
+    rng: rand_pcg::Pcg64,
     /// Directory used by this workload.
     workload_dir: TempDir,
     /// The handle to the trickfs FUSE FS.
@@ -293,32 +67,29 @@ pub struct Workload {
     ///
     /// This must be the same agent as the one in `self.agent`.
     rr: Option<comms::RequestResponse>,
-    /// How many iterations the workload should perform.
-    iterations: usize,
-    /// The current state of the workload.
-    state: WorkloadState,
     /// The identifier of the workload. Useful for debugging.
     workload_id: u64,
-    /// The seed for bitbox generated for this workload.
-    bitbox_seed: [u8; 16],
-    /// Data collected to evaluate the average commit time.
+    /// Configuration used to determine how the nomt instance should be opened,
+    /// how the workload should be formed, which checks should be performed and
+    /// which type of crash should be exercised.
+    config: WorkloadConfiguration,
+    /// Total time spent by commits.
+    ///
+    /// Used to evaluate the average commit time.
     tot_commit_time: Duration,
+    /// Number of successful commits.
+    ///
+    /// Used to evaluate the average commit time.
     n_successfull_commit: u64,
-    /// Whether to ensure the correct application of the changeset after every commit.
-    ensure_changeset: bool,
-    /// Whether to ensure the correctness of the entire state after every crash or rollback.
-    ensure_snapshot: bool,
+    /// If `Some` there is rollback waiting to be applied,
+    /// possibly alongside the delay after which the rollback process should panic.
+    scheduled_rollback: Option<(ScheduledRollback, Option<Duration>)>,
+    /// All committed key values.
+    committed: Snapshot,
     /// Whether the trickfs is currently configured to return `ENOSPC` errors for every write.
     enabled_enospc: bool,
     /// Whether the trickfs is currently configured to inject latency for every operation.
     enabled_latency: bool,
-    /// Whether to randomly sample the state after every crash or rollback.
-    sample_snapshot: bool,
-    /// The max number of commits involved in a rollback.
-    max_rollback_commits: u32,
-    /// If `Some` there is rollback waiting to be applied,
-    /// possibly alongside the delay after which the rollback process should panic.
-    scheduled_rollback: Option<(ScheduledRollback, Option<Duration>)>,
     /// ResourceAllocator is used to make sure that the workload that is being executed
     /// does not exceed the assigned disk space and memory and to free the assigned
     /// resources when it finishes.
@@ -339,45 +110,19 @@ impl Workload {
     pub fn new(
         seed: u64,
         workload_dir: TempDir,
-        workload_params: WorkloadParams,
         workload_id: u64,
         resource_alloc: Arc<Mutex<ResourceAllocator>>,
-    ) -> anyhow::Result<Self> {
-        // TODO: make proper use of allocated resources.
-        {
-            let mut allocator = resource_alloc.lock().unwrap();
-            let _ = allocator.alloc(workload_id);
-            let _ = allocator.assigned_disk(workload_id);
-            let _ = allocator.assigned_memory(workload_id);
-        }
-        // TODO: Make the workload size configurable and more sophisticated.
-        //
-        // Right now the workload size is a synonym for the number of iterations. We probably
-        // want to make it more about the number of keys inserted. Potentially, we might consider
-        // testing the "edging" scenario where the supervisor tries to stay below the maximum
-        // number of items in the database occasionally going over the limit expecting proper
-        // handling of the situation.
-        let workload_biases = Biases::new(
-            workload_params.delete,
-            workload_params.overflow,
-            workload_params.new_key,
-            workload_params.rollback,
-            workload_params.commit_crash,
-            workload_params.rollback_crash,
-        );
-        let mut state = WorkloadState::new(
-            seed,
-            workload_biases,
-            workload_params.size,
-            workload_params.random_size,
-        );
-        let bitbox_seed = state.gen_bitbox_seed();
+    ) -> Result<Self, ResourceExhaustion> {
+        let mut rng = rand_pcg::Pcg64::seed_from_u64(seed);
+
+        let config = WorkloadConfiguration::new(&mut rng, resource_alloc.clone(), workload_id)?;
 
         #[cfg(target_os = "linux")]
-        let trick_handle = workload_params
-            .trickfs
-            .then(|| trickfs::spawn_trick(&workload_dir.path(), seed))
-            .transpose()?;
+        let trick_handle = if config.trickfs {
+            Some(trickfs::spawn_trick(&workload_dir.path(), seed).unwrap())
+        } else {
+            None
+        };
 
         #[cfg(not(target_os = "linux"))]
         let trick_handle = None;
@@ -387,20 +132,16 @@ impl Workload {
             trick_handle,
             agent: None,
             rr: None,
-            iterations: workload_params.iterations,
-            state,
             workload_id,
-            bitbox_seed,
             tot_commit_time: Duration::ZERO,
             n_successfull_commit: 0,
-            ensure_changeset: workload_params.ensure_changeset,
-            ensure_snapshot: workload_params.ensure_snapshot,
-            sample_snapshot: workload_params.sample_snapshot,
-            max_rollback_commits: workload_params.max_rollback_commits,
             scheduled_rollback: None,
             enabled_enospc: false,
             enabled_latency: false,
             resource_alloc,
+            rng,
+            committed: Snapshot::empty(),
+            config,
         })
     }
 
@@ -430,7 +171,7 @@ impl Workload {
 
     async fn run_inner(&mut self) -> Result<()> {
         self.spawn_new_agent().await?;
-        for iterno in 0..self.iterations {
+        for iterno in 0..self.config.iterations {
             self.run_iteration()
                 .instrument(trace_span!("iteration", iterno))
                 .await?;
@@ -449,9 +190,11 @@ impl Workload {
     async fn run_iteration(&mut self) -> Result<()> {
         trace!("run_iteration");
 
-        if self.scheduled_rollback.as_ref().map_or(false, |(r, _)| {
-            r.sync_seqn == self.state.committed.sync_seqn
-        }) {
+        if self
+            .scheduled_rollback
+            .as_ref()
+            .map_or(false, |(r, _)| r.sync_seqn == self.committed.sync_seqn)
+        {
             // UNWRAP: scheduled_rollback has just be checked to be `Some`
             let (scheduled_rollback, should_crash) = self.scheduled_rollback.take().unwrap();
             self.exercise_rollback(scheduled_rollback, should_crash)
@@ -461,7 +204,7 @@ impl Workload {
 
         if self.trick_handle.is_some() {
             if self.enabled_enospc {
-                let should_turn_off = self.state.rng.gen_bool(self.state.biases.enospc_off);
+                let should_turn_off = self.rng.gen_bool(self.config.enospc_off);
                 if should_turn_off {
                     info!("unsetting ENOSPC");
                     self.enabled_enospc = false;
@@ -471,7 +214,7 @@ impl Workload {
                         .set_trigger_enospc(false);
                 }
             } else {
-                let should_turn_on = self.state.rng.gen_bool(self.state.biases.enospc_on);
+                let should_turn_on = self.rng.gen_bool(self.config.enospc_on);
                 if should_turn_on {
                     info!("setting ENOSPC");
                     self.enabled_enospc = true;
@@ -480,7 +223,7 @@ impl Workload {
             }
 
             if self.enabled_latency {
-                let should_turn_off = self.state.rng.gen_bool(self.state.biases.latency_off);
+                let should_turn_off = self.rng.gen_bool(self.config.latency_off);
                 if should_turn_off {
                     info!("unsetting latency injector");
                     self.enabled_latency = false;
@@ -490,7 +233,7 @@ impl Workload {
                         .set_trigger_latency_injector(false);
                 }
             } else {
-                let should_turn_on = self.state.rng.gen_bool(self.state.biases.latency_on);
+                let should_turn_on = self.rng.gen_bool(self.config.latency_on);
                 if should_turn_on {
                     info!("setting latency injector");
                     self.enabled_latency = true;
@@ -504,12 +247,12 @@ impl Workload {
 
         // Do not schedule new rollbacks if they are already scheduled.
         let is_rollback_scheduled = self.scheduled_rollback.is_some();
-        if !is_rollback_scheduled && self.state.rng.gen_bool(self.state.biases.rollback) {
-            let should_crash = self.state.rng.gen_bool(self.state.biases.rollback_crash);
+        if !is_rollback_scheduled && self.rng.gen_bool(self.config.rollback) {
+            let should_crash = self.rng.gen_bool(self.config.rollback_crash);
             self.schedule_rollback(should_crash).await?
         }
 
-        let should_crash = self.state.rng.gen_bool(self.state.biases.commit_crash);
+        let should_crash = self.rng.gen_bool(self.config.commit_crash);
         self.exercise_commit(should_crash).await?;
 
         Ok(())
@@ -526,13 +269,13 @@ impl Workload {
         };
 
         // Generate a changeset and the associated snapshot
-        let (snapshot, reads, changeset) = self.state.gen_commit();
+        let (snapshot, reads, changeset) = self.gen_commit();
         let commit_response = self
             .rr()
             .send_request(crate::message::ToAgent::Commit(
                 crate::message::CommitPayload {
                     reads,
-                    read_concurrency: 6,
+                    read_concurrency: self.config.read_concurrency,
                     changeset: changeset.clone(),
                     should_crash,
                 },
@@ -555,7 +298,7 @@ impl Workload {
             let agent_sync_seqn = self.rr().send_query_sync_seqn().await?;
             if snapshot.sync_seqn == agent_sync_seqn {
                 true
-            } else if self.state.committed.sync_seqn == agent_sync_seqn {
+            } else if self.committed.sync_seqn == agent_sync_seqn {
                 false
             } else {
                 return Err(anyhow::anyhow!("Unexpected sync_seqn after commit crash",));
@@ -587,7 +330,7 @@ impl Workload {
 
         if is_applied {
             self.ensure_changeset_applied(&changeset).await?;
-            self.state.commit(snapshot);
+            self.commit(snapshot);
         } else {
             self.ensure_changeset_reverted(&changeset).await?;
         }
@@ -626,7 +369,7 @@ impl Workload {
                 //
                 // But we still should be able to make the sync_seqn and the kv queries.
                 let agent_sync_seqn = self.rr().send_query_sync_seqn().await?;
-                if self.state.committed.sync_seqn != agent_sync_seqn {
+                if self.committed.sync_seqn != agent_sync_seqn {
                     return Err(anyhow::anyhow!(
                         "Unexpected sync_seqn after failed operation with ENOSPC"
                     ));
@@ -638,7 +381,7 @@ impl Workload {
 
                 // Verify that the sync_seqn is still the same for the second time.
                 let agent_sync_seqn = self.rr().send_query_sync_seqn().await?;
-                if self.state.committed.sync_seqn != agent_sync_seqn {
+                if self.committed.sync_seqn != agent_sync_seqn {
                     return Err(anyhow::anyhow!(
                         "Unexpected sync_seqn after failed operation with ENOSPC"
                     ));
@@ -655,9 +398,10 @@ impl Workload {
     }
 
     async fn schedule_rollback(&mut self, should_crash: bool) -> anyhow::Result<()> {
-        let n_commits_to_rollback = self.state.rng.gen_range(1..self.max_rollback_commits) as usize;
+        let n_commits_to_rollback =
+            self.rng.gen_range(1..self.config.max_rollback_commits) as usize;
 
-        let last_snapshot = &self.state.committed;
+        let last_snapshot = &self.committed;
         let rollback_sync_seqn = last_snapshot.sync_seqn + n_commits_to_rollback as u32;
         let scheduled_rollback = ScheduledRollback {
             sync_seqn: rollback_sync_seqn,
@@ -727,10 +471,10 @@ impl Workload {
             self.spawn_new_agent().await?;
 
             let agent_sync_seqn = self.rr().send_query_sync_seqn().await?;
-            let last_sync_seqn = self.state.committed.sync_seqn;
+            let last_sync_seqn = self.committed.sync_seqn;
             if agent_sync_seqn == last_sync_seqn + 1 {
                 // sync_seqn has increased, so the rollback is expected to be applied correctly
-                self.state.rollback(snapshot);
+                self.rollback(snapshot);
             } else if agent_sync_seqn == last_sync_seqn {
                 // The rollback successfully crashed.
                 info!("rollback crashed, seqno: {}", last_sync_seqn);
@@ -751,10 +495,10 @@ impl Workload {
             self.ensure_outcome_validity(&outcome).await?;
 
             let agent_sync_seqn = self.rr().send_query_sync_seqn().await?;
-            let last_sync_seqn = self.state.committed.sync_seqn;
+            let last_sync_seqn = self.committed.sync_seqn;
             if agent_sync_seqn == last_sync_seqn + 1 {
                 // sync_seqn has increased, so the rollback is expected to be applied correctly
-                self.state.rollback(snapshot);
+                self.rollback(snapshot);
             } else if agent_sync_seqn == last_sync_seqn {
                 if !was_enospc_enabled {
                     return Err(anyhow::anyhow!(
@@ -796,7 +540,7 @@ impl Workload {
         &self,
         changeset: &Vec<KeyValueChange>,
     ) -> anyhow::Result<()> {
-        if !self.ensure_changeset {
+        if !self.config.ensure_changeset {
             return Ok(());
         }
 
@@ -822,7 +566,7 @@ impl Workload {
         &self,
         changeset: &Vec<KeyValueChange>,
     ) -> anyhow::Result<()> {
-        if !self.ensure_changeset {
+        if !self.config.ensure_changeset {
             return Ok(());
         }
 
@@ -833,7 +577,7 @@ impl Workload {
                 KeyValueChange::Insert(key, _value) => {
                     // The current value must be equal to the previous one.
                     let current_value = self.rr().send_request_query(*key).await?;
-                    match self.state.committed.state.get(key) {
+                    match self.committed.state.get(key) {
                         None | Some(None) if current_value.is_some() => {
                             return Err(anyhow::anyhow!("New inserted item should not be present"));
                         }
@@ -847,7 +591,7 @@ impl Workload {
                 }
                 KeyValueChange::Delete(key) => {
                     // UNWRAP: Non existing keys are not deleted.
-                    let prev_value = self.state.committed.state.get(key).unwrap();
+                    let prev_value = self.committed.state.get(key).unwrap();
                     assert!(prev_value.is_some());
                     if self.rr().send_request_query(*key).await?.as_ref() != prev_value.as_ref() {
                         return Err(anyhow::anyhow!(
@@ -861,11 +605,11 @@ impl Workload {
     }
 
     async fn ensure_snapshot_validity(&mut self) -> anyhow::Result<()> {
-        if !self.ensure_snapshot && !self.sample_snapshot {
+        if !self.config.should_ensure_snapshot() && !self.config.sample_snapshot {
             return Ok(());
         }
 
-        let expected_sync_seqn = self.state.committed.sync_seqn;
+        let expected_sync_seqn = self.committed.sync_seqn;
         let sync_seqn = self.rr().send_query_sync_seqn().await?;
         if expected_sync_seqn != sync_seqn {
             return Err(anyhow::anyhow!(
@@ -875,7 +619,7 @@ impl Workload {
             ));
         }
 
-        if self.ensure_snapshot {
+        if self.config.should_ensure_snapshot() {
             return self.check_entire_snapshot().await;
         }
 
@@ -883,7 +627,7 @@ impl Workload {
     }
 
     async fn check_entire_snapshot(&self) -> anyhow::Result<()> {
-        for (i, (key, expected_value)) in (self.state.committed.state.iter()).enumerate() {
+        for (i, (key, expected_value)) in (self.committed.state.iter()).enumerate() {
             let value = self.rr().send_request_query(*key).await?;
             if &value != expected_value {
                 return Err(anyhow::anyhow!(
@@ -901,12 +645,11 @@ impl Workload {
     async fn check_sampled_snapshot(&mut self) -> anyhow::Result<()> {
         let mut key = [0; 32];
         // The amount of items randomly sampled is equal to 5% of the entire state size.
-        let sample_check_size = (self.state.committed.state.len() as f64 * 0.05) as usize;
+        let sample_check_size = (self.committed.state.len() as f64 * 0.05) as usize;
         for _ in 0..sample_check_size {
             let (key, expected_value) = loop {
-                self.state.rng.fill_bytes(&mut key);
-                if let Some((next_key, Some(expected_value))) =
-                    self.state.committed.state.get_next(&key)
+                self.rng.fill_bytes(&mut key);
+                if let Some((next_key, Some(expected_value))) = self.committed.state.get_next(&key)
                 {
                     break (next_key, expected_value);
                 }
@@ -954,8 +697,8 @@ impl Workload {
     ///
     /// If the agent has run out of storage, we will turn off the `ENOSPC` error and try again.
     async fn ensure_agent_open_db(&mut self) -> anyhow::Result<()> {
-        let rollback = if self.state.biases.rollback > 0.0 {
-            Some(self.max_rollback_commits)
+        let rollback = if self.config.rollback > 0.0 {
+            Some(self.config.max_rollback_commits)
         } else {
             None
         };
@@ -963,7 +706,7 @@ impl Workload {
             .agent
             .as_mut()
             .unwrap()
-            .open(self.bitbox_seed, rollback)
+            .open(self.config.bitbox_seed, rollback)
             .await?;
 
         match outcome {
@@ -984,7 +727,7 @@ impl Workload {
                     .agent
                     .as_mut()
                     .unwrap()
-                    .open(self.bitbox_seed, rollback)
+                    .open(self.config.bitbox_seed, rollback)
                     .await?;
                 assert!(matches!(outcome, OpenOutcome::Success));
             }
@@ -1038,6 +781,129 @@ impl Workload {
     /// Return the workload directory path.
     pub fn workload_dir_path(&self) -> PathBuf {
         self.workload_dir.path().to_path_buf()
+    }
+
+    fn gen_commit(&mut self) -> (Snapshot, Vec<Key>, Vec<KeyValueChange>) {
+        let mut snapshot = self.committed.clone();
+        snapshot.sync_seqn += 1;
+
+        let size = self.rng.gen_range(0..self.config.avg_commit_size * 2);
+
+        let reads_size = (size as f64 * self.config.reads) as usize;
+        let changeset_size = size - reads_size;
+        let mut changes = Vec::with_capacity(changeset_size);
+        let reads = self.gen_reads(reads_size);
+
+        // Commiting requires using only the unique keys. To ensure that we deduplicate the keys
+        // using a hash set.
+        let mut used_keys = std::collections::HashSet::with_capacity(changeset_size);
+        loop {
+            let change = self.gen_key_value_change();
+            if used_keys.contains(change.key()) {
+                continue;
+            }
+
+            snapshot.state.insert(*change.key(), change.value());
+            used_keys.insert(*change.key());
+            changes.push(change);
+
+            if used_keys.len() >= changeset_size {
+                break;
+            }
+        }
+
+        changes.sort_by(|a, b| a.key().cmp(&b.key()));
+
+        (snapshot, reads, changes)
+    }
+
+    fn gen_reads(&mut self, size: usize) -> Vec<Key> {
+        let mut reads = vec![];
+        let mut key = [0; 32];
+
+        // `threshold` after which we stop trying to read existing keys
+        // because there is a high chance that all have already been read.
+        let threshold = self.committed.state.len();
+        while reads.len() < size {
+            self.rng.fill_bytes(&mut key);
+            if reads.len() < threshold && self.rng.gen_bool(self.config.read_existing_key) {
+                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
+                    key.copy_from_slice(next_key);
+                }
+            }
+            reads.push(key.clone());
+        }
+
+        reads
+    }
+
+    /// Returns a KeyValueChange with a new key, a deleted or a modified one.
+    fn gen_key_value_change(&mut self) -> KeyValueChange {
+        let mut key = [0; 32];
+        // Generate a Delete KeyValueChange
+        if !self.committed.state.is_empty() && self.rng.gen_bool(self.config.delete) {
+            loop {
+                self.rng.fill_bytes(&mut key);
+                if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
+                    return KeyValueChange::Delete(*next_key);
+                }
+            }
+        }
+
+        // Generate a new key KeyValueChange
+        if self.committed.state.is_empty() {
+            self.rng.fill_bytes(&mut key);
+            return KeyValueChange::Insert(key, self.gen_value());
+        }
+
+        if self.rng.gen_bool(self.config.new_key) {
+            loop {
+                self.rng.fill_bytes(&mut key);
+
+                let Some(next_key) = self.committed.state.get_next(&key).map(|(k, _)| *k) else {
+                    continue;
+                };
+
+                let common_bytes =
+                    self.rng.sample(self.config.new_key_distribution.clone()) as usize;
+                key[..common_bytes].copy_from_slice(&next_key[..common_bytes]);
+
+                if !self.committed.state.contains_key(&key) {
+                    return KeyValueChange::Insert(key, self.gen_value());
+                }
+            }
+        }
+
+        // Generate an update KeyValueChange
+        loop {
+            self.rng.fill_bytes(&mut key);
+            if let Some((next_key, _)) = self.committed.state.get_next(&key) {
+                return KeyValueChange::Insert(*next_key, self.gen_value());
+            }
+        }
+    }
+
+    fn gen_value(&mut self) -> Vec<u8> {
+        // MAX_LEAF_VALUE_SIZE is 1332,
+        // thus every value size bigger than this will create an overflow value.
+        let len = if self.rng.gen_bool(self.config.overflow) {
+            self.rng.gen_range(1333..32 * 1024)
+        } else {
+            self.rng.gen_range(1..1333)
+        };
+        let mut value = vec![0; len];
+        self.rng.fill_bytes(&mut value);
+        value
+    }
+
+    fn rollback(&mut self, snapshot: Snapshot) {
+        // The application of a rollback counts as increased sync_seq.
+        self.committed.sync_seqn += 1;
+        self.committed.state = snapshot.state;
+    }
+
+    fn commit(&mut self, snapshot: Snapshot) {
+        self.committed = snapshot;
     }
 }
 
