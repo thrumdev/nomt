@@ -26,13 +26,20 @@ const MAX_ASSIGNED_MEMORY: u64 = 5 * (1 << 30);
 /// which will use only memory.
 const MAX_ASSIGNED_ONLY_MEMORY: u64 = 50 * (1 << 30);
 
+#[derive(Clone, Copy)]
+/// Amount of resources assigned to a workload.
+/// Resources are disk space and memory.
+pub struct AssignedResources {
+    pub disk: u64,
+    pub memory: u64,
+}
+
 /// ResourceAllocator is used to split resources randomly across multiple workloads.
 ///
 /// Resources are Memory and Disk space.
 pub struct ResourceAllocator {
     rng: rand_pcg::Pcg64,
-    // (workload_id, assigned_disk, assigned_mem)
-    assigned: Vec<(u64, u64, u64)>,
+    assigned: Vec<(u64, AssignedResources)>,
     max_disk_avail: u64,
     max_memory_avail: u64,
     total_assigned_disk: u64,
@@ -85,12 +92,17 @@ impl ResourceAllocator {
 
         let assigned_disk_ratio = assigned_disk as f64 / avail_disk as f64;
         avail_memory = std::cmp::min(avail_memory, MAX_ASSIGNED_MEMORY);
-        let assigned_mem = (avail_memory as f64 * assigned_disk_ratio) as u64;
+        let assigned_memory = (avail_memory as f64 * assigned_disk_ratio) as u64;
 
         self.total_assigned_disk += assigned_disk;
-        self.total_assigned_memory += assigned_mem;
-        self.assigned
-            .push((workload_id, assigned_disk, assigned_mem));
+        self.total_assigned_memory += assigned_memory;
+        self.assigned.push((
+            workload_id,
+            AssignedResources {
+                disk: assigned_disk,
+                memory: assigned_memory,
+            },
+        ));
 
         Ok(())
     }
@@ -102,9 +114,15 @@ impl ResourceAllocator {
         }
 
         avail_memory = std::cmp::min(avail_memory, MAX_ASSIGNED_ONLY_MEMORY);
-        let assigned_mem = self.rng.gen_range(MIN_ASSIGNED_MEMORY..avail_memory);
+        let assigned_memory = self.rng.gen_range(MIN_ASSIGNED_MEMORY..avail_memory);
 
-        self.assigned.push((workload_id, 0, assigned_mem));
+        self.assigned.push((
+            workload_id,
+            AssignedResources {
+                disk: 0,
+                memory: assigned_memory,
+            },
+        ));
         Ok(())
     }
 
@@ -118,9 +136,9 @@ impl ResourceAllocator {
             .position(|(id, ..)| *id == workload_id)
             .unwrap();
 
-        let (_, assigned_disk, assigned_mem) = self.assigned.remove(idx);
-        self.total_assigned_memory -= assigned_mem;
-        self.total_assigned_disk -= assigned_disk;
+        let (_, AssignedResources { disk, memory }) = self.assigned.remove(idx);
+        self.total_assigned_disk -= disk;
+        self.total_assigned_memory -= memory;
     }
 
     /// Ensures that the workload_dir does not occupy more disk space than the assigned limit
@@ -137,66 +155,22 @@ impl ResourceAllocator {
         workload_dir_path: &Path,
         process_id: u32,
     ) -> bool {
-        let (_, assigned_disk, assigned_mem) = self
+        let (_, AssignedResources { disk, memory }) = self
             .assigned
             .iter()
             .find(|(id, ..)| *id == workload_id)
             .unwrap();
-
-        let Some(used_mem) = process_memory_occupied(process_id) else {
-            return true;
-        };
-        if used_mem >= *assigned_mem {
-            return true;
-        }
-
-        if *assigned_disk == 0 {
-            return false;
-        }
-
-        fn dir_size(path: &Path) -> u64 {
-            std::fs::read_dir(path)
-                .unwrap()
-                .into_iter()
-                .filter_map(|entry| entry.ok())
-                .map(|entry| {
-                    let entry_metadata = entry.metadata().unwrap();
-                    if entry_metadata.is_dir() {
-                        dir_size(&entry.path())
-                    } else {
-                        entry_metadata.size()
-                    }
-                })
-                .sum()
-        }
-
-        let used_disk = dir_size(workload_dir_path);
-        if used_disk >= *assigned_disk {
-            return true;
-        }
-
-        false
+        is_exceeding_resources(*disk, *memory, workload_dir_path, process_id)
     }
 
-    /// Fetch the amount of assigned memory to the specified `workload_id`.
+    /// Fetch the amount of assigned resources to the specified `workload_id`.
     ///
     /// Panics if the specified workload_id is not present in the tracked ones.
-    pub fn assigned_memory(&mut self, workload_id: u64) -> u64 {
+    pub fn assigned_resources(&self, workload_id: u64) -> AssignedResources {
         self.assigned
             .iter()
             .find(|(id, ..)| *id == workload_id)
-            .map(|(_, _, assigned_mem)| *assigned_mem)
-            .unwrap()
-    }
-
-    /// Fetch the amount of assigned disk space to the specified `workload_id`.
-    ///
-    /// Panics if the specified workload_id is not present in the tracked ones.
-    pub fn assigned_disk(&mut self, workload_id: u64) -> u64 {
-        self.assigned
-            .iter()
-            .find(|(id, ..)| *id == workload_id)
-            .map(|(_, assigned_disk, _)| *assigned_disk)
+            .map(|(_, assigned_resources)| *assigned_resources)
             .unwrap()
     }
 }
@@ -263,4 +237,53 @@ fn disk_info(path: &Path) -> (u64, u64) {
     let avail_disk = statvfs.f_bsize * statvfs.f_bavail;
     let total_disk = statvfs.f_bsize * statvfs.f_blocks;
     (avail_disk, total_disk)
+}
+
+/// Ensures that the workload_dir does not occupy more disk space than the assigned limit
+/// and the same applies to the memory utilization of the specified process_id.
+///
+/// Return false if the process_id does not refer to an ongoing process.
+///
+/// Panics if:
+/// 1. workload_dir_path does not exist.
+/// 2. process_id does not refer to an ongoing process.
+pub fn is_exceeding_resources(
+    assigned_disk: u64,
+    assigned_memory: u64,
+    workload_dir_path: &Path,
+    process_id: u32,
+) -> bool {
+    let Some(used_mem) = process_memory_occupied(process_id) else {
+        return true;
+    };
+    if used_mem >= assigned_memory {
+        return true;
+    }
+
+    if assigned_disk == 0 {
+        return false;
+    }
+
+    fn dir_size(path: &Path) -> u64 {
+        std::fs::read_dir(path)
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| {
+                let entry_metadata = entry.metadata().unwrap();
+                if entry_metadata.is_dir() {
+                    dir_size(&entry.path())
+                } else {
+                    entry_metadata.size()
+                }
+            })
+            .sum()
+    }
+
+    let used_disk = dir_size(workload_dir_path);
+    if used_disk >= assigned_disk {
+        return true;
+    }
+
+    false
 }
