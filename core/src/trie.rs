@@ -83,6 +83,7 @@ pub struct InternalData {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LeafData {
     /// The total path to this value within the trie.
     ///
