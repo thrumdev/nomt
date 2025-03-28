@@ -16,6 +16,7 @@ use alloc::vec::Vec;
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PathProofTerminal {
     Leaf(LeafData),
     Terminator(TriePosition),
@@ -44,6 +45,7 @@ impl PathProofTerminal {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PathProof {
     /// The terminal node encountered when looking up a key. This is always either a terminator or
     /// leaf.

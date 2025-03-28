@@ -12,6 +12,7 @@ use bitvec::prelude::*;
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriePosition {
     // The bits after depth are irrelevant.
     path: [u8; 32],
