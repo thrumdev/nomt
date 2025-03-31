@@ -18,6 +18,9 @@ repository = "https://github.com/thrumdev/nomt"
 edition = "2021"
 license = "MIT/Apache-2.0"
 
+[workspace.dependencies]
+borsh = { version = "1", default-features = false, features = ["derive"] }
+
 [profile.release]
 debug = 1
 debug-assertions = true
