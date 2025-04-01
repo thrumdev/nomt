@@ -11,42 +11,42 @@ license.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = { version = "1.0.81", features = ["backtrace"] }
+anyhow.workspace = true
 nomt-core = { path = "../core", default-features = false, features = ["std"] }
-parking_lot = { version = "0.12.3", features = ["arc_lock", "send_guard"] }
-threadpool = "1.8.1"
-bitvec = { version = "1" }
-twox-hash = "2.1.0"
-fxhash = "0.2.1"
-dashmap = "5.5.3"
-crossbeam = "0.8.4"
-crossbeam-channel = "0.5.13"
-slab = "0.4.9"
-rand = "0.8.5"
-ahash = "0.8.11"
-imbl = "3.0.0"
-lru = "0.12.3"
-libc = "0.2.155"
-criterion = { version = "0.3", optional = true }
-thread_local = "1.1.8"
-cfg-if = "1.0.0"
+parking_lot.workspace = true
+threadpool.workspace = true
+bitvec.workspace = true
+twox-hash.workspace = true
+fxhash.workspace = true
+dashmap.workspace = true
+crossbeam.workspace = true
+crossbeam-channel.workspace = true
+slab.workspace = true
+rand.workspace = true
+ahash.workspace = true
+imbl.workspace = true
+lru.workspace = true
+libc.workspace = true
+criterion = { workspace = true, optional = true }
+thread_local.workspace = true
+cfg-if.workspace = true
 borsh = { workspace = true, optional = true }
 
 [target.'cfg(target_os="linux")'.dependencies]
-io-uring = "0.6.4"
+io-uring.workspace = true
 
 [target.'cfg(loom)'.dependencies]
-loom = { version = "0.7", features = ["checkpoint"] }
+loom.workspace = true
 
 [dev-dependencies]
-rand_pcg = "0.3.1"
-hex-literal = "0.4"
-tempfile = "3.8.1"
-criterion = "0.3"
-lazy_static = "1.5.0"
-hex = "0.4.3"
-quickcheck = "1.0.3"
-blake3 = "1.5.1"
+rand_pcg.workspace = true
+hex-literal.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+lazy_static.workspace = true
+hex.workspace = true
+quickcheck.workspace = true
+blake3.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
