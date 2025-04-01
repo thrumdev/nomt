@@ -260,7 +260,8 @@ fn disk_info(path: &Path) -> (u64, u64) {
     if unsafe { libc::statvfs(path_cstr.as_ptr(), &mut statvfs as *mut libc::statvfs) } < 0 {
         panic!("Getting disk information failed");
     }
-    let avail_disk = statvfs.f_bsize * statvfs.f_bavail;
-    let total_disk = statvfs.f_bsize * statvfs.f_blocks;
+    // The casts are necessary because on macOS `f_bavail` and `f_blocks` are u32.
+    let avail_disk = statvfs.f_bsize * statvfs.f_bavail as u64;
+    let total_disk = statvfs.f_bsize * statvfs.f_blocks as u64;
     (avail_disk, total_disk)
 }
