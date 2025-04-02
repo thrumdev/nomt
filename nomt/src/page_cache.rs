@@ -37,6 +37,11 @@ fn set_node(data: &mut FatPage, index: usize, node: Node) {
     data[start..end].copy_from_slice(&node);
 }
 
+fn read_elided_children(data: &FatPage) -> u64 {
+    // UNWRAP: elided_children range length is 8 bytes.
+    u64::from_le_bytes(data[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32].try_into().unwrap())
+}
+
 /// A mutable page.
 pub struct PageMut {
     pub inner: FatPage,
@@ -60,6 +65,8 @@ impl PageMut {
             inner: page_pool.alloc_fat_page(),
         };
         page.inner[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
+        // No gargabe in the elided children bitfield.
+        page.set_elided_children(0);
         page
     }
 
@@ -78,17 +85,13 @@ impl PageMut {
         set_node(&mut self.inner, index, node)
     }
 
-    pub fn elided_childs(&self) -> u64 {
-        u64::from_le_bytes(
-            self.inner[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32]
-                .try_into()
-                .unwrap(),
-        )
+    pub fn elided_children(&self) -> u64 {
+        read_elided_children(&self.inner)
     }
 
-    pub fn set_elided_childs(&mut self, elided_childs: u64) {
+    pub fn set_elided_children(&mut self, elided_children: u64) {
         self.inner[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32]
-            .copy_from_slice(&elided_childs.to_le_bytes());
+            .copy_from_slice(&elided_children.to_le_bytes());
     }
 }
 
@@ -110,6 +113,10 @@ impl Page {
     /// Read out the node at the given index.
     pub fn node(&self, index: usize) -> Node {
         read_node(&self.inner, index)
+    }
+
+    pub fn elided_children(&self) -> u64 {
+        read_elided_children(&self.inner)
     }
 
     /// Create a mutable deep copy of this page.

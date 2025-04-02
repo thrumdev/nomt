@@ -66,15 +66,7 @@ impl Metrics {
                 Metric::PageRequests => &metrics.page_requests,
                 Metric::PageCacheMisses => &metrics.page_cache_misses,
                 Metric::ElidedHashTablePages => &metrics.elided_hashtable_pages,
-                Metric::TotalHashTablePages => {
-                    let counter = &metrics.total_hashtable_pages;
-                    let counter_value = counter.load(Ordering::Relaxed);
-                    if counter_value % 50_000 == 0 {
-                        let elided_counter = metrics.elided_hashtable_pages.load(Ordering::Relaxed);
-                        println!("({counter_value}, {elided_counter}),");
-                    }
-                    counter
-                }
+                Metric::TotalHashTablePages => &metrics.total_hashtable_pages,
                 _ => panic!("Specified metric is not a Counter"),
             };
 

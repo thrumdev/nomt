@@ -24,8 +24,8 @@ use std::{
 };
 
 use super::{
-    page_set::{FrozenSharedPageSet, PageSet},
-    page_walker::{Output, PageWalker},
+    page_set::{FrozenSharedPageSet, PageOrigin, PageSet},
+    page_walker::{Output, PageSet as _, PageWalker},
     seek::{Seek, Seeker},
     KeyReadWrite, LiveOverlay, RootPagePending, UpdateCommand, UpdateShared, WarmUpCommand,
     WarmUpOutput, WorkerOutput,
@@ -175,7 +175,7 @@ fn warm_up_phase<H: HashAlgorithm>(
                     Err(_) => panic!("Warm-Up worker, unexpected failure of the warmup channel"),
                 };
 
-                seeker.push(warm_up_command.key_path);
+                seeker.push(warm_up_command.key_path, &mut page_set);
             } else if index == page_idx {
                 seeker.try_recv_page(&mut page_set)?;
             } else {
@@ -240,7 +240,7 @@ fn update<H: HashAlgorithm>(
     if let Some((root_page, root_page_bucket)) =
         super::get_in_memory_page(&shared.overlay, &page_cache, &ROOT_PAGE_ID)
     {
-        page_set.insert(ROOT_PAGE_ID, root_page, root_page_bucket);
+        page_set.insert(ROOT_PAGE_ID, root_page, PageOrigin::HT(root_page_bucket));
     }
 
     for (trie_pos, pending_op) in pending_ops {
@@ -266,7 +266,7 @@ fn update<H: HashAlgorithm>(
             output.updated_pages.extend(updates);
             output.root = Some(new_root);
         }
-        Output::ChildPageRoots(_, _) => unreachable!(),
+        _ => unreachable!(),
     };
 
     Ok(output)
@@ -518,7 +518,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                         break;
                     }
                 } else {
-                    seeker.push(self.shared.read_write[next_push].0);
+                    seeker.push(self.shared.read_write[next_push].0, page_set);
                     seeker.submit_all(page_set);
                 }
             }
@@ -529,8 +529,8 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         // 2. conclude.
         // PANIC: walker was configured with a parent page.
         let (new_nodes, updates) = match self.page_walker.conclude() {
-            Output::Root(_, _) => unreachable!(),
-            Output::ChildPageRoots(new_nodes, updates) => (new_nodes, updates),
+            Output::ChildPageRoots(new_nodes, output_pages) => (new_nodes, output_pages),
+            _ => unreachable!(),
         };
 
         debug_assert!(!updates.iter().any(|item| item.page_id == ROOT_PAGE_ID));

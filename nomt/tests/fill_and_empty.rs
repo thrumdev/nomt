@@ -116,7 +116,7 @@ fn fill_32() {
     let mut rng = rand_pcg::Lcg64Xsh32::from_seed(seed());
 
     let db_size = 1 << 20;
-    let commit_size = db_size / 16;
+    let commit_size = db_size / 256;
 
     let mut items = std::collections::BTreeSet::new();
     while items.len() < db_size as usize {
@@ -126,11 +126,11 @@ fn fill_32() {
     items.shuffle(&mut rng);
 
     let mut t = Test::new_with_params(
-        format!("fill{}", 32), // name
-        16,
-        10_000_000, // hashtable_buckets
-        None,       // panic_on_sync
-        true,       //  cleanup_dir
+        format!("fill_32{}", 32), // name
+        32,
+        5_000_000, // hashtable_buckets
+        None,      // panic_on_sync
+        true,      //  cleanup_dir
     );
 
     // inserting all the values
