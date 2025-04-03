@@ -1080,6 +1080,7 @@ dependencies = [
  "quickcheck",
  "rand",
  "rand_pcg",
+ "serde",
  "slab",
  "tempfile",
  "thread_local",
@@ -1097,6 +1098,7 @@ dependencies = [
  "borsh",
  "hex",
  "ruint",
+ "serde",
  "sha2",
 ]
 
