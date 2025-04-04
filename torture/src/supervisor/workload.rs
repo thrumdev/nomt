@@ -955,35 +955,52 @@ impl Workload {
         let mut find_existing_key = |rng: &mut rand_pcg::Pcg64| -> Option<Key> {
             let mut key = [0; 32];
             rng.fill_bytes(&mut key);
-            let mut start_key = None;
+            let start_key = key;
+            let mut restart = false;
             // Starting from a random key, perform a circular linear search looking
             // for an unused key to delete. This is never called if the committed state is empty,
             // but we need to check that not all committed keys are already used.
             loop {
+                if restart && key > start_key {
+                    break None;
+                }
+
                 let next_key = match self.committed.state.get_next(&key) {
                     Some((next_key, Some(_))) => next_key,
                     Some((next_key, None)) => {
                         key.copy_from_slice(next_key);
-                        key[0] += 1;
+                        let increased_key = ruint::Uint::<256, 4>::from_be_bytes(key)
+                            .checked_add(ruint::Uint::from(1));
+                        match increased_key {
+                            Some(increased_key) => key = increased_key.to_be_bytes(),
+                            None => {
+                                restart = true;
+                                key = [0; 32];
+                            }
+                        }
                         continue;
                     }
                     None => {
-                        key.copy_from_slice(&[0; 32]);
-                        key[0] += 1;
+                        key = [0; 32];
+                        restart = true;
                         continue;
                     }
                 };
 
-                match start_key {
-                    None => start_key = Some(next_key),
-                    Some(start_key) if start_key == next_key => break None,
-                    _ => (),
-                }
-
                 if used_keys.insert(*next_key) {
                     break Some(*next_key);
                 }
+
                 key.copy_from_slice(next_key);
+                let increased_key =
+                    ruint::Uint::<256, 4>::from_be_bytes(key).checked_add(ruint::Uint::from(1));
+                match increased_key {
+                    Some(increased_key) => key = increased_key.to_be_bytes(),
+                    None => {
+                        restart = true;
+                        key = [0; 32];
+                    }
+                }
             }
         };
 

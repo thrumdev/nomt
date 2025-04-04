@@ -28,3 +28,4 @@ futures-util.workspace = true
 clap.workspace = true
 trickfs = { path = "../trickfs" }
 which.workspace = true
+ruint.workspace = true
