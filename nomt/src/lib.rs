@@ -577,6 +577,11 @@ impl<T: HashAlgorithm> Session<T> {
         self.store.load_value(path)
     }
 
+    /// Prev root
+    pub fn prev_root(&self) -> Root {
+        self.prev_root
+    }
+
     /// Signals that the given key is going to be written to. Relevant only if rollback is enabled.
     ///
     /// This function initiates an I/O load operation to fetch and preserve the prior value of the key.
