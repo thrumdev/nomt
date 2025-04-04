@@ -249,6 +249,7 @@ impl DB {
                     dirty_page
                         .diff
                         .pack_changed_nodes(dirty_page.page.page_data()),
+                    dirty_page.page.elided_children(),
                     bucket,
                 );
 
@@ -459,6 +460,7 @@ fn recover(
                 page_id,
                 page_diff,
                 changed_nodes,
+                elided_children,
                 bucket,
             } => {
                 let hash = hash_raw_page_id(page_id, &seed);
@@ -490,6 +492,9 @@ fn recover(
 
                 // Label the page.
                 page[PAGE_SIZE - 32..].copy_from_slice(&page_id);
+                // Write elided children bitfield.
+                page[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32]
+                    .copy_from_slice(&elided_children.to_le_bytes());
 
                 ht_fd.write_all_at(&page, pn * PAGE_SIZE as u64)?;
             }

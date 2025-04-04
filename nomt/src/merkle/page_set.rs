@@ -9,9 +9,37 @@ use crate::{
     page_cache::{Page, PageMut},
 };
 
+/// A page in the [`PageSet`] can have two different origins.
+#[derive(Clone)]
+pub enum PageOrigin {
+    /// It could have been fetched from the hash table, thereby having an associated `BucketInfo`.
+    Persisted(BucketInfo),
+    /// It could have been reconstructed on the fly without being stored anywhere.
+    /// Keeps track of the total number of leaves in child pages.
+    Reconstructed(u64),
+}
+
+impl PageOrigin {
+    /// Extract `BucketInfo` from `PageOrigin::Persisted` variant.
+    pub fn bucket_info(self) -> Option<BucketInfo> {
+        match self {
+            PageOrigin::Persisted(bucket_info) => Some(bucket_info),
+            PageOrigin::Reconstructed(_) => None,
+        }
+    }
+
+    /// Extract the number of leaves from `PageOrigin::Reconstructed` variant.
+    pub fn leaves_counter(&self) -> Option<u64> {
+        match self {
+            PageOrigin::Reconstructed(counter) => Some(*counter),
+            PageOrigin::Persisted(_) => None,
+        }
+    }
+}
+
 pub struct PageSet {
-    map: HashMap<PageId, (Page, BucketInfo)>,
-    warm_up_map: Option<Arc<HashMap<PageId, (Page, BucketInfo)>>>,
+    map: HashMap<PageId, (Page, PageOrigin)>,
+    warm_up_map: Option<Arc<HashMap<PageId, (Page, PageOrigin)>>>,
     page_pool: PagePool,
 }
 
@@ -24,9 +52,9 @@ impl PageSet {
         }
     }
 
-    /// Insert a page with a known bucket index.
-    pub fn insert(&mut self, page_id: PageId, page: Page, bucket_info: BucketInfo) {
-        self.map.insert(page_id, (page, bucket_info));
+    /// Checks if a `page_id` is already present.
+    pub fn contains(&self, page_id: &PageId) -> bool {
+        self.map.contains_key(page_id)
     }
 
     /// Freeze this page-set and make a shareable version of it. This returns a frozen page set
@@ -35,7 +63,7 @@ impl PageSet {
         FrozenSharedPageSet(Arc::new(self.map))
     }
 
-    fn get_warmed_up(&self, page_id: &PageId) -> Option<(Page, BucketInfo)> {
+    fn get_warmed_up(&self, page_id: &PageId) -> Option<(Page, PageOrigin)> {
         self.warm_up_map
             .as_ref()
             .and_then(|m| m.get(page_id))
@@ -44,21 +72,23 @@ impl PageSet {
 }
 
 impl super::page_walker::PageSet for PageSet {
-    fn fresh(&self, page_id: &PageId) -> (PageMut, BucketInfo) {
+    fn fresh(&self, page_id: &PageId) -> PageMut {
         let page = PageMut::pristine_empty(&self.page_pool, &page_id);
-        let bucket_info = BucketInfo::Fresh;
-
-        (page, bucket_info)
+        page
     }
 
-    fn get(&self, page_id: &PageId) -> Option<(Page, BucketInfo)> {
+    fn get(&self, page_id: &PageId) -> Option<(Page, PageOrigin)> {
         self.map
             .get(&page_id)
             .map(|(p, bucket_info)| (p.clone(), bucket_info.clone()))
             .or_else(|| self.get_warmed_up(page_id))
     }
+
+    fn insert(&mut self, page_id: PageId, page: Page, page_origin: PageOrigin) {
+        self.map.insert(page_id, (page, page_origin));
+    }
 }
 
 /// A frozen, shared page set. This is cheap to clone.
 #[derive(Clone)]
-pub struct FrozenSharedPageSet(Arc<HashMap<PageId, (Page, BucketInfo)>>);
+pub struct FrozenSharedPageSet(Arc<HashMap<PageId, (Page, PageOrigin)>>);

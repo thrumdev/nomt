@@ -19,6 +19,8 @@ pub enum WalEntry {
         /// Nodes that were changed by this update. The length of this array must be consistent with
         /// the number of ones in `page_diff`.
         changed_nodes: Vec<[u8; 32]>,
+        /// Bitfield representing which child page has been elided.
+        elided_children: u64,
         /// The bucket index which is being updated.
         bucket: u64,
     },
@@ -101,12 +103,14 @@ impl WalBlobReader {
                     changed_nodes.push(node);
                 }
 
+                let elided_children = self.read_u64()?;
                 let bucket = self.read_u64()?;
 
                 Ok(Some(WalEntry::Update {
                     page_id,
                     page_diff,
                     changed_nodes,
+                    elided_children,
                     bucket,
                 }))
             }
