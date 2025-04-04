@@ -12,12 +12,16 @@ use crate::{
     HashAlgorithm,
 };
 
-use super::{page_set::PageSet, BucketInfo, LiveOverlay};
+use super::{
+    page_set::{PageOrigin, PageSet},
+    page_walker::{ElidedChildren, PageSet as _, PAGE_ELISION_THRESHOLD},
+    BucketInfo, LiveOverlay,
+};
 
 use nomt_core::{
     page::DEPTH,
     page_id::{PageId, ROOT_PAGE_ID},
-    trie::{self, KeyPath, Node},
+    trie::{self, KeyPath, Node, ValueHash},
     trie_pos::TriePosition,
 };
 
@@ -46,6 +50,7 @@ impl SeekRequest {
         overlay: &LiveOverlay,
         key: KeyPath,
         root: Node,
+        page_set: &mut PageSet,
     ) -> SeekRequest {
         let state = if trie::is_terminator::<H>(&root) {
             RequestState::Completed(None)
@@ -64,9 +69,13 @@ impl SeekRequest {
             ios: 0,
         };
 
-        if let RequestState::FetchingLeaf(_, _) = request.state {
-            // we must advance the iterator until blocked.
-            request.continue_leaf_fetch::<H>(None);
+        // The iterator must be advanced until it is blocked.
+        match request.state {
+            RequestState::FetchingLeaf { .. } => request.continue_leaf_fetch::<H>(None),
+            RequestState::FetchingLeaves { .. } => {
+                request.continue_leaves_fetch::<H>(page_set, overlay, None)
+            }
+            _ => (),
         }
 
         request
@@ -79,7 +88,8 @@ impl SeekRequest {
     fn is_completed(&self) -> bool {
         match self.state {
             RequestState::Seeking => false,
-            RequestState::FetchingLeaf(_, _) => false,
+            RequestState::FetchingLeaf { .. } => false,
+            RequestState::FetchingLeaves { .. } => false,
             RequestState::Completed(_) => true,
         }
     }
@@ -93,9 +103,14 @@ impl SeekRequest {
                     .child_page_id(self.position.child_page_index())
                     .unwrap(),
             })),
-            RequestState::FetchingLeaf(_, ref mut needed) => {
-                needed.next().map(|pn| IoQuery::LeafPage(pn))
-            }
+            RequestState::FetchingLeaf {
+                ref mut needed_leaves,
+                ..
+            } => needed_leaves.next().map(|pn| IoQuery::LeafPage(pn)),
+            RequestState::FetchingLeaves {
+                ref mut needed_leaves,
+                ..
+            } => needed_leaves.next().map(|pn| IoQuery::LeafPage(pn)),
             RequestState::Completed(_) => None,
         }
     }
@@ -107,6 +122,7 @@ impl SeekRequest {
         page_id: PageId,
         page: &Page,
         record_siblings: bool,
+        page_set: &mut PageSet,
     ) {
         let RequestState::Seeking = self.state else {
             panic!("seek past end")
@@ -115,7 +131,7 @@ impl SeekRequest {
         // terminator should have yielded completion.
         assert!(self.position.depth() as usize % DEPTH == 0);
 
-        self.page_id = Some(page_id);
+        self.page_id = Some(page_id.clone());
 
         // take enough bits to get us to the end of this page.
         let bits = self.key.view_bits::<Msb0>()[self.position.depth() as usize..]
@@ -124,6 +140,7 @@ impl SeekRequest {
             .take(DEPTH);
 
         let mut do_leaf_fetch = false;
+        let mut found_leaf = false;
 
         for bit in bits {
             self.position.down(bit);
@@ -136,9 +153,10 @@ impl SeekRequest {
             if trie::is_leaf::<H>(&cur_node) {
                 self.state =
                     RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
-                if let RequestState::FetchingLeaf(_, _) = self.state {
+                if let RequestState::FetchingLeaf { .. } = self.state {
                     do_leaf_fetch = true;
                 }
+                found_leaf = true;
                 break;
             } else if trie::is_terminator::<H>(&cur_node) {
                 self.state = RequestState::Completed(None);
@@ -149,18 +167,48 @@ impl SeekRequest {
         if do_leaf_fetch {
             self.continue_leaf_fetch::<H>(None);
         }
+
+        // The traversal reached the end of the current page, and possibly the next page is being elided.
+        // This information resides in the page within the `elided_children` field.
+        if !found_leaf {
+            // UNWRAP: `continue_seek` scans multiple `DEPTH` bits, so `position` must be at the last
+            // layer of the current page.
+            let child_page_id = page_id
+                .child_page_id(self.position.child_page_index())
+                .unwrap();
+
+            // Avoid reconstructing already reconstructed pages.
+            if page_set.contains(&child_page_id) {
+                return;
+            }
+
+            let elided_children = ElidedChildren::new(page.elided_children());
+            if elided_children.is_elided(self.position.child_page_index()) {
+                // Begin fetching the beatree leaves required for reconstructing the elided pages.
+                self.state = RequestState::begin_leaves_fetch::<H>(
+                    read_transaction,
+                    &self.position,
+                    page.clone(),
+                );
+                self.continue_leaves_fetch::<H>(page_set, overlay, None);
+            }
+        }
     }
 
     fn continue_leaf_fetch<H: HashAlgorithm>(&mut self, leaf: Option<LeafNodeRef>) {
-        let RequestState::FetchingLeaf(ref mut iter, _) = self.state else {
+        let RequestState::FetchingLeaf {
+            ref mut beatree_iterator,
+            ..
+        } = self.state
+        else {
             panic!("called continue_leaf_fetch without active iterator");
         };
 
         if let Some(leaf) = leaf {
-            iter.provide_leaf(leaf);
+            beatree_iterator.provide_leaf(leaf);
         }
 
-        let (key, value_hash) = match iter.next() {
+        let (key, value_hash) = match beatree_iterator.next() {
             None => panic!("leaf must exist position={}", self.position.path()),
             Some(IterOutput::Blocked) => return,
             Some(IterOutput::Item(key, value)) => {
@@ -174,11 +222,129 @@ impl SeekRequest {
             value_hash,
         }));
     }
+
+    fn continue_leaves_fetch<H: HashAlgorithm>(
+        &mut self,
+        page_set: &mut PageSet,
+        overlay: &LiveOverlay,
+        leaf: Option<LeafNodeRef>,
+    ) {
+        let RequestState::FetchingLeaves {
+            ref page,
+            ref range,
+            ref mut beatree_iterator,
+            ref mut collected_leaf_data,
+            ..
+        } = self.state
+        else {
+            panic!("called continue_leaves_fetch without active iterator");
+        };
+
+        if let Some(leaf) = leaf {
+            beatree_iterator.provide_leaf(leaf);
+        }
+
+        // Collect all items in range from the beatree iterator.
+        while let Some(iter_output) = beatree_iterator.next() {
+            match iter_output {
+                IterOutput::Blocked => return,
+                IterOutput::Item(key, value) => {
+                    collected_leaf_data.push((key, H::hash_value(&value)))
+                }
+                IterOutput::OverflowItem(key, value_hash, _) => {
+                    collected_leaf_data.push((key, value_hash))
+                }
+            }
+        }
+
+        // All values in the range have been collected from the leaves,
+        // now they need to be intersected with what resides in the overlay.
+        let mut final_leaf_data_collection = Vec::with_capacity(collected_leaf_data.len());
+        let overlay_leaves = overlay.value_iter(range.0, range.1);
+
+        if collected_leaf_data.is_empty() {
+            let leaves_data = overlay_leaves.map(|(overlay_key, overlay_valuechange)| {
+                let value_hash = match overlay_valuechange {
+                    ValueChange::Insert(value) => H::hash_value(value),
+                    ValueChange::InsertOverflow(_, value_hash) => *value_hash,
+                    // PANIC: There is no leaf data in the range we are looking for,
+                    // thus there cannot be any deleted leaf in the same range within the overlay.
+                    _ => unreachable!(),
+                };
+                (overlay_key, value_hash)
+            });
+            final_leaf_data_collection.extend(leaves_data);
+        } else {
+            // Both `collected_leaf_data` and `overlay_leaves` are ordered.
+            let mut idx = 0;
+
+            for (overlay_key, overlay_valuechange) in overlay.value_iter(range.0, range.1) {
+                let start_idx = idx;
+                while idx < collected_leaf_data.len() && collected_leaf_data[idx].0 < overlay_key {
+                    idx += 1;
+                }
+
+                final_leaf_data_collection.extend_from_slice(&collected_leaf_data[start_idx..idx]);
+
+                let key_path = collected_leaf_data.get(idx).map(|(key_path, _)| *key_path);
+
+                let value_hash = match overlay_valuechange {
+                    ValueChange::Insert(value) => H::hash_value(value),
+                    ValueChange::InsertOverflow(_, value_hash) => *value_hash,
+                    // Deleted item, do nothing.
+                    ValueChange::Delete
+                        if key_path.map_or(false, |key_path| key_path == overlay_key) =>
+                    {
+                        continue
+                    }
+                    // PANIC: Deleted key must be present in key.
+                    ValueChange::Delete => unreachable!(),
+                };
+
+                if key_path.map_or(false, |key_path| key_path == overlay_key) {
+                    // The leaf data has been updated in the overlay.
+                    idx += 1;
+                }
+
+                final_leaf_data_collection.push((overlay_key, value_hash));
+            }
+
+            final_leaf_data_collection.extend_from_slice(&collected_leaf_data[idx..]);
+        }
+
+        // UNWRAP: The `page_id` from where the leaves request started must be `Some`.
+        let pages = super::page_walker::reconstruct_pages::<H>(
+            page,
+            self.page_id.clone().unwrap(),
+            self.position.clone(),
+            page_set,
+            final_leaf_data_collection,
+        );
+
+        for (page_id, page, leaves_counter) in pages {
+            page_set.insert(page_id, page, PageOrigin::Reconstructed(leaves_counter));
+        }
+
+        // Now that all pages are reconstructed, seeking can be resumed.
+        self.state = RequestState::Seeking;
+    }
 }
 
 enum RequestState {
     Seeking,
-    FetchingLeaf(BeatreeIterator, NeededLeavesIter),
+    // Fetching one leaf
+    FetchingLeaf {
+        beatree_iterator: BeatreeIterator,
+        needed_leaves: NeededLeavesIter,
+    },
+    // Fetching multiple leaves to construct elided pages.
+    FetchingLeaves {
+        page: Page,
+        range: (KeyPath, Option<KeyPath>),
+        beatree_iterator: BeatreeIterator,
+        needed_leaves: NeededLeavesIter,
+        collected_leaf_data: Vec<(KeyPath, ValueHash)>,
+    },
     Completed(Option<trie::LeafData>),
 }
 
@@ -211,9 +377,30 @@ impl RequestState {
         }
 
         // Fall back to iterator (most likely).
-        let iter = read_transaction.iterator(start, end);
-        let needed_leaves = iter.needed_leaves();
-        RequestState::FetchingLeaf(iter, needed_leaves)
+        let beatree_iterator = read_transaction.iterator(start, end);
+        let needed_leaves = beatree_iterator.needed_leaves();
+        RequestState::FetchingLeaf {
+            beatree_iterator,
+            needed_leaves,
+        }
+    }
+
+    fn begin_leaves_fetch<H: HashAlgorithm>(
+        read_transaction: &BeatreeReadTx,
+        pos: &TriePosition,
+        page: Page,
+    ) -> Self {
+        let (start, end) = range_bounds(pos.raw_path(), pos.depth() as usize);
+
+        let beatree_iterator = read_transaction.iterator(start, end);
+        let needed_leaves = beatree_iterator.needed_leaves();
+        RequestState::FetchingLeaves {
+            page,
+            range: (start, end),
+            beatree_iterator,
+            needed_leaves,
+            collected_leaf_data: Vec::with_capacity(PAGE_ELISION_THRESHOLD as usize),
+        }
     }
 }
 
@@ -260,8 +447,7 @@ enum IoRequest {
 ///
 /// Advance the seeker, provide new keys, and handle completions. A key path
 /// request is considered completed when the terminal node has been found, and all pages along the
-/// path to the terminal node are in the page cache. This includes the page that contains the leaf
-/// children of the request.
+/// path to the terminal node are in the page cache.
 ///
 /// Requests are completed in the order they are submitted.
 pub struct Seeker<H: HashAlgorithm> {
@@ -382,13 +568,14 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Push a request for key path.
-    pub fn push(&mut self, key: KeyPath) {
+    pub fn push(&mut self, key: KeyPath, page_set: &mut PageSet) {
         let request_index = self.processed + self.requests.len();
         self.requests.push_back(SeekRequest::new::<H>(
             &self.beatree_read_transaction,
             &self.overlay,
             key,
             self.root,
+            page_set,
         ));
         self.idle_requests.push_back(request_index);
     }
@@ -446,17 +633,30 @@ impl<H: HashAlgorithm> Seeker<H> {
         while let Some(query) = request.next_query() {
             match query {
                 IoQuery::MerklePage(page_id) => {
-                    let maybe_in_memory =
-                        super::get_in_memory_page(&self.overlay, &self.page_cache, &page_id);
-                    if let Some((page, bucket_info)) = maybe_in_memory {
+                    // Attempt to fetch a page from the page_set. If retrieval from memory
+                    // is required, then insert it with its origin into the page set.
+                    let maybe_page = page_set.get(&page_id).map(|(page, _origin)| page).or(
+                        super::get_in_memory_page(&self.overlay, &self.page_cache, &page_id).map(
+                            |(page, bucket_info)| {
+                                page_set.insert(
+                                    page_id.clone(),
+                                    page.clone(),
+                                    PageOrigin::Persisted(bucket_info),
+                                );
+                                page
+                            },
+                        ),
+                    );
+
+                    if let Some(page) = maybe_page {
                         request.continue_seek::<H>(
                             &self.beatree_read_transaction,
                             &self.overlay,
                             page_id.clone(),
                             &page,
                             self.record_siblings,
+                            page_set,
                         );
-                        page_set.insert(page_id, page, bucket_info);
                         continue;
                     }
 
@@ -495,7 +695,20 @@ impl<H: HashAlgorithm> Seeker<H> {
                         slab_index as u64,
                     ) {
                         Ok(leaf) => {
-                            request.continue_leaf_fetch::<H>(Some(leaf));
+                            match request.state {
+                                RequestState::FetchingLeaf { .. } => {
+                                    request.continue_leaf_fetch::<H>(Some(leaf))
+                                }
+                                RequestState::FetchingLeaves { .. } => request
+                                    .continue_leaves_fetch::<H>(
+                                        page_set,
+                                        &self.overlay,
+                                        Some(leaf),
+                                    ),
+                                // PANIC: The state cannot be `RequestState::Seeking`, we would have entered
+                                // the other match arm otherwise. `request.next_query()` has already checked for it.
+                                _ => unreachable!(),
+                            }
                             continue;
                         }
                         Err(leaf_load) => {
@@ -530,7 +743,11 @@ impl<H: HashAlgorithm> Seeker<H> {
             }
             IoRequest::Leaf(_) => {
                 // UNWRAP: read transaction always submits a `Read` command that yields a fat page.
-                self.handle_leaf_page_and_continue(slab_index, io.command.kind.unwrap_buf());
+                self.handle_leaf_page_and_continue(
+                    slab_index,
+                    io.command.kind.unwrap_buf(),
+                    page_set,
+                );
             }
         }
 
@@ -557,7 +774,7 @@ impl<H: HashAlgorithm> Seeker<H> {
         page_set.insert(
             page_load.page_id().clone(),
             page.clone(),
-            BucketInfo::Known(bucket_index),
+            PageOrigin::Persisted(BucketInfo::Known(bucket_index)),
         );
 
         for waiting_request in self
@@ -579,6 +796,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                 page_load.page_id().clone(),
                 &page,
                 self.record_siblings,
+                page_set,
             );
 
             if !request.is_completed() {
@@ -587,7 +805,12 @@ impl<H: HashAlgorithm> Seeker<H> {
         }
     }
 
-    fn handle_leaf_page_and_continue(&mut self, slab_index: usize, page: FatPage) {
+    fn handle_leaf_page_and_continue(
+        &mut self,
+        slab_index: usize,
+        page: FatPage,
+        page_set: &mut PageSet,
+    ) {
         let IoRequest::Leaf(leaf_load) = self.io_slab.remove(slab_index) else {
             panic!()
         };
@@ -607,7 +830,18 @@ impl<H: HashAlgorithm> Seeker<H> {
             let request = &mut self.requests[idx];
             assert!(!request.is_completed());
 
-            request.continue_leaf_fetch::<H>(Some(leaf.clone()));
+            match request.state {
+                RequestState::FetchingLeaf { .. } => {
+                    request.continue_leaf_fetch::<H>(Some(leaf.clone()));
+                }
+                RequestState::FetchingLeaves { .. } => {
+                    request.continue_leaves_fetch::<H>(page_set, &self.overlay, Some(leaf.clone()));
+                }
+                // PANIC: This is strictly called only when `IoRequest::Leaf` is received, thus
+                // no `RequestState::Seeking` is expected.
+                _ => unreachable!(),
+            }
+
             if !request.is_completed() {
                 self.idle_requests.push_back(waiting_request);
             }
