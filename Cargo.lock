@@ -1797,6 +1797,7 @@ dependencies = [
  "rand",
  "rand_distr",
  "rand_pcg",
+ "ruint",
  "serde",
  "tempfile",
  "tokio",
