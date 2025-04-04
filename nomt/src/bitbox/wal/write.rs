@@ -99,6 +99,7 @@ impl WalBlobBuilder {
         page_id: [u8; 32],
         page_diff: &PageDiff,
         changed: impl Iterator<Item = [u8; 32]>,
+        elided_children: u64,
         bucket_index: u64,
     ) {
         unsafe {
@@ -109,6 +110,7 @@ impl WalBlobBuilder {
             for changed in changed {
                 self.write(&changed);
             }
+            self.write(&elided_children.to_le_bytes());
             self.write(&bucket_index.to_le_bytes());
         }
     }
