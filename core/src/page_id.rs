@@ -53,7 +53,7 @@ pub const NUM_CHILDREN: usize = MAX_CHILD_INDEX as usize + 1;
 ///
 /// Each page can be thought of a root-less binary tree. The leaves of that tree are roots of
 /// subtrees stored in subsequent pages. There are 64 (2^[`DEPTH`]) children in each page.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct ChildPageIndex(u8);
 
 impl ChildPageIndex {

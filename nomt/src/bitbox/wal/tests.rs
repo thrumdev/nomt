@@ -24,6 +24,7 @@ fn test_write_read() {
         .unwrap(),
         vec![].into_iter(),
         0,
+        0,
     );
     builder.write_clear(1);
     builder.write_update(
@@ -33,6 +34,7 @@ fn test_write_read() {
         ))
         .unwrap(),
         vec![[1; 32]].into_iter(),
+        1,
         1,
     );
     builder.write_update(
@@ -45,6 +47,7 @@ fn test_write_read() {
             diff
         },
         (0..126).map(|x| [x; 32]),
+        2,
         2,
     );
     builder.finalize();
@@ -65,6 +68,7 @@ fn test_write_read() {
             page_id: [0; 32],
             page_diff: PageDiff::default(),
             changed_nodes: vec![],
+            elided_children: 0,
             bucket: 0,
         })
     );
@@ -82,6 +86,7 @@ fn test_write_read() {
                 diff
             },
             changed_nodes: vec![[1; 32]],
+            elided_children: 1,
             bucket: 1,
         })
     );
@@ -97,6 +102,7 @@ fn test_write_read() {
                 diff
             },
             changed_nodes: (0..126).map(|x| [x; 32]).collect(),
+            elided_children: 2,
             bucket: 2,
         })
     );
