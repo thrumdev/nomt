@@ -204,7 +204,7 @@ impl WorkloadConfiguration {
         // which can be at most 96 bytes.
         let avg_value_per_leaf: f64 =
             ((1. - config.overflow) * config.avg_value_len as f64) + (config.overflow * 96.);
-        // The maximum integer number of leaves that can fit in a leaf.
+        // The maximum integer number of items that can fit in a leaf.
         let n_per_leaf: f64 = (avg_leaf_page_usage / (34. + avg_value_per_leaf)).floor();
 
         // Estimate the number of items that can fit in the space left for leaves and bbns.
@@ -284,7 +284,6 @@ impl WorkloadConfiguration {
         Self::new_inner(rng, avail_bytes).unwrap()
     }
 
-    #[allow(unused)]
     pub fn enable_ensure_snapshot(&mut self) {
         self.ensure_snapshot = true;
     }

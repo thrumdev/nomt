@@ -8,7 +8,7 @@ use rand::SeedableRng;
 use rand_distr::Distribution;
 
 /// Max possible delay, in micros, used as injected latency.
-const MAX_LATENCY_MICROS: u64 = 1500;
+const MAX_LATENCY_MICROS: u64 = 1000;
 type Reply = Box<dyn FnOnce() + Send + 'static>;
 
 /// An injector of latencies.

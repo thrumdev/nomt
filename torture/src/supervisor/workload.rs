@@ -23,6 +23,9 @@ use crate::{
     },
 };
 
+/// Time to wait for the agent to crash.
+const TOLERANCE: Duration = Duration::from_secs(5);
+
 /// Represents a snapshot of the state of the database.
 #[derive(Clone)]
 struct Snapshot {
@@ -171,17 +174,21 @@ impl Workload {
         ))
     }
 
-    pub fn new_with_resources(
+    pub fn new_with_data(
         seed: u64,
         workload_dir: TempDir,
         workload_id: u64,
+        ensure_snapshot: bool,
         assigned_disk: u64,
         assigned_memory: u64,
     ) -> Self {
         let mut rng = rand_pcg::Pcg64::seed_from_u64(seed);
 
-        let config =
+        let mut config =
             WorkloadConfiguration::new_with_resources(&mut rng, assigned_disk, assigned_memory);
+        if ensure_snapshot {
+            config.enable_ensure_snapshot();
+        }
 
         Self::new_inner(
             rng,
@@ -439,7 +446,7 @@ impl Workload {
         // Crash a little bit earlier than the average commit time to increase the
         // possibilities of crashing during sync.
         crash_delay_millis = (crash_delay_millis as f64 * 0.98) as u64;
-        Duration::from_millis(crash_delay_millis)
+        std::cmp::min(Duration::from_millis(crash_delay_millis), TOLERANCE)
     }
 
     async fn ensure_outcome_validity(&mut self, outcome: &crate::message::Outcome) -> Result<()> {
@@ -614,7 +621,6 @@ impl Workload {
         //
         // Note that we don't "take" the agent from the `workload_agent` place. This is because there is
         // always a looming possibility of SIGINT arriving.
-        const TOLERANCE: Duration = Duration::from_secs(5);
         let agent = self.agent.as_mut().unwrap();
         let agent_died_or_timeout = timeout(TOLERANCE, agent.died()).await;
         self.agent.take().unwrap().teardown().await;
@@ -1016,6 +1022,7 @@ impl Workload {
             }
         }
 
+        // `delete_key` + `update_key` + `new_key` is always bigger than 0.
         let distr = WeightedIndex::new([
             self.config.delete_key,
             self.config.update_key,

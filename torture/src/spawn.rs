@@ -93,7 +93,7 @@ pub fn am_spawned() -> Option<UnixStream> {
     Some(stream)
 }
 
-pub fn spawn_child(output_path: PathBuf) -> Result<(Child, UnixStream)> {
+pub fn spawn_child(workload_dir_path: PathBuf) -> Result<(Child, UnixStream)> {
     let (sock1, sock2) = UnixStream::pair()?;
 
     // Those sockets are going to be used in tokio and as such they should be both set to
@@ -101,13 +101,13 @@ pub fn spawn_child(output_path: PathBuf) -> Result<(Child, UnixStream)> {
     sock1.set_nonblocking(true)?;
     sock2.set_nonblocking(true)?;
 
-    let child = spawn_child_with_sock(sock2.as_raw_fd(), output_path)?;
+    let child = spawn_child_with_sock(sock2.as_raw_fd(), workload_dir_path)?;
     drop(sock2); // Close parent's end in child
 
     Ok((child, sock1))
 }
 
-fn spawn_child_with_sock(socket_fd: RawFd, output_path: PathBuf) -> Result<Child> {
+fn spawn_child_with_sock(socket_fd: RawFd, workload_dir_path: PathBuf) -> Result<Child> {
     trace!(?socket_fd, "Spawning child process");
 
     // Prepare argv for the child process.
@@ -125,7 +125,7 @@ fn spawn_child_with_sock(socket_fd: RawFd, output_path: PathBuf) -> Result<Child
     let out_file = std::fs::File::options()
         .create(false)
         .append(true)
-        .open(output_path.join("log.txt"))
+        .open(workload_dir_path.join("log.txt"))
         .expect("Log file is expected to be created by the supervisor");
     let mut cmd = Command::new(program);
     cmd.stdout(out_file.try_clone().unwrap());
