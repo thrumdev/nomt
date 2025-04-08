@@ -11,7 +11,7 @@ pub enum SwarmFeatures {
     /// Will be used only when the assigned memory is smaller than
     /// `TRICKFS_MEMORY_THRESHOLD`.
     TrickfsLatencyInjection,
-    /// Ensure that the changest was correctly applied
+    /// Ensure that the changeset was correctly applied
     EnsureChangeset,
     /// Randomly sample the state after every crash or rollback to check the
     /// correctness of the state of the database.

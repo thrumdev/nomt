@@ -345,10 +345,11 @@ async fn run_single_workload(
 
     let workload_dir = init_workload_dir(workdir_path.clone(), 0 /* workload_id */);
 
-    let workload = Workload::new_with_resources(
+    let workload = Workload::new_with_data(
         run_params.seed,
         workload_dir,
         0, /* workload_id */
+        run_params.ensure_snapshot,
         run_params.assigned_disk,
         run_params.assigned_memory,
     );

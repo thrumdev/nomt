@@ -56,4 +56,10 @@ pub struct RunParams {
     /// It will contain the folder of the workload that it is being executed.
     #[arg(long = "workdir")]
     pub workdir: Option<String>,
+
+    /// Check whether the entire state is up to date as expected.
+    ///
+    /// This applies after every rollback.
+    #[arg(long = "ensure_snapshot", default_value = "false")]
+    pub ensure_snapshot: bool,
 }
