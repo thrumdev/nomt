@@ -1096,6 +1096,7 @@ dependencies = [
  "bitvec",
  "blake3",
  "borsh",
+ "digest",
  "hex",
  "ruint",
  "serde",
