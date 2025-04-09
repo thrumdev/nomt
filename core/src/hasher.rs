@@ -102,6 +102,13 @@ impl<H: BinaryHash> NodeHasher for BinaryHasher<H> {
     }
 }
 
+/// Blanket implementation for all implementations of `Digest`
+impl<H: digest::Digest<OutputSize = digest::typenum::U32> + Send + Sync> BinaryHash for H {
+    fn hash(input: &[u8]) -> [u8; 32] {
+        H::digest(input).into()
+    }
+}
+
 #[cfg(any(feature = "blake3-hasher", test))]
 pub use blake3::Blake3Hasher;
 
