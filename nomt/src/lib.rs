@@ -572,7 +572,7 @@ impl<T: HashAlgorithm> Session<T> {
         self.store.load_value(path)
     }
 
-    /// Prev root
+    /// Previous root
     pub fn prev_root(&self) -> Root {
         self.prev_root
     }
