@@ -2265,6 +2265,7 @@ dependencies = [
  "bitvec",
  "blake3",
  "borsh 1.5.7",
+ "digest 0.10.7",
  "hex",
  "ruint",
  "serde",
