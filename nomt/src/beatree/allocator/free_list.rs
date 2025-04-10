@@ -187,16 +187,11 @@ impl FreeList {
         // append the released free list pages
         to_push.extend(self.released_portions.drain(..));
 
-        let pages = if had_pops && to_push.is_empty() {
-            // note: empty vec when head is empty.
-            self.encode_head(page_pool).into_iter().collect()
-        } else {
-            let new_pages = self.preallocate(&mut to_push, bump);
-            let pages = self.push_and_encode(page_pool, &to_push, new_pages);
-            // preallocate pops, therefore, we must set it back.
-            self.pop = false;
-            pages
-        };
+        let new_pages = self.preallocate(&mut to_push, bump);
+        let pages = self.push_and_encode(page_pool, &to_push, new_pages);
+
+        // preallocate pops, therefore, we must set it back.
+        self.pop = false;
 
         let (len, fragmented) = len_and_fragmented(&self.portions);
         self.len = len;
@@ -733,10 +728,17 @@ mod tests {
             fragmented: false,
         };
 
+        // The head must follow CoW.
         let page_pool = PagePool::new();
         let result = free_list.commit(&page_pool, Vec::new(), &mut PageNumber(10000));
+
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, PageNumber(1));
+        assert_eq!(result[0].0, PageNumber(2));
+
+        let (prev_pn, free_list) = super::decode_free_list_page(result[0].1.clone(), 3);
+
+        assert_eq!(prev_pn, super::FREELIST_EMPTY);
+        assert_eq!(free_list, vec![PageNumber(1)]);
     }
 
     #[test]
