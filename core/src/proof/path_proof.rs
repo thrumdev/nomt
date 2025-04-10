@@ -5,6 +5,7 @@ use crate::trie::{self, InternalData, KeyPath, LeafData, Node, NodeKind, TERMINA
 use crate::trie_pos::TriePosition;
 
 use bitvec::prelude::*;
+use core::fmt;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -198,6 +199,16 @@ impl VerifiedPathProof {
     }
 }
 
+impl fmt::Debug for VerifiedPathProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedPathProof")
+            .field("path", &self.path())
+            .field("terminal", &self.terminal())
+            .field("root", &self.root())
+            .finish()
+    }
+}
+
 /// Errors that can occur when verifying an update proof.
 #[derive(Debug, Clone, Copy)]
 pub enum VerifyUpdateError {
@@ -219,6 +230,15 @@ pub struct PathUpdate {
     pub inner: VerifiedPathProof,
     /// Update operations to perform on keys that all start with the path.
     pub ops: Vec<(KeyPath, Option<trie::ValueHash>)>,
+}
+
+impl fmt::Debug for PathUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PathUpdate")
+            .field("inner", &self.inner)
+            .field("ops", &self.ops)
+            .finish()
+    }
 }
 
 /// Verify an update operation against the root node. This follows a similar algorithm to the
