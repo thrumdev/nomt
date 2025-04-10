@@ -228,10 +228,17 @@ pub struct PathUpdate {
 /// paths in `paths`.
 ///
 /// All paths should share the same root.
+///
+/// Returns the root of the trie obtained after application of the given updates in the `paths`
+/// vector. In case the `paths` is empty, `prev_root` is returned.
 pub fn verify_update<H: NodeHasher>(
     prev_root: Node,
     paths: &[PathUpdate],
 ) -> Result<Node, VerifyUpdateError> {
+    if paths.is_empty() {
+        return Ok(prev_root);
+    }
+
     if paths.iter().any(|p| p.inner.root() != prev_root) {
         return Err(VerifyUpdateError::RootMismatch);
     }
@@ -324,8 +331,9 @@ pub fn verify_update<H: NodeHasher>(
         pending_siblings.push((cur_node, end_layer));
     }
 
-    // The last `path` iterates up to layer 0, so this always stores the root if paths nonempty.
-    Ok(pending_siblings.pop().map(|n| n.0).unwrap_or(TERMINATOR))
+    // UNWRAP: If `paths` is not empty this can never be `None` since `pending_siblings` is
+    // unconditionally appended to.
+    Ok(pending_siblings.pop().map(|n| n.0).unwrap())
 }
 
 // TODO: dedup, this appears in `update` as well.
