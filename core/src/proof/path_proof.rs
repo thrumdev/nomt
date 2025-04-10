@@ -259,15 +259,21 @@ pub fn verify_update<H: NodeHasher>(
         return Ok(prev_root);
     }
 
-    if paths.iter().any(|p| p.inner.root() != prev_root) {
-        return Err(VerifyUpdateError::RootMismatch);
-    }
-
-    // left frontier
-    let mut pending_siblings: Vec<(Node, usize)> = Vec::new();
+    // Verify important properties about the paths.
     for (i, path) in paths.iter().enumerate() {
+        // All paths must stem from the same starting root.
+        if path.inner.root() != prev_root {
+            return Err(VerifyUpdateError::RootMismatch);
+        }
+
+        // All paths must be ascending.
         if i != 0 && paths[i - 1].inner.path() >= path.inner.path() {
             return Err(VerifyUpdateError::PathsOutOfOrder);
+        }
+
+        // Path's operations must be non-empty.
+        if path.ops.is_empty() {
+            return Err(VerifyUpdateError::PathWithoutOps);
         }
 
         for (j, (key, _value)) in path.ops.iter().enumerate() {
@@ -279,11 +285,11 @@ pub fn verify_update<H: NodeHasher>(
                 return Err(VerifyUpdateError::OpOutOfScope);
             }
         }
+    }
 
-        if path.ops.is_empty() {
-            return Err(VerifyUpdateError::PathWithoutOps);
-        }
-
+    // left frontier
+    let mut pending_siblings: Vec<(Node, usize)> = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
         let leaf = path.inner.terminal().map(|x| x.clone());
         let ops = &path.ops;
         let skip = path.inner.path().len();

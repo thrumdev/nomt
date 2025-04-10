@@ -124,3 +124,51 @@ fn empty_witness() {
         new_root.into_inner(),
     );
 }
+
+#[test]
+fn test_verify_update_with_identical_paths() {
+    use nomt::{
+        hasher::Blake3Hasher,
+        proof::{verify_update, PathUpdate},
+        trie::ValueHash,
+    };
+
+    let account0 = 0;
+
+    // Create a simple trie, create an update witness.
+    let mut t = Test::new("identical_paths_test");
+    common::set_balance(&mut t, account0, 1000);
+    let (root, _) = t.commit();
+    t.read_id(account0);
+    let (_, witness) = t.commit();
+
+    // Using that witness extract and verify the proof.
+    let witnessed_path = &witness.path_proofs[0];
+    let verified_proof = witnessed_path
+        .inner
+        .verify::<Blake3Hasher>(&witnessed_path.path.path(), root.into_inner())
+        .unwrap();
+
+    // Create two identical PathUpdate objects
+    let mut updates = Vec::new();
+
+    // First update
+    let value1 = ValueHash::default();
+    let ops1 = vec![([0; 32], Some(value1))];
+    updates.push(PathUpdate {
+        inner: verified_proof.clone(),
+        ops: ops1,
+    });
+
+    // Second update with identical path
+    let value2 = ValueHash::default();
+    let ops2 = vec![([1; 32], Some(value2))];
+    updates.push(PathUpdate {
+        inner: verified_proof, // Using the same verified proof
+        ops: ops2,
+    });
+
+    // Try to verify the update. We expect an error due to identical paths, because that violates
+    // the requirement of ascending keys.
+    verify_update::<Blake3Hasher>(root.into_inner(), &updates).unwrap_err();
+}
