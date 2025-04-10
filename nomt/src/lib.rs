@@ -685,6 +685,11 @@ impl FinishedSession {
         Root(self.merkle_output.root)
     }
 
+    /// Returns the [`Root`] at which this session is based off of.
+    pub fn prev_root(&self) -> Root {
+        self.prev_root
+    }
+
     /// Take the witness, if any.
     ///
     /// If this session was configured with proving  (see [`SessionParams::witness_mode`]),
