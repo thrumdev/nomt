@@ -92,3 +92,35 @@ fn produced_witness_validity() {
         new_root.into_inner(),
     );
 }
+
+#[test]
+fn empty_witness() {
+    let mut accounts = 0;
+    let mut t = Test::new("empty_witness");
+
+    let (prev_root, _) = {
+        for _ in 0..10 {
+            common::set_balance(&mut t, accounts, 1000);
+            accounts += 1;
+        }
+        t.commit()
+    };
+
+    // Create a commit with no operations performed
+    let (new_root, witness) = t.commit();
+
+    // The roots should be identical since no changes were made
+    assert_eq!(prev_root, new_root);
+
+    // The witness should be empty
+    assert_eq!(witness.operations.reads.len(), 0);
+    assert_eq!(witness.operations.writes.len(), 0);
+    assert_eq!(witness.path_proofs.len(), 0);
+
+    // Verify that an empty update produces the same root
+    let updates: Vec<proof::PathUpdate> = Vec::new();
+    assert_eq!(
+        proof::verify_update::<Blake3Hasher>(prev_root.into_inner(), &updates).unwrap(),
+        new_root.into_inner(),
+    );
+}
