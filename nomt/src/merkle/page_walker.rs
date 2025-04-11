@@ -107,6 +107,8 @@ struct ReconstructedPage {
     pub page: PageMut,
     /// Number of leaves present in the child pages of the page.
     pub leaves_counter: u64,
+    /// A compact diff indicating all reconstructed slots in the page.
+    pub diff: PageDiff,
 }
 
 /// A page that currently stays in the stack of the page walker.
@@ -129,6 +131,9 @@ struct StackPage {
     /// Bitfield used to keep track of which child pages have been elided.
     /// `None` if no child page has been elided.
     elided_children: ElidedChildren,
+    /// A compact diff indicating all reconstructed slots in the page if the
+    /// page was reconstructed.
+    reconstruction_diff: Option<PageDiff>,
 }
 
 impl StackPage {
@@ -136,11 +141,21 @@ impl StackPage {
         Self {
             elided_children: ElidedChildren::new(page.elided_children()),
             leaves_counter: page_origin.leaves_counter(),
+            reconstruction_diff: page_origin.page_diff().cloned(),
             bucket_info: page_origin.bucket_info(),
             page_id,
             page,
             diff,
         }
+    }
+
+    /// Join both diffs associated with the reconstruction phase and
+    /// those involved in the update process.
+    fn total_diff(&self) -> PageDiff {
+        self.reconstruction_diff
+            .as_ref()
+            .map(|reconstruction_diff| reconstruction_diff.join(&self.diff))
+            .unwrap_or(self.diff.clone())
     }
 }
 
@@ -454,7 +469,10 @@ impl<H: NodeHasher> PageWalker<H> {
         for bit in bit_path.iter().by_vals() {
             if self.position.is_root() {
                 let (page, page_origin) = if fresh {
-                    (page_set.fresh(&ROOT_PAGE_ID), PageOrigin::Reconstructed(0))
+                    (
+                        page_set.fresh(&ROOT_PAGE_ID),
+                        PageOrigin::Reconstructed(0, PageDiff::default()),
+                    )
                 } else {
                     // UNWRAP: all pages on the path to the node should be in the cache.
                     page_set
@@ -487,7 +505,7 @@ impl<H: NodeHasher> PageWalker<H> {
                         child_page_id,
                         page,
                         PageDiff::default(),
-                        PageOrigin::Reconstructed(0),
+                        PageOrigin::Reconstructed(0, PageDiff::default()),
                     )
                 } else {
                     // UNWRAP: all pages on the path to the node should be in the cache.
@@ -554,10 +572,13 @@ impl<H: NodeHasher> PageWalker<H> {
         let mut first_elided_page = page_set.fresh(&first_elided_page_id);
         first_elided_page.set_node(0, TERMINATOR);
         first_elided_page.set_node(1, TERMINATOR);
+        let mut diff = PageDiff::default();
+        diff.set_changed(0);
+        diff.set_changed(1);
         page_set.insert(
             first_elided_page_id,
             first_elided_page.freeze(),
-            PageOrigin::Reconstructed(0),
+            PageOrigin::Reconstructed(0, diff),
         );
 
         // Split the ops into the two subtrees present in a page.
@@ -826,6 +847,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
         let push_reconstructed = |output_pages: &mut Vec<_>, reconstructed: StackPage| {
             output_pages.push(PageWalkerPageOutput::Reconstructed(ReconstructedPage {
+                diff: reconstructed.total_diff(),
                 page_id: reconstructed.page_id,
                 page: reconstructed.page,
                 // UNWRAP: If the page is being reconstructed, it must have a leaves
@@ -836,9 +858,9 @@ impl<H: NodeHasher> PageWalker<H> {
 
         let push_updated = |output_pages: &mut Vec<_>, updated: StackPage| {
             output_pages.push(PageWalkerPageOutput::Updated(UpdatedPage {
+                diff: updated.total_diff(),
                 page_id: updated.page_id,
                 page: updated.page,
-                diff: updated.diff,
                 bucket_info: updated.bucket_info.unwrap_or(BucketInfo::Fresh),
             }));
         };
@@ -971,13 +993,17 @@ fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
 /// Reconstruct the elided pages using all the key-value pairs present in the elided subtree.
 /// Reconstruction requires the page and its page_id, where the elided child page was found,
 /// as well as the `TriePosition` within that page.
+///
+/// Returns an iterator over the following items: the reconstructed page, its page_id,
+/// the PageDiff indicating all nodes effectively reconstructed within the page
+/// and a counter of leaves in the page's subtrees.
 pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
     page: &Page,
     page_id: PageId,
     position: TriePosition,
     page_set: &mut impl PageSet,
     ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
-) -> impl Iterator<Item = (PageId, Page, u64)> {
+) -> impl Iterator<Item = (PageId, Page, PageDiff, u64)> {
     let subtree_root = page.node(position.node_index());
 
     let page_walker = PageWalker::<H>::new_reconstructor(
@@ -996,6 +1022,7 @@ pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
         (
             reconstructed_page.page_id,
             reconstructed_page.page.freeze(),
+            reconstructed_page.diff,
             reconstructed_page.leaves_counter,
         )
     })
@@ -1073,7 +1100,7 @@ mod tests {
         fn get(&self, page_id: &PageId) -> Option<(Page, PageOrigin)> {
             self.inner
                 .get(page_id)
-                .map(|p| (p.clone(), PageOrigin::Reconstructed(0)))
+                .map(|p| (p.clone(), PageOrigin::Reconstructed(0, PageDiff::default())))
         }
 
         fn insert(&mut self, page_id: PageId, page: Page, _page_origin: PageOrigin) {
@@ -1849,8 +1876,8 @@ mod tests {
         // Make sure that elision bitfield was updated correctly.
         let reconstructed_page = reconstructed_pages
             .iter()
-            .find(|(page_id, _, _)| page_id.length_dependent_encoding() == &[24, 24])
-            .map(|(_, page, _)| page)
+            .find(|(page_id, _, _, _)| page_id.length_dependent_encoding() == &[24, 24])
+            .map(|(_, page, _, _)| page)
             .unwrap();
 
         let elided_children = super::ElidedChildren::new(reconstructed_page.elided_children());
@@ -1864,7 +1891,7 @@ mod tests {
         }
 
         // Ensure reconstructed pages are what we expect.
-        for (page_id, page, _) in reconstructed_pages {
+        for (page_id, page, _, _) in reconstructed_pages {
             let correct_page = correct_pages
                 .iter()
                 .position(|correct_page| correct_page.page_id == page_id)
