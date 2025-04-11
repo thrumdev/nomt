@@ -17,6 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     io::PagePool,
+    metrics::Metrics,
     overlay::LiveOverlay,
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
@@ -216,6 +217,7 @@ impl Updater {
         self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
         witness: bool,
+        metrics: Metrics,
     ) -> std::io::Result<UpdateHandle> {
         if let Some(ref warm_up) = self.warm_up {
             let _ = warm_up.finish_tx.send(());
@@ -259,7 +261,7 @@ impl Updater {
                 warm_page_set: warm_page_set.clone(),
                 command,
             };
-            spawn_updater::<H>(&self.worker_tp, params, worker_tx.clone());
+            spawn_updater::<H>(&self.worker_tp, params, worker_tx.clone(), metrics.clone());
         }
 
         Ok(UpdateHandle {
@@ -484,8 +486,13 @@ fn spawn_updater<H: HashAlgorithm>(
     worker_tp: &ThreadPool,
     params: worker::UpdateParams,
     output_tx: Sender<TaskResult<std::io::Result<WorkerOutput>>>,
+    metrics: Metrics,
 ) {
-    spawn_task(&worker_tp, || worker::run_update::<H>(params), output_tx);
+    spawn_task(
+        &worker_tp,
+        || worker::run_update::<H>(params, metrics),
+        output_tx,
+    );
 }
 
 fn get_in_memory_page(
