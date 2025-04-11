@@ -112,6 +112,15 @@ impl PageDiff {
         FastIterOnes(self.changed_nodes[0])
             .chain(FastIterOnes(self.changed_nodes[1]).map(|i| i + 64))
     }
+
+    pub fn join(&self, diff: &PageDiff) -> PageDiff {
+        PageDiff {
+            changed_nodes: [
+                self.changed_nodes[0] | diff.changed_nodes[0],
+                self.changed_nodes[1] | diff.changed_nodes[1],
+            ],
+        }
+    }
 }
 
 struct FastIterOnes(u64);
