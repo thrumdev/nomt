@@ -7,6 +7,7 @@ use super::BucketInfo;
 use crate::{
     io::PagePool,
     page_cache::{Page, PageMut},
+    page_diff::PageDiff,
 };
 
 /// A page in the [`PageSet`] can have two different origins.
@@ -15,8 +16,9 @@ pub enum PageOrigin {
     /// It could have been fetched from the hash table, thereby having an associated `BucketInfo`.
     Persisted(BucketInfo),
     /// It could have been reconstructed on the fly without being stored anywhere.
-    /// Keeps track of the total number of leaves in child pages.
-    Reconstructed(u64),
+    /// It keeps track of the total number of leaves in child pages and which nodes
+    /// in the page have been reconstructed.
+    Reconstructed(u64, PageDiff),
 }
 
 impl PageOrigin {
@@ -24,14 +26,22 @@ impl PageOrigin {
     pub fn bucket_info(self) -> Option<BucketInfo> {
         match self {
             PageOrigin::Persisted(bucket_info) => Some(bucket_info),
-            PageOrigin::Reconstructed(_) => None,
+            PageOrigin::Reconstructed(_, _) => None,
         }
     }
 
     /// Extract the number of leaves from `PageOrigin::Reconstructed` variant.
     pub fn leaves_counter(&self) -> Option<u64> {
         match self {
-            PageOrigin::Reconstructed(counter) => Some(*counter),
+            PageOrigin::Reconstructed(counter, _) => Some(*counter),
+            PageOrigin::Persisted(_) => None,
+        }
+    }
+
+    /// Extract the [`PageDiff`] from `PageOrigin::Reconstructed` variant.
+    pub fn page_diff(&self) -> Option<&PageDiff> {
+        match self {
+            PageOrigin::Reconstructed(_, page_diff) => Some(page_diff),
             PageOrigin::Persisted(_) => None,
         }
     }

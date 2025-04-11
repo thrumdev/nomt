@@ -312,8 +312,12 @@ impl SeekRequest {
             final_leaf_data_collection,
         );
 
-        for (page_id, page, leaves_counter) in pages {
-            page_set.insert(page_id, page, PageOrigin::Reconstructed(leaves_counter));
+        for (page_id, page, diff, leaves_counter) in pages {
+            page_set.insert(
+                page_id,
+                page,
+                PageOrigin::Reconstructed(leaves_counter, diff),
+            );
         }
 
         // Now that all pages are reconstructed, seeking can be resumed.
