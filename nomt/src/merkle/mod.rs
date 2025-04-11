@@ -7,7 +7,7 @@ use page_set::FrozenSharedPageSet;
 use parking_lot::Mutex;
 
 use nomt_core::{
-    page_id::PageId,
+    page_id::{ChildPageIndex, PageId},
     trie::{self, KeyPath, Node, ValueHash},
     trie_pos::TriePosition,
 };
@@ -35,6 +35,58 @@ mod worker;
 
 pub use cache_prepopulate::prepopulate as prepopulate_cache;
 pub use page_walker::UpdatedPage;
+
+#[cfg(doc)]
+use nomt_core::page_id::MAX_CHILD_INDEX;
+
+/// Threshold representing the number of leaves required to be present in the two
+/// subtrees contained in a page to be stored on disk.
+/// If this threshold is not exceeded, the page will not be stored on disk
+/// and will be constructed on the fly when needed.
+pub const PAGE_ELISION_THRESHOLD: u64 = 20;
+
+/// Bitfield used to note which child pages are elided and thus require on-the-fly reconstruction.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ElidedChildren {
+    elided: u64,
+}
+
+impl ElidedChildren {
+    /// Create a new empty ElidedChildren from its raw version.
+    pub fn new() -> Self {
+        Self { elided: 0 }
+    }
+
+    /// Create a new ElidedChildren from its encoded version.
+    pub fn from_bytes(raw: [u8; 8]) -> ElidedChildren {
+        ElidedChildren {
+            elided: u64::from_le_bytes(raw),
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 8] {
+        self.elided.to_le_bytes()
+    }
+
+    /// Toggle as elided or not elided a child of the page.
+    ///
+    /// Panics if `child_index` is bigger than [`MAX_CHILD_INDEX`].
+    pub fn set_elide(&mut self, child_page_index: ChildPageIndex, elide: bool) {
+        let shift = child_page_index.to_u8() as u64;
+        if elide {
+            self.elided |= 1 << shift;
+        } else {
+            self.elided &= !(1 << shift);
+        }
+    }
+
+    /// Checks if the child at `child_index` is elided.
+    ///
+    /// Panics if `child_index` is bigger than [`MAX_CHILD_INDEX`].
+    pub fn is_elided(&self, child_page_index: ChildPageIndex) -> bool {
+        (self.elided >> child_page_index.to_u8() as u64) & 1 == 1
+    }
+}
 
 /// Updated pages produced by update workers.
 pub struct UpdatedPages(Vec<Vec<UpdatedPage>>);

@@ -3,6 +3,7 @@
 use super::{WAL_ENTRY_TAG_CLEAR, WAL_ENTRY_TAG_END, WAL_ENTRY_TAG_START, WAL_ENTRY_TAG_UPDATE};
 use crate::{
     io::{self, PagePool, PAGE_SIZE},
+    merkle::ElidedChildren,
     page_diff::PageDiff,
 };
 use anyhow::bail;
@@ -20,7 +21,7 @@ pub enum WalEntry {
         /// the number of ones in `page_diff`.
         changed_nodes: Vec<[u8; 32]>,
         /// Bitfield representing which child page has been elided.
-        elided_children: u64,
+        elided_children: ElidedChildren,
         /// The bucket index which is being updated.
         bucket: u64,
     },
@@ -103,7 +104,8 @@ impl WalBlobReader {
                     changed_nodes.push(node);
                 }
 
-                let elided_children = self.read_u64()?;
+                let elided_children: [u8; 8] = self.read_buf()?;
+                let elided_children = ElidedChildren::from_bytes(elided_children);
                 let bucket = self.read_u64()?;
 
                 Ok(Some(WalEntry::Update {

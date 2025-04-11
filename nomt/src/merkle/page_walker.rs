@@ -46,27 +46,18 @@ use bitvec::prelude::*;
 use nomt_core::{
     hasher::NodeHasher,
     page::DEPTH,
-    page_id::{ChildPageIndex, PageId, ROOT_PAGE_ID},
+    page_id::{PageId, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node, NodeKind, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
     update::WriteNode,
 };
 
-#[cfg(doc)]
-use nomt_core::page_id::MAX_CHILD_INDEX;
-
 use crate::{
-    merkle::{page_set::PageOrigin, BucketInfo},
+    merkle::{page_set::PageOrigin, BucketInfo, ElidedChildren, PAGE_ELISION_THRESHOLD},
     metrics::Metrics,
     page_cache::{Page, PageMut},
     page_diff::PageDiff,
 };
-
-/// Threshold representing the number of leaves required to be present in the two
-/// subtrees contained in a page to be stored on disk.
-/// If this threshold is not exceeded, the page will not be stored on disk
-/// and will be constructed on the fly when needed.
-pub const PAGE_ELISION_THRESHOLD: u64 = 20;
 
 /// The output of the page walker.
 pub enum Output {
@@ -139,7 +130,7 @@ struct StackPage {
 impl StackPage {
     fn new(page_id: PageId, page: PageMut, diff: PageDiff, page_origin: PageOrigin) -> Self {
         Self {
-            elided_children: ElidedChildren::new(page.elided_children()),
+            elided_children: page.elided_children(),
             leaves_counter: page_origin.leaves_counter(),
             reconstruction_diff: page_origin.page_diff().cloned(),
             bucket_info: page_origin.bucket_info(),
@@ -156,37 +147,6 @@ impl StackPage {
             .as_ref()
             .map(|reconstruction_diff| reconstruction_diff.join(&self.diff))
             .unwrap_or(self.diff.clone())
-    }
-}
-
-/// Bitfield used to note which child pages are elided and thus require on-the-fly reconstruction.
-pub struct ElidedChildren {
-    elided: u64,
-}
-
-impl ElidedChildren {
-    /// Create an ElidedChildren from its raw version.
-    pub fn new(elided: u64) -> Self {
-        Self { elided }
-    }
-
-    /// Toggle as elided or not elided a child of the page.
-    ///
-    /// Panics if `child_index` is bigger than [`MAX_CHILD_INDEX`].
-    pub fn set_elide(&mut self, child_page_index: ChildPageIndex, elide: bool) {
-        let shift = child_page_index.to_u8() as u64;
-        if elide {
-            self.elided |= 1 << shift;
-        } else {
-            self.elided &= !(1 << shift);
-        }
-    }
-
-    /// Checks if the child at `child_index` is elided.
-    ///
-    /// Panics if `child_index` is bigger than [`MAX_CHILD_INDEX`].
-    pub fn is_elided(&self, child_page_index: ChildPageIndex) -> bool {
-        (self.elided >> child_page_index.to_u8() as u64) & 1 == 1
     }
 }
 
@@ -842,7 +802,7 @@ impl<H: NodeHasher> PageWalker<H> {
             // Store the updated elided_children field into the page.
             stack_page
                 .page
-                .set_elided_children(stack_page.elided_children.elided);
+                .set_elided_children(&stack_page.elided_children);
         }
 
         let push_reconstructed = |output_pages: &mut Vec<_>, reconstructed: StackPage| {
@@ -1037,7 +997,7 @@ mod tests {
     use crate::{
         hasher::Blake3Hasher,
         io::PagePool,
-        merkle::page_set::PageOrigin,
+        merkle::{page_set::PageOrigin, ElidedChildren},
         metrics::Metrics,
         page_cache::{Page, PageMut},
         page_diff::PageDiff,
@@ -1880,7 +1840,7 @@ mod tests {
             .map(|(_, page, _, _)| page)
             .unwrap();
 
-        let elided_children = super::ElidedChildren::new(reconstructed_page.elided_children());
+        let elided_children = reconstructed_page.elided_children();
         let expected_elided = [0, 2, 10, 26];
         for i in 0..64 {
             if expected_elided.contains(&i) {
@@ -1902,7 +1862,7 @@ mod tests {
                 // The correct pages are build without elision,
                 // so the elided children bitfield is not present.
                 let mut no_bitfield_page = page.deep_copy();
-                no_bitfield_page.set_elided_children(0);
+                no_bitfield_page.set_elided_children(&ElidedChildren::new());
                 no_bitfield_page.freeze()
             } else {
                 page
