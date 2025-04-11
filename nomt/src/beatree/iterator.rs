@@ -172,6 +172,10 @@ impl CurrentLeaf {
         end.map_or(true, |end| &self.leaf.key(self.index) < end)
     }
 
+    fn is_last_output_in_range(&self, end: Option<&Key>) -> bool {
+        end.map_or(true, |end| &self.leaf.key(self.index - 1) < end)
+    }
+
     fn last_output(&self) -> IterOutput {
         let index = self.index - 1;
         let key = self.leaf.key(index);
@@ -251,13 +255,20 @@ impl LeafIterator {
                 } => {
                     current.index += 1;
                     let next_state = if current.is_consumed() {
-                        // move to next leaf.
-                        self.new_state_leaf_consumed(branch, index_in_branch + 1, current)
-                    } else if !current.is_in_range(self.end.as_ref()) {
-                        // iterator is done
-                        LeafIteratorState::Done {
-                            last: Some(current),
+                        // Move to the next leaf if the last output is within the range.
+                        if current.is_last_output_in_range(self.end.as_ref()) {
+                            self.new_state_leaf_consumed(branch, index_in_branch + 1, current)
+                        } else {
+                            LeafIteratorState::Done { last: None }
                         }
+                    } else if !current.is_in_range(self.end.as_ref()) {
+                        // `current.index` is out of range, but `current.index - 1` might also be.
+                        let last = if current.is_last_output_in_range(self.end.as_ref()) {
+                            Some(current)
+                        } else {
+                            None
+                        };
+                        LeafIteratorState::Done { last }
                     } else {
                         // iterator is still proceeding
                         LeafIteratorState::Proceeding {
@@ -318,7 +329,7 @@ impl LeafIterator {
             if self.end.map_or(true, |end| separator < end) {
                 LeafIteratorState::Blocked {
                     index_in_branch: next_index_in_branch,
-                    separator: get_key(&branch, next_index_in_branch),
+                    separator,
                     branch,
                     last: Some(last),
                 }
@@ -732,11 +743,8 @@ mod tests {
     #[test]
     fn end_bound_respected_in_leaves() {
         let (_, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
-
         let (_, leaf_2) = build_leaf(vec![(key(6), 6), (key(7), 7)]);
-
         let branch = build_branch(vec![(key(0), 69.into()), (key(6), 70.into())]);
-
         let index = build_index(vec![branch.clone()]);
         {
             let end = key(7);
@@ -777,6 +785,36 @@ mod tests {
                         inner: leaves.next().unwrap(),
                     }),
                     IterOutput::Item(k, _) => assert!(k < end),
+                    IterOutput::OverflowItem(_, _, _) => panic!(),
+                }
+            }
+
+            assert!(leaves.next().is_none());
+        }
+
+        // Special case where the end is bigger than the separator but smaller than
+        // the first item in the second provided leaf.
+        let (_, leaf_1) = build_leaf(vec![(key(1), 1), (key(2), 2), (key(3), 3)]);
+        let (_, leaf_2) = build_leaf(vec![(key(8), 8), (key(9), 9)]);
+        let branch = build_branch(vec![(key(0), 69.into()), (key(6), 70.into())]);
+        let index = build_index(vec![branch.clone()]);
+
+        {
+            let end = key(7);
+            let mut leaves = vec![leaf_1.clone(), leaf_2.clone()].into_iter();
+            let mut iter = BeatreeIterator::new(
+                OrdMap::new(),
+                None,
+                index.clone(),
+                Key::default(),
+                Some(end),
+            );
+            while let Some(output) = iter.next() {
+                match output {
+                    IterOutput::Blocked => iter.provide_leaf(LeafNodeRef {
+                        inner: leaves.next().unwrap(),
+                    }),
+                    IterOutput::Item(k, _) => assert!(dbg!(k) < end),
                     IterOutput::OverflowItem(_, _, _) => panic!(),
                 }
             }
