@@ -1,7 +1,7 @@
 //! The write-path for the WAL.
 
 use super::{WAL_ENTRY_TAG_CLEAR, WAL_ENTRY_TAG_END, WAL_ENTRY_TAG_START, WAL_ENTRY_TAG_UPDATE};
-use crate::{io::PAGE_SIZE, page_diff::PageDiff};
+use crate::{io::PAGE_SIZE, merkle::ElidedChildren, page_diff::PageDiff};
 
 const MAX_SIZE: usize = 1 << 37; // 128 GiB
 
@@ -99,7 +99,7 @@ impl WalBlobBuilder {
         page_id: [u8; 32],
         page_diff: &PageDiff,
         changed: impl Iterator<Item = [u8; 32]>,
-        elided_children: u64,
+        elided_children: ElidedChildren,
         bucket_index: u64,
     ) {
         unsafe {
@@ -110,7 +110,7 @@ impl WalBlobBuilder {
             for changed in changed {
                 self.write(&changed);
             }
-            self.write(&elided_children.to_le_bytes());
+            self.write(&elided_children.to_bytes());
             self.write(&bucket_index.to_le_bytes());
         }
     }
