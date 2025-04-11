@@ -494,7 +494,7 @@ fn recover(
                 page[PAGE_SIZE - 32..].copy_from_slice(&page_id);
                 // Write elided children bitfield.
                 page[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32]
-                    .copy_from_slice(&elided_children.to_le_bytes());
+                    .copy_from_slice(&elided_children.to_bytes());
 
                 ht_fd.write_all_at(&page, pn * PAGE_SIZE as u64)?;
             }

@@ -1,5 +1,5 @@
 use super::{WalBlobBuilder, WalBlobReader, WalEntry};
-use crate::{io::page_pool::PagePool, page_diff::PageDiff};
+use crate::{io::page_pool::PagePool, merkle::ElidedChildren, page_diff::PageDiff};
 use std::{fs::OpenOptions, io::Write as _};
 
 #[test]
@@ -23,7 +23,7 @@ fn test_write_read() {
         ))
         .unwrap(),
         vec![].into_iter(),
-        0,
+        ElidedChildren::new(),
         0,
     );
     builder.write_clear(1);
@@ -34,7 +34,7 @@ fn test_write_read() {
         ))
         .unwrap(),
         vec![[1; 32]].into_iter(),
-        1,
+        ElidedChildren::from_bytes([1, 0, 0, 0, 0, 0, 0, 0]),
         1,
     );
     builder.write_update(
@@ -47,7 +47,7 @@ fn test_write_read() {
             diff
         },
         (0..126).map(|x| [x; 32]),
-        2,
+        ElidedChildren::from_bytes([2, 0, 0, 0, 0, 0, 0, 0]),
         2,
     );
     builder.finalize();
@@ -68,7 +68,7 @@ fn test_write_read() {
             page_id: [0; 32],
             page_diff: PageDiff::default(),
             changed_nodes: vec![],
-            elided_children: 0,
+            elided_children: ElidedChildren::new(),
             bucket: 0,
         })
     );
@@ -86,7 +86,7 @@ fn test_write_read() {
                 diff
             },
             changed_nodes: vec![[1; 32]],
-            elided_children: 1,
+            elided_children: ElidedChildren::from_bytes([1, 0, 0, 0, 0, 0, 0, 0]),
             bucket: 1,
         })
     );
@@ -102,7 +102,7 @@ fn test_write_read() {
                 diff
             },
             changed_nodes: (0..126).map(|x| [x; 32]).collect(),
-            elided_children: 2,
+            elided_children: ElidedChildren::from_bytes([2, 0, 0, 0, 0, 0, 0, 0]),
             bucket: 2,
         })
     );
