@@ -139,9 +139,6 @@ impl SeekRequest {
             .by_vals()
             .take(DEPTH);
 
-        let mut do_leaf_fetch = false;
-        let mut found_leaf = false;
-
         for bit in bits {
             self.position.down(bit);
 
@@ -154,44 +151,38 @@ impl SeekRequest {
                 self.state =
                     RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
                 if let RequestState::FetchingLeaf { .. } = self.state {
-                    do_leaf_fetch = true;
+                    self.continue_leaf_fetch::<H>(None);
                 }
-                found_leaf = true;
-                break;
+                return;
             } else if trie::is_terminator::<H>(&cur_node) {
                 self.state = RequestState::Completed(None);
                 return;
             }
         }
 
-        if do_leaf_fetch {
-            self.continue_leaf_fetch::<H>(None);
-        }
-
         // The traversal reached the end of the current page, and possibly the next page is being elided.
         // This information resides in the page within the `elided_children` field.
-        if !found_leaf {
-            // UNWRAP: `continue_seek` scans multiple `DEPTH` bits, so `position` must be at the last
-            // layer of the current page.
-            let child_page_id = page_id
-                .child_page_id(self.position.child_page_index())
-                .unwrap();
+        //
+        // UNWRAP: `continue_seek` scans multiple `DEPTH` bits, so `position` must be at the last
+        // layer of the current page.
+        let child_page_id = page_id
+            .child_page_id(self.position.child_page_index())
+            .unwrap();
 
-            // Avoid reconstructing already reconstructed pages.
-            if page_set.contains(&child_page_id) {
-                return;
-            }
+        // Avoid reconstructing already reconstructed pages.
+        if page_set.contains(&child_page_id) {
+            return;
+        }
 
-            let elided_children = ElidedChildren::new(page.elided_children());
-            if elided_children.is_elided(self.position.child_page_index()) {
-                // Begin fetching the beatree leaves required for reconstructing the elided pages.
-                self.state = RequestState::begin_leaves_fetch::<H>(
-                    read_transaction,
-                    &self.position,
-                    page.clone(),
-                );
-                self.continue_leaves_fetch::<H>(page_set, overlay, None);
-            }
+        let elided_children = ElidedChildren::new(page.elided_children());
+        if elided_children.is_elided(self.position.child_page_index()) {
+            // Begin fetching the beatree leaves required for reconstructing the elided pages.
+            self.state = RequestState::begin_leaves_fetch::<H>(
+                read_transaction,
+                &self.position,
+                page.clone(),
+            );
+            self.continue_leaves_fetch::<H>(page_set, overlay, None);
         }
     }
 
