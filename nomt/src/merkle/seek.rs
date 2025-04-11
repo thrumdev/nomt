@@ -14,8 +14,8 @@ use crate::{
 
 use super::{
     page_set::{PageOrigin, PageSet},
-    page_walker::{ElidedChildren, PageSet as _, PAGE_ELISION_THRESHOLD},
-    BucketInfo, LiveOverlay,
+    page_walker::PageSet as _,
+    BucketInfo, LiveOverlay, PAGE_ELISION_THRESHOLD,
 };
 
 use nomt_core::{
@@ -174,8 +174,10 @@ impl SeekRequest {
             return;
         }
 
-        let elided_children = ElidedChildren::new(page.elided_children());
-        if elided_children.is_elided(self.position.child_page_index()) {
+        if page
+            .elided_children()
+            .is_elided(self.position.child_page_index())
+        {
             // Begin fetching the beatree leaves required for reconstructing the elided pages.
             self.state = RequestState::begin_leaves_fetch::<H>(
                 read_transaction,

@@ -1,6 +1,7 @@
 use crate::{
     bitbox::BucketIndex,
     io::{page_pool::FatPage, PagePool, PAGE_SIZE},
+    merkle::ElidedChildren,
     metrics::{Metric, Metrics},
     page_region::PageRegion,
     rw_pass_cell::{Region, RegionContains, RwPassDomain, WritePass},
@@ -37,9 +38,9 @@ fn set_node(data: &mut FatPage, index: usize, node: Node) {
     data[start..end].copy_from_slice(&node);
 }
 
-fn read_elided_children(data: &FatPage) -> u64 {
-    // UNWRAP: elided_children range length is 8 bytes.
-    u64::from_le_bytes(data[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32].try_into().unwrap())
+fn read_elided_children(data: &FatPage) -> ElidedChildren {
+    // UNWRAP: elided_children slice is 8 bytes long.
+    ElidedChildren::from_bytes(data[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32].try_into().unwrap())
 }
 
 /// A mutable page.
@@ -66,7 +67,7 @@ impl PageMut {
         };
         page.inner[PAGE_SIZE - 32..].copy_from_slice(&page_id.encode());
         // No garbage in the elided children bitfield.
-        page.set_elided_children(0);
+        page.set_elided_children(&ElidedChildren::new());
         page
     }
 
@@ -86,14 +87,13 @@ impl PageMut {
     }
 
     /// Read out the bitfield representing which child page has been elided.
-    pub fn elided_children(&self) -> u64 {
+    pub fn elided_children(&self) -> ElidedChildren {
         read_elided_children(&self.inner)
     }
 
     /// Write the bitfield representing which child page has been elided.
-    pub fn set_elided_children(&mut self, elided_children: u64) {
-        self.inner[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32]
-            .copy_from_slice(&elided_children.to_le_bytes());
+    pub fn set_elided_children(&mut self, elided_children: &ElidedChildren) {
+        self.inner[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32].copy_from_slice(&elided_children.to_bytes());
     }
 }
 
@@ -118,7 +118,7 @@ impl Page {
     }
 
     /// Read out the bitfield representing which child page has been elided.
-    pub fn elided_children(&self) -> u64 {
+    pub fn elided_children(&self) -> ElidedChildren {
         read_elided_children(&self.inner)
     }
 
