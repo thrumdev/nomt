@@ -440,7 +440,7 @@ impl Workload {
 
     fn get_crash_delay(&self) -> Duration {
         // The agent should crash after `crash_delay`ns.
-        // If no data avaible crash after 300ms.
+        // If no data available crash after 300ms.
         let mut crash_delay_millis = self
             .tot_commit_time
             .as_millis()
