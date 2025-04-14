@@ -186,7 +186,7 @@ pub enum ResourceExhaustion {
 }
 
 /// Return the amount of physical memory utilized by the specified pid, or None
-/// if the `statm` file associated with the `pid` is not avaiable.
+/// if the `statm` file associated with the `pid` is not available.
 pub fn process_memory_occupied(pid: u32) -> Option<u64> {
     let file_path = format!("/proc/{}/statm", pid);
     let mut statm_file = std::fs::File::open(&file_path).ok()?;
@@ -202,7 +202,7 @@ pub fn process_memory_occupied(pid: u32) -> Option<u64> {
     Some(occupied_memory)
 }
 
-/// Returns the number of avaiable and total memory in bytes.
+/// Returns the number of available and total memory in bytes.
 ///
 /// Panics if /proc/meminfo does not exist or is not formatted as usual.
 fn mem_info() -> (u64, u64) {
