@@ -26,6 +26,9 @@ use crate::{
 /// Time to wait for the agent to crash.
 const TOLERANCE: Duration = Duration::from_secs(5);
 
+/// Max time after which the agent should crash a task.
+const MAX_CRASH_DELAY: Duration = TOLERANCE.checked_sub(Duration::from_secs(1)).unwrap();
+
 /// Represents a snapshot of the state of the database.
 #[derive(Clone)]
 struct Snapshot {
@@ -446,7 +449,7 @@ impl Workload {
         // Crash a little bit earlier than the average commit time to increase the
         // possibilities of crashing during sync.
         crash_delay_millis = (crash_delay_millis as f64 * 0.98) as u64;
-        std::cmp::min(Duration::from_millis(crash_delay_millis), TOLERANCE)
+        std::cmp::min(Duration::from_millis(crash_delay_millis), MAX_CRASH_DELAY)
     }
 
     async fn ensure_outcome_validity(&mut self, outcome: &crate::message::Outcome) -> Result<()> {
@@ -1022,7 +1025,7 @@ impl Workload {
             }
         }
 
-        // `delete_key` + `update_key` + `new_key` is always bigger than 0.
+        // UNWRAP: `delete_key` + `update_key` + `new_key` is always bigger than 0.
         let distr = WeightedIndex::new([
             self.config.delete_key,
             self.config.update_key,
