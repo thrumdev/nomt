@@ -12,8 +12,7 @@ use nomt_core::{
     hasher::{NodeHasher, ValueHasher},
     page_id::ROOT_PAGE_ID,
     proof::PathProof,
-    trie::{InternalData, KeyPath, LeafData, Node, ValueHash, TERMINATOR},
-    trie_pos::TriePosition,
+    trie::{InternalData, KeyPath, LeafData, Node, TERMINATOR},
 };
 use overlay::{LiveOverlay, OverlayMarker};
 use page_cache::PageCache;
@@ -23,6 +22,9 @@ use store::{Store, ValueTransaction};
 pub use nomt_core::hasher;
 pub use nomt_core::proof;
 pub use nomt_core::trie;
+pub use nomt_core::witness::{
+    Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
+};
 pub use options::{Options, PanicOnSyncMode};
 pub use overlay::{InvalidAncestors, Overlay};
 pub use store::HashTableUtilization;
@@ -61,78 +63,6 @@ struct Shared {
     root: Root,
     /// The marker of the last committed overlay. `None` if the last commit was not an overlay.
     last_commit_marker: Option<OverlayMarker>,
-}
-
-/// A witness that can be used to prove the correctness of state trie retrievals and updates.
-///
-/// Expected to be serializable.
-#[cfg_attr(
-    feature = "borsh",
-    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
-)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Witness {
-    /// Various paths down the trie used as part of this witness.
-    pub path_proofs: Vec<WitnessedPath>,
-    /// The operations witnessed by the paths.
-    pub operations: WitnessedOperations,
-}
-
-/// Operations provable by a corresponding witness.
-// TODO: the format of this structure depends heavily on how it'd be used with the path proofs.
-#[cfg_attr(
-    feature = "borsh",
-    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
-)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WitnessedOperations {
-    /// Read operations.
-    pub reads: Vec<WitnessedRead>,
-    /// Write operations.
-    pub writes: Vec<WitnessedWrite>,
-}
-
-/// A path observed in the witness.
-#[cfg_attr(
-    feature = "borsh",
-    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
-)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WitnessedPath {
-    /// Proof of a query path along the trie.
-    pub inner: PathProof,
-    /// The query path itself.
-    pub path: TriePosition,
-}
-
-/// A witness of a read value.
-#[cfg_attr(
-    feature = "borsh",
-    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
-)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WitnessedRead {
-    /// The key of the read value.
-    pub key: KeyPath,
-    /// The hash of the value witnessed. None means no value.
-    pub value: Option<ValueHash>,
-    /// The index of the path in the corresponding witness.
-    pub path_index: usize,
-}
-
-/// A witness of a write operation.
-#[cfg_attr(
-    feature = "borsh",
-    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
-)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WitnessedWrite {
-    /// The key of the written value.
-    pub key: KeyPath,
-    /// The hash of the written value. `None` means "delete".
-    pub value: Option<ValueHash>,
-    /// The index of the path in the corresponding witness.
-    pub path_index: usize,
 }
 
 /// Whether a key was read, written, or both, along with old and new values.
