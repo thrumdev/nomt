@@ -266,7 +266,7 @@ impl From<[u8; 32]> for Root {
 }
 
 /// An instance of the Nearly-Optimal Merkle Trie Database.
-pub struct Nomt<T: HashAlgorithm> {
+pub struct Nomt<T> {
     merkle_update_pool: UpdatePool,
     /// The handle to the page cache.
     page_cache: PageCache,
