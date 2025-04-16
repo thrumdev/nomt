@@ -20,8 +20,6 @@ use page_cache::PageCache;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use store::{Store, ValueTransaction};
 
-// CARGO HACK: silence lint; this is used in integration tests
-
 pub use nomt_core::hasher;
 pub use nomt_core::proof;
 pub use nomt_core::trie;
