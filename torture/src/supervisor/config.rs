@@ -103,6 +103,7 @@ pub struct WorkloadConfiguration {
     /// Whether trickfs will be used or not.
     ///
     /// If false, enospc_on/off and latency_on/off will all be 0.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub trickfs: bool,
     /// The probability of turning on the `ENOSPC` error.
     pub enospc_on: f64,
