@@ -35,10 +35,10 @@ fn main() -> Result<()> {
                 // Check for non-existence if the return value was None
                 None => assert!(verified.confirm_nonexistence(&read.key).unwrap()),
                 // Verify the correctness of the returned value when it is Some(_)
-                Some(ref v) => {
+                Some(value_hash) => {
                     let leaf = LeafData {
                         key_path: read.key,
-                        value_hash: *blake3::hash(v).as_bytes(),
+                        value_hash,
                     };
                     assert!(verified.confirm_value(&leaf).unwrap());
                 }
@@ -59,10 +59,7 @@ fn main() -> Result<()> {
             .skip_while(|r| r.path_index != i)
             .take_while(|r| r.path_index == i)
         {
-            write_ops.push((
-                write.key,
-                write.value.as_ref().map(|v| *blake3::hash(v).as_bytes()),
-            ));
+            write_ops.push((write.key, write.value));
         }
 
         if !write_ops.is_empty() {
