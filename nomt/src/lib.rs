@@ -466,7 +466,7 @@ impl SessionParams {
 /// When the session is finished, the application can confirm the changes by calling
 /// [`Session::finish`] or others and create a [`Witness`] that can be used to prove the
 /// correctness of replaying the same operations.
-pub struct Session<T: HashAlgorithm> {
+pub struct Session<T> {
     store: Store,
     merkle_updater: Updater,
     metrics: Metrics,
@@ -478,7 +478,7 @@ pub struct Session<T: HashAlgorithm> {
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<T: HashAlgorithm> Session<T> {
+impl<T> Session<T> {
     /// Signal to the backend to warm up the merkle paths and b-tree pages for a key, so they are
     /// ready by the time you commit the session.
     ///
@@ -538,7 +538,9 @@ impl<T: HashAlgorithm> Session<T> {
             rollback.tentative_preserve_prior(path);
         }
     }
+}
 
+impl<T: HashAlgorithm> Session<T> {
     /// Finish the session. Provide the actual reads and writes (in sorted order) that are to be
     /// considered within the finished session.
     ///
