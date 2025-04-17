@@ -206,6 +206,8 @@ impl Workload {
         )
     }
 
+    
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn new_inner(
         rng: rand_pcg::Pcg64,
         seed: u64,
