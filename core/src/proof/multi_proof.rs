@@ -412,7 +412,7 @@ pub fn verify<H: NodeHasher>(
     Ok(VerifiedMultiProof { inner: new_paths })
 }
 
-// returns the the node made by verifying this range along with the number of siblings used.
+// returns the node made by verifying this range along with the number of siblings used.
 fn verify_range<H: NodeHasher>(
     start_depth: usize,
     paths: &[MultiPathProof],
