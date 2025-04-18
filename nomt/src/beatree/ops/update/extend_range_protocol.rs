@@ -73,7 +73,7 @@ pub fn try_answer_left_neighbor<Node>(
     // high range to let the left worker use new fresh nodes
     let mut found_next_node = false;
     // an unchanged range is given by a difference between the next_separator
-    // of a changed item the the key associated to the next item
+    // of a changed item the key associated to the next item
     let mut found_unchanged_range = false;
     let mut new_high_range = None;
     let mut separator = worker_params.range.low;
