@@ -171,7 +171,7 @@ fn warm_up_phase<H: HashAlgorithm>(
                     Err(_) => panic!("Warm-Up worker, unexpected failure of the warmup channel"),
                 };
 
-                seeker.push(warm_up_command.key_path, &mut page_set);
+                seeker.push(warm_up_command.key_path);
             } else if index == page_idx {
                 seeker.try_recv_page(&mut page_set)?;
             } else {
@@ -510,7 +510,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                         break;
                     }
                 } else {
-                    seeker.push(self.shared.read_write[next_push].0, page_set);
+                    seeker.push(self.shared.read_write[next_push].0);
                     seeker.submit_all(page_set);
                 }
             }
