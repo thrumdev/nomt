@@ -62,11 +62,6 @@ impl PageSet {
         }
     }
 
-    /// Checks if a `page_id` is already present.
-    pub fn contains(&self, page_id: &PageId) -> bool {
-        self.map.contains_key(page_id)
-    }
-
     /// Freeze this page-set and make a shareable version of it. This returns a frozen page set
     /// containing all insertions into this map.
     pub fn freeze(self) -> FrozenSharedPageSet {
@@ -85,6 +80,10 @@ impl super::page_walker::PageSet for PageSet {
     fn fresh(&self, page_id: &PageId) -> PageMut {
         let page = PageMut::pristine_empty(&self.page_pool, &page_id);
         page
+    }
+
+    fn contains(&self, page_id: &PageId) -> bool {
+        self.map.contains_key(&page_id)
     }
 
     fn get(&self, page_id: &PageId) -> Option<(Page, PageOrigin)> {
