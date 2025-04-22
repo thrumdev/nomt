@@ -169,16 +169,23 @@ impl SeekRequest {
             .child_page_id(self.position.child_page_index())
             .unwrap();
 
-        // Avoid reconstructing already reconstructed pages.
-        if page_set.contains(&child_page_id) {
-            return;
-        }
-
         if page
             .elided_children()
             .is_elided(self.position.child_page_index())
         {
+            // Avoid reconstructing already reconstructed pages.
+            if page_set.contains(&child_page_id) {
+                return;
+            }
+
             // Begin fetching the beatree leaves required for reconstructing the elided pages.
+            //
+            // NOTE: It could happen that two or more sequential requests end up in the same elided
+            // subtree, thus, a leaves fetch process could begin while the previous SeekRequest has already
+            // started the same process. This duplication of work is accepted because they will share the same
+            // beatree leaves, and the requests will be woken one after the other when a needed leaf is received.
+            // This is less consuming than the overhead introduced by making the second SeekRequest depend
+            // on the first one or sharing some data between them.
             self.state = RequestState::begin_leaves_fetch::<H>(
                 read_transaction,
                 &self.position,
@@ -306,7 +313,7 @@ impl SeekRequest {
         }
 
         // UNWRAP: The `page_id` from where the leaves request started must be `Some`.
-        let pages = super::page_walker::reconstruct_pages::<H>(
+        let maybe_pages = super::page_walker::reconstruct_pages::<H>(
             page,
             self.page_id.clone().unwrap(),
             self.position.clone(),
@@ -314,12 +321,14 @@ impl SeekRequest {
             final_leaf_data_collection,
         );
 
-        for (page_id, page, diff, leaves_counter) in pages {
-            page_set.insert(
-                page_id,
-                page,
-                PageOrigin::Reconstructed(leaves_counter, diff),
-            );
+        if let Some(pages) = maybe_pages {
+            for (page_id, page, diff, leaves_counter) in pages {
+                page_set.insert(
+                    page_id,
+                    page,
+                    PageOrigin::Reconstructed(leaves_counter, diff),
+                );
+            }
         }
 
         // Now that all pages are reconstructed, seeking can be resumed.

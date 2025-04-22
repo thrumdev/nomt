@@ -152,6 +152,8 @@ impl StackPage {
 pub trait PageSet {
     /// Get a page from the set. `None` if it isn't exist.
     fn get(&self, page_id: &PageId) -> Option<(Page, PageOrigin)>;
+    /// Checks if a `page_id` is already present.
+    fn contains(&self, page_id: &PageId) -> bool;
     /// Create a new fresh page.
     fn fresh(&self, page_id: &PageId) -> PageMut;
     /// Insert a page into the set along with its origin.
@@ -503,7 +505,7 @@ impl<H: NodeHasher> PageWalker<H> {
         page_set: &mut impl PageSet,
         position: TriePosition,
         ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
-    ) -> (Node, Vec<ReconstructedPage>) {
+    ) -> Option<(Node, Vec<ReconstructedPage>)> {
         assert!(self.reconstruction);
 
         // Create the first page that will be reconstructed.
@@ -511,6 +513,12 @@ impl<H: NodeHasher> PageWalker<H> {
         let first_elided_page_id = parent_page_id
             .child_page_id(position.child_page_index())
             .unwrap();
+
+        if page_set.contains(&first_elided_page_id) {
+            // Reconstruction already happened, avoid doing it twice.
+            return None;
+        }
+
         let mut first_elided_page = page_set.fresh(&first_elided_page_id);
         first_elided_page.set_node(0, TERMINATOR);
         first_elided_page.set_node(1, TERMINATOR);
@@ -552,7 +560,7 @@ impl<H: NodeHasher> PageWalker<H> {
             })
             .collect();
 
-        (self.child_page_roots[0].1, reconstructed_pages)
+        Some((self.child_page_roots[0].1, reconstructed_pages))
     }
 
     fn compact_up(&mut self, target_pos: Option<TriePosition>) {
@@ -940,23 +948,23 @@ pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
     position: TriePosition,
     page_set: &mut impl PageSet,
     ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
-) -> impl Iterator<Item = (PageId, Page, PageDiff, u64)> {
+) -> Option<impl Iterator<Item = (PageId, Page, PageDiff, u64)>> {
     let subtree_root = page.node(position.node_index());
 
     let page_walker = PageWalker::<H>::new_reconstructor(subtree_root, page_id.clone());
 
-    let (root, reconstructed_pages) = page_walker.reconstruct(page_set, position, ops);
+    let (root, reconstructed_pages) = page_walker.reconstruct(page_set, position, ops)?;
 
     assert_eq!(root, subtree_root);
 
-    reconstructed_pages.into_iter().map(|reconstructed_page| {
+    Some(reconstructed_pages.into_iter().map(|reconstructed_page| {
         (
             reconstructed_page.page_id,
             reconstructed_page.page.freeze(),
             reconstructed_page.diff,
             reconstructed_page.leaves_counter,
         )
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -1025,6 +1033,10 @@ mod tests {
         fn fresh(&self, page_id: &PageId) -> PageMut {
             let page = PageMut::pristine_empty(&self.page_pool, page_id);
             page
+        }
+
+        fn contains(&self, page_id: &PageId) -> bool {
+            self.inner.contains_key(page_id)
         }
 
         fn get(&self, page_id: &PageId) -> Option<(Page, PageOrigin)> {
@@ -1798,6 +1810,7 @@ mod tests {
             &mut page_set,
             ops.into_iter(),
         )
+        .unwrap()
         .collect();
 
         // Make sure that elision bitfield was updated correctly.
