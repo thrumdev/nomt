@@ -20,17 +20,11 @@ pub enum Metric {
     PageFetchTime,
     /// Timer used to record average value fetch time during reads
     ValueFetchTime,
-    /// Counter of created or modified hashtable pages.
-    HashTablePages,
-    /// Count of elided hashtable pages.
-    ElidedHashTablePages,
 }
 
 struct ActiveMetrics {
     page_requests: AtomicU64,
     page_cache_misses: AtomicU64,
-    hashtable_pages: AtomicU64,
-    elided_hashtable_pages: AtomicU64,
     page_fetch_time: Timer,
     value_fetch_time: Timer,
 }
@@ -43,8 +37,6 @@ impl Metrics {
                 Some(Arc::new(ActiveMetrics {
                     page_requests: AtomicU64::new(0),
                     page_cache_misses: AtomicU64::new(0),
-                    elided_hashtable_pages: AtomicU64::new(0),
-                    hashtable_pages: AtomicU64::new(0),
                     page_fetch_time: Timer::new(),
                     value_fetch_time: Timer::new(),
                 }))
@@ -62,8 +54,6 @@ impl Metrics {
             let counter = match metric {
                 Metric::PageRequests => &metrics.page_requests,
                 Metric::PageCacheMisses => &metrics.page_cache_misses,
-                Metric::HashTablePages => &metrics.hashtable_pages,
-                Metric::ElidedHashTablePages => &metrics.elided_hashtable_pages,
                 _ => panic!("Specified metric is not a Counter"),
             };
 
@@ -90,12 +80,6 @@ impl Metrics {
     pub fn print(&self) {
         if let Some(ref metrics) = self.metrics {
             println!("metrics");
-
-            let hashtable_pages = metrics.hashtable_pages.load(Ordering::Relaxed);
-            println!("  ht pages              {}", hashtable_pages);
-
-            let elided_hashtable_pages = metrics.elided_hashtable_pages.load(Ordering::Relaxed);
-            println!("  elided ht pages       {}", elided_hashtable_pages);
 
             let tot_page_requests = metrics.page_requests.load(Ordering::Relaxed);
             println!("  page requests         {}", tot_page_requests);
