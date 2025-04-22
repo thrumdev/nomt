@@ -113,6 +113,8 @@ impl PageDiff {
             .chain(FastIterOnes(self.changed_nodes[1]).map(|i| i + 64))
     }
 
+    /// Join two `PageDiff` together into one, it results in a `PageDiff` that contains
+    /// all the changed nodes present in the two operand `PageDiff`s.
     pub fn join(&self, diff: &PageDiff) -> PageDiff {
         PageDiff {
             changed_nodes: [
