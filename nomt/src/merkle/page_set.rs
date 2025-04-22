@@ -22,7 +22,7 @@ pub enum PageOrigin {
 }
 
 impl PageOrigin {
-    /// Extract `BucketInfo` from `PageOrigin::Persisted` variant.
+    /// Extract `BucketInfo` from [`PageOrigin::Persisted`] variant.
     pub fn bucket_info(self) -> Option<BucketInfo> {
         match self {
             PageOrigin::Persisted(bucket_info) => Some(bucket_info),
@@ -30,7 +30,7 @@ impl PageOrigin {
         }
     }
 
-    /// Extract the number of leaves from `PageOrigin::Reconstructed` variant.
+    /// Extract the number of leaves from [`PageOrigin::Reconstructed`] variant.
     pub fn leaves_counter(&self) -> Option<u64> {
         match self {
             PageOrigin::Reconstructed(counter, _) => Some(*counter),
@@ -38,7 +38,7 @@ impl PageOrigin {
         }
     }
 
-    /// Extract the [`PageDiff`] from `PageOrigin::Reconstructed` variant.
+    /// Extract the [`PageDiff`] from [`PageOrigin::Reconstructed`] variant.
     pub fn page_diff(&self) -> Option<&PageDiff> {
         match self {
             PageOrigin::Reconstructed(_, page_diff) => Some(page_diff),

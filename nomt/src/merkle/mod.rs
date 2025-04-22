@@ -41,7 +41,7 @@ use nomt_core::page_id::MAX_CHILD_INDEX;
 
 /// Threshold representing the number of leaves required to be present in the two
 /// subtrees contained in a page to be stored on disk.
-/// If this threshold is not exceeded, the page will not be stored on disk
+/// If this threshold is not reached, the page will not be stored on disk
 /// and will be constructed on the fly when needed.
 pub const PAGE_ELISION_THRESHOLD: u64 = 20;
 
@@ -64,13 +64,12 @@ impl ElidedChildren {
         }
     }
 
+    /// Get raw bytes representing the `ElidedChildren`.
     pub fn to_bytes(&self) -> [u8; 8] {
         self.elided.to_le_bytes()
     }
 
     /// Toggle as elided or not elided a child of the page.
-    ///
-    /// Panics if `child_index` is bigger than [`MAX_CHILD_INDEX`].
     pub fn set_elide(&mut self, child_page_index: ChildPageIndex, elide: bool) {
         let shift = child_page_index.to_u8() as u64;
         if elide {
@@ -81,8 +80,6 @@ impl ElidedChildren {
     }
 
     /// Checks if the child at `child_index` is elided.
-    ///
-    /// Panics if `child_index` is bigger than [`MAX_CHILD_INDEX`].
     pub fn is_elided(&self, child_page_index: ChildPageIndex) -> bool {
         (self.elided >> child_page_index.to_u8() as u64) & 1 == 1
     }

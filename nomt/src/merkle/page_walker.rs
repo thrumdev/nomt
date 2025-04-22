@@ -120,7 +120,6 @@ struct StackPage {
     /// track of it because all parent pages also exceed the threshold.
     leaves_counter: Option<u64>,
     /// Bitfield used to keep track of which child pages have been elided.
-    /// `None` if no child page has been elided.
     elided_children: ElidedChildren,
     /// A compact diff indicating all reconstructed slots in the page if the
     /// page was reconstructed.
@@ -976,8 +975,6 @@ pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
 
     assert_eq!(root, subtree_root);
 
-    // SAFETY: PageWalker was initialized with the parent_page set to Some thus
-    // no updated page is expected.
     reconstructed_pages.into_iter().map(|reconstructed_page| {
         (
             reconstructed_page.page_id,
