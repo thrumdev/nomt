@@ -50,7 +50,6 @@ impl SeekRequest {
         overlay: &LiveOverlay,
         key: KeyPath,
         root: Node,
-        page_set: &mut PageSet,
     ) -> SeekRequest {
         let state = if trie::is_terminator::<H>(&root) {
             RequestState::Completed(None)
@@ -70,13 +69,9 @@ impl SeekRequest {
         };
 
         // The iterator must be advanced until it is blocked.
-        match request.state {
-            RequestState::FetchingLeaf { .. } => request.continue_leaf_fetch::<H>(None),
-            RequestState::FetchingLeaves { .. } => {
-                request.continue_leaves_fetch::<H>(page_set, overlay, None)
-            }
-            _ => (),
-        }
+        if let RequestState::FetchingLeaf { .. } = request.state {
+            request.continue_leaf_fetch::<H>(None)
+        };
 
         request
     }
@@ -574,14 +569,13 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Push a request for key path.
-    pub fn push(&mut self, key: KeyPath, page_set: &mut PageSet) {
+    pub fn push(&mut self, key: KeyPath) {
         let request_index = self.processed + self.requests.len();
         self.requests.push_back(SeekRequest::new::<H>(
             &self.beatree_read_transaction,
             &self.overlay,
             key,
             self.root,
-            page_set,
         ));
         self.idle_requests.push_back(request_index);
     }

@@ -499,6 +499,8 @@ impl<H: NodeHasher> PageWalker<H> {
 
     /// Reconstruct all pages under the parent page and the specified position using the provided ops.
     ///
+    /// Returns None if the pages that should be reconstructed are already in the `PageSet`.
+    ///
     /// Panics if the page walker was not constructed using `new_reconstructor`.
     fn reconstruct(
         mut self,
@@ -939,7 +941,9 @@ fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
 /// Reconstruction requires the page and its page_id, where the elided child page was found,
 /// as well as the `TriePosition` within that page.
 ///
-/// Returns an iterator over the following items: the reconstructed page, its page_id,
+///
+/// Returns None if the pages that should be reconstructed are already in the `PageSet`,
+/// otherwise an iterator over the following items: the reconstructed page, its page_id,
 /// the PageDiff indicating all nodes effectively reconstructed within the page
 /// and a counter of leaves in the page's subtrees.
 pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
