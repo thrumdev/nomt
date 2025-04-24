@@ -190,6 +190,13 @@ impl MultiProof {
         // `siblings` will follow this structure for each bisection
         // |common siblings| ext siblings in the left bisection | ext siblings in the right bisection |
 
+        if path_proofs.is_empty() {
+            return MultiProof {
+                paths: Vec::new(),
+                siblings: Vec::new(),
+            };
+        }
+
         let mut paths: Vec<MultiPathProof> = vec![];
         let mut siblings: Vec<Node> = vec![];
 
@@ -884,6 +891,13 @@ mod tests {
                 sibling15, sibling17, sibling19, sibling20, sibling22, sibling24
             ]
         );
+    }
+
+    #[test]
+    fn multi_proof_failure_empty_witness() {
+        let multi_proof = MultiProof::from_path_proofs(Vec::new());
+
+        let _verified_multi_proof = verify::<Blake3Hasher>(&multi_proof, TERMINATOR).unwrap();
     }
 
     #[test]
