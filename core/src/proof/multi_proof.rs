@@ -8,14 +8,14 @@ use crate::{
         path_proof::{hash_path, shared_bits},
         KeyOutOfScope, PathProof, PathProofTerminal,
     },
-    trie::{InternalData, KeyPath, LeafData, Node, TERMINATOR},
+    trie::{InternalData, KeyPath, LeafData, Node, NodeKind, ValueHash, TERMINATOR},
 };
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
 use bitvec::prelude::*;
-use core::cmp::Ordering;
+use core::{cmp::Ordering, ops::Range};
 
 /// This struct includes the terminal node and its depth
 #[derive(Debug, Clone)]
@@ -267,12 +267,23 @@ pub enum MultiProofVerificationError {
 struct VerifiedMultiPath {
     terminal: PathProofTerminal,
     depth: usize,
+    unique_siblings: Range<usize>,
+}
+
+// indicates a bisection which started at a given depth and covers these common siblings.
+#[derive(Debug, Clone)]
+struct VerifiedBisection {
+    start_depth: usize,
+    common_siblings: Range<usize>,
 }
 
 /// A verified multi-proof.
 #[derive(Debug, Clone)]
 pub struct VerifiedMultiProof {
     inner: Vec<VerifiedMultiPath>,
+    bisections: Vec<VerifiedBisection>,
+    siblings: Vec<Node>,
+    root: Node,
 }
 
 impl VerifiedMultiProof {
@@ -391,13 +402,10 @@ pub fn verify<H: NodeHasher>(
     multi_proof: &MultiProof,
     root: Node,
 ) -> Result<VerifiedMultiProof, MultiProofVerificationError> {
-    let mut new_paths = Vec::with_capacity(multi_proof.paths.len());
+    let mut verified_paths = Vec::with_capacity(multi_proof.paths.len());
+    let mut verified_bisections = Vec::new();
     for i in 0..multi_proof.paths.len() {
         let path = &multi_proof.paths[i];
-        new_paths.push(VerifiedMultiPath {
-            terminal: path.terminal.clone(),
-            depth: path.depth,
-        });
         if i > 0 {
             if path.terminal.path() <= multi_proof.paths[i - 1].terminal.path() {
                 return Err(MultiProofVerificationError::PathsOutOfOrder);
@@ -405,8 +413,14 @@ pub fn verify<H: NodeHasher>(
         }
     }
 
-    let (new_root, siblings_used) =
-        verify_range::<H>(0, &multi_proof.paths, &multi_proof.siblings)?;
+    let (new_root, siblings_used) = verify_range::<H>(
+        0,
+        &multi_proof.paths,
+        &multi_proof.siblings,
+        0,
+        &mut verified_paths,
+        &mut verified_bisections,
+    )?;
 
     if root != new_root {
         return Err(MultiProofVerificationError::RootMismatch);
@@ -416,7 +430,12 @@ pub fn verify<H: NodeHasher>(
         return Err(MultiProofVerificationError::TooManySiblings);
     }
 
-    Ok(VerifiedMultiProof { inner: new_paths })
+    Ok(VerifiedMultiProof {
+        inner: verified_paths,
+        bisections: verified_bisections,
+        siblings: multi_proof.siblings.clone(),
+        root: root,
+    })
 }
 
 // returns the node made by verifying this range along with the number of siblings used.
@@ -424,10 +443,18 @@ fn verify_range<H: NodeHasher>(
     start_depth: usize,
     paths: &[MultiPathProof],
     siblings: &[Node],
+    sibling_offset: usize,
+    verified_paths: &mut Vec<VerifiedMultiPath>,
+    verified_bisections: &mut Vec<VerifiedBisection>,
 ) -> Result<(Node, usize), MultiProofVerificationError> {
     // the range should never be empty except in the first call, if the entire multi-proof is
     // empty.
     if paths.is_empty() {
+        verified_paths.push(VerifiedMultiPath {
+            terminal: PathProofTerminal::Terminator(crate::trie_pos::TriePosition::new()),
+            depth: 0,
+            unique_siblings: Range { start: 0, end: 0 },
+        });
         return Ok((TERMINATOR, 0));
     }
     if paths.len() == 1 {
@@ -441,6 +468,15 @@ fn verify_range<H: NodeHasher>(
             &terminal_path.terminal.path()[start_depth..start_depth + unique_len],
             siblings[..unique_len].iter().rev().copied(),
         );
+
+        verified_paths.push(VerifiedMultiPath {
+            terminal: terminal_path.terminal.clone(),
+            depth: terminal_path.depth,
+            unique_siblings: Range {
+                start: sibling_offset,
+                end: sibling_offset + unique_len,
+            },
+        });
 
         return Ok((node, unique_len));
     }
@@ -473,11 +509,24 @@ fn verify_range<H: NodeHasher>(
     // bisection is based off of them.
     let bisect_idx = search_result.unwrap_err();
 
+    if common_bits > 0 {
+        verified_bisections.push(VerifiedBisection {
+            start_depth,
+            common_siblings: Range {
+                start: sibling_offset,
+                end: sibling_offset + common_bits,
+            },
+        });
+    }
+
     // recurse into the left bisection.
     let (left_node, left_siblings_used) = verify_range::<H>(
         uncommon_start_len,
         &paths[..bisect_idx],
         &siblings[common_bits..],
+        sibling_offset + common_bits,
+        verified_paths,
+        verified_bisections,
     )?;
 
     // now that we know how many siblings were used on the left, we can recurse into the right.
@@ -485,6 +534,9 @@ fn verify_range<H: NodeHasher>(
         uncommon_start_len,
         &paths[bisect_idx..],
         &siblings[common_bits + left_siblings_used..],
+        sibling_offset + common_bits + left_siblings_used,
+        verified_paths,
+        verified_bisections,
     )?;
 
     let total_siblings_used = common_bits + left_siblings_used + right_siblings_used;
@@ -500,15 +552,338 @@ fn verify_range<H: NodeHasher>(
     Ok((node, total_siblings_used))
 }
 
+/// Errors that can occur when verifying an update against a [`VerifiedMultiProof`].
+#[derive(Debug, Clone, Copy)]
+pub enum MultiVerifyUpdateError {
+    /// The operations on the trie were provided out-of-order by [`KeyPath`].
+    OpsOutOfOrder,
+    /// An operation was out of scope for the [`VerifiedMultiProof`]
+    OpOutOfScope,
+    /// Paths were verified against different state-roots.
+    RootMismatch,
+}
+
+fn terminal_contains(terminal: &VerifiedMultiPath, key_path: &KeyPath) -> bool {
+    key_path.view_bits::<Msb0>()[..terminal.depth] == terminal.terminal.path()[..terminal.depth]
+}
+
+// walks a multiproof left-to-right and keeps track of a stack of all siblings, based on
+// bisections.
+//
+// when this has ingested all paths up to and including X, the stack will represent all non-unique
+// siblings for X.
+#[derive(Debug)]
+struct CommonSiblings {
+    bisection_stack: Vec<VerifiedBisection>,
+    stack: Vec<(usize, Node)>,
+    taken_siblings: usize,
+    terminal_index: usize,
+    bisection_index: usize,
+}
+
+impl CommonSiblings {
+    fn new() -> Self {
+        CommonSiblings {
+            bisection_stack: Vec::new(),
+            stack: Vec::new(),
+            taken_siblings: 0,
+            terminal_index: 0,
+            bisection_index: 0,
+        }
+    }
+
+    fn advance(&mut self, proof: &VerifiedMultiProof) {
+        let next_terminal = &proof.inner[self.terminal_index];
+
+        let mut prune = true;
+        while next_terminal.unique_siblings.start != self.taken_siblings {
+            let next_bisection = &proof.bisections[self.bisection_index];
+            self.bisection_index += 1;
+
+            assert_eq!(next_bisection.common_siblings.start, self.taken_siblings);
+            if prune {
+                self.pop_to(next_bisection.start_depth);
+                prune = false;
+            }
+
+            // a bisection at depth N involves siblings starting at N+1
+            self.extend(
+                next_bisection.start_depth + 1,
+                next_bisection.common_siblings.end,
+                &proof.siblings,
+                false,
+            );
+            self.bisection_stack.push(next_bisection.clone());
+        }
+
+        let terminal_n = next_terminal.unique_siblings.end - next_terminal.unique_siblings.start;
+        self.extend(
+            next_terminal.depth - terminal_n + 1,
+            next_terminal.unique_siblings.end,
+            &proof.siblings,
+            true,
+        );
+        self.terminal_index += 1;
+    }
+
+    fn pop_to(&mut self, depth: usize) {
+        while self
+            .bisection_stack
+            .last()
+            .map_or(false, |b| b.start_depth >= depth)
+        {
+            let _ = self.bisection_stack.pop();
+        }
+
+        while self.stack.last().map_or(false, |(d, _)| *d >= depth) {
+            let _ = self.stack.pop();
+        }
+    }
+
+    fn extend(&mut self, start_depth: usize, end: usize, siblings: &[Node], reverse: bool) {
+        if reverse {
+            for (i, sibling) in siblings[self.taken_siblings..end].iter().rev().enumerate() {
+                self.stack.push((start_depth + i, *sibling))
+            }
+        } else {
+            for (i, sibling) in siblings[self.taken_siblings..end].iter().enumerate() {
+                self.stack.push((start_depth + i, *sibling))
+            }
+        }
+
+        self.taken_siblings = end;
+    }
+
+    fn pop_if_at_depth(&mut self, depth: usize) -> Option<Node> {
+        if self.stack.last().map_or(false, |(d, _)| *d == depth) {
+            self.stack.pop().map(|(_, n)| n)
+        } else {
+            None
+        }
+    }
+}
+
+/// Verify an update operation against a verified multi-proof. This follows a similar algorithm to
+/// the multi-item update, but without altering any backing storage.
+///
+/// `ops` should contain all updates to be processed. It should be sorted (ascending) by keypath,
+/// without duplicates.
+///
+/// All provided operations should have a key-path which is in scope for the multi proof.
+///
+/// Returns the root of the trie obtained after application of the given updates in the `paths`
+/// vector. In case the `paths` is empty, `prev_root` is returned.
+pub fn verify_update<H: NodeHasher>(
+    proof: &VerifiedMultiProof,
+    ops: Vec<(KeyPath, Option<ValueHash>)>,
+) -> Result<Node, MultiVerifyUpdateError> {
+    // left frontier
+    let mut pending_siblings: Vec<(Node, usize)> = Vec::new();
+
+    let mut last_key = None;
+    let mut last_terminal_index = None;
+    let mut next_pending_terminal_index = None;
+
+    let mut working_ops = Vec::new();
+
+    let mut common_siblings = CommonSiblings::new();
+    let ops_len = ops.len();
+
+    // chain with dummy item for handling the last batch.
+    for (i, (key, op)) in ops.into_iter().chain(Some(([0u8; 32], None))).enumerate() {
+        let is_last = i == ops_len;
+
+        if is_last {
+            let updated_terminal_index = last_terminal_index.unwrap_or(0);
+            let start = next_pending_terminal_index.unwrap_or(0);
+
+            // ingest all terminals from the next one needing an update to the end.
+            for terminal_index in start..proof.inner.len() {
+                let next = if terminal_index == proof.inner.len() - 1 {
+                    None
+                } else {
+                    Some(terminal_index + 1)
+                };
+
+                let terminal = &proof.inner[terminal_index];
+                let next_terminal = next.map(|n| &proof.inner[n]);
+
+                let ops = if terminal_index == updated_terminal_index {
+                    &working_ops[..]
+                } else {
+                    &[]
+                };
+
+                common_siblings.advance(&proof);
+                hash_and_compact_terminal::<H>(
+                    &mut pending_siblings,
+                    terminal,
+                    next_terminal,
+                    &mut common_siblings,
+                    ops,
+                );
+            }
+        } else {
+            // enforce key ordering.
+            if let Some(last_key) = last_key {
+                if key <= last_key {
+                    return Err(MultiVerifyUpdateError::OpsOutOfOrder);
+                }
+            }
+            last_key = Some(key);
+
+            // find terminal index for the operation, erroring if out of scope.
+            let mut next_terminal_index = last_terminal_index.unwrap_or(0);
+            if proof.inner.len() <= next_terminal_index {
+                return Err(MultiVerifyUpdateError::OpOutOfScope);
+            }
+
+            while !terminal_contains(&proof.inner[next_terminal_index], &key) {
+                next_terminal_index += 1;
+                if proof.inner.len() <= next_terminal_index {
+                    return Err(MultiVerifyUpdateError::OpOutOfScope);
+                }
+            }
+
+            // if this is either the first op or this has the same terminal as the previous op...
+            if last_terminal_index.map_or(true, |x| x == next_terminal_index) {
+                last_terminal_index = Some(next_terminal_index);
+                working_ops.push((key, op));
+                continue;
+            }
+
+            // UNWRAP: guaranteed by above.
+            let updated_index = last_terminal_index.unwrap();
+            last_terminal_index = Some(next_terminal_index);
+
+            // ingest all terminals up to current.
+            let start = next_pending_terminal_index.unwrap_or(0);
+
+            for terminal_index in start..updated_index {
+                let terminal = &proof.inner[terminal_index];
+                let next_terminal = Some(&proof.inner[terminal_index + 1]);
+
+                common_siblings.advance(&proof);
+                hash_and_compact_terminal::<H>(
+                    &mut pending_siblings,
+                    terminal,
+                    next_terminal,
+                    &mut common_siblings,
+                    &[],
+                );
+            }
+
+            // ingest the currently updated terminal.
+            let ops = core::mem::replace(&mut working_ops, Vec::new());
+            working_ops.push((key, op));
+
+            let terminal = &proof.inner[updated_index];
+            let next_terminal = proof.inner.get(updated_index + 1);
+            common_siblings.advance(&proof);
+
+            hash_and_compact_terminal::<H>(
+                &mut pending_siblings,
+                terminal,
+                next_terminal,
+                &mut common_siblings,
+                &ops,
+            );
+
+            next_pending_terminal_index = Some(updated_index + 1);
+        };
+    }
+
+    // UNWRAP: This is always full unless the update is empty
+    Ok(pending_siblings.pop().map(|n| n.0).unwrap_or(proof.root))
+}
+
+fn hash_and_compact_terminal<H: NodeHasher>(
+    pending_siblings: &mut Vec<(Node, usize)>,
+    terminal: &VerifiedMultiPath,
+    next_terminal: Option<&VerifiedMultiPath>,
+    common_siblings: &mut CommonSiblings,
+    ops: &[(KeyPath, Option<ValueHash>)],
+) {
+    let leaf = terminal.terminal.as_leaf_option();
+    let skip = terminal.depth;
+
+    let up_layers = if let Some(next_terminal) = next_terminal {
+        let n = shared_bits(terminal.terminal.path(), next_terminal.terminal.path());
+        // n always < skip
+        // we want to end at layer n + 1
+        skip - (n + 1)
+    } else {
+        skip // go to root
+    };
+
+    let ops = crate::update::leaf_ops_spliced(leaf, &ops);
+    let sub_root = crate::update::build_trie::<H>(skip, ops, |_| {});
+
+    let mut cur_node = sub_root;
+    let mut cur_layer = skip;
+    let end_layer = skip - up_layers;
+
+    // iterate siblings up to the point of collision with next path, replacing with pending
+    // siblings, and compacting where possible.
+    // push (node, end_layer) to pending siblings when done.
+    for bit in terminal.terminal.path()[..terminal.depth]
+        .iter()
+        .by_vals()
+        .rev()
+        .take(up_layers)
+    {
+        let sibling = if pending_siblings.last().map_or(false, |p| p.1 == cur_layer) {
+            // is this even possible? maybe not. but being extra cautious...
+            let _ = common_siblings.pop_if_at_depth(cur_layer);
+            // UNWRAP: guaranteed to exist.
+            pending_siblings.pop().unwrap().0
+        } else {
+            // UNWRAP: `common_siblings`` holds everything which isn't computed dynamically from branch
+            // to branch. basically, it's the inverse of `pending_siblings`. so if the sibling isn't
+            // in pending_siblings, it's in here.
+            common_siblings.pop_if_at_depth(cur_layer).unwrap()
+        };
+
+        match (NodeKind::of::<H>(&cur_node), NodeKind::of::<H>(&sibling)) {
+            (NodeKind::Terminator, NodeKind::Terminator) => {}
+            (NodeKind::Leaf, NodeKind::Terminator) => {}
+            (NodeKind::Terminator, NodeKind::Leaf) => {
+                // relocate sibling upwards.
+                cur_node = sibling;
+            }
+            _ => {
+                // otherwise, internal
+                let node_data = if bit {
+                    InternalData {
+                        left: sibling,
+                        right: cur_node,
+                    }
+                } else {
+                    InternalData {
+                        left: cur_node,
+                        right: sibling,
+                    }
+                };
+                cur_node = H::hash_internal(&node_data);
+            }
+        }
+
+        cur_layer -= 1;
+    }
+
+    pending_siblings.push((cur_node, end_layer));
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{verify, MultiProof};
+    use super::{verify, verify_update, MultiProof};
 
     use crate::{
         hasher::{Blake3Hasher, NodeHasher},
         proof::{PathProof, PathProofTerminal},
         trie::{InternalData, LeafData, TERMINATOR},
         trie_pos::TriePosition,
+        update::build_trie,
     };
 
     #[test]
@@ -901,6 +1276,51 @@ mod tests {
     }
 
     #[test]
+    fn multi_proof_verify_empty() {
+        let multi_proof = MultiProof::from_path_proofs(Vec::new());
+
+        let verified_multi_proof = verify::<Blake3Hasher>(&multi_proof, TERMINATOR).unwrap();
+
+        assert_eq!(
+            verify_update::<Blake3Hasher>(&verified_multi_proof, Vec::new()).unwrap(),
+            TERMINATOR,
+        );
+    }
+
+    #[test]
+    fn multi_proof_verify_empty_with_provided_updates() {
+        let multi_proof = MultiProof::from_path_proofs(Vec::new());
+
+        let verified_multi_proof = verify::<Blake3Hasher>(&multi_proof, TERMINATOR).unwrap();
+
+        let mut key_path_0 = [0; 32];
+        key_path_0[0] = 0b00001000;
+
+        let mut key_path_1 = [0; 32];
+        key_path_1[0] = 0b00010000;
+
+        let mut key_path_2 = [0; 32];
+        key_path_2[0] = 0b10000000;
+
+        let ops = vec![
+            (key_path_0, Some([1; 32])),
+            (key_path_1, Some([1; 32])),
+            (key_path_2, Some([1; 32])),
+        ];
+
+        let expected_root = build_trie::<Blake3Hasher>(
+            0,
+            ops.clone().into_iter().map(|(k, v)| (k, v.unwrap())),
+            |_| {},
+        );
+
+        assert_eq!(
+            verify_update::<Blake3Hasher>(&verified_multi_proof, ops).unwrap(),
+            expected_root,
+        );
+    }
+
+    #[test]
     pub fn test_verify_multiproof_two_leafs() {
         //     root
         //     /  \
@@ -961,6 +1381,212 @@ mod tests {
 
         assert!(verified.confirm_value(&leaf_0).unwrap());
         assert!(verified.confirm_value(&leaf_1).unwrap());
+    }
+
+    #[test]
+    fn multi_proof_verify_2_leaves_with_provided_updates() {
+        //     root
+        //     /  \
+        //    s3   v1
+        //   / \
+        //  v0  v2
+
+        let mut key_path_0 = [0; 32];
+        key_path_0[0] = 0b00000000;
+
+        let mut key_path_1 = [0; 32];
+        key_path_1[0] = 0b10000000;
+
+        let mut key_path_2 = [0; 32];
+        key_path_2[0] = 0b01000000;
+
+        let leaf_0 = LeafData {
+            key_path: key_path_0,
+            value_hash: [0; 32],
+        };
+
+        let leaf_1 = LeafData {
+            key_path: key_path_1,
+            value_hash: [1; 32],
+        };
+
+        let leaf_2 = LeafData {
+            key_path: key_path_2,
+            value_hash: [2; 32],
+        };
+
+        // this is the
+        let v0 = Blake3Hasher::hash_leaf(&leaf_0);
+        let v1 = Blake3Hasher::hash_leaf(&leaf_1);
+        let v2 = Blake3Hasher::hash_leaf(&leaf_2);
+        let s3 = Blake3Hasher::hash_internal(&InternalData {
+            left: v0.clone(),
+            right: v2,
+        });
+        let root = Blake3Hasher::hash_internal(&InternalData {
+            left: s3,
+            right: v1,
+        });
+
+        let path_proof_0 = PathProof {
+            terminal: PathProofTerminal::Leaf(leaf_0.clone()),
+            siblings: vec![v1, v2],
+        };
+        let path_proof_1 = PathProof {
+            terminal: PathProofTerminal::Leaf(leaf_1.clone()),
+            siblings: vec![s3],
+        };
+
+        let multi_proof =
+            MultiProof::from_path_proofs(vec![path_proof_0.clone(), path_proof_1.clone()]);
+
+        let verified = verify::<Blake3Hasher>(&multi_proof, root).unwrap();
+
+        let mut key_path_3 = key_path_1;
+        key_path_3[0] = 0b10100000;
+
+        let mut key_path_4 = key_path_0;
+        key_path_4[0] = 0b00000100;
+
+        let ops = vec![
+            (key_path_0, Some([2; 32])),
+            (key_path_4, Some([1; 32])),
+            (key_path_1, None),
+            (key_path_3, Some([1; 32])),
+        ];
+
+        let final_state = vec![
+            (key_path_0, [2; 32]),
+            (key_path_4, [1; 32]),
+            (key_path_2, [2; 32]),
+            (key_path_3, [1; 32]),
+        ];
+
+        let expected_root = build_trie::<Blake3Hasher>(0, final_state, |_| {});
+
+        assert_eq!(
+            verify_update::<Blake3Hasher>(&verified, ops).unwrap(),
+            expected_root,
+        );
+    }
+
+    #[test]
+    fn multi_proof_verify_4_leaves_with_long_bisections() {
+        //              R
+        //              i1
+        //              i2
+        //              i3
+        //              i4
+        //           i5a    i5a
+        //           i6a    i6b
+        //           i7a    i7b
+        //         l8a l8b l8c l8d
+
+        let make_leaf = |key_path, value_byte| {
+            let leaf_data = LeafData {
+                key_path,
+                value_hash: [value_byte; 32],
+            };
+
+            let hash = Blake3Hasher::hash_leaf(&leaf_data);
+            (leaf_data, hash)
+        };
+        let internal_hash =
+            |left, right| Blake3Hasher::hash_internal(&InternalData { left, right });
+
+        let mut key_path_0 = [0; 32];
+        key_path_0[0] = 0b00000000;
+
+        let mut key_path_1 = [0; 32];
+        key_path_1[0] = 0b00000001;
+
+        let mut key_path_2 = [0; 32];
+        key_path_2[0] = 0b00001000;
+
+        let mut key_path_3 = [0; 32];
+        key_path_3[0] = 0b00001001;
+
+        let (leaf_a, l8a) = make_leaf(key_path_0, 1);
+        let (leaf_b, l8b) = make_leaf(key_path_1, 1);
+        let (leaf_c, l8c) = make_leaf(key_path_2, 1);
+        let (leaf_d, l8d) = make_leaf(key_path_3, 1);
+
+        let i7a = internal_hash(l8a, l8b);
+        let i7b = internal_hash(l8c, l8d);
+
+        let i6a = internal_hash(i7a, [7; 32]);
+        let i6b = internal_hash(i7b, [7; 32]);
+
+        let i5a = internal_hash(i6a, [6; 32]);
+        let i5b = internal_hash(i6b, [6; 32]);
+
+        let i4 = internal_hash(i5a, i5b);
+        let i3 = internal_hash(i4, [4; 32]);
+        let i2 = internal_hash(i3, [3; 32]);
+        let i1 = internal_hash(i2, [2; 32]);
+        let root = internal_hash(i1, [1; 32]);
+
+        let path_proof_a = PathProof {
+            terminal: PathProofTerminal::Leaf(leaf_a.clone()),
+            siblings: vec![
+                [1; 32], [2; 32], [3; 32], [4; 32], i5b, [6; 32], [7; 32], l8b,
+            ],
+        };
+        let path_proof_b = PathProof {
+            terminal: PathProofTerminal::Leaf(leaf_b.clone()),
+            siblings: vec![
+                [1; 32], [2; 32], [3; 32], [4; 32], i5b, [6; 32], [7; 32], l8a,
+            ],
+        };
+        let path_proof_c = PathProof {
+            terminal: PathProofTerminal::Leaf(leaf_c.clone()),
+            siblings: vec![
+                [1; 32], [2; 32], [3; 32], [4; 32], i5a, [6; 32], [7; 32], l8d,
+            ],
+        };
+        let path_proof_d = PathProof {
+            terminal: PathProofTerminal::Leaf(leaf_d.clone()),
+            siblings: vec![
+                [1; 32], [2; 32], [3; 32], [4; 32], i5a, [6; 32], [7; 32], l8c,
+            ],
+        };
+
+        let multi_proof = MultiProof::from_path_proofs(vec![
+            path_proof_a.clone(),
+            path_proof_b.clone(),
+            path_proof_c.clone(),
+            path_proof_d.clone(),
+        ]);
+
+        let verified = verify::<Blake3Hasher>(&multi_proof, root).unwrap();
+
+        let ops = vec![(key_path_0, Some([69; 32])), (key_path_3, Some([69; 32]))];
+
+        let (_, l8a) = make_leaf(key_path_0, 69);
+        let (_, l8b) = make_leaf(key_path_1, 1);
+        let (_, l8c) = make_leaf(key_path_2, 1);
+        let (_, l8d) = make_leaf(key_path_3, 69);
+
+        let i7a = internal_hash(l8a, l8b);
+        let i7b = internal_hash(l8c, l8d);
+
+        let i6a = internal_hash(i7a, [7; 32]);
+        let i6b = internal_hash(i7b, [7; 32]);
+
+        let i5a = internal_hash(i6a, [6; 32]);
+        let i5b = internal_hash(i6b, [6; 32]);
+
+        let i4 = internal_hash(i5a, i5b);
+
+        let i3 = internal_hash(i4, [4; 32]);
+        let i2 = internal_hash(i3, [3; 32]);
+        let i1 = internal_hash(i2, [2; 32]);
+        let post_root = internal_hash(i1, [1; 32]);
+
+        assert_eq!(
+            verify_update::<Blake3Hasher>(&verified, ops).unwrap(),
+            post_root,
+        );
     }
 
     #[test]
