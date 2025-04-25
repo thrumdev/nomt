@@ -9,8 +9,8 @@
 //! of updating a trie with a set of changes ([`verify_update`]).
 
 pub use multi_proof::{
-    verify as verify_multi_proof, MultiPathProof, MultiProof, MultiProofVerificationError,
-    VerifiedMultiProof,
+    verify as verify_multi_proof, verify_update as verify_multi_proof_update, MultiPathProof,
+    MultiProof, MultiProofVerificationError, VerifiedMultiProof,
 };
 pub use path_proof::{
     verify_update, KeyOutOfScope, PathProof, PathProofTerminal, PathProofVerificationError,
