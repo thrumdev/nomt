@@ -881,10 +881,12 @@ mod tests {
     use crate::{
         hasher::{Blake3Hasher, NodeHasher},
         proof::{PathProof, PathProofTerminal},
-        trie::{InternalData, LeafData, TERMINATOR},
+        trie::{InternalData, LeafData, TERMINATOR, KeyPath, ValueHash},
         trie_pos::TriePosition,
         update::build_trie,
     };
+    use bitvec::prelude::*;
+    use crate::proof::multi_proof::{VerifiedMultiProof, VerifiedMultiPath};
 
     #[test]
     pub fn test_multiproof_creation_single_path_proof() {
@@ -1762,5 +1764,79 @@ mod tests {
         assert!(verified.confirm_value(&l2).unwrap());
         assert!(verified.confirm_value(&l3).unwrap());
         assert!(verified.confirm_value(&l4).unwrap());
+    }
+
+    #[test]
+    fn test_verify_update_underflow_prefix_paths() {
+        // 1. Define paths with prefix relationship
+        let bits_prefix = bitvec![u8, Msb0; 1, 0, 1, 0]; // length 4
+        let bits_longer = bitvec![u8, Msb0; 1, 0, 1, 0, 1, 1]; // length 6 (prefix + 2 bits)
+
+        // Helper to create KeyPath from BitVec (simplified, assumes short paths)
+        let keypath_from_bits = |bits: &BitSlice<u8, Msb0>| -> KeyPath {
+            let mut kp = KeyPath::default();
+            for (i, bit) in bits.iter().by_vals().enumerate() {
+                if i >= 256 { break; }
+                if bit {
+                    kp[i / 8] |= 1 << (7 - (i % 8));
+                }
+            }
+            kp
+        };
+
+        let kp_prefix = keypath_from_bits(&bits_prefix);
+        let kp_longer = keypath_from_bits(&bits_longer);
+
+        // 2. Create corresponding LeafData and Nodes
+        let leaf_prefix = LeafData { key_path: kp_prefix, value_hash: [1; 32] };
+        let leaf_longer = LeafData { key_path: kp_longer, value_hash: [2; 32] };
+
+        let node_prefix = Blake3Hasher::hash_leaf(&leaf_prefix);
+        let node_longer = Blake3Hasher::hash_leaf(&leaf_longer);
+
+        // 3. Construct the VerifiedMultiProof
+        let vmp_prefix = VerifiedMultiPath {
+            terminal: PathProofTerminal::Leaf(leaf_prefix.clone()),
+            depth: bits_prefix.len(),
+            unique_siblings: 0..0, // Minimal example
+        };
+        let vmp_longer = VerifiedMultiPath {
+            terminal: PathProofTerminal::Leaf(leaf_longer.clone()),
+            depth: bits_longer.len(),
+            unique_siblings: 0..0, // Minimal example
+        };
+
+        // Create a plausible root for the test setup.
+        // For the purpose of triggering the bug, the exact root structure isn't critical,
+        // as long as the VerifiedMultiProof structure is valid and contains the prefix paths.
+        let plausible_root = Blake3Hasher::hash_internal(&InternalData { left: node_prefix, right: node_longer });
+
+        let verified_proof = VerifiedMultiProof {
+            inner: vec![vmp_prefix, vmp_longer],
+            bisections: Vec::new(), // Minimal example
+            siblings: Vec::new(),   // Minimal example
+            root: plausible_root,
+        };
+
+        // 4. Create operations falling under each path
+        let mut key_op1_bits = bits_prefix.clone();
+        key_op1_bits.push(false); // e.g., 10100 (falls under 1010)
+        let key_op1 = keypath_from_bits(&key_op1_bits);
+
+        let mut key_op2_bits = bits_longer.clone();
+        key_op2_bits.push(true); // e.g., 1010111 (falls under 101011)
+        let key_op2 = keypath_from_bits(&key_op2_bits);
+
+        let ops = vec![
+            (key_op1, Some(ValueHash::default())), // Op under prefix path
+            (key_op2, Some(ValueHash::default())), // Op under longer path
+        ];
+
+        // Ensure ops are sorted (should be by construction here)
+        assert!(ops[0].0 < ops[1].0);
+
+        // This call should trigger the underflow in hash_and_compact_terminal
+        // when processing vmp_prefix and looking ahead to vmp_longer.
+        verify_update::<Blake3Hasher>(&verified_proof, ops);
     }
 }
