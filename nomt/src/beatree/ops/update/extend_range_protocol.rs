@@ -136,7 +136,7 @@ pub fn try_answer_left_neighbor<Node>(
 
     let changed = (0..take)
         .map(|_| {
-            // UNWRAP: the existance and variant of `take` nodes_tracker items was previously checked
+            // UNWRAP: the existence and variant of `take` nodes_tracker items was previously checked
             nodes_tracker.inner.pop_first().unwrap()
         })
         .collect::<Vec<_>>();
