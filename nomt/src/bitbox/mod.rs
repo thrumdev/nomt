@@ -297,11 +297,11 @@ pub struct SyncController {
     db: DB,
     /// The channel to send the result of the pre-meta sync errors. Option is to allow `take`.
     pre_meta_result_tx: Option<Sender<TaskResult<std::io::Result<()>>>>,
-    /// he channel to receive the result of the pre-meta sync errors.
+    /// The channel to receive the result of the pre-meta sync errors.
     pre_meta_result_rx: Receiver<TaskResult<std::io::Result<()>>>,
     /// The channel to send the result of the begin_sync task. Option is to allow `take`.
     begin_sync_result_tx: Option<Sender<TaskResult<Result<(), BucketExhaustion>>>>,
-    /// The channel to receive the result of the the begin_sync task.
+    /// The channel to receive the result of the begin_sync task.
     begin_sync_result_rx: Receiver<TaskResult<Result<(), BucketExhaustion>>>,
     /// The pages along with their page numbers to write out to the HT file.
     ht_to_write: Arc<Mutex<Option<Vec<(u64, Arc<FatPage>)>>>>,
