@@ -28,7 +28,7 @@ impl NomtDB {
         let session =
             nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
 
-        // Here we will move the data saved under b"key1" to b"key2" and deletes it
+        // Here we will move the data saved under b"key1" to b"key2" and delete it
         //
         // NOMT expects keys to be uniformly distributed across the key space
         let key_path_1 = sha2::Sha256::digest(b"key1").into();
