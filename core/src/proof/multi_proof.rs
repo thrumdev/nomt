@@ -19,6 +19,11 @@ use core::cmp::Ordering;
 
 /// This struct includes the terminal node and its depth
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiPathProof {
     /// Terminal node
     pub terminal: PathProofTerminal,
@@ -28,6 +33,11 @@ pub struct MultiPathProof {
 
 /// A proof of multiple paths through the trie.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiProof {
     /// List of all provable paths. These are sorted in ascending order by bit-path
     pub paths: Vec<MultiPathProof>,
