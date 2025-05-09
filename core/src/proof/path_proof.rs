@@ -38,6 +38,14 @@ impl PathProofTerminal {
             Self::Terminator(_key_path) => TERMINATOR,
         }
     }
+
+    /// Transform this into an optional LeafData.
+    pub fn as_leaf_option(&self) -> Option<LeafData> {
+        match self {
+            Self::Leaf(leaf_data) => Some(leaf_data.clone()),
+            Self::Terminator(_) => None,
+        }
+    }
 }
 
 /// A proof of some particular path through the trie.

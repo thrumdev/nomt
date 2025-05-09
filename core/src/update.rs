@@ -212,6 +212,7 @@ pub fn build_trie<H: NodeHasher>(
             .take(hash_up_layers)
         {
             layer -= 1;
+
             let sibling = if pending_siblings.last().map_or(false, |l| l.1 == layer + 1) {
                 // unwrap: just checked
                 pending_siblings.pop().unwrap().0
