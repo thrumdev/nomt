@@ -64,3 +64,7 @@ borsh = ["dep:borsh", "nomt-core/borsh"]
 blake3-hasher = ["nomt-core/blake3-hasher"]
 sha2-hasher = ["nomt-core/sha2-hasher"]
 serde = ["dep:serde", "nomt-core/serde"]
+
+[[bin]]
+name = "assertion_bug_reproduction"
+path = "bin/main.rs"
