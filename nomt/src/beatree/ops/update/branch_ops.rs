@@ -210,15 +210,19 @@ impl BranchOpsTracker {
             match *&self.ops[pos] {
                 BranchOp::Insert(key, _) => {
                     if gauge.body_size_after(key, separator_len(&key)) > BRANCH_NODE_BODY_SIZE {
+                        // Rare case: body was artifically small due to long shared prefix.
+
+                        // Change the target requirement to minimize the number of non
+                        // compressed separators saved into one node.
+                        target = BRANCH_MERGE_THRESHOLD;
+
                         if gauge.body_size() < BRANCH_MERGE_THRESHOLD {
-                            // rare case: body was artifically small due to long shared prefix.
-                            // start applying items without prefix compression. we assume items are less
+                            // Start applying items without prefix compression. we assume items are less
                             // than half the body size, so the next item should apply cleanly.
                             gauge.stop_prefix_compression();
-                            // change the target requirement to minumize the number of non
-                            // compressed separators saved into one node
-                            target = BRANCH_MERGE_THRESHOLD;
                         } else {
+                            // The initial target was not reached, but BRANCH_MERGE_THRESHOLD was met. To avoid
+                            // inserting compressed separators, let's build the node with the operations collected until now.
                             break;
                         }
                     }
@@ -234,6 +238,9 @@ impl BranchOpsTracker {
                             self.replace_with_insert(base, pos);
                             continue;
                         } else {
+                            // The initial target was not reached, but BRANCH_MERGE_THRESHOLD was met. To avoid
+                            // inserting compressed separators, let's build the node with the operations collected until now.
+                            target = BRANCH_MERGE_THRESHOLD;
                             break;
                         }
                     }
@@ -580,6 +587,107 @@ mod tests {
         drop(res_ops);
         assert_eq!(ops_tracker.ops.len(), 1);
         assert!(res_gauge.body_size() > target);
+    }
+
+    #[test]
+    fn extract_ops_until_decrease_target_no_stop_prefix_compression_with_inserts() {
+        // BranchOp::Insert exceeds BRANCH_MERGE_THRESHOLD and a single
+        // additional item bumps the size to exceed BRANCH_NODE_BODY_SIZE.
+        // To avoid using stop prefix compression,
+        // the target is decreased to BRANCH_MERGE_THRESHOLD.
+        let compressed_key = |i| prefixed_key(0x00, 30, i);
+        let uncompressed_key = |i| prefixed_key(0xFF, 30, i);
+        let mut gauge = BranchGauge::default();
+        let target = 3500;
+        let mut ops_tracker = BranchOpsTracker::new();
+
+        // Collect BranchOp::Insert into updater.ops until the gauge associated
+        // to the ops is just after BRANCH_MERGE_THRESHOLD.
+        let mut rightsized = false;
+        ops_tracker.ops = (0..)
+            .map(|i| compressed_key(i))
+            .take_while(|key| {
+                let res = !rightsized;
+                rightsized =
+                    gauge.body_size_after(*key, separator_len(key)) >= BRANCH_MERGE_THRESHOLD;
+
+                if res {
+                    gauge.ingest_key(*key, separator_len(key));
+                }
+                res
+            })
+            .enumerate()
+            .map(|(i, key)| BranchOp::Insert(key, PageNumber(i as u32)))
+            .collect();
+
+        let n_compressed_insertions = ops_tracker.ops.len();
+        let n_uncompressed_insertions = 5;
+
+        ops_tracker.ops.extend(
+            (0..n_uncompressed_insertions)
+                .map(|i| BranchOp::Insert(uncompressed_key(i), PageNumber(i as u32))),
+        );
+
+        let Some((res_ops, res_gauge)) = ops_tracker.extract_ops_until(None, target) else {
+            panic!()
+        };
+
+        assert_eq!(res_ops.len(), n_compressed_insertions);
+        assert_eq!(res_gauge.body_size(), gauge.body_size());
+        drop(res_ops);
+        assert_eq!(ops_tracker.ops.len(), n_uncompressed_insertions);
+    }
+
+    #[test]
+    fn extract_ops_until_decrease_target_no_stop_prefix_compression_with_updates() {
+        // A single BranchOp::Update bumps the size from being already above
+        // BRANCH_MERGE_THRESHOLD to exceeding the BRANCH_NODE_BODY_SIZE.
+        // To avoid using stop prefix compression,
+        // the target is decreased to BRANCH_MERGE_THRESHOLD.
+        let compressed_key = |i| prefixed_key(0x00, 30, i);
+        let uncompressed_key = |i| prefixed_key(0xFF, 30, i);
+        let mut gauge = BranchGauge::default();
+        let target = 3500;
+        let mut ops_tracker = BranchOpsTracker::new();
+
+        // Collect BranchOp::Insert into updater.ops until the gauge associated
+        // to the ops is just after BRANCH_MERGE_THRESHOLD.
+        let mut rightsized = false;
+        ops_tracker.ops = (0..)
+            .map(|i| compressed_key(i))
+            .take_while(|key| {
+                let res = !rightsized;
+                rightsized =
+                    gauge.body_size_after(*key, separator_len(key)) >= BRANCH_MERGE_THRESHOLD;
+
+                if res {
+                    gauge.ingest_key(*key, separator_len(key));
+                }
+                res
+            })
+            .enumerate()
+            .map(|(i, key)| BranchOp::Insert(key, PageNumber(i as u32)))
+            .collect();
+
+        let n_compressed_insertions = ops_tracker.ops.len();
+
+        let branch = make_branch_with_body_size_target(uncompressed_key, |size| {
+            size < BRANCH_NODE_BODY_SIZE
+        });
+        let base = BaseBranch::new(branch.clone());
+
+        ops_tracker.ops.push(BranchOp::Update(0, PageNumber(1)));
+
+        let Some((res_ops, res_gauge)) = ops_tracker.extract_ops_until(Some(&base), target) else {
+            panic!()
+        };
+
+        assert_eq!(res_ops.len(), n_compressed_insertions);
+        assert_eq!(res_gauge.body_size(), gauge.body_size());
+        assert!(res_gauge.body_size() < target);
+        assert!(res_gauge.body_size() >= BRANCH_MERGE_THRESHOLD);
+        drop(res_ops);
+        assert_eq!(ops_tracker.ops.len(), 1);
     }
 
     #[test]
