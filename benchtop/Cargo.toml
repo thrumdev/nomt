@@ -50,3 +50,11 @@ debug = true
 [features]
 sov-db=["dep:sov-db", "sov-schema-db", "sov-prover-storage-manager", "jmt" ]
 sp-trie=["dep:sp-trie", "sp-state-machine", "trie-db", "hash-db", "sp-core", "kvdb", "kvdb-rocksdb", "array-bytes" ]
+
+[[bin]]
+name = "unreachable"
+path = "src/bin/unreachable.rs"
+
+[[bin]]
+name = "left_right_assertion"
+path = "src/bin/left_right_assertion.rs"
