@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Witness {
     /// Various paths down the trie used as part of this witness.
+    /// Note that the paths are not necessarily in lexicographic order.
     pub path_proofs: Vec<WitnessedPath>,
     /// The operations witnessed by the paths.
     pub operations: WitnessedOperations,
