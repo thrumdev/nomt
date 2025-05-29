@@ -164,7 +164,11 @@ impl PathProofRange {
 }
 
 impl MultiProof {
-    /// Construct a MultiProof from a vector of *ordered* PathProof
+    /// Construct a MultiProof from a vector of *ordered* PathProof.
+    ///
+    /// Note that the path proofs produced within a [`crate::witness::Witness`] are not guaranteed
+    /// to be ordered, so the input should be sorted lexicographically by the terminal path prior
+    /// to calling this function.
     pub fn from_path_proofs(path_proofs: Vec<PathProof>) -> Self {
         // A multi-proof can be viewed by associating each terminal node
         // with its first n uniquely related siblings from its path proof,
