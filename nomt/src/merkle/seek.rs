@@ -255,18 +255,24 @@ impl SeekRequest {
         // All values in the range have been collected from the leaves,
         // now they need to be intersected with what resides in the overlay.
         let mut final_leaf_data_collection = Vec::with_capacity(collected_leaf_data.len());
+        let mut deleted_indices = Vec::new();
         let overlay_leaves = overlay.value_iter(range.0, range.1);
 
         if collected_leaf_data.is_empty() {
-            let leaves_data = overlay_leaves.map(|(overlay_key, overlay_valuechange)| {
+            let leaves_data = overlay_leaves.filter_map(|(overlay_key, overlay_valuechange)| {
                 let value_hash = match overlay_valuechange {
                     ValueChange::Insert(value) => H::hash_value(value),
                     ValueChange::InsertOverflow(_, value_hash) => *value_hash,
-                    // PANIC: There is no leaf data in the range we are looking for,
-                    // thus there cannot be any deleted leaf in the same range within the overlay.
-                    _ => unreachable!(),
+                    _ => {
+                        // Overlays sometimes contain "naked deletions", i.e. deleted items that
+                        // never existed in the beatree.
+                        //
+                        // Because `collected_leaf_data` is empty, we cannot have any true
+                        // deletions, so we can safely ignore these.
+                        return None;
+                    }
                 };
-                (overlay_key, value_hash)
+                Some((overlay_key, value_hash))
             });
             final_leaf_data_collection.extend(leaves_data);
         } else {
@@ -286,14 +292,16 @@ impl SeekRequest {
                 let value_hash = match overlay_valuechange {
                     ValueChange::Insert(value) => H::hash_value(value),
                     ValueChange::InsertOverflow(_, value_hash) => *value_hash,
-                    // Deleted item, do nothing.
+                    // Deleted key, flag as deleted if it matches the key path.
                     ValueChange::Delete
                         if key_path.map_or(false, |key_path| key_path == overlay_key) =>
                     {
-                        continue
+                        deleted_indices.push(idx);
+                        continue;
                     }
-                    // PANIC: Deleted key must be present in key.
-                    ValueChange::Delete => unreachable!(),
+                    // Overlays can contain "naked deletions", i.e. deleted items that
+                    // never existed in the beatree. Skip these as they have no effect.
+                    ValueChange::Delete => continue,
                 };
 
                 if key_path.map_or(false, |key_path| key_path == overlay_key) {
@@ -307,13 +315,29 @@ impl SeekRequest {
             final_leaf_data_collection.extend_from_slice(&collected_leaf_data[idx..]);
         }
 
+        // Iterate over the final collection, filtering out the deleted indices.
+        let ops = {
+            let mut deleted_indices = deleted_indices.into_iter().peekable();
+            let ops = final_leaf_data_collection.into_iter().enumerate();
+            ops.filter(move |(idx, (_, _))| {
+                let next_deleted = deleted_indices.peek();
+                if Some(idx) == next_deleted {
+                    deleted_indices.next();
+                    false // skip this index
+                } else {
+                    true // keep this index
+                }
+            })
+            .map(|(_, x)| x)
+        };
+
         // UNWRAP: The `page_id` from where the leaves request started must be `Some`.
         let maybe_pages = super::page_walker::reconstruct_pages::<H>(
             page,
             self.page_id.clone().unwrap(),
             self.position.clone(),
             page_set,
-            final_leaf_data_collection,
+            ops,
         );
 
         if let Some(pages) = maybe_pages {
