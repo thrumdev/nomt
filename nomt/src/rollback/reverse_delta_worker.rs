@@ -7,7 +7,7 @@ use threadpool::ThreadPool;
 
 use crate::{
     beatree::{self, AsyncLookup, OverflowPageInfo, ReadTransaction},
-    io::{FatPage, IoHandle},
+    io::{CompleteIo, FatPage, IoHandle},
     overlay::LiveOverlay,
     task::{spawn_task, TaskResult},
 };
@@ -20,6 +20,7 @@ use crate::{
 pub(super) trait LoadValueAsync: Send + Sync + Sized + 'static {
     type Pending: AsyncPending<Store = Self>;
     type Completion: Send;
+    type RawCompletion;
 
     /// Start a load. This may complete eagerly or return a pending result.
     fn start_load(
@@ -28,10 +29,13 @@ pub(super) trait LoadValueAsync: Send + Sync + Sized + 'static {
         user_data: u64,
     ) -> Result<Option<Vec<u8>>, Self::Pending>;
 
+    /// Get a receiver of completions.
+    fn raw_completion_stream(&self) -> Receiver<Self::RawCompletion>;
+
     /// Create the completion function.
-    fn build_next(
-        &self,
-    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static;
+    fn process_raw_completion(
+        complete_io: Self::RawCompletion,
+    ) -> (u64, anyhow::Result<Self::Completion>);
 }
 
 /// A trait for a pending asynchronous value load.
@@ -49,8 +53,6 @@ pub(super) trait AsyncPending {
     ) -> Option<Option<Vec<u8>>>;
 }
 
-struct LoadValueCompletion<T>(u64, anyhow::Result<T>);
-
 pub(super) enum DeltaBuilderCommand {
     /// Start lookup on a key path.
     Lookup(KeyPath),
@@ -65,18 +67,9 @@ pub(super) fn start(
     store: impl LoadValueAsync,
     tp: &ThreadPool,
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
-) -> (
-    Sender<DeltaBuilderCommand>,
-    Receiver<TaskResult<()>>,
-    Receiver<TaskResult<()>>,
-) {
+) -> (Sender<DeltaBuilderCommand>, Receiver<TaskResult<()>>) {
     let (command_tx, command_rx) = crossbeam::channel::unbounded();
-    let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
     let (worker_result_tx, worker_result_rx) = crossbeam::channel::unbounded();
-    let (completion_worker_result_tx, completion_worker_result_rx) =
-        crossbeam::channel::unbounded();
-
-    let next_fn = store.build_next();
 
     let worker_task = {
         let priors = priors.clone();
@@ -90,18 +83,14 @@ pub(super) fn start(
                 overflow_request_index: u64::MAX,
                 dormant_request_count: 0,
             };
-            run(worker, command_rx, completion_rx)
+
+            run(worker, command_rx);
         }
     };
+
     spawn_task(&tp, worker_task, worker_result_tx);
 
-    spawn_task(
-        &tp,
-        move || reverse_delta_completion_worker(completion_tx, next_fn),
-        completion_worker_result_tx,
-    );
-
-    (command_tx, worker_result_rx, completion_worker_result_rx)
+    (command_tx, worker_result_rx)
 }
 
 const TARGET_OVERFLOW_REQUESTS: usize = 128;
@@ -260,8 +249,10 @@ impl<Store: LoadValueAsync> ReverseDeltaWorker<Store> {
 fn run<Store: LoadValueAsync>(
     mut worker: ReverseDeltaWorker<Store>,
     command_rx: Receiver<DeltaBuilderCommand>,
-    completion_rx: Receiver<LoadValueCompletion<Store::Completion>>,
 ) {
+    // UNWRAP: the store is always live until shutdown.
+    let raw_completion_rx = worker.store.as_ref().unwrap().raw_completion_stream();
+
     loop {
         let join = crossbeam::select! {
             recv(command_rx) -> command => match command {
@@ -275,20 +266,23 @@ fn run<Store: LoadValueAsync>(
                 },
                 Ok(DeltaBuilderCommand::Join(done_joining, new_priors)) => Some((done_joining, new_priors)),
             },
-            recv(completion_rx) -> completion => match completion {
+            recv(raw_completion_rx) -> raw_completion => match raw_completion {
                 // PANIC: completions never disconnect before commands.
                 Err(RecvError) => unreachable!(),
-                Ok(LoadValueCompletion(user_data, completion)) => {
+                Ok(raw_completion) => {
+                    let (user_data, completion) = Store::process_raw_completion(raw_completion);
                     worker.handle_completion(user_data, completion);
                     None
-                },
+                }
             },
         };
 
         if let Some((done_joining, new_priors)) = join {
             while !worker.is_empty() {
                 // UNWRAP: completions never disconnect before `commands` does.
-                let LoadValueCompletion(user_data, completion) = completion_rx.recv().unwrap();
+                let raw_completion = raw_completion_rx.recv().unwrap();
+                let (user_data, completion) = Store::process_raw_completion(raw_completion);
+
                 worker.handle_completion(user_data, completion);
             }
 
@@ -298,20 +292,12 @@ fn run<Store: LoadValueAsync>(
     }
 
     // wait on outstanding completions.
-    for LoadValueCompletion(user_data, completion) in completion_rx {
+    for raw_completion in raw_completion_rx {
+        let (user_data, completion) = Store::process_raw_completion(raw_completion);
         worker.handle_completion(user_data, completion);
     }
 
     assert!(worker.is_shut_down());
-}
-
-fn reverse_delta_completion_worker<F, T>(completion_tx: Sender<LoadValueCompletion<T>>, mut next: F)
-where
-    F: FnMut() -> Option<(u64, anyhow::Result<T>)>,
-{
-    while let Some((user_data, result)) = next() {
-        let _ = completion_tx.send(LoadValueCompletion(user_data, result));
-    }
 }
 
 /// The implementation of [`LoadValueAsync`] for the real store.
@@ -355,6 +341,7 @@ impl AsyncPending for AsyncLookup {
 impl LoadValueAsync for StoreLoadValueAsync {
     type Completion = FatPage;
     type Pending = AsyncLookup;
+    type RawCompletion = CompleteIo;
 
     fn start_load(
         &self,
@@ -369,19 +356,19 @@ impl LoadValueAsync for StoreLoadValueAsync {
             .lookup_async(key_path, &self.io_handle, user_data)
     }
 
-    fn build_next(
-        &self,
-    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static {
+    fn raw_completion_stream(&self) -> Receiver<Self::RawCompletion> {
         // using just the receiver ensures that when `self` is dropped, the completion stream ends.
-        let mut receiver = self.io_handle.receiver().clone().into_iter();
-        move || {
-            receiver.next().map(|complete_io| {
-                let user_data = complete_io.command.user_data;
-                let res = complete_io
-                    .result
-                    .map(|()| complete_io.command.kind.unwrap_buf());
-                (user_data, res.map_err(Into::into))
-            })
-        }
+        self.io_handle.receiver().clone()
+    }
+
+    fn process_raw_completion(
+        complete_io: Self::RawCompletion,
+    ) -> (u64, anyhow::Result<Self::Completion>) {
+        let user_data = complete_io.command.user_data;
+        let res = complete_io
+            .result
+            .map(|()| complete_io.command.kind.unwrap_buf());
+
+        (user_data, res.map_err(Into::into))
     }
 }
