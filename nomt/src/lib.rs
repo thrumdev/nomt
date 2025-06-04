@@ -693,7 +693,7 @@ impl FinishedSession {
     /// The changeset may be invalidated if another competing session, overlay, or rollback was
     /// committed.
     pub fn try_commit_nonblocking<T: HashAlgorithm>(
-        self,
+        mut self,
         nomt: &Nomt<T>,
     ) -> Result<Option<Self>, anyhow::Error> {
         let write_guard = self
@@ -702,6 +702,15 @@ impl FinishedSession {
             .flatten();
         if write_guard.is_none() {
             return Ok(Some(self));
+        }
+
+        if let Some(rollback_delta) = self.rollback_delta {
+            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
+            let rollback = nomt.store.rollback().unwrap();
+            if let Some(delta) = rollback.commit_nonblocking(rollback_delta)? {
+                self.rollback_delta = Some(delta);
+                return Ok(Some(self));
+            }
         }
 
         {
@@ -715,12 +724,6 @@ impl FinishedSession {
             }
             shared.root = Root(self.merkle_output.root);
             shared.last_commit_marker = None;
-        }
-
-        if let Some(rollback_delta) = self.rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
         }
 
         nomt.store.commit(
