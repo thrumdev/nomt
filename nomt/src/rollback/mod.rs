@@ -147,13 +147,14 @@ impl Rollback {
     // generality is primarily for testing.
     fn delta_builder_inner(&self, store: impl LoadValueAsync) -> ReverseDeltaBuilder {
         let priors = Arc::new(DashMap::new());
-        let (command_tx, worker_result_rx, completion_worker_result_rx) =
+        let (command_tx, worker_result_rx) =
             reverse_delta_worker::start(store, &self.shared.worker_tp, priors.clone());
+
         ReverseDeltaBuilder {
             command_tx,
             worker_result_rx,
-            completion_worker_result_rx,
             priors,
+            finalized: false,
         }
     }
 
@@ -381,11 +382,11 @@ struct WriteoutData {
 pub struct ReverseDeltaBuilder {
     command_tx: Sender<DeltaBuilderCommand>,
     worker_result_rx: Receiver<TaskResult<()>>,
-    completion_worker_result_rx: Receiver<TaskResult<()>>,
     /// The values of the keys that should be preserved at commit time for this delta.
     ///
     /// Before the commit takes place, the set contains tentative values.
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
+    finalized: bool,
 }
 
 impl ReverseDeltaBuilder {
@@ -401,7 +402,7 @@ impl ReverseDeltaBuilder {
     /// Finalize the delta.
     ///
     /// This function is expected to be called before the store is modified.
-    pub fn finalize(self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
+    pub fn finalize(mut self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
         // wait for all submitted requests to finish.
         let fresh_priors = Arc::new(DashMap::new());
         let (join_tx, join_rx) = crossbeam::channel::bounded(1);
@@ -412,7 +413,7 @@ impl ReverseDeltaBuilder {
 
         // At this point, `tentative_priors` is unique, because the worker has swapped
         // with `fresh_priors`.
-        let tentative_priors = self.priors;
+        let tentative_priors = &self.priors;
         let mut final_priors = HashMap::with_capacity(tentative_priors.len() * 2);
 
         for (path, read_write) in actuals {
@@ -441,9 +442,10 @@ impl ReverseDeltaBuilder {
 
         // Wait for the load worker to join. After this point, priors contains the final set of
         // values to be preserved.
-        drop(self.command_tx);
+        let _ = std::mem::replace(&mut self.command_tx, crossbeam_channel::bounded(0).0);
         join_task(&self.worker_result_rx);
-        join_task(&self.completion_worker_result_rx);
+
+        self.finalized = true;
 
         // UNWRAP: At this point, `fresh_priors` is unique because the worker thread has joined.
         // At this point, fresh_priors is fully populated with all lookups submitted in the loop.
@@ -451,6 +453,22 @@ impl ReverseDeltaBuilder {
         final_priors.extend(fresh_priors);
         Delta {
             priors: final_priors,
+        }
+    }
+}
+
+impl Drop for ReverseDeltaBuilder {
+    fn drop(&mut self) {
+        if !self.finalized {
+            // If the builder is dropped, we need to ensure that the worker thread is stopped.
+            // We do this by sending a `Join` command.
+            let _ = self.command_tx.send(DeltaBuilderCommand::Join(
+                crossbeam::channel::unbounded().0,
+                Arc::new(DashMap::new()),
+            ));
+
+            let _ = std::mem::replace(&mut self.command_tx, crossbeam_channel::bounded(0).0);
+            join_task(&self.worker_result_rx);
         }
     }
 }

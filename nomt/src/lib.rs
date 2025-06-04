@@ -478,6 +478,8 @@ pub struct Session<T> {
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
     overlay: LiveOverlay,
     witness_mode: WitnessMode,
+    // Note: this needs to be after rollback_delta and merkle_updater in declaration order,
+    // so this is dropped after all read transactions are taken, even when the session is dropped.
     access_guard: Option<ArcRwLockReadGuard<parking_lot::RawRwLock, ()>>,
     prev_root: Root,
     _marker: std::marker::PhantomData<T>,

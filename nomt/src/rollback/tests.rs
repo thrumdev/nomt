@@ -81,6 +81,7 @@ impl AsyncPending for MockPending {
 impl LoadValueAsync for MockStoreAsync {
     type Completion = Option<Vec<u8>>;
     type Pending = MockPending;
+    type RawCompletion = (u64, Option<Vec<u8>>);
 
     fn start_load(
         &self,
@@ -101,11 +102,15 @@ impl LoadValueAsync for MockStoreAsync {
         Err(MockPending)
     }
 
-    fn build_next(
-        &self,
-    ) -> impl FnMut() -> Option<(u64, anyhow::Result<Self::Completion>)> + Send + 'static {
-        let mut rx = self.completion_rx.clone().into_iter();
-        move || rx.next().map(|(user_data, res)| (user_data, Ok(res)))
+    fn raw_completion_stream(&self) -> Receiver<Self::RawCompletion> {
+        self.completion_rx.clone()
+    }
+
+    fn process_raw_completion(
+        complete_io: (u64, Option<Vec<u8>>),
+    ) -> (u64, anyhow::Result<Self::Completion>) {
+        let (user_data, completion) = complete_io;
+        (user_data, Ok(completion))
     }
 }
 
