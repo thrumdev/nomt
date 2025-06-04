@@ -172,6 +172,27 @@ impl Rollback {
         Ok(())
     }
 
+    /// Saves the delta into the log, unless the locks are already held by another thread.
+    ///
+    /// If commit is blocked, it returns the delta back to the caller.
+    pub fn commit_nonblocking(&self, delta: Delta) -> anyhow::Result<Option<Delta>> {
+        let delta_bytes = delta.encode();
+
+        // Try to lock the in-memory log and the seglog.
+        let mut in_memory = match self.shared.in_memory.try_lock() {
+            Some(lock) => lock,
+            None => return Ok(Some(delta)), // Another thread is holding the lock.
+        };
+        let mut seglog = match self.shared.seglog.try_lock() {
+            Some(lock) => lock,
+            None => return Ok(Some(delta)), // Another thread is holding the lock.
+        };
+
+        let record_id = seglog.append(&delta_bytes)?;
+        in_memory.push_recent(record_id, delta);
+        Ok(None)
+    }
+
     /// Truncates the rollback log by removing the last `n` deltas.
     ///
     /// This function returns the keys and values that we should apply to the database to restore
