@@ -302,6 +302,13 @@ impl<T: HashAlgorithm> Nomt<T> {
     pub fn begin_session(&self, params: SessionParams) -> Session<T> {
         let live_overlay = params.overlay;
 
+        // We must take the access guard before instantiating the rollback delta,
+        // because it creates a read transaction and any commits or rollbacks will block
+        // indefinitely for us to finish.
+        let access_guard = params
+            .take_global_guard
+            .then(|| RwLock::read_arc(&self.access_lock));
+
         let store = self.store.clone();
         let rollback_delta = if params.record_rollback_delta {
             self.store
@@ -328,9 +335,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             rollback_delta,
             overlay: live_overlay,
             witness_mode: params.witness,
-            access_guard: params
-                .take_global_guard
-                .then(|| RwLock::read_arc(&self.access_lock)),
+            access_guard,
             prev_root: Root(prev_root),
             _marker: std::marker::PhantomData,
         }
