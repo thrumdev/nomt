@@ -3,6 +3,7 @@ use nomt::{
     KeyReadWrite, Nomt, Options, Overlay, PanicOnSyncMode, Root, Session, SessionParams, Witness,
     WitnessMode,
 };
+use nomt_core::proof::PathProof;
 use std::{
     collections::{hash_map::Entry, HashMap},
     mem,
@@ -167,6 +168,14 @@ impl Test {
             .overlay(ancestors)
             .unwrap();
         self.session = Some(self.nomt.begin_session(params));
+    }
+
+    pub fn prove(&self, key: KeyPath) -> PathProof {
+        self.session.as_ref().unwrap().prove(key).unwrap()
+    }
+
+    pub fn prove_id(&self, id: u64) -> PathProof {
+        self.prove(account_path(id))
     }
 
     pub fn root(&self) -> Root {
