@@ -10,6 +10,21 @@ const RING_CAPACITY: u32 = 1024;
 // max number of inflight requests is bounded by the slab.
 const MAX_IN_FLIGHT: usize = RING_CAPACITY as usize;
 
+pub fn check_iou_permissions() -> super::IoUringPermission {
+    let maybe_ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
+        .setup_single_issuer()
+        .build(RING_CAPACITY);
+
+    match maybe_ring {
+        // EPERM -> PermissionDenied
+        // https://doc.rust-lang.org/stable/src/std/sys/pal/unix/mod.rs.html#278
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            super::IoUringPermission::Denied
+        }
+        _ => super::IoUringPermission::Allowed,
+    }
+}
+
 struct PendingIo {
     command: IoCommand,
     completion_sender: Sender<CompleteIo>,
