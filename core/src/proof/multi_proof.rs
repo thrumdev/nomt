@@ -293,6 +293,7 @@ struct VerifiedBisection {
 
 /// A verified multi-proof.
 #[derive(Debug, Clone)]
+#[must_use = "VerifiedMultiProof only checks the consistency of the trie, not the values"]
 pub struct VerifiedMultiProof {
     inner: Vec<VerifiedMultiPath>,
     bisections: Vec<VerifiedBisection>,
@@ -411,7 +412,10 @@ impl VerifiedMultiProof {
     }
 }
 
-/// Verify a multi-proof against an expected root.
+/// Verify a multi-proof against an expected root. This ONLY checks the consistency of the trie.
+///
+/// You MUST use `confirm_value` or `confirm_nonexistence` to check the values in the verified
+/// multi-proof.
 pub fn verify<H: NodeHasher>(
     multi_proof: &MultiProof,
     root: Node,
