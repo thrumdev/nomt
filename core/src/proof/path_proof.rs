@@ -65,6 +65,10 @@ pub struct PathProof {
 
 impl PathProof {
     /// Verify this path proof.
+    /// This ONLY verifies the path proof. It does not verify the key path or value of the terminal
+    /// node.
+    ///
+    /// You MUST use this in conjunction with `confirm_value` or `confirm_nonexistence`.
     ///
     /// Provide the root node and a key path. The key path can be any key that results in the
     /// lookup of the terminal node and must be at least as long as the siblings vector.
@@ -148,6 +152,7 @@ pub enum PathProofVerificationError {
 /// Statement (2) is true for any key which begins with the proven path, where the terminal node is
 /// either not a leaf or contains a value for a different key.
 #[derive(Clone)]
+#[must_use = "VerifiedPathProof only checks the trie path, not whether it actually looks up to your expected value."]
 pub struct VerifiedPathProof {
     key_path: BitVec<u8, Msb0>,
     terminal: Option<LeafData>,
