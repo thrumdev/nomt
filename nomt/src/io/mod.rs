@@ -26,6 +26,26 @@ pub const PAGE_SIZE: usize = 4096;
 
 pub use page_pool::{FatPage, PagePool};
 
+/// Whether the current device has permission to use io_uring.
+///
+/// If not linux, this will always return `NotSupported`.
+pub enum IoUringPermission {
+    /// The device has permission to use io_uring.
+    Allowed,
+    /// The device does not have permission to use io_uring.
+    Denied,
+    /// This version of NOMT was compiled targeting a non-Linux platform, so io_uring is not
+    /// supported.
+    NotSupported,
+}
+
+/// Check whether the current device has permission to use io_uring.
+///
+/// On non-Linux platforms, this will always return `NotSupported`.
+pub fn check_iou_permissions() -> IoUringPermission {
+    platform::check_iou_permissions()
+}
+
 pub enum IoKind {
     Read(RawFd, u64, FatPage),
     Write(RawFd, u64, FatPage),

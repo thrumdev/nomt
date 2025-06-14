@@ -19,6 +19,7 @@ use page_cache::PageCache;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use store::{Store, ValueTransaction};
 
+pub use io::IoUringPermission;
 pub use nomt_core::hasher;
 pub use nomt_core::proof;
 pub use nomt_core::trie;
@@ -209,6 +210,9 @@ pub struct Nomt<T> {
 
 impl<T: HashAlgorithm> Nomt<T> {
     /// Open the database with the given options.
+    ///
+    /// It is recommended to check io_uring permissions before calling this function by calling
+    /// [`check_iou_permissions`]
     pub fn open(mut o: Options) -> anyhow::Result<Self> {
         if o.commit_concurrency == 0 {
             anyhow::bail!("commit concurrency must be greater than zero".to_string());
@@ -938,6 +942,13 @@ fn compute_root_node<H: HashAlgorithm>(page_cache: &PageCache, store: &Store) ->
             }
         }
     }
+}
+
+/// Check whether the current device has permission to use io_uring.
+///
+/// On non-Linux platforms, this will always return `NotSupported`.
+pub fn check_iou_permissions() -> IoUringPermission {
+    crate::io::check_iou_permissions()
 }
 
 #[cfg(test)]

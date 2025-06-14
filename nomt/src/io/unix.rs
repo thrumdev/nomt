@@ -2,6 +2,10 @@ use super::{CompleteIo, IoCommand, IoKind, IoKindResult, IoPacket, PagePool, PAG
 use crossbeam_channel::{Receiver, Sender};
 use threadpool::ThreadPool;
 
+pub fn check_iou_permissions() -> super::IoUringPermission {
+    super::IoUringPermission::NotSupported
+}
+
 pub fn start_io_worker(
     page_pool: PagePool,
     io_workers_tp: &ThreadPool,
