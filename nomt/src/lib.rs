@@ -548,6 +548,16 @@ impl<T> Session<T> {
 }
 
 impl<T: HashAlgorithm> Session<T> {
+    /// Get a merkle proof for the given key path.
+    ///
+    /// This will block until the proof is fetched from the database.
+    /// Note that this may require multiple round trips to the database to complete.
+    ///
+    /// Fails only if I/O fails. Proves either the existence or non-existence of the key.
+    pub fn prove(&self, path: KeyPath) -> anyhow::Result<PathProof> {
+        Ok(self.merkle_updater.prove::<T>(path)?)
+    }
+
     /// Finish the session. Provide the actual reads and writes (in sorted order) that are to be
     /// considered within the finished session.
     ///

@@ -3,19 +3,21 @@
 //! This splits the work of warming-up and performing the trie update across worker threads.
 
 use crossbeam::channel::{self, Receiver, Sender};
-use page_set::FrozenSharedPageSet;
+use page_set::{FrozenSharedPageSet, PageSet};
 use parking_lot::Mutex;
 
 use nomt_core::{
     page_id::{ChildPageIndex, PageId},
+    proof::{PathProof, PathProofTerminal},
     trie::{self, KeyPath, Node, ValueHash},
     trie_pos::TriePosition,
 };
-use seek::Seek;
+use seek::{Seek, Seeker};
 
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
+    beatree::ReadTransaction as BeatreeReadTx,
     io::PagePool,
     overlay::LiveOverlay,
     page_cache::{Page, PageCache, ShardIndex},
@@ -223,6 +225,8 @@ impl UpdatePool {
             None
         };
 
+        let beatree_read_tx = store.read_transaction();
+
         Updater {
             worker_tp: self.worker_tp.clone(),
             warm_up,
@@ -231,6 +235,7 @@ impl UpdatePool {
             store,
             page_pool,
             overlay,
+            beatree_read_tx,
         }
     }
 }
@@ -246,6 +251,7 @@ pub struct Updater {
     store: Store,
     page_pool: PagePool,
     overlay: LiveOverlay,
+    beatree_read_tx: BeatreeReadTx,
 }
 
 impl Updater {
@@ -315,6 +321,48 @@ impl Updater {
             shared,
             worker_rx,
             num_workers,
+        })
+    }
+
+    pub fn prove<H: HashAlgorithm>(&self, key_path: KeyPath) -> std::io::Result<PathProof> {
+        let io_handle = self.store.io_pool().make_handle();
+
+        // It's a little wasteful to create a seeker just for this, but
+        // this is the simplest way to get the path proof
+        let mut seeker = Seeker::<H>::new(
+            self.root,
+            self.beatree_read_tx.clone(),
+            self.page_cache.clone(),
+            self.overlay.clone(),
+            io_handle,
+            self.store.page_loader(),
+            true, // collect witness
+        );
+
+        seeker.push(key_path);
+        let mut page_set = PageSet::new(self.page_pool.clone(), None);
+
+        // Blocking I/O loop.
+        let found = loop {
+            seeker.submit_all(&mut page_set);
+
+            // Submitting all requests may have yielded a completion.
+            if let Some(completion) = seeker.take_completion() {
+                break completion;
+            }
+
+            // Block only if no completion was received.
+            seeker.recv_page(&mut page_set)?;
+        };
+
+        let terminal = found
+            .terminal
+            .map(PathProofTerminal::Leaf)
+            .unwrap_or_else(|| PathProofTerminal::Terminator(found.position.clone()));
+
+        Ok(PathProof {
+            terminal,
+            siblings: found.siblings,
         })
     }
 }
