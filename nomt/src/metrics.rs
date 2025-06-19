@@ -3,6 +3,8 @@ use std::sync::{
     Arc,
 };
 
+const METRICS_NOT_ENABLED: &str = "Metrics are not enabled";
+
 /// Metrics collector, if active, it provides Counters and Timers
 #[derive(Clone)]
 pub struct Metrics {
@@ -105,6 +107,44 @@ impl Metrics {
         } else {
             println!("Metrics collection was not activated")
         }
+    }
+
+    /// Counter of total page requests.
+    /// Panics if metrics are not enabled.
+    pub fn get_page_requests(&self) -> u64 {
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.page_requests.load(Ordering::Relaxed))
+            .expect(METRICS_NOT_ENABLED)
+    }
+
+    /// Counter of page requests cache misses over all page requests.
+    /// Panics if metrics are not enabled.
+    pub fn get_page_cache_misses(&self) -> u64 {
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.page_cache_misses.load(Ordering::Relaxed))
+            .expect(METRICS_NOT_ENABLED)
+    }
+
+    /// Average page fetch time.
+    /// Returns None if there were no requests.
+    /// Panics if metrics are not enabled.
+    pub fn get_page_fetch_time(&self) -> Option<u64> {
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.page_fetch_time.mean())
+            .expect(METRICS_NOT_ENABLED)
+    }
+
+    /// Average value fetch time during reads.
+    /// Returns None if there were no requests.
+    /// Panics if metrics are not enabled.
+    pub fn get_value_fetch_time(&self) -> Option<u64> {
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.value_fetch_time.mean())
+            .expect(METRICS_NOT_ENABLED)
     }
 }
 
