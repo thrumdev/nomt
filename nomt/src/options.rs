@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 /// Options when opening a [`crate::Nomt`] instance.
+#[derive(Debug)]
 pub struct Options {
     /// The path to the directory where the trie is stored.
     pub(crate) path: PathBuf,
@@ -190,7 +191,7 @@ fn page_size_is_4096() {
 }
 
 /// Modes for panicking during sync.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum PanicOnSyncMode {
     /// After the meta has been swapped, but before other points.
     PostMeta,
