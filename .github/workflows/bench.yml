@@ -28,7 +28,7 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: |
           # Install required dependencies
           sudo apt-get update
