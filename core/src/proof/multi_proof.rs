@@ -697,6 +697,10 @@ pub fn verify_update<H: NodeHasher>(
     proof: &VerifiedMultiProof,
     ops: Vec<(KeyPath, Option<ValueHash>)>,
 ) -> Result<Node, MultiVerifyUpdateError> {
+    if ops.is_empty() {
+        return Ok(proof.root);
+    }
+
     // left frontier
     let mut pending_siblings: Vec<(Node, usize)> = Vec::new();
 
