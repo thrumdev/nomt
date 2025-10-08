@@ -663,18 +663,21 @@ impl<H: HashAlgorithm> Seeker<H> {
                 IoQuery::MerklePage(page_id) => {
                     // Attempt to fetch a page from the page_set. If retrieval from memory
                     // is required, then insert it with its origin into the page set.
-                    let maybe_page = page_set.get(&page_id).map(|(page, _origin)| page).or(
-                        super::get_in_memory_page(&self.overlay, &self.page_cache, &page_id).map(
-                            |(page, bucket_info)| {
-                                page_set.insert(
-                                    page_id.clone(),
-                                    page.clone(),
-                                    PageOrigin::Persisted(bucket_info),
-                                );
-                                page
-                            },
-                        ),
-                    );
+                    let maybe_page =
+                        page_set
+                            .get(&page_id)
+                            .map(|(page, _origin)| page)
+                            .or_else(|| {
+                                super::get_in_memory_page(&self.overlay, &self.page_cache, &page_id)
+                                    .map(|(page, bucket_info)| {
+                                        page_set.insert(
+                                            page_id.clone(),
+                                            page.clone(),
+                                            PageOrigin::Persisted(bucket_info),
+                                        );
+                                        page
+                                    })
+                            });
 
                     if let Some(page) = maybe_page {
                         request.continue_seek::<H>(
