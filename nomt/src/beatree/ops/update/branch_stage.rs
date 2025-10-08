@@ -94,34 +94,41 @@ pub fn run(
     drop(changeset);
 
     let mut output = BranchStageOutput::default();
+    let mut branch_changeset: Vec<(Key, Option<Arc<BranchNode>>)> = vec![];
 
     for _ in 0..num_workers {
         let worker_output = join_task(&worker_result_rx)?;
-        apply_bbn_changes(bbn_index, &mut output, worker_output);
+        apply_bbn_changes(&mut output, &mut branch_changeset, worker_output);
     }
+
+    filter_branch_changeset(&mut branch_changeset);
+    apply_changes_to_index(bbn_index, branch_changeset);
 
     Ok(output)
 }
 
 fn apply_bbn_changes(
-    bbn_index: &mut Index,
     output: &mut BranchStageOutput,
+    branch_changeset: &mut Vec<(Key, Option<Arc<BranchNode>>)>,
     mut worker_output: BranchWorkerOutput,
 ) {
     for (key, changed_branch) in worker_output.branches_tracker.inner {
-        match changed_branch.inserted {
-            Some((node, _pn)) => {
-                bbn_index.insert(key, node);
-                output.submitted_io += 1;
-            }
-            None => {
-                bbn_index.remove(&key);
-            }
+        // Discard entries that have both insert and delete equal to None.
+        // This could happen when a worker receives a created page from the right
+        // worker, but it has been merged into a previous one.
+        if changed_branch.inserted.is_none() && changed_branch.deleted.is_none() {
+            continue;
+        }
+
+        if changed_branch.inserted.is_some() {
+            output.submitted_io += 1;
         }
 
         if let Some(deleted_pn) = changed_branch.deleted {
             output.freed_pages.push(deleted_pn);
         }
+
+        branch_changeset.push((key.clone(), changed_branch.inserted.map(|(node, _)| node)));
     }
 
     output.submitted_io += worker_output.branches_tracker.extra_freed.len();
@@ -131,6 +138,57 @@ fn apply_bbn_changes(
     output.post_io_drop.deferred_drop_pages.push(std::mem::take(
         &mut worker_output.branches_tracker.deferred_drop_pages,
     ));
+}
+
+// Branch changeset is created by aggregating the outcomes of multiple workers,
+// who share the pages they have worked on with the extension range protocol.
+// This function filters some work to avoid the incorrect elimination of pages.
+fn filter_branch_changeset(branch_changeset: &mut Vec<(Key, Option<Arc<BranchNode>>)>) {
+    branch_changeset.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+    let mut to_remove = vec![];
+    // If there are two changes with the same separator produced
+    // by two workers, one is expected to be deleted and the other
+    // inserted.
+    //
+    // The deleted page was already inserted in the freed_pages, thus,
+    // now only the inserted page must be kept, resulting in a standard
+    // modification of the same page, but made by two workers.
+    for i in 0..branch_changeset.len() - 1 {
+        if branch_changeset[i].0 == branch_changeset[i + 1].0 {
+            // PANICS: If two changesets refer to the same page, they
+            // are expected to be treated as a single one, with one
+            // change deleting it and the other inserting it.
+            if branch_changeset[i].1.is_some() {
+                assert!(branch_changeset[i + 1].1.is_none());
+                to_remove.push(i + 1);
+            }
+
+            if branch_changeset[i].1.is_none() {
+                assert!(branch_changeset[i + 1].1.is_some());
+                to_remove.push(i);
+            }
+        }
+    }
+
+    for idx in to_remove.into_iter().rev() {
+        branch_changeset.remove(idx);
+    }
+}
+
+fn apply_changes_to_index(
+    bbn_index: &mut Index,
+    branch_changeset: Vec<(Key, Option<Arc<BranchNode>>)>,
+) {
+    for (key, maybe_inserted) in branch_changeset {
+        match maybe_inserted {
+            Some(node) => {
+                bbn_index.insert(key, node);
+            }
+            None => {
+                bbn_index.remove(&key);
+            }
+        }
+    }
 }
 
 fn prepare_workers(

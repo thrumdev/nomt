@@ -176,7 +176,7 @@ pub fn run(
         apply_worker_changes(&leaf_reader, &mut output, worker_output);
     }
 
-    output.leaf_changeset.sort_by_key(|(k, _)| *k);
+    filter_leaves_changeset(&mut output.leaf_changeset);
     enforce_first_leaf_separator(&mut output.leaf_changeset, bbn_index);
     Ok(output)
 }
@@ -191,6 +191,13 @@ fn apply_worker_changes(
     }
 
     for (key, leaf_entry) in &worker_output.leaves_tracker.inner {
+        // Discard entries that have both insert and delete equal to None.
+        // This could happen when a worker receives a created page from the right
+        // worker, but it has been merged into a previous one.
+        if leaf_entry.inserted.is_none() && leaf_entry.deleted.is_none() {
+            continue;
+        }
+
         let new_pn = leaf_entry.inserted.as_ref().map(|(_, pn)| *pn);
         if new_pn.is_some() {
             output.submitted_io += 1;
@@ -209,6 +216,41 @@ fn apply_worker_changes(
         .extend(worker_output.leaves_tracker.extra_freed.drain(..));
 
     output.post_io_work.worker_changes.push(worker_output);
+}
+
+// Leaves changeset is created by aggregating the outcomes of multiple workers,
+// who share the pages they have worked on with the extension range protocol.
+// This function filters some work to avoid the incorrect elimination of pages.
+fn filter_leaves_changeset(leaf_changeset: &mut Vec<(Key, Option<PageNumber>)>) {
+    leaf_changeset.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+    let mut to_remove = vec![];
+    // If there are two changes with the same separator produced
+    // by two workers, one is expected to be deleted and the other
+    // inserted.
+    //
+    // The deleted page was already inserted in the freed_pages, thus,
+    // now only the inserted page must be kept, resulting in a standard
+    // modification of the same page, but made by two workers.
+    for i in 0..leaf_changeset.len() - 1 {
+        if leaf_changeset[i].0 == leaf_changeset[i + 1].0 {
+            // PANICS: If two changesets refer to the same page, they
+            // are expected to be treated as a single one, with one
+            // change deleting it and the other inserting it.
+            if leaf_changeset[i].1.is_some() {
+                assert!(leaf_changeset[i + 1].1.is_none());
+                to_remove.push(i + 1);
+            }
+
+            if leaf_changeset[i].1.is_none() {
+                assert!(leaf_changeset[i + 1].1.is_some());
+                to_remove.push(i);
+            }
+        }
+    }
+
+    for idx in to_remove.into_iter().rev() {
+        leaf_changeset.remove(idx);
+    }
 }
 
 // The first leaf always have a separator of all 0.
