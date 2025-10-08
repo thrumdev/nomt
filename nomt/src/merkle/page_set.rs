@@ -16,9 +16,13 @@ pub enum PageOrigin {
     /// It could have been fetched from the hash table, thereby having an associated `BucketInfo`.
     Persisted(BucketInfo),
     /// It could have been reconstructed on the fly without being stored anywhere.
-    /// It keeps track of the total number of leaves in child pages and which nodes
-    /// in the page have been reconstructed.
-    Reconstructed(u64, PageDiff),
+    /// It keeps track of the total number of leaves contained within the page,
+    /// in child pages, and which nodes in the page have been reconstructed.
+    Reconstructed {
+        page_leaves_counter: u64,
+        children_leaves_counter: u64,
+        diff: PageDiff,
+    },
 }
 
 impl PageOrigin {
@@ -26,14 +30,28 @@ impl PageOrigin {
     pub fn bucket_info(self) -> Option<BucketInfo> {
         match self {
             PageOrigin::Persisted(bucket_info) => Some(bucket_info),
-            PageOrigin::Reconstructed(_, _) => None,
+            PageOrigin::Reconstructed { .. } => None,
         }
     }
 
-    /// Extract the number of leaves from [`PageOrigin::Reconstructed`] variant.
-    pub fn leaves_counter(&self) -> Option<u64> {
+    /// Extract the number of leaves in the children from [`PageOrigin::Reconstructed`] variant.
+    pub fn children_leaves_counter(&self) -> Option<u64> {
         match self {
-            PageOrigin::Reconstructed(counter, _) => Some(*counter),
+            PageOrigin::Reconstructed {
+                children_leaves_counter,
+                ..
+            } => Some(*children_leaves_counter),
+            PageOrigin::Persisted(_) => None,
+        }
+    }
+
+    /// Extract the number of leaves in the page from [`PageOrigin::Reconstructed`] variant.
+    pub fn page_leaves_counter(&self) -> Option<u64> {
+        match self {
+            PageOrigin::Reconstructed {
+                page_leaves_counter,
+                ..
+            } => Some(*page_leaves_counter),
             PageOrigin::Persisted(_) => None,
         }
     }
@@ -41,7 +59,7 @@ impl PageOrigin {
     /// Extract the [`PageDiff`] from [`PageOrigin::Reconstructed`] variant.
     pub fn page_diff(&self) -> Option<&PageDiff> {
         match self {
-            PageOrigin::Reconstructed(_, page_diff) => Some(page_diff),
+            PageOrigin::Reconstructed { diff, .. } => Some(diff),
             PageOrigin::Persisted(_) => None,
         }
     }
@@ -89,7 +107,7 @@ impl super::page_walker::PageSet for PageSet {
     fn get(&self, page_id: &PageId) -> Option<(Page, PageOrigin)> {
         self.map
             .get(&page_id)
-            .map(|(p, bucket_info)| (p.clone(), bucket_info.clone()))
+            .map(|(p, page_origin)| (p.clone(), page_origin.clone()))
             .or_else(|| self.get_warmed_up(page_id))
     }
 

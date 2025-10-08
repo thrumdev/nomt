@@ -341,11 +341,15 @@ impl SeekRequest {
         );
 
         if let Some(pages) = maybe_pages {
-            for (page_id, page, diff, leaves_counter) in pages {
+            for (page_id, page, diff, page_leaves_counter, children_leaves_counter) in pages {
                 page_set.insert(
                     page_id,
                     page,
-                    PageOrigin::Reconstructed(leaves_counter, diff),
+                    PageOrigin::Reconstructed {
+                        page_leaves_counter,
+                        children_leaves_counter,
+                        diff,
+                    },
                 );
             }
         }
