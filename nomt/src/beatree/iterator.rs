@@ -176,7 +176,7 @@ impl CurrentLeaf {
         end.map_or(true, |end| &self.leaf.key(self.index - 1) < end)
     }
 
-    fn last_output(&self) -> IterOutput {
+    fn last_output(&self) -> IterOutput<'_> {
         let index = self.index - 1;
         let key = self.leaf.key(index);
         let (cell, overflow) = self.leaf.value(index);
