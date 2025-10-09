@@ -59,7 +59,7 @@ impl BranchNode {
         self.page.page()
     }
 
-    pub fn view(&self) -> BranchNodeView {
+    pub fn view(&self) -> BranchNodeView<'_> {
         BranchNodeView {
             inner: self.as_slice(),
         }
@@ -109,7 +109,7 @@ impl BranchNode {
         self.view().prefix()
     }
 
-    pub fn raw_prefix(&self) -> RawPrefix {
+    pub fn raw_prefix(&self) -> RawPrefix<'_> {
         self.view().raw_prefix()
     }
 
@@ -136,11 +136,11 @@ impl BranchNode {
         }
     }
 
-    pub fn raw_separator(&self, i: usize) -> RawSeparator {
+    pub fn raw_separator(&self, i: usize) -> RawSeparator<'_> {
         self.view().raw_separator(i)
     }
 
-    pub fn raw_separators_mut(&mut self, from: usize, to: usize) -> RawSeparatorsMut {
+    pub fn raw_separators_mut(&mut self, from: usize, to: usize) -> RawSeparatorsMut<'_> {
         let RawSeparatorsData {
             start,
             byte_len,

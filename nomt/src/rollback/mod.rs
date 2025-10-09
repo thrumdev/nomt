@@ -308,7 +308,7 @@ impl Rollback {
     }
 
     #[cfg(test)]
-    pub fn seglog(&self) -> parking_lot::MutexGuard<SegmentedLog> {
+    pub fn seglog(&self) -> parking_lot::MutexGuard<'_, SegmentedLog> {
         self.shared.seglog.lock()
     }
 }

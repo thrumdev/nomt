@@ -139,7 +139,7 @@ impl FreeList {
 
     /// Get a reference to this free list asserted to be clean. This panics if the free list isn't
     /// clean: if any `pop`s have occurred since the last call to `commit`.
-    pub fn as_clean(&self) -> CleanFreeList {
+    pub fn as_clean(&self) -> CleanFreeList<'_> {
         assert!(!self.pop);
         CleanFreeList(self)
     }

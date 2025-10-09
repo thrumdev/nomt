@@ -106,7 +106,7 @@ impl SegmentFileReader {
     /// Reads the header of the record.
     ///
     /// Returns `None` if the end of the file is reached.
-    pub fn read_header(&mut self) -> std::io::Result<Option<RecordHeader>> {
+    pub fn read_header(&mut self) -> std::io::Result<Option<RecordHeader<'_>>> {
         if self.next_pos.unwrap_or(0) >= self.file_size {
             return Ok(None);
         }
