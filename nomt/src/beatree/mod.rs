@@ -113,7 +113,7 @@ impl Tree {
             &bbn_freelist_tracked,
             bbn_bump,
         )
-        .with_context(|| format!("failed to reconstruct btree from bbn store file"))?;
+        .context("failed to reconstruct btree from bbn store file")?;
         let shared = Shared {
             io_handle: io_pool.make_handle(),
             page_pool: io_pool.page_pool().clone(),
@@ -386,7 +386,7 @@ pub fn create(db_dir: impl AsRef<Path>) -> anyhow::Result<()> {
     ln_fd.set_len(BRANCH_NODE_SIZE as u64)?;
     bbn_fd.set_len(BRANCH_NODE_SIZE as u64)?;
 
-    // Sync files and the directory. I am not sure if syncing files is necessar, but it
+    // Sync files and the directory. I am not sure if syncing files is necessary, but it
     // is necessary to make sure that the directory is synced.
     ln_fd.sync_all()?;
     bbn_fd.sync_all()?;
@@ -694,17 +694,17 @@ impl AsyncLookup {
         meta: Option<OverflowPageInfo>,
     ) -> Option<Option<Vec<u8>>> {
         match self.state {
-            AsyncLookupState::Done => return None,
+            AsyncLookupState::Done => None,
             AsyncLookupState::Initial(ref inner) => {
                 let leaf = inner.finish_inner(page);
                 match ops::finish_lookup_async(self.key, &leaf, &inner.read_tx.leaf_store) {
                     Ok(val) => {
                         self.state = AsyncLookupState::Done;
-                        return Some(val);
+                        Some(val)
                     }
                     Err(overflow) => {
                         self.state = AsyncLookupState::Overflow(overflow, None);
-                        return None;
+                        None
                     }
                 }
             }
