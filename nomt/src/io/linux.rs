@@ -21,6 +21,10 @@ pub fn check_iou_permissions() -> super::IoUringPermission {
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             super::IoUringPermission::Denied
         }
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            // Note that support for IORING_SETUP_SINGLE_ISSUER was added in linux 6.0.  A 5.x kernel will throw EINVAL on .build()
+            super::IoUringPermission::MissingFlagSupport
+        }
         _ => super::IoUringPermission::Allowed,
     }
 }
