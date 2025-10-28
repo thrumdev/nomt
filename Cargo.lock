@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "nomt"
-version = "1.0.0-preview"
+version = "1.0.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "nomt-core"
-version = "1.0.0-preview"
+version = "1.0.1"
 dependencies = [
  "arrayvec",
  "bitvec",
