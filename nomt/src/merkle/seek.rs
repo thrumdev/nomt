@@ -255,7 +255,6 @@ impl SeekRequest {
         // All values in the range have been collected from the leaves,
         // now they need to be intersected with what resides in the overlay.
         let mut final_leaf_data_collection = Vec::with_capacity(collected_leaf_data.len());
-        let mut deleted_indices = Vec::new();
         let overlay_leaves = overlay.value_iter(range.0, range.1);
 
         if collected_leaf_data.is_empty() {
@@ -276,27 +275,32 @@ impl SeekRequest {
             });
             final_leaf_data_collection.extend(leaves_data);
         } else {
-            // Both `collected_leaf_data` and `overlay_leaves` are ordered.
-            let mut idx = 0;
+            // Both `collected_leaf_data` and `overlay_leaves` are ordered,
+            // they need to be merged while updating the previous values,
+            // taking into consideration overlay changes.
+
+            let mut beatree_leaf_idx = 0;
 
             for (overlay_key, overlay_valuechange) in overlay.value_iter(range.0, range.1) {
-                let start_idx = idx;
-                while idx < collected_leaf_data.len() && collected_leaf_data[idx].0 < overlay_key {
-                    idx += 1;
+                let start_idx = beatree_leaf_idx;
+                while beatree_leaf_idx < collected_leaf_data.len()
+                    && collected_leaf_data[beatree_leaf_idx].0 < overlay_key
+                {
+                    beatree_leaf_idx += 1;
                 }
 
-                final_leaf_data_collection.extend_from_slice(&collected_leaf_data[start_idx..idx]);
-
-                let key_path = collected_leaf_data.get(idx).map(|(key_path, _)| *key_path);
+                final_leaf_data_collection
+                    .extend_from_slice(&collected_leaf_data[start_idx..beatree_leaf_idx]);
+                let key_path = collected_leaf_data
+                    .get(beatree_leaf_idx)
+                    .map(|(key_path, _)| key_path);
 
                 let value_hash = match overlay_valuechange {
                     ValueChange::Insert(value) => H::hash_value(value),
                     ValueChange::InsertOverflow(_, value_hash) => *value_hash,
-                    // Deleted key, flag as deleted if it matches the key path.
-                    ValueChange::Delete
-                        if key_path.map_or(false, |key_path| key_path == overlay_key) =>
-                    {
-                        deleted_indices.push(idx);
+                    // Deleted key, skip it.
+                    ValueChange::Delete if key_path == Some(&overlay_key) => {
+                        beatree_leaf_idx += 1;
                         continue;
                     }
                     // Overlays can contain "naked deletions", i.e. deleted items that
@@ -304,32 +308,16 @@ impl SeekRequest {
                     ValueChange::Delete => continue,
                 };
 
-                if key_path.map_or(false, |key_path| key_path == overlay_key) {
+                if key_path == Some(&overlay_key) {
                     // The leaf data has been updated in the overlay.
-                    idx += 1;
+                    beatree_leaf_idx += 1;
                 }
 
                 final_leaf_data_collection.push((overlay_key, value_hash));
             }
 
-            final_leaf_data_collection.extend_from_slice(&collected_leaf_data[idx..]);
+            final_leaf_data_collection.extend_from_slice(&collected_leaf_data[beatree_leaf_idx..]);
         }
-
-        // Iterate over the final collection, filtering out the deleted indices.
-        let ops = {
-            let mut deleted_indices = deleted_indices.into_iter().peekable();
-            let ops = final_leaf_data_collection.into_iter().enumerate();
-            ops.filter(move |(idx, (_, _))| {
-                let next_deleted = deleted_indices.peek();
-                if Some(idx) == next_deleted {
-                    deleted_indices.next();
-                    false // skip this index
-                } else {
-                    true // keep this index
-                }
-            })
-            .map(|(_, x)| x)
-        };
 
         // UNWRAP: The `page_id` from where the leaves request started must be `Some`.
         let maybe_pages = super::page_walker::reconstruct_pages::<H>(
@@ -337,7 +325,7 @@ impl SeekRequest {
             self.page_id.clone().unwrap(),
             self.position.clone(),
             page_set,
-            ops,
+            final_leaf_data_collection,
         );
 
         if let Some(pages) = maybe_pages {
