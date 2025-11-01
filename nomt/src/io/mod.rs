@@ -34,12 +34,10 @@ pub enum IoUringPermission {
     Allowed,
     /// The device does not have permission to use io_uring.
     Denied,
-    /// The device has permission to use io_uring, but does not support the flags required
-    /// for io_uring_setup.  NOMT uses the IORING_SETUP_SINGLE_ISSUER flag for io_uring which
-    /// was introduced in linux 6.0.
-    MissingFlagSupport,
-    /// This version of NOMT was compiled targeting a non-Linux platform, so io_uring is not
-    /// supported.
+    /// This version of NOMT was compiled targeting a non-Linux platform, or a version of Linux
+    /// where the syscalls or flags are not available, so io_uring is not supported.
+    ///
+    /// Note that a 6.x or newer Linux kernel is required to support the flags NOMT uses.
     NotSupported,
 }
 
