@@ -22,8 +22,14 @@ pub fn check_iou_permissions() -> super::IoUringPermission {
             super::IoUringPermission::Denied
         }
         Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            println!("
+                The device has permission to use io_uring, but does not support the flags required
+                for io_uring_setup.  NOMT uses the IORING_SETUP_SINGLE_ISSUER flag for io_uring which
+                was introduced in linux 6.0. Please update your kernel to at least version 6.0
+                to use NOMT with io_uring.
+            ");
             // Note that support for IORING_SETUP_SINGLE_ISSUER was added in linux 6.0.  A 5.x kernel will throw EINVAL on .build()
-            super::IoUringPermission::MissingFlagSupport
+            super::IoUringPermission::NotSupported
         }
         _ => super::IoUringPermission::Allowed,
     }
