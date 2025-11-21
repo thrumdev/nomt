@@ -56,6 +56,9 @@ mod io;
 
 const MAX_COMMIT_CONCURRENCY: usize = 64;
 
+use std::sync::atomic::AtomicUsize;
+static COMMIT_NUMBER: AtomicUsize = AtomicUsize::new(0);
+
 /// A full value stored within the trie.
 pub type Value = Vec<u8>;
 
@@ -67,7 +70,7 @@ struct Shared {
 }
 
 /// Whether a key was read, written, or both, along with old and new values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KeyReadWrite {
     /// The key was read. Contains the read value.
     Read(Option<Value>),
@@ -580,6 +583,22 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
+
+        {
+            let n_commit = COMMIT_NUMBER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let serialization = serde_json::to_string(&actuals).unwrap();
+            if !std::fs::exists("actuals").unwrap() {
+                std::fs::create_dir_all("actuals").unwrap();
+            }
+            let path_name = format!("actuals/actual{}", n_commit);
+            if std::fs::exists("path_name").unwrap() {
+                panic!("Move or clear already existing actual serialization");
+            }
+            let mut output = std::fs::File::create(path_name).unwrap();
+            use std::io::Write;
+            write!(output, "{}", serialization).unwrap();
+        }
+
         let rollback_delta = self
             .rollback_delta
             .take()

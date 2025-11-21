@@ -68,6 +68,7 @@ log = "0.4.22"
 rand_distr = "0.4.3"
 env_logger = "0.11.6"
 digest = { version = "0.10.7" }
+serde_json = { version = "1.0.132" }
 
 [profile.release]
 debug = 1
