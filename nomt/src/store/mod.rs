@@ -46,6 +46,7 @@ struct Shared {
     meta_fd: File,
     flock: Option<flock::Flock>,
     poisoned: AtomicBool,
+    merkle_page_elision: bool,
 
     // Retained for the lifetime of the store.
     _db_dir_fd: Arc<File>,
@@ -179,6 +180,7 @@ impl Store {
                 )
             })
             .transpose()?;
+
         Ok(Self {
             sync: Arc::new(Mutex::new(sync::Sync::new(
                 meta.sync_seqn,
@@ -195,6 +197,7 @@ impl Store {
                 meta_fd,
                 flock: Some(flock),
                 poisoned: false.into(),
+                merkle_page_elision: o.merkle_page_elision,
             }),
         })
     }
@@ -266,6 +269,12 @@ impl Store {
     /// Create a new raw value transaction to be applied against this database.
     pub fn new_value_tx(&self) -> ValueTransaction {
         ValueTransaction { batch: Vec::new() }
+    }
+
+    /// Whether the merkle tree should be updated without
+    /// page elision.
+    pub fn should_inhibit_merkle_elision(&self) -> bool {
+        !self.shared.merkle_page_elision
     }
 
     /// Atomically apply the given transaction.

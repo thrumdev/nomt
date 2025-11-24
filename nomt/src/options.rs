@@ -30,6 +30,8 @@ pub struct Options {
     /// This incurs some I/O on startup but leads to predictable worst-case performance.
     pub(crate) prepopulate_page_cache: bool,
     pub(crate) page_cache_upper_levels: usize,
+    /// Whether to enable page elision in the merkle worker
+    pub(crate) merkle_page_elision: bool,
 }
 
 impl Options {
@@ -55,6 +57,7 @@ impl Options {
             leaf_cache_size: 256,
             prepopulate_page_cache: false,
             page_cache_upper_levels: 2,
+            merkle_page_elision: true,
         }
     }
 
@@ -181,6 +184,14 @@ impl Options {
     /// Default: 2
     pub fn page_cache_upper_levels(&mut self, upper_levels: usize) {
         self.page_cache_upper_levels = upper_levels;
+    }
+
+    /// Determines whether merkle page elision should be used.
+    ///
+    /// Do not change this value for the same DB, e.g. by disabling it
+    /// or enabling it when it previously used the other value.
+    pub fn use_merkle_page_elision(&mut self, enable: bool) {
+        self.merkle_page_elision = enable
     }
 }
 

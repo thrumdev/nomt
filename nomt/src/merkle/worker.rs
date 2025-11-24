@@ -78,6 +78,7 @@ pub(super) fn run_warm_up<H: HashAlgorithm>(
         io_handle,
         page_loader,
         true,
+        params.store.should_inhibit_merkle_elision(),
     );
 
     warm_up_phase(page_io_receiver, seeker, page_set, warmup_rx, finish_rx)
@@ -103,6 +104,7 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> std::io::Res
         store.io_pool().make_handle(),
         store.page_loader(),
         command.shared.witness,
+        store.should_inhibit_merkle_elision(),
     );
 
     update::<H>(
@@ -113,6 +115,7 @@ pub(super) fn run_update<H: HashAlgorithm>(params: UpdateParams) -> std::io::Res
         command,
         warm_ups,
         warm_page_set,
+        store.should_inhibit_merkle_elision(),
     )
 }
 
@@ -205,6 +208,7 @@ fn update<H: HashAlgorithm>(
     command: UpdateCommand,
     warm_ups: Arc<HashMap<KeyPath, Seek>>,
     warm_page_set: Option<FrozenSharedPageSet>,
+    inhibit_elision: bool,
 ) -> std::io::Result<WorkerOutput> {
     let UpdateCommand { shared, write_pass } = command;
     let write_pass = write_pass.into_inner();
@@ -213,7 +217,7 @@ fn update<H: HashAlgorithm>(
 
     let mut page_set = PageSet::new(page_pool, warm_page_set);
 
-    let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache);
+    let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache, inhibit_elision);
 
     // one lucky thread gets the master write pass.
     match updater.update(&mut seeker, &mut output, &mut page_set, warm_ups)? {
@@ -222,7 +226,11 @@ fn update<H: HashAlgorithm>(
     };
 
     let pending_ops = shared.take_root_pending();
-    let mut root_page_updater = PageWalker::<H>::new(root, None);
+    let mut root_page_updater = if inhibit_elision {
+        PageWalker::<H>::new_no_elision(root, None)
+    } else {
+        PageWalker::<H>::new(root, None)
+    };
 
     // Ensure the root page updater holds the root page. It is possible that this worker did not
     // seek any keys, and therefore the root page would not have been populated yet.
@@ -284,6 +292,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         shared: Arc<UpdateShared>,
         write_pass: WritePass<ShardIndex>,
         page_cache: &PageCache,
+        inhibit_elision: bool,
     ) -> Self {
         let region = match write_pass.region() {
             ShardIndex::Root => PageRegion::universe(),
@@ -302,11 +311,17 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             .binary_search_by_key(&key_range_end, |x| x.0)
             .unwrap_or_else(|i| i);
 
+        let page_walker = if inhibit_elision {
+            PageWalker::<H>::new_no_elision(root, Some(ROOT_PAGE_ID))
+        } else {
+            PageWalker::<H>::new(root, Some(ROOT_PAGE_ID))
+        };
+
         RangeUpdater {
             shared,
             write_pass,
             region,
-            page_walker: PageWalker::<H>::new(root, Some(ROOT_PAGE_ID)),
+            page_walker,
             range_start,
             range_end,
         }

@@ -195,28 +195,38 @@ pub struct PageWalker<H> {
     // Whether the page walker is used to reconstruct elided pages.
     // If so, the elision does not occur, if a page is not found in the page set, it is freshly created.
     reconstruction: bool,
+    // True if page elision as a feature is disabled.
+    inhibit_elision: bool,
 
     _marker: std::marker::PhantomData<H>,
 
-    #[cfg(test)]
-    inhibit_elision: bool,
 }
 
 impl<H: NodeHasher> PageWalker<H> {
     /// Create a new [`PageWalker`], with an optional parent page for constraining operations
     /// to a subsection of the page tree.
     pub fn new(root: Node, parent_page: Option<PageId>) -> Self {
-        Self::new_inner(root, parent_page, false /* reconstruction */)
+        Self::new_inner(root, parent_page, true, false /* reconstruction */)
+    }
+
+    /// Create a new [`PageWalker`] which will not use page elision.
+    pub fn new_no_elision(root: Node, parent_page: Option<PageId>) -> Self {
+        Self::new_inner(root, parent_page, false, false)
     }
 
     /// Create a new [`PageWalker`] made to reconstruct all elided pages below the specified `parent_page`.
     ///
     /// A [`PageWalker`] created to reconstruct pages can only call [`PageWalker::reconstruct`].
     fn new_reconstructor(root: Node, parent_page: PageId) -> Self {
-        Self::new_inner(root, Some(parent_page), true /* reconstruction */)
+        Self::new_inner(root, Some(parent_page), true, true /* reconstruction */)
     }
 
-    fn new_inner(root: Node, parent_page: Option<PageId>, reconstruction: bool) -> Self {
+    fn new_inner(
+        root: Node,
+        parent_page: Option<PageId>,
+        reconstruct_pages: bool,
+        for_reconstruction: bool,
+    ) -> Self {
         PageWalker {
             last_position: None,
             position: TriePosition::new(),
@@ -228,9 +238,8 @@ impl<H: NodeHasher> PageWalker<H> {
             sibling_stack: Vec::new(),
             prev_node: None,
             _marker: std::marker::PhantomData,
-            reconstruction,
-            #[cfg(test)]
-            inhibit_elision: false,
+            reconstruction: for_reconstruction,
+            inhibit_elision: !reconstruct_pages,
         }
     }
 
@@ -849,7 +858,7 @@ impl<H: NodeHasher> PageWalker<H> {
         // elision and the carrying of elided children do not occur.
         // The stack could be empty if the page is the root page or one of its children,
         // and if the page is the last to be reconstructed.
-        if self.stack.is_empty() || stack_page.page_id.parent_page_id() == ROOT_PAGE_ID {
+        if self.stack.is_empty() || stack_page.page_id.parent_page_id() == ROOT_PAGE_ID || self.inhibit_elision {
             if self.reconstruction {
                 push_reconstructed(&mut self.output_pages, stack_page);
             } else {

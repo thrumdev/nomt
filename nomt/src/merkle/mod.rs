@@ -337,6 +337,7 @@ impl Updater {
             io_handle,
             self.store.page_loader(),
             true, // collect witness
+            self.store.should_inhibit_merkle_elision(),
         );
 
         seeker.push(key_path);

@@ -117,6 +117,7 @@ impl SeekRequest {
         page_id: PageId,
         page: &Page,
         record_siblings: bool,
+        inhibit_elision: bool,
         page_set: &mut PageSet,
     ) {
         let RequestState::Seeking = self.state else {
@@ -169,7 +170,7 @@ impl SeekRequest {
             .is_elided(self.position.child_page_index())
         {
             // Avoid reconstructing already reconstructed pages.
-            if page_set.contains(&child_page_id) {
+            if page_set.contains(&child_page_id) || inhibit_elision {
                 return;
             }
 
@@ -186,7 +187,7 @@ impl SeekRequest {
                 &self.position,
                 page.clone(),
             );
-            self.continue_leaves_fetch::<H>(page_set, overlay, None);
+            self.continue_leaves_fetch::<H>(page_set, overlay, None, true);
         }
     }
 
@@ -223,6 +224,7 @@ impl SeekRequest {
         page_set: &mut PageSet,
         overlay: &LiveOverlay,
         leaf: Option<LeafNodeRef>,
+        inhibit_elision: bool,
     ) {
         let RequestState::FetchingLeaves {
             ref page,
@@ -320,13 +322,17 @@ impl SeekRequest {
         }
 
         // UNWRAP: The `page_id` from where the leaves request started must be `Some`.
-        let maybe_pages = super::page_walker::reconstruct_pages::<H>(
-            page,
-            self.page_id.clone().unwrap(),
-            self.position.clone(),
-            page_set,
-            final_leaf_data_collection,
-        );
+        let maybe_pages = if inhibit_elision {
+            None
+        } else {
+            super::page_walker::reconstruct_pages::<H>(
+                page,
+                self.page_id.clone().unwrap(),
+                self.position.clone(),
+                page_set,
+                final_leaf_data_collection,
+            )
+        };
 
         if let Some(pages) = maybe_pages {
             for (page_id, page, diff, page_leaves_counter, children_leaves_counter) in pages {
@@ -483,6 +489,7 @@ pub struct Seeker<H: HashAlgorithm> {
     /// FIFO, pushed onto back.
     idle_page_loads: VecDeque<usize>,
     record_siblings: bool,
+    inhibit_elision: bool,
     _marker: std::marker::PhantomData<H>,
 }
 
@@ -496,6 +503,7 @@ impl<H: HashAlgorithm> Seeker<H> {
         io_handle: IoHandle,
         page_loader: PageLoader,
         record_siblings: bool,
+        inhibit_elision: bool,
     ) -> Self {
         Seeker {
             root,
@@ -511,6 +519,7 @@ impl<H: HashAlgorithm> Seeker<H> {
             idle_requests: VecDeque::new(),
             idle_page_loads: VecDeque::new(),
             record_siblings,
+            inhibit_elision,
             _marker: std::marker::PhantomData,
         }
     }
@@ -674,6 +683,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                             page_id.clone(),
                             &page,
                             self.record_siblings,
+                            self.inhibit_elision,
                             page_set,
                         );
                         continue;
@@ -723,6 +733,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                                         page_set,
                                         &self.overlay,
                                         Some(leaf),
+                                        self.inhibit_elision,
                                     ),
                                 // PANIC: The state cannot be `RequestState::Seeking`, we would have entered
                                 // the other match arm otherwise. `request.next_query()` has already checked for it.
@@ -815,6 +826,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                 page_load.page_id().clone(),
                 &page,
                 self.record_siblings,
+                self.inhibit_elision,
                 page_set,
             );
 
@@ -854,7 +866,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                     request.continue_leaf_fetch::<H>(Some(leaf.clone()));
                 }
                 RequestState::FetchingLeaves { .. } => {
-                    request.continue_leaves_fetch::<H>(page_set, &self.overlay, Some(leaf.clone()));
+                    request.continue_leaves_fetch::<H>(page_set, &self.overlay, Some(leaf.clone()), self.inhibit_elision);
                 }
                 // PANIC: This is strictly called only when `IoRequest::Leaf` is received, thus
                 // no `RequestState::Seeking` is expected.
