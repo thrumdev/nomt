@@ -17,7 +17,7 @@ jobs:
       # Avoid shrinking the inputs when an error is found in the leaf/branch stage tests.
       NO_STAGES_SHRINKING: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/install-fuse
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --verbose --workspace --locked
@@ -26,7 +26,7 @@ jobs:
     name: NOMT - check benchtop
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/install-fuse
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --verbose --manifest-path=benchtop/Cargo.toml --locked
@@ -34,7 +34,7 @@ jobs:
     name: NOMT - loom rw_pass_cell
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: RUSTFLAGS="--cfg loom" cargo test -p nomt --release --lib rw_pass_cell
   doc:
@@ -44,7 +44,7 @@ jobs:
       # Treat rustdoc warnings as errors.
       RUSTDOCFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/install-fuse
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo doc --verbose --workspace --document-private-items
@@ -52,7 +52,7 @@ jobs:
     name: NOMT - fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path=benchtop/Cargo.toml --check
@@ -63,7 +63,7 @@ jobs:
       # This is a workaround for the blake3 crate.
       CARGO_FEATURE_PURE: 1
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
