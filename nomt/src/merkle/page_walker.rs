@@ -199,7 +199,6 @@ pub struct PageWalker<H> {
     inhibit_elision: bool,
 
     _marker: std::marker::PhantomData<H>,
-
 }
 
 impl<H: NodeHasher> PageWalker<H> {
@@ -218,7 +217,12 @@ impl<H: NodeHasher> PageWalker<H> {
     ///
     /// A [`PageWalker`] created to reconstruct pages can only call [`PageWalker::reconstruct`].
     fn new_reconstructor(root: Node, parent_page: PageId) -> Self {
-        Self::new_inner(root, Some(parent_page), true, true /* reconstruction */)
+        Self::new_inner(
+            root,
+            Some(parent_page),
+            true,
+            true, /* reconstruction */
+        )
     }
 
     fn new_inner(
@@ -858,7 +862,10 @@ impl<H: NodeHasher> PageWalker<H> {
         // elision and the carrying of elided children do not occur.
         // The stack could be empty if the page is the root page or one of its children,
         // and if the page is the last to be reconstructed.
-        if self.stack.is_empty() || stack_page.page_id.parent_page_id() == ROOT_PAGE_ID || self.inhibit_elision {
+        if self.stack.is_empty()
+            || stack_page.page_id.parent_page_id() == ROOT_PAGE_ID
+            || self.inhibit_elision
+        {
             if self.reconstruction {
                 push_reconstructed(&mut self.output_pages, stack_page);
             } else {
@@ -873,11 +880,8 @@ impl<H: NodeHasher> PageWalker<H> {
         {
             let page_leaves_counter = count_leaves::<H>(&stack_page.page);
 
-            #[cfg(not(test))]
-            let elide = page_leaves_counter + children_leaves_counter < PAGE_ELISION_THRESHOLD;
-            #[cfg(test)]
-            let elide = page_leaves_counter + children_leaves_counter < PAGE_ELISION_THRESHOLD
-                && !self.inhibit_elision;
+            let elide = !self.inhibit_elision
+                && page_leaves_counter + children_leaves_counter < PAGE_ELISION_THRESHOLD;
 
             if elide {
                 // The total number of leaves in the subtree of this pages is lower than the threshold.

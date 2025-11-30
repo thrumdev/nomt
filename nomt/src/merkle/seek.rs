@@ -187,7 +187,7 @@ impl SeekRequest {
                 &self.position,
                 page.clone(),
             );
-            self.continue_leaves_fetch::<H>(page_set, overlay, None, true);
+            self.continue_leaves_fetch::<H>(page_set, overlay, None, inhibit_elision);
         }
     }
 
@@ -204,19 +204,24 @@ impl SeekRequest {
             beatree_iterator.provide_leaf(leaf);
         }
 
-        let (key, value_hash) = match beatree_iterator.next() {
-            None => panic!("leaf must exist position={}", self.position.path()),
+        match beatree_iterator.next() {
+            None => {
+                self.state = RequestState::Completed(None);
+            }
             Some(IterOutput::Blocked) => return,
             Some(IterOutput::Item(key, value)) => {
-                (key, H::hash_value(&value)) // hash
+                self.state = RequestState::Completed(Some(trie::LeafData {
+                    key_path: key,
+                    value_hash: H::hash_value(&value),
+                }));
             }
-            Some(IterOutput::OverflowItem(key, value_hash, _)) => (key, value_hash),
-        };
-
-        self.state = RequestState::Completed(Some(trie::LeafData {
-            key_path: key,
-            value_hash,
-        }));
+            Some(IterOutput::OverflowItem(key, value_hash, _)) => {
+                self.state = RequestState::Completed(Some(trie::LeafData {
+                    key_path: key,
+                    value_hash,
+                }));
+            }
+        }
     }
 
     fn continue_leaves_fetch<H: HashAlgorithm>(
@@ -380,23 +385,24 @@ impl RequestState {
         let (start, end) = range_bounds(pos.raw_path(), pos.depth() as usize);
 
         // First see if the item is present within the overlay.
-        let overlay_item = overlay
-            .value_iter(start, end)
-            .filter(|(_, v)| v.as_option().is_some())
-            .next();
-
-        if let Some((key_path, overlay_leaf)) = overlay_item {
-            let value_hash = match overlay_leaf {
-                // PANIC: we filtered out all deletions above.
-                ValueChange::Delete => panic!(),
-                ValueChange::Insert(value) => H::hash_value(value),
-                ValueChange::InsertOverflow(_, value_hash) => value_hash.clone(),
-            };
-
-            return RequestState::Completed(Some(trie::LeafData {
-                key_path,
-                value_hash,
-            }));
+        for (key_path, overlay_change) in overlay.value_iter(start, end) {
+            match overlay_change {
+                ValueChange::Delete => {
+                    return RequestState::Completed(None);
+                }
+                ValueChange::Insert(value) => {
+                    return RequestState::Completed(Some(trie::LeafData {
+                        key_path,
+                        value_hash: H::hash_value(value),
+                    }));
+                }
+                ValueChange::InsertOverflow(_, value_hash) => {
+                    return RequestState::Completed(Some(trie::LeafData {
+                        key_path,
+                        value_hash: value_hash.clone(),
+                    }));
+                }
+            }
         }
 
         // Fall back to iterator (most likely).
@@ -866,7 +872,12 @@ impl<H: HashAlgorithm> Seeker<H> {
                     request.continue_leaf_fetch::<H>(Some(leaf.clone()));
                 }
                 RequestState::FetchingLeaves { .. } => {
-                    request.continue_leaves_fetch::<H>(page_set, &self.overlay, Some(leaf.clone()), self.inhibit_elision);
+                    request.continue_leaves_fetch::<H>(
+                        page_set,
+                        &self.overlay,
+                        Some(leaf.clone()),
+                        self.inhibit_elision,
+                    );
                 }
                 // PANIC: This is strictly called only when `IoRequest::Leaf` is received, thus
                 // no `RequestState::Seeking` is expected.

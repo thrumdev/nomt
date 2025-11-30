@@ -217,7 +217,13 @@ fn update<H: HashAlgorithm>(
 
     let mut page_set = PageSet::new(page_pool, warm_page_set);
 
-    let updater = RangeUpdater::<H>::new(root, shared.clone(), write_pass, &page_cache, inhibit_elision);
+    let updater = RangeUpdater::<H>::new(
+        root,
+        shared.clone(),
+        write_pass,
+        &page_cache,
+        inhibit_elision,
+    );
 
     // one lucky thread gets the master write pass.
     match updater.update(&mut seeker, &mut output, &mut page_set, warm_ups)? {
