@@ -53,7 +53,10 @@ use nomt_core::{
 };
 
 use crate::{
-    merkle::{page_set::PageOrigin, BucketInfo, ElidedChildren, PAGE_ELISION_THRESHOLD},
+    merkle::{
+        page_set::PageOrigin, BucketInfo, ElidedChildren, PAGE_ELISION_ENABLED,
+        PAGE_ELISION_THRESHOLD,
+    },
     page_cache::{Page, PageMut},
     page_diff::PageDiff,
 };
@@ -865,9 +868,11 @@ impl<H: NodeHasher> PageWalker<H> {
             let page_leaves_counter = count_leaves::<H>(&stack_page.page);
 
             #[cfg(not(test))]
-            let elide = page_leaves_counter + children_leaves_counter < PAGE_ELISION_THRESHOLD;
+            let elide = PAGE_ELISION_ENABLED
+                && page_leaves_counter + children_leaves_counter < PAGE_ELISION_THRESHOLD;
             #[cfg(test)]
-            let elide = page_leaves_counter + children_leaves_counter < PAGE_ELISION_THRESHOLD
+            let elide = PAGE_ELISION_ENABLED
+                && page_leaves_counter + children_leaves_counter < PAGE_ELISION_THRESHOLD
                 && !self.inhibit_elision;
 
             if elide {
@@ -1033,7 +1038,7 @@ mod tests {
     use crate::{
         hasher::Blake3Hasher,
         io::PagePool,
-        merkle::{page_set::PageOrigin, ElidedChildren},
+        merkle::{page_set::PageOrigin, ElidedChildren, PAGE_ELISION_ENABLED},
         page_cache::{Page, PageMut},
         page_diff::PageDiff,
     };
@@ -1779,6 +1784,9 @@ mod tests {
 
     #[test]
     fn count_cumulative_leaves() {
+        if !PAGE_ELISION_ENABLED {
+            return;
+        }
         let root = trie::TERMINATOR;
         let mut page_set = MockPageSet::default();
 
@@ -1834,6 +1842,9 @@ mod tests {
 
     #[test]
     fn cumulative_delta_leaves() {
+        if !PAGE_ELISION_ENABLED {
+            return;
+        }
         let root = trie::TERMINATOR;
         let mut page_set = MockPageSet::default();
 
@@ -1941,6 +1952,9 @@ mod tests {
 
     #[test]
     fn cumulative_delta_children() {
+        if !PAGE_ELISION_ENABLED {
+            return;
+        }
         let root = trie::TERMINATOR;
         let mut page_set = MockPageSet::default();
 
@@ -2038,6 +2052,9 @@ mod tests {
 
     #[test]
     fn delete_chain_of_elided_pages() {
+        if !PAGE_ELISION_ENABLED {
+            return;
+        }
         let root = trie::TERMINATOR;
         let mut page_set = MockPageSet::default();
 
@@ -2126,6 +2143,9 @@ mod tests {
 
     #[test]
     fn reconstruct_pages() {
+        if !PAGE_ELISION_ENABLED {
+            return;
+        }
         let root = trie::TERMINATOR;
         let mut page_set = MockPageSet::default();
 

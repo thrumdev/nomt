@@ -46,6 +46,12 @@ use nomt_core::page_id::MAX_CHILD_INDEX;
 /// and will be constructed on the fly when needed.
 pub const PAGE_ELISION_THRESHOLD: u64 = 20;
 
+/// Feature flag controlling whether page elision/reconstruction is enabled.
+///
+/// Temporarily set to `false` to avoid depending on reconstruction while
+/// investigating data-mismatch issues.
+pub const PAGE_ELISION_ENABLED: bool = false;
+
 /// Bitfield used to note which child pages are elided and thus require on-the-fly reconstruction.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ElidedChildren {
