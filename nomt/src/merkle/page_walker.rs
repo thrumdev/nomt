@@ -1008,7 +1008,14 @@ pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
 
     let page_walker = PageWalker::<H>::new_reconstructor(subtree_root, page_id.clone());
 
-    let (root, reconstructed_pages) = page_walker.reconstruct(page_set, position, ops)?;
+    let (root, reconstructed_pages) = page_walker.reconstruct(page_set, position.clone(), ops)?;
+
+    if root != subtree_root {
+        println!(
+            "Reconstruction Error at page_id: {:?}, pos: {:?}",
+            page_id, position
+        );
+    }
 
     assert_eq!(root, subtree_root);
 

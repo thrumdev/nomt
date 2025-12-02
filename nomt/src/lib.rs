@@ -305,6 +305,7 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// in-memory [`Overlay`].
     pub fn begin_session(&self, params: SessionParams) -> Session<T> {
         let live_overlay = params.overlay;
+        live_overlay.ensure_base_root(self.root()).unwrap();
 
         // We must take the access guard before instantiating the rollback delta,
         // because it creates a read transaction and any commits or rollbacks will block
@@ -768,6 +769,8 @@ impl Overlay {
     /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
     /// rollback.
     pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> anyhow::Result<()> {
+        let _write_guard = nomt.access_lock.write();
+
         if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
             anyhow::bail!("Overlay parent not committed");
         }
@@ -784,8 +787,6 @@ impl Overlay {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
-
-        let _write_guard = nomt.access_lock.write();
 
         let marker = self.mark_committed();
 

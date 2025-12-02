@@ -237,6 +237,7 @@ pub enum InvalidAncestors {
 #[derive(Clone)]
 pub(super) struct LiveOverlay {
     parent: Option<Arc<OverlayInner>>,
+    base_root: Option<Root>,
     ancestor_data: Vec<Arc<Data>>,
     min_seqn: u64,
 }
@@ -246,10 +247,17 @@ impl LiveOverlay {
     pub(super) fn new<'a>(
         live_ancestors: impl IntoIterator<Item = &'a Overlay>,
     ) -> Result<Self, InvalidAncestors> {
+        let live_ancestors: Vec<_> = live_ancestors.into_iter().collect();
+        let base_root = live_ancestors
+            .iter()
+            .last()
+            .map(|overlay| overlay.prev_root());
+
         let mut live_ancestors = live_ancestors.into_iter();
         let Some(parent) = live_ancestors.next().map(|p| p.inner.clone()) else {
             return Ok(LiveOverlay {
                 parent: None,
+                base_root: None,
                 ancestor_data: Vec::new(),
                 min_seqn: 0,
             });
@@ -266,7 +274,7 @@ impl LiveOverlay {
                 return Err(InvalidAncestors::NotAncestor);
             }
 
-            ancestor_data.push(actual_ancestor);
+            ancestor_data.push(actual_ancestor.clone());
         }
 
         // verify that the chain is complete. The last ancestor's parent must either be `None` or
@@ -286,6 +294,7 @@ impl LiveOverlay {
         Ok(LiveOverlay {
             parent: Some(parent),
             ancestor_data,
+            base_root: base_root,
             min_seqn,
         })
     }
@@ -417,6 +426,18 @@ impl LiveOverlay {
     /// Get the overlay's root. If this is an empty overlay, returns `None`.
     pub(super) fn parent_root(&self) -> Option<Node> {
         self.parent.as_ref().map(|p| p.root)
+    }
+
+    /// TODO doc
+    pub fn ensure_base_root(&self, state_root: Root) -> Result<(), InvalidAncestors> {
+        if self
+            .base_root
+            .map_or(true, |base_root| base_root == state_root)
+        {
+            Ok(())
+        } else {
+            Err(InvalidAncestors::Incomplete)
+        }
     }
 }
 
