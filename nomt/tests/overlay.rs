@@ -160,3 +160,95 @@ fn overlay_uncommitted_not_on_disk() {
     assert_eq!(test.read([2; 32]), None);
     assert_eq!(test.read([3; 32]), None);
 }
+
+#[test]
+fn overlay_deletions() {
+    let test_db = || -> Test {
+        let mut test = Test::new("overlay_deletions");
+        // subtree at 0000000_0/1
+        test.write([0; 32], Some(vec![1, 1]));
+        test.write([1; 32], Some(vec![2, 2]));
+
+        // subtree at 001000_00/01/10
+        test.write([32; 32], Some(vec![1, 1]));
+        test.write([33; 32], Some(vec![2, 2]));
+        test.write([34; 32], Some(vec![3, 3]));
+
+        // subtree at 100000_00/01/10/11
+        test.write([128; 32], Some(vec![4, 4]));
+        test.write([129; 32], Some(vec![5, 5]));
+        test.write([130; 32], Some(vec![6, 6]));
+        test.write([131; 32], Some(vec![7, 7]));
+
+        test.commit();
+        test
+    };
+
+    // Delete the first item for each subtree
+    let mut test = test_db();
+
+    test.write([0; 32], None);
+    test.write([32; 32], None);
+    test.write([128; 32], None);
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    assert_eq!(test.read([0; 32]), None);
+    assert_eq!(test.read([1; 32]), Some(vec![2, 2]));
+
+    assert_eq!(test.read([32; 32]), None);
+    assert_eq!(test.read([33; 32]), Some(vec![2, 2]));
+    assert_eq!(test.read([34; 32]), Some(vec![3, 3]));
+
+    assert_eq!(test.read([128; 32]), None);
+    assert_eq!(test.read([129; 32]), Some(vec![5, 5]));
+    assert_eq!(test.read([130; 32]), Some(vec![6, 6]));
+    assert_eq!(test.read([131; 32]), Some(vec![7, 7]));
+
+    let _overlay_b = test.update().0;
+
+    // Delete the second item for each subtree
+    let mut test = test_db();
+
+    test.write([1; 32], None);
+    test.write([33; 32], None);
+    test.write([129; 32], None);
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    assert_eq!(test.read([0; 32]), Some(vec![1, 1]));
+    assert_eq!(test.read([1; 32]), None);
+
+    assert_eq!(test.read([32; 32]), Some(vec![1, 1]));
+    assert_eq!(test.read([33; 32]), None);
+    assert_eq!(test.read([34; 32]), Some(vec![3, 3]));
+
+    assert_eq!(test.read([128; 32]), Some(vec![4, 4]));
+    assert_eq!(test.read([129; 32]), None);
+    assert_eq!(test.read([130; 32]), Some(vec![6, 6]));
+    assert_eq!(test.read([131; 32]), Some(vec![7, 7]));
+
+    let _overlay_b = test.update().0;
+
+    // Sequence of deletes
+    let mut test = test_db();
+
+    test.write([32; 32], None);
+    test.write([33; 32], None);
+    test.write([128; 32], None);
+    test.write([129; 32], None);
+    test.write([131; 32], None);
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    assert_eq!(test.read([32; 32]), None);
+    assert_eq!(test.read([33; 32]), None);
+    assert_eq!(test.read([34; 32]), Some(vec![3, 3]));
+
+    assert_eq!(test.read([128; 32]), None);
+    assert_eq!(test.read([129; 32]), None);
+    assert_eq!(test.read([130; 32]), Some(vec![6, 6]));
+    assert_eq!(test.read([131; 32]), None);
+
+    let _overlay_b = test.update().0;
+}
