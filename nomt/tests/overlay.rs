@@ -252,3 +252,77 @@ fn overlay_deletions() {
 
     let _overlay_b = test.update().0;
 }
+
+#[test]
+fn overlay_detect_alredy_committed_chain() {
+    let mut test = Test::new("overlay_wrong_chains");
+
+    test.write([0; 32], Some(vec![1]));
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    test.write([0; 32], Some(vec![2]));
+    let overlay_b = test.update().0;
+
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    test.write([0; 32], Some(vec![3]));
+    let overlay_c = test.update().0;
+
+    let params = nomt::SessionParams::default()
+        .witness_mode(nomt::WitnessMode::read_write())
+        .overlay([&overlay_c, &overlay_b, &overlay_a])
+        .unwrap();
+
+    test.commit_overlay(overlay_a);
+    test.commit_overlay(overlay_b);
+    test.commit_overlay(overlay_c);
+
+    assert!(test.try_begin_session(params).is_err());
+}
+
+#[test]
+fn overlay_detect_parallel_non_committed_overlay_chain() {
+    let mut test = Test::new("overlay_detect_parallel_non_committed_overlay_chain");
+
+    test.write([0; 32], Some(vec![1]));
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    test.write([0; 32], Some(vec![2]));
+    let overlay_b = test.update().0;
+
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    test.write([0; 32], Some(vec![3]));
+    let overlay_c = test.update().0;
+
+    test.write([0; 32], Some(vec![4]));
+    let overlay_d = test.update().0;
+
+    test.start_overlay_session([&overlay_d]);
+    test.write([0; 32], Some(vec![5]));
+    let overlay_e = test.update().0;
+
+    test.start_overlay_session([&overlay_e, &overlay_d]);
+    test.write([0; 32], Some(vec![6]));
+    let overlay_f = test.update().0;
+
+    test.start_overlay_session([&overlay_f, &overlay_e, &overlay_d]);
+    test.write([0; 32], Some(vec![7]));
+    let overlay_g = test.update().0;
+
+    test.commit_overlay(overlay_d);
+    test.commit_overlay(overlay_e);
+    test.commit_overlay(overlay_f);
+
+    let params = nomt::SessionParams::default()
+        .witness_mode(nomt::WitnessMode::read_write())
+        .overlay([&overlay_c, &overlay_b, &overlay_a])
+        .unwrap();
+    assert!(test.try_begin_session(params).is_err());
+
+    let params = nomt::SessionParams::default()
+        .witness_mode(nomt::WitnessMode::read_write())
+        .overlay([&overlay_g])
+        .unwrap();
+    assert!(test.try_begin_session(params).is_ok());
+}

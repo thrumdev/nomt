@@ -22,12 +22,12 @@ fn setup_nomt(path: &str) -> Nomt<Blake3Hasher> {
 #[test]
 fn test_prev_root_commits() {
     let nomt = setup_nomt("prev_root_commits");
-    let session1 = nomt.begin_session(SessionParams::default());
+    let session1 = nomt.begin_session(SessionParams::default()).unwrap();
     let finished1 = session1
         .finish(vec![([1; 32], KeyReadWrite::Write(Some(vec![1, 2, 3])))])
         .unwrap();
 
-    let session2 = nomt.begin_session(SessionParams::default());
+    let session2 = nomt.begin_session(SessionParams::default()).unwrap();
     let finished2 = session2
         .finish(vec![([1; 32], KeyReadWrite::Write(Some(vec![1, 2, 3])))])
         .unwrap();
@@ -40,13 +40,13 @@ fn test_prev_root_commits() {
 #[test]
 fn test_prev_root_overlay_invalidated() {
     let nomt = setup_nomt("prev_root_overlay_invalidated");
-    let session1 = nomt.begin_session(SessionParams::default());
+    let session1 = nomt.begin_session(SessionParams::default()).unwrap();
     let finished1 = session1
         .finish(vec![([1; 32], KeyReadWrite::Write(Some(vec![1, 2, 3])))])
         .unwrap();
     let overlay1 = finished1.into_overlay();
 
-    let session2 = nomt.begin_session(SessionParams::default());
+    let session2 = nomt.begin_session(SessionParams::default()).unwrap();
     let finished2 = session2
         .finish(vec![([1; 32], KeyReadWrite::Write(Some(vec![1, 2, 3])))])
         .unwrap();
@@ -59,13 +59,13 @@ fn test_prev_root_overlay_invalidated() {
 #[test]
 fn test_prev_root_overlay_invalidates_session() {
     let nomt = setup_nomt("prev_root_overlays");
-    let session1 = nomt.begin_session(SessionParams::default());
+    let session1 = nomt.begin_session(SessionParams::default()).unwrap();
     let finished1 = session1
         .finish(vec![([1; 32], KeyReadWrite::Write(Some(vec![1, 2, 3])))])
         .unwrap();
     let overlay1 = finished1.into_overlay();
 
-    let session2 = nomt.begin_session(SessionParams::default());
+    let session2 = nomt.begin_session(SessionParams::default()).unwrap();
     let finished2 = session2
         .finish(vec![([1; 32], KeyReadWrite::Write(Some(vec![1, 2, 3])))])
         .unwrap();

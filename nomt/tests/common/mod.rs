@@ -76,8 +76,9 @@ impl Test {
         o.hashtable_buckets(hashtable_buckets);
         o.commit_concurrency(commit_concurrency);
         let nomt = Nomt::open(o).unwrap();
-        let session =
-            nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
+        let session = nomt
+            .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()))
+            .unwrap();
         Self {
             nomt,
             session: Some(session),
@@ -128,7 +129,8 @@ impl Test {
         finished.commit(&self.nomt).unwrap();
         self.session = Some(
             self.nomt
-                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
+                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()))
+                .unwrap(),
         );
         (root, witness)
     }
@@ -142,7 +144,8 @@ impl Test {
 
         self.session = Some(
             self.nomt
-                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
+                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()))
+                .unwrap(),
         );
 
         (finished.into_overlay(), witness)
@@ -155,8 +158,14 @@ impl Test {
         overlay.commit(&self.nomt).unwrap();
         self.session = Some(
             self.nomt
-                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write())),
+                .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()))
+                .unwrap(),
         );
+    }
+
+    pub fn try_begin_session(&mut self, params: SessionParams) -> anyhow::Result<()> {
+        self.session = Some(self.nomt.begin_session(params)?);
+        Ok(())
     }
 
     pub fn start_overlay_session<'a>(&mut self, ancestors: impl IntoIterator<Item = &'a Overlay>) {
@@ -167,7 +176,7 @@ impl Test {
             .witness_mode(WitnessMode::read_write())
             .overlay(ancestors)
             .unwrap();
-        self.session = Some(self.nomt.begin_session(params));
+        self.session = Some(self.nomt.begin_session(params).unwrap());
     }
 
     pub fn prove(&self, key: KeyPath) -> PathProof {

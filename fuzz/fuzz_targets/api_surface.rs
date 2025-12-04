@@ -16,9 +16,9 @@ fuzz_target!(|run: Run| {
     for call in run.calls.calls {
         match call {
             NomtCall::BeginSession { session_calls } => {
-                let session = db.begin_session(
-                    SessionParams::default().witness_mode(WitnessMode::read_write()),
-                );
+                let session = db
+                    .begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()))
+                    .unwrap();
                 for session_call in session_calls {
                     match session_call {
                         SessionCall::TentativeRead {

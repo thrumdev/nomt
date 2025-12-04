@@ -95,7 +95,7 @@ impl NomtDB {
         } else {
             session_params.overlay(overlay_window.iter()).unwrap()
         };
-        let session = self.nomt.begin_session(session_params);
+        let session = self.nomt.begin_session(session_params).unwrap();
 
         let mut transaction = Tx {
             session: &session,
@@ -147,7 +147,7 @@ impl NomtDB {
         } else {
             session_params.overlay(overlay_window.iter()).unwrap()
         };
-        let session = self.nomt.begin_session(session_params);
+        let session = self.nomt.begin_session(session_params).unwrap();
         let mut results: Vec<Option<_>> = (0..workloads.len()).map(|_| None).collect();
 
         let use_timer = timer.is_some();

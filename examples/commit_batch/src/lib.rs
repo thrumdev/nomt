@@ -26,7 +26,7 @@ impl NomtDB {
         // Writes do not occur immediately, instead,
         // they are cached and applied all at once later on
         let session =
-            nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
+            nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()))?;
 
         // Here we will move the data saved under b"key1" to b"key2" and deletes it
         //

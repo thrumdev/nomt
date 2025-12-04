@@ -318,7 +318,7 @@ impl Agent {
         let nomt = self.nomt.as_ref().unwrap();
         assert!(self.session.is_none());
         self.session
-            .replace(nomt.begin_session(SessionParams::default()));
+            .replace(nomt.begin_session(SessionParams::default()).unwrap());
     }
 
     /// Read the specified keys from an already opened session, it requires
