@@ -16,7 +16,7 @@ fn main() -> Result<()> {
     // Instantiate a new Session object to handle read and write operations
     // and generate a Witness later on
     let session =
-        nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
+        nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()))?;
 
     // Reading a key from the database
     let key_path = sha2::Sha256::digest(b"key").into();

@@ -303,8 +303,9 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// prevent writes to the database. Sessions are the main way of reading to the database,
     /// and permit a changeset to be committed either directly to the database or into an
     /// in-memory [`Overlay`].
-    pub fn begin_session(&self, params: SessionParams) -> Session<T> {
+    pub fn begin_session(&self, params: SessionParams) -> anyhow::Result<Session<T>> {
         let live_overlay = params.overlay;
+        live_overlay.ensure_base_root(self.root())?;
 
         // We must take the access guard before instantiating the rollback delta,
         // because it creates a read transaction and any commits or rollbacks will block
@@ -326,7 +327,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             .parent_root()
             .unwrap_or_else(|| self.root().into_inner());
 
-        Session {
+        Ok(Session {
             store,
             merkle_updater: self.merkle_update_pool.begin::<T>(
                 self.page_cache.clone(),
@@ -342,7 +343,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             access_guard,
             prev_root: Root(prev_root),
             _marker: std::marker::PhantomData,
-        }
+        })
     }
 
     /// Perform a rollback of the last `n` commits.
@@ -373,7 +374,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         // We hold a write guard and don't need the session to take any other.
         session_params.take_global_guard = false;
-        let sess = self.begin_session(session_params);
+        let sess = self.begin_session(session_params)?;
 
         // Convert the traceback into a series of write commands.
         let mut actuals = Vec::new();

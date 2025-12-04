@@ -41,7 +41,7 @@ fn test_rollback_disabled() {
         /* should_clean_up */ true,
     );
 
-    let session = nomt.begin_session(SessionParams::default());
+    let session = nomt.begin_session(SessionParams::default()).unwrap();
     let finished = session
         .finish(vec![(
             hex!("0000000000000000000000000000000000000000000000000000000000000001"),
@@ -64,7 +64,7 @@ fn test_rollback_to_initial() {
         /* should_clean_up */ true,
     );
 
-    let session = nomt.begin_session(SessionParams::default());
+    let session = nomt.begin_session(SessionParams::default()).unwrap();
     let finished = session
         .finish(vec![(
             hex!("0000000000000000000000000000000000000000000000000000000000000001"),
@@ -181,7 +181,7 @@ impl TestPlan {
                 "removing keys: {}",
                 display_keys(to_remove[commit_no].iter())
             );
-            let session = nomt.begin_session(SessionParams::default());
+            let session = nomt.begin_session(SessionParams::default()).unwrap();
             let mut operations = Vec::new();
             for (key, value) in to_insert[commit_no].iter() {
                 operations.push((key.clone(), KeyReadWrite::Write(Some(value.clone()))));
@@ -207,7 +207,7 @@ impl TestPlan {
 
     fn apply_forward(&self, nomt: &mut Nomt<Blake3Hasher>) {
         for commit_no in 0..self.to_insert.len() {
-            let session = nomt.begin_session(SessionParams::default());
+            let session = nomt.begin_session(SessionParams::default()).unwrap();
             let mut operations = Vec::new();
             for (key, value) in self.to_insert[commit_no].iter() {
                 operations.push((key.clone(), KeyReadWrite::Write(Some(value.clone()))));
@@ -429,7 +429,7 @@ fn test_rollback_change_history() {
     plan.verify_restored_state(&mut nomt, 7);
 
     // 3. Create new commits
-    let session = nomt.begin_session(SessionParams::default());
+    let session = nomt.begin_session(SessionParams::default()).unwrap();
     let new_key = KeyPath::from([0xAA; 32]);
     let new_value = vec![0xBB; 32];
     let finished = session
@@ -464,7 +464,7 @@ fn test_rollback_read_then_write() {
     );
 
     // Create a new key and write a value to it
-    let session = nomt.begin_session(SessionParams::default());
+    let session = nomt.begin_session(SessionParams::default()).unwrap();
     let key = KeyPath::from([0xAA; 32]);
     let original_value = vec![0xBB; 32];
     let finished = session
@@ -479,7 +479,7 @@ fn test_rollback_read_then_write() {
     //
     // The expected behavior is that the value from the ReadThenWrite operation takes precedence
     // over the original value.
-    let session = nomt.begin_session(SessionParams::default());
+    let session = nomt.begin_session(SessionParams::default()).unwrap();
     assert_eq!(session.read(key).unwrap(), Some(original_value.clone()));
     let new_value = vec![0xCC; 32];
     let finished = session

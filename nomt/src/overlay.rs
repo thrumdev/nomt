@@ -237,6 +237,7 @@ pub enum InvalidAncestors {
 #[derive(Clone)]
 pub(super) struct LiveOverlay {
     parent: Option<Arc<OverlayInner>>,
+    base_root: Option<Root>,
     ancestor_data: Vec<Arc<Data>>,
     min_seqn: u64,
 }
@@ -250,12 +251,14 @@ impl LiveOverlay {
         let Some(parent) = live_ancestors.next().map(|p| p.inner.clone()) else {
             return Ok(LiveOverlay {
                 parent: None,
+                base_root: None,
                 ancestor_data: Vec::new(),
                 min_seqn: 0,
             });
         };
 
         let mut ancestor_data = Vec::new();
+        let mut base_root = Some(Root(parent.prev_root));
         for (supposed_ancestor, actual_ancestor) in live_ancestors.zip(parent.ancestor_data.iter())
         {
             let Some(actual_ancestor) = actual_ancestor.upgrade() else {
@@ -266,7 +269,8 @@ impl LiveOverlay {
                 return Err(InvalidAncestors::NotAncestor);
             }
 
-            ancestor_data.push(actual_ancestor);
+            base_root = Some(supposed_ancestor.prev_root());
+            ancestor_data.push(actual_ancestor.clone());
         }
 
         // verify that the chain is complete. The last ancestor's parent must either be `None` or
@@ -286,6 +290,7 @@ impl LiveOverlay {
         Ok(LiveOverlay {
             parent: Some(parent),
             ancestor_data,
+            base_root,
             min_seqn,
         })
     }
@@ -417,6 +422,17 @@ impl LiveOverlay {
     /// Get the overlay's root. If this is an empty overlay, returns `None`.
     pub(super) fn parent_root(&self) -> Option<Node> {
         self.parent.as_ref().map(|p| p.root)
+    }
+
+    /// Ensure that the oldest overlay's previous root matches
+    /// the specified current state root.
+    pub fn ensure_base_root(&self, state_root: Root) -> anyhow::Result<()> {
+        self.base_root
+            .map_or(true, |base_root| base_root == state_root)
+            .then(|| ())
+            .ok_or(anyhow::anyhow!(
+                "State root and oldest overlay prev root do not match."
+            ))
     }
 }
 
