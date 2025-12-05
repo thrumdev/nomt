@@ -162,7 +162,7 @@ fn overlay_uncommitted_not_on_disk() {
 }
 
 #[test]
-fn overlay_deletions() {
+fn overlay_contains_deletions() {
     let test_db = || -> Test {
         let mut test = Test::new("overlay_deletions");
         // subtree at 0000000_0/1
@@ -251,4 +251,181 @@ fn overlay_deletions() {
     assert_eq!(test.read([131; 32]), None);
 
     let _overlay_b = test.update().0;
+}
+
+#[test]
+fn overlay_naked_deletions() {
+    let base_key = [0; 32];
+    let k0 = base_key.clone();
+    let mut k1 = base_key.clone();
+    k1[2] = 64;
+    let mut k2 = base_key.clone();
+    k2[2] = 128;
+    let mut k3 = base_key.clone();
+    k3[2] = 192;
+
+    let mut k4 = base_key.clone();
+    k4[2] = 224;
+    let mut k5 = base_key.clone();
+    k5[2] = 96;
+
+    let val = |i| -> Option<Vec<u8>> { Some(vec![i, i]) };
+
+    let test_db = || -> Test {
+        let mut test = Test::new("overlay_naked_deletions");
+
+        // subtree at 00000000_00000000_00/01/10/11 (bytes)
+        //            000000_000000_0000_00/01/10/11 (pages)
+        test.write(k0.clone(), val(0));
+        test.write(k1.clone(), val(1));
+        test.write(k2.clone(), val(2));
+        test.write(k3.clone(), val(3));
+
+        test.commit();
+        test
+    };
+
+    // 1. Delete an existing key and reinsert the same key with a different value.
+    // 2. Insert a new key, delete it, and reinsert it with a different value.
+    // Force page reconstruction to test the leaf collection.
+
+    // 1
+    let mut test = test_db();
+
+    test.write(k1, None);
+
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    assert_eq!(test.read(k0.clone()), val(0));
+    assert_eq!(test.read(k1.clone()), None);
+    assert_eq!(test.read(k2.clone()), val(2));
+    assert_eq!(test.read(k3.clone()), val(3));
+
+    // This enforces page reconstruction due to witness collection.
+    let _ = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    test.write(k1, val(4));
+    let overlay_b = test.update().0;
+
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    assert_eq!(test.read(k0.clone()), val(0));
+    assert_eq!(test.read(k1.clone()), val(4));
+    assert_eq!(test.read(k2.clone()), val(2));
+    assert_eq!(test.read(k3.clone()), val(3));
+    let _ = test.update().0;
+
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    test.write(k1, None);
+    let overlay_c = test.update().0;
+
+    test.start_overlay_session([&overlay_c, &overlay_b, &overlay_a]);
+    assert_eq!(test.read(k0.clone()), val(0));
+    assert_eq!(test.read(k1.clone()), None);
+    assert_eq!(test.read(k2.clone()), val(2));
+    assert_eq!(test.read(k3.clone()), val(3));
+    let _ = test.update().0;
+
+    // 2
+    let mut test = test_db();
+
+    test.write(k4, val(4));
+
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    assert_eq!(test.read(k0.clone()), val(0));
+    assert_eq!(test.read(k1.clone()), val(1));
+    assert_eq!(test.read(k2.clone()), val(2));
+    assert_eq!(test.read(k3.clone()), val(3));
+    assert_eq!(test.read(k4.clone()), val(4));
+    let _ = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+    test.write(k4, None);
+    let overlay_b = test.update().0;
+
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    assert_eq!(test.read(k0.clone()), val(0));
+    assert_eq!(test.read(k1.clone()), val(1));
+    assert_eq!(test.read(k2.clone()), val(2));
+    assert_eq!(test.read(k3.clone()), val(3));
+    assert_eq!(test.read(k4.clone()), None);
+    let _ = test.update().0;
+
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    test.write(k4, val(5));
+    let overlay_c = test.update().0;
+
+    test.start_overlay_session([&overlay_c, &overlay_b, &overlay_a]);
+    assert_eq!(test.read(k0.clone()), val(0));
+    assert_eq!(test.read(k1.clone()), val(1));
+    assert_eq!(test.read(k2.clone()), val(2));
+    assert_eq!(test.read(k3.clone()), val(3));
+    assert_eq!(test.read(k4.clone()), val(5));
+    let _ = test.update().0;
+}
+
+#[test]
+fn overlay_reconstruction_with_multiple_changes() {
+    let base_key = [0; 32];
+
+    let k0 = base_key.clone(); // 000
+
+    let mut k1 = base_key.clone(); // 001
+    k1[2] = 32;
+
+    let mut k2 = base_key.clone(); // 010
+    k2[2] = 64;
+
+    let mut k3 = base_key.clone(); // 011
+    k3[2] = 64 + 32;
+
+    let mut k4 = base_key.clone(); // 100
+    k4[2] = 128;
+
+    let mut k5 = base_key.clone(); // 101
+    k5[2] = 128 + 32;
+
+    let mut k6 = base_key.clone(); // 110
+    k6[2] = 128 + 64;
+
+    let mut k7 = base_key.clone(); // 111
+    k7[2] = 128 + 64 + 32;
+
+    let val = |i| -> Option<Vec<u8>> { Some(vec![i, i]) };
+
+    let mut test = Test::new("overlay_reconstruction_with_multiple_changes");
+
+    test.write(k2.clone(), val(2));
+    test.write(k3.clone(), val(3));
+    test.commit();
+
+    test.write(k0.clone(), val(0));
+    test.write(k3.clone(), val(33));
+    test.write(k5.clone(), val(5));
+    test.write(k7.clone(), val(7));
+    let overlay_a = test.update().0;
+
+    test.start_overlay_session([&overlay_a]);
+
+    test.write(k0.clone(), None);
+    test.write(k1.clone(), val(1));
+    test.write(k2.clone(), None);
+    test.write(k4.clone(), val(4));
+    test.write(k6.clone(), val(6));
+    test.write(k7.clone(), None);
+    let overlay_b = test.update().0;
+
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    assert_eq!(test.read(k0), None);
+    assert_eq!(test.read(k1), val(1));
+    assert_eq!(test.read(k2), None);
+    assert_eq!(test.read(k3), val(33));
+    assert_eq!(test.read(k4), val(4));
+    assert_eq!(test.read(k5), val(5));
+    assert_eq!(test.read(k6), val(6));
+    assert_eq!(test.read(k7), None);
+    let _ = test.update().0;
 }
