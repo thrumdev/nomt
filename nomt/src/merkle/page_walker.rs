@@ -1002,13 +1002,33 @@ pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
     page_id: PageId,
     position: TriePosition,
     page_set: &mut impl PageSet,
-    ops: impl IntoIterator<Item = (KeyPath, ValueHash)>,
+    ops: Vec<(KeyPath, ValueHash)>,
 ) -> Option<impl Iterator<Item = (PageId, Page, PageDiff, u64, u64)>> {
     let subtree_root = page.node(position.node_index());
 
     let page_walker = PageWalker::<H>::new_reconstructor(subtree_root, page_id.clone());
 
-    let (root, reconstructed_pages) = page_walker.reconstruct(page_set, position, ops)?;
+    let maybe_reconstructed =
+        page_walker.reconstruct(page_set, position.clone(), ops.iter().cloned());
+    if maybe_reconstructed.is_none() {
+        return None;
+    }
+    let (root, reconstructed_pages) = maybe_reconstructed.unwrap();
+
+    if root != subtree_root {
+        println!(
+            "Reconstructed root at {:?} does not match subtree root: {:x?} != {:x?}",
+            position.path(),
+            root,
+            subtree_root
+        );
+
+        println!("Reconstructed from ops: {ops:?}");
+
+        let expected_root =
+            nomt_core::update::build_trie::<H>(position.depth() as usize, ops.into_iter(), |_| {});
+        println!("Expected root: {:x?}", expected_root);
+    }
 
     assert_eq!(root, subtree_root);
 

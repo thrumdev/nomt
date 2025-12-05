@@ -17,3 +17,5 @@ profile.json
 /benchtop/nomt_db*
 /benchtop/sp_trie_db*
 /benchtop/target
+
+/logs/
