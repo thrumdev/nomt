@@ -42,6 +42,7 @@ struct SeekRequest {
     siblings: Vec<Node>,
     state: RequestState,
     ios: usize,
+    parent: Node,
 }
 
 impl SeekRequest {
@@ -66,6 +67,7 @@ impl SeekRequest {
             siblings: Vec::new(),
             state,
             ios: 0,
+            parent: root,
         };
 
         // The iterator must be advanced until it is blocked.
@@ -138,15 +140,44 @@ impl SeekRequest {
             self.position.down(bit);
 
             let cur_node = page.node(self.position.node_index());
+            let sibling = page.node(self.position.sibling_index());
             if record_siblings {
-                self.siblings.push(page.node(self.position.sibling_index()));
+                self.siblings.push(sibling);
             }
+
+            let parent_preimage = if bit {
+                trie::InternalData {
+                    left: sibling,
+                    right: cur_node,
+                }
+            } else {
+                trie::InternalData {
+                    left: cur_node,
+                    right: sibling,
+                }
+            };
+
+            let expected_hash = H::hash_internal(&parent_preimage);
+            if self.parent != expected_hash {
+                println!("Trie corruption detected. Expected parent hash {:x?} but found {:x?} at position {}",
+                    expected_hash,
+                    self.parent,
+                    self.position.path(),
+                );
+
+                panic!("Trie corruption detected");
+            }
+
+            self.parent = cur_node.clone();
 
             if trie::is_leaf::<H>(&cur_node) {
                 self.state =
                     RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
                 if let RequestState::FetchingLeaf { .. } = self.state {
                     self.continue_leaf_fetch::<H>(None);
+                }
+                if let RequestState::Completed(Some(ref leaf_data)) = self.state {
+                    self.verify_leaf_vs_parent::<H>(leaf_data.key_path, leaf_data.value_hash);
                 }
                 return;
             } else if trie::is_terminator::<H>(&cur_node) {
@@ -190,6 +221,23 @@ impl SeekRequest {
         }
     }
 
+    fn verify_leaf_vs_parent<H: HashAlgorithm>(&self, key: KeyPath, value_hash: ValueHash) {
+        let parent_preimage = trie::LeafData {
+            key_path: key.clone(),
+            value_hash,
+        };
+        let expected_hash = H::hash_leaf(&parent_preimage);
+        if self.parent != expected_hash {
+            println!("Trie corruption detected. Expected parent hash {:x?} but found {:x?} at position {}",
+                expected_hash,
+                self.parent,
+                self.position.path(),
+            );
+
+            panic!("Trie corruption detected");
+        }
+    }
+
     fn continue_leaf_fetch<H: HashAlgorithm>(&mut self, leaf: Option<LeafNodeRef>) {
         let RequestState::FetchingLeaf {
             ref mut overlay_deletions,
@@ -224,6 +272,7 @@ impl SeekRequest {
             }
         };
 
+        self.verify_leaf_vs_parent::<H>(key, value_hash);
         self.state = RequestState::Completed(Some(trie::LeafData {
             key_path: key,
             value_hash,
