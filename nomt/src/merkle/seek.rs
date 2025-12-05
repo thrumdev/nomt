@@ -74,7 +74,7 @@ impl SeekRequest {
 
         // The iterator must be advanced until it is blocked.
         if let RequestState::FetchingLeaf { .. } = request.state {
-            request.continue_leaf_fetch::<H>(None)
+            request.continue_leaf_fetch::<H>(overlay, read_transaction, None)
         };
 
         request
@@ -181,10 +181,15 @@ impl SeekRequest {
                 self.state =
                     RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
                 if let RequestState::FetchingLeaf { .. } = self.state {
-                    self.continue_leaf_fetch::<H>(None);
+                    self.continue_leaf_fetch::<H>(overlay, read_transaction, None);
                 }
                 if let RequestState::Completed(Some(ref leaf_data)) = self.state {
-                    self.verify_leaf_vs_parent::<H>(leaf_data.key_path, leaf_data.value_hash);
+                    self.verify_leaf_vs_parent::<H>(
+                        overlay,
+                        read_transaction,
+                        leaf_data.key_path,
+                        leaf_data.value_hash,
+                    );
                 }
                 return;
             } else if trie::is_terminator::<H>(&cur_node) {
@@ -228,26 +233,75 @@ impl SeekRequest {
         }
     }
 
-    fn verify_leaf_vs_parent<H: HashAlgorithm>(&self, key: KeyPath, value_hash: ValueHash) {
+    fn verify_leaf_vs_parent<H: HashAlgorithm>(
+        &self,
+        overlay: &LiveOverlay,
+        read_tx: &BeatreeReadTx,
+        key: KeyPath,
+        value_hash: ValueHash,
+    ) {
         let parent_preimage = trie::LeafData {
             key_path: key.clone(),
             value_hash,
         };
         let expected_hash = H::hash_leaf(&parent_preimage);
-        if self.parent != expected_hash {
-            println!("Trie corruption (leaf) detected. Expected parent hash {:?} but found {:?} at position {}",
-                expected_hash,
-                self.parent,
-                self.position.path(),
-            );
-
-            println!("Page origins {:?}", self.page_origins);
-
-            panic!("Trie corruption detected");
+        if self.parent == expected_hash {
+            return;
         }
+        println!("Trie corruption (leaf) detected. Expected parent hash {:?} but found {:?} at position {}",
+            expected_hash,
+            self.parent,
+            self.position.path(),
+        );
+
+        println!("Page origins {:?}", self.page_origins);
+
+        let value_stack = overlay.value_stack(key);
+        let original_value = read_tx.lookup_sync(key);
+
+        fn log_leaf<H: HashAlgorithm>(prefix: &str, leaf_data: Option<trie::LeafData>) {
+            match leaf_data {
+                None => {
+                    println!("\t {}: <none>", prefix);
+                }
+                Some(leaf) => {
+                    let hash = H::hash_leaf(&leaf);
+                    println!(
+                        "\t {}: value_hash={:?} leaf_hash={:?}",
+                        prefix, leaf.value_hash, hash
+                    );
+                }
+            }
+        }
+        let mut leaf_data = original_value.map(|v| {
+            let value_hash = H::hash_value(&v);
+            trie::LeafData {
+                key_path: key.clone(),
+                value_hash,
+            }
+        });
+        log_leaf::<H>("on-disk", leaf_data.clone());
+        for (i, change) in value_stack.into_iter() {
+            let prefix = format!("{}-ago", i);
+            leaf_data = change.map(|v| {
+                let value_hash = H::hash_value(&v);
+                trie::LeafData {
+                    key_path: key.clone(),
+                    value_hash,
+                }
+            });
+            log_leaf::<H>(&prefix, leaf_data.clone());
+        }
+
+        panic!("Trie corruption detected");
     }
 
-    fn continue_leaf_fetch<H: HashAlgorithm>(&mut self, leaf: Option<LeafNodeRef>) {
+    fn continue_leaf_fetch<H: HashAlgorithm>(
+        &mut self,
+        overlay: &LiveOverlay,
+        read_tx: &BeatreeReadTx,
+        leaf: Option<LeafNodeRef>,
+    ) {
         let RequestState::FetchingLeaf {
             ref mut overlay_deletions,
             ref mut beatree_iterator,
@@ -281,7 +335,7 @@ impl SeekRequest {
             }
         };
 
-        self.verify_leaf_vs_parent::<H>(key, value_hash);
+        self.verify_leaf_vs_parent::<H>(overlay, read_tx, key, value_hash);
         self.state = RequestState::Completed(Some(trie::LeafData {
             key_path: key,
             value_hash,
@@ -787,9 +841,12 @@ impl<H: HashAlgorithm> Seeker<H> {
                     ) {
                         Ok(leaf) => {
                             match request.state {
-                                RequestState::FetchingLeaf { .. } => {
-                                    request.continue_leaf_fetch::<H>(Some(leaf))
-                                }
+                                RequestState::FetchingLeaf { .. } => request
+                                    .continue_leaf_fetch::<H>(
+                                        &self.overlay,
+                                        &self.beatree_read_transaction,
+                                        Some(leaf),
+                                    ),
                                 RequestState::FetchingLeaves { .. } => request
                                     .continue_leaves_fetch::<H>(
                                         page_set,
@@ -923,7 +980,11 @@ impl<H: HashAlgorithm> Seeker<H> {
 
             match request.state {
                 RequestState::FetchingLeaf { .. } => {
-                    request.continue_leaf_fetch::<H>(Some(leaf.clone()));
+                    request.continue_leaf_fetch::<H>(
+                        &self.overlay,
+                        &self.beatree_read_transaction,
+                        Some(leaf.clone()),
+                    );
                 }
                 RequestState::FetchingLeaves { .. } => {
                     request.continue_leaves_fetch::<H>(page_set, &self.overlay, Some(leaf.clone()));

@@ -8,7 +8,7 @@ use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
 use ops::overflow;
 use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
-use std::{collections::BTreeMap, fs::File, mem, path::Path, sync::Arc};
+use std::{fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::{
@@ -174,7 +174,7 @@ impl Tree {
     }
 
     /// Get a copy of all keys in the btree. Blocks current thread.
-    pub fn all_kv(&self) -> BTreeMap<Key, Vec<u8>> {
+    pub fn all_kv(&self) -> OrdMap<Key, Vec<u8>> {
         let shared = self.shared.read();
         shared.memory_mirror.kv.clone()
     }
@@ -215,6 +215,7 @@ impl Tree {
             leaf_store: StoreReader::new(shared.leaf_store.clone(), shared.page_pool.clone()),
             leaf_cache: shared.leaf_cache.clone(),
             read_counter: self.read_transaction_counter.clone(),
+            memory_mirror: shared.memory_mirror.clone(),
         });
 
         ReadTransaction { inner }
@@ -536,6 +537,7 @@ struct ReadTransactionInner {
     leaf_store: StoreReader,
     leaf_cache: LeafCache,
     read_counter: ReadTransactionCounter,
+    memory_mirror: MemoryMirror,
 }
 
 impl ReadTransaction {
@@ -574,6 +576,36 @@ impl ReadTransaction {
                 read_tx: self.inner.clone(),
             })
         }
+    }
+
+    /// Lookup a key in the btree synchronously.
+    pub fn lookup_sync(&self, key: Key) -> Option<Vec<u8>> {
+        // First look up in the primary staging which contains the most recent changes.
+        if let Some(val) = self.inner.primary_staging.get(&key) {
+            return val.as_option().map(|v| v.to_vec());
+        }
+
+        // Then check the secondary staging which is a bit older, but fresher still than the btree.
+        if let Some(val) = self
+            .inner
+            .secondary_staging
+            .as_ref()
+            .and_then(|x| x.get(&key))
+        {
+            return val.as_option().map(|v| v.to_vec());
+        }
+
+        let disk_out = ops::lookup_blocking(
+            key,
+            &self.inner.bbn_index,
+            &self.inner.leaf_cache,
+            &self.inner.leaf_store,
+        )
+        .unwrap();
+
+        let mirrored = self.inner.memory_mirror.lookup(&key);
+        assert_eq!(disk_out, mirrored);
+        disk_out
     }
 
     /// Initiate an asynchronous lookup of a value. This may return immediately if the leaf is cached.
@@ -800,15 +832,14 @@ struct ReadTransactionCounterInner {
     cvar: Condvar,
 }
 
+#[derive(Clone)]
 struct MemoryMirror {
-    kv: BTreeMap<Key, Vec<u8>>,
+    kv: OrdMap<Key, Vec<u8>>,
 }
 
 impl MemoryMirror {
     pub fn new() -> Self {
-        MemoryMirror {
-            kv: BTreeMap::new(),
-        }
+        MemoryMirror { kv: OrdMap::new() }
     }
 
     pub fn lookup(&self, key: &Key) -> Option<Vec<u8>> {

@@ -418,6 +418,19 @@ impl LiveOverlay {
     pub(super) fn parent_root(&self) -> Option<Node> {
         self.parent.as_ref().map(|p| p.root)
     }
+
+    /// Probe the entire stack of overlays for value changes associated with the given key.
+    /// `None` indicates 'deleted'. The returned vector is ordered from most recent to least recent.
+    pub fn value_stack(&self, key: KeyPath) -> Vec<(usize, Option<Vec<u8>>)> {
+        let mut v = Vec::new();
+        for (i, ancestor) in self.ancestor_data.iter().enumerate() {
+            if let Some(change) = ancestor.values.get(&key) {
+                v.push((i, change.as_option().map(|v| v.to_vec())))
+            }
+        }
+
+        return v;
+    }
 }
 
 #[cfg(test)]
