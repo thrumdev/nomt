@@ -8,7 +8,7 @@ use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
 use ops::overflow;
 use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
-use std::{collections::HashMap, fs::File, mem, path::Path, sync::Arc};
+use std::{collections::BTreeMap, fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::{
@@ -171,6 +171,12 @@ impl Tree {
         let mirrored = shared.memory_mirror.lookup(&key);
         assert_eq!(out, mirrored);
         out
+    }
+
+    /// Get a copy of all keys in the btree. Blocks current thread.
+    pub fn all_kv(&self) -> BTreeMap<Key, Vec<u8>> {
+        let shared = self.shared.read();
+        shared.memory_mirror.kv.clone()
     }
 
     /// Returns a controller for the sync process. This is blocked by other `sync`s running as well
@@ -795,12 +801,14 @@ struct ReadTransactionCounterInner {
 }
 
 struct MemoryMirror {
-    kv: HashMap<Key, Vec<u8>>,
+    kv: BTreeMap<Key, Vec<u8>>,
 }
 
 impl MemoryMirror {
     pub fn new() -> Self {
-        MemoryMirror { kv: HashMap::new() }
+        MemoryMirror {
+            kv: BTreeMap::new(),
+        }
     }
 
     pub fn lookup(&self, key: &Key) -> Option<Vec<u8>> {

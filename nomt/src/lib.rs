@@ -697,13 +697,15 @@ impl FinishedSession {
             rollback.commit(rollback_delta)?;
         }
 
-        nomt.store.commit(
-            self.value_transaction.into_iter(),
-            nomt.page_cache.clone(),
-            self.merkle_output
-                .updated_pages
-                .into_frozen_iter(/* into_overlay */ false),
-        )
+        nomt.store
+            .commit(
+                self.value_transaction.into_iter(),
+                nomt.page_cache.clone(),
+                self.merkle_output
+                    .updated_pages
+                    .into_frozen_iter(/* into_overlay */ false),
+            )
+            .map(|_| ())
     }
 
     /// Commit this session to disk directly without blocking.
@@ -747,7 +749,7 @@ impl FinishedSession {
             shared.last_commit_marker = None;
         }
 
-        nomt.store.commit(
+        let _ = nomt.store.commit(
             self.value_transaction.into_iter(),
             nomt.page_cache.clone(),
             self.merkle_output
@@ -808,8 +810,22 @@ impl Overlay {
             rollback.commit(rollback_delta)?;
         }
 
-        nomt.store
-            .commit(values, nomt.page_cache.clone(), page_changes)
+        let all_kv = nomt
+            .store
+            .commit(values, nomt.page_cache.clone(), page_changes)?;
+
+        let expected_root = nomt_core::update::build_trie::<T>(
+            0,
+            all_kv.into_iter().map(|(k, v)| (k, T::hash_value(&v))),
+            |_| {},
+        );
+
+        assert_eq!(
+            expected_root, root.0,
+            "root mismatch after committing overlay"
+        );
+
+        Ok(())
     }
 
     /// Commit the changes from this overlay to the underlying database without blocking.
@@ -866,8 +882,20 @@ impl Overlay {
             rollback.commit(rollback_delta)?;
         }
 
-        nomt.store
+        let all_kv = nomt
+            .store
             .commit(values, nomt.page_cache.clone(), page_changes)?;
+
+        let expected_root = nomt_core::update::build_trie::<T>(
+            0,
+            all_kv.into_iter().map(|(k, v)| (k, T::hash_value(&v))),
+            |_| {},
+        );
+
+        assert_eq!(
+            expected_root, root.0,
+            "root mismatch after committing overlay"
+        );
 
         Ok(None)
     }

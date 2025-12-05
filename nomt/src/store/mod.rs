@@ -268,6 +268,11 @@ impl Store {
         ValueTransaction { batch: Vec::new() }
     }
 
+    /// Get all KV
+    pub fn all_kv(&self) -> impl Iterator<Item = (KeyPath, Vec<u8>)> {
+        self.shared.values.all_kv().into_iter()
+    }
+
     /// Atomically apply the given transaction.
     ///
     /// After this function returns, accessor methods such as [`Self::load_page`] will return the
@@ -277,7 +282,7 @@ impl Store {
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<impl Iterator<Item = (beatree::Key, Vec<u8>)>> {
         let mut sync = self.sync.lock();
 
         if self
@@ -302,7 +307,8 @@ impl Store {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return Err(e);
         }
-        Ok(())
+
+        Ok(self.all_kv())
     }
 }
 
