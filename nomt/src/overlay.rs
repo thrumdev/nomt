@@ -215,6 +215,7 @@ struct Data {
     values: HashMap<KeyPath, ValueChange>,
     status: OverlayStatus,
     parent_status: Option<OverlayStatus>,
+    root: Node,
 }
 
 impl Drop for Data {
@@ -406,6 +407,7 @@ impl LiveOverlay {
                     values: value_changes,
                     status: OverlayStatus::new_live(),
                     parent_status,
+                    root,
                 }),
                 seqn: new_seqn,
                 ancestor_data,
@@ -430,6 +432,15 @@ impl LiveOverlay {
         }
 
         return v;
+    }
+
+    /// Probe the entire stack of overlays for the associated merkle roots (descending order)
+    pub fn ancestor_roots(&self) -> Vec<Node> {
+        let mut v = Vec::new();
+        for ancestor in self.ancestor_data.iter() {
+            v.push(ancestor.root.clone());
+        }
+        v
     }
 }
 

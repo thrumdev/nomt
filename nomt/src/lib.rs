@@ -825,6 +825,8 @@ impl Overlay {
             "root mismatch after committing overlay"
         );
 
+        println!("Committed overlay with root {:?}", root.0);
+
         Ok(())
     }
 

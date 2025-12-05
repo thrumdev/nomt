@@ -293,6 +293,11 @@ impl SeekRequest {
             log_leaf::<H>(&prefix, leaf_data.clone());
         }
 
+        println!("Historical root hashes");
+        for (i, root) in overlay.ancestor_roots().into_iter().enumerate() {
+            println!("\t{}-ago: {:?}", i, root);
+        }
+
         panic!("Trie corruption detected");
     }
 
