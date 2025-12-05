@@ -63,6 +63,15 @@ impl PageOrigin {
             PageOrigin::Persisted(_) => None,
         }
     }
+
+    pub fn display(&self) -> &'static str {
+        match self {
+            PageOrigin::Persisted(BucketInfo::Fresh) => "Persisted(Fresh)",
+            PageOrigin::Persisted(BucketInfo::Dependent(_)) => "Persisted(Dependent)",
+            PageOrigin::Persisted(BucketInfo::Known(_)) => "Persisted(Known)",
+            PageOrigin::Reconstructed { .. } => "Reconstructed",
+        }
+    }
 }
 
 pub struct PageSet {

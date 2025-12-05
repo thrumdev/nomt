@@ -43,6 +43,7 @@ struct SeekRequest {
     state: RequestState,
     ios: usize,
     parent: Node,
+    page_origins: Vec<&'static str>,
 }
 
 impl SeekRequest {
@@ -68,6 +69,7 @@ impl SeekRequest {
             state,
             ios: 0,
             parent: root,
+            page_origins: Vec::new(),
         };
 
         // The iterator must be advanced until it is blocked.
@@ -120,6 +122,7 @@ impl SeekRequest {
         page: &Page,
         record_siblings: bool,
         page_set: &mut PageSet,
+        origin_str: &'static str,
     ) {
         let RequestState::Seeking = self.state else {
             panic!("seek past end")
@@ -135,6 +138,8 @@ impl SeekRequest {
             .iter()
             .by_vals()
             .take(DEPTH);
+
+        self.page_origins.push(origin_str);
 
         for bit in bits {
             self.position.down(bit);
@@ -159,11 +164,13 @@ impl SeekRequest {
 
             let expected_hash = H::hash_internal(&parent_preimage);
             if self.parent != expected_hash {
-                println!("Trie corruption detected. Expected parent hash {:x?} but found {:x?} at position {}",
+                println!("Trie corruption (internal) detected. Expected parent hash {:?} but found {:?} at position {}",
                     expected_hash,
                     self.parent,
                     self.position.path(),
                 );
+
+                println!("Page origins {:?}", self.page_origins);
 
                 panic!("Trie corruption detected");
             }
@@ -228,11 +235,13 @@ impl SeekRequest {
         };
         let expected_hash = H::hash_leaf(&parent_preimage);
         if self.parent != expected_hash {
-            println!("Trie corruption detected. Expected parent hash {:x?} but found {:x?} at position {}",
+            println!("Trie corruption (leaf) detected. Expected parent hash {:?} but found {:?} at position {}",
                 expected_hash,
                 self.parent,
                 self.position.path(),
             );
+
+            println!("Page origins {:?}", self.page_origins);
 
             panic!("Trie corruption detected");
         }
@@ -716,23 +725,20 @@ impl<H: HashAlgorithm> Seeker<H> {
                 IoQuery::MerklePage(page_id) => {
                     // Attempt to fetch a page from the page_set. If retrieval from memory
                     // is required, then insert it with its origin into the page set.
-                    let maybe_page =
-                        page_set
-                            .get(&page_id)
-                            .map(|(page, _origin)| page)
-                            .or_else(|| {
-                                super::get_in_memory_page(&self.overlay, &self.page_cache, &page_id)
-                                    .map(|(page, bucket_info)| {
-                                        page_set.insert(
-                                            page_id.clone(),
-                                            page.clone(),
-                                            PageOrigin::Persisted(bucket_info),
-                                        );
-                                        page
-                                    })
-                            });
+                    let maybe_page = page_set
+                        .get(&page_id)
+                        .map(|(page, origin)| (page, origin.display()))
+                        .or_else(|| {
+                            super::get_in_memory_page(&self.overlay, &self.page_cache, &page_id)
+                                .map(|(page, bucket_info)| {
+                                    let origin = PageOrigin::Persisted(bucket_info);
+                                    let origin_str = origin.display();
+                                    page_set.insert(page_id.clone(), page.clone(), origin);
+                                    (page, origin_str)
+                                })
+                        });
 
-                    if let Some(page) = maybe_page {
+                    if let Some((page, origin_str)) = maybe_page {
                         request.continue_seek::<H>(
                             &self.beatree_read_transaction,
                             &self.overlay,
@@ -740,6 +746,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                             &page,
                             self.record_siblings,
                             page_set,
+                            origin_str,
                         );
                         continue;
                     }
@@ -855,11 +862,10 @@ impl<H: HashAlgorithm> Seeker<H> {
         let page = self
             .page_cache
             .insert(page_load.page_id().clone(), page.clone(), bucket_index);
-        page_set.insert(
-            page_load.page_id().clone(),
-            page.clone(),
-            PageOrigin::Persisted(BucketInfo::Known(bucket_index)),
-        );
+
+        let origin = PageOrigin::Persisted(BucketInfo::Known(bucket_index));
+        let origin_str = origin.display();
+        page_set.insert(page_load.page_id().clone(), page.clone(), origin);
 
         for waiting_request in self
             .io_waiters
@@ -881,6 +887,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                 &page,
                 self.record_siblings,
                 page_set,
+                origin_str,
             );
 
             if !request.is_completed() {
