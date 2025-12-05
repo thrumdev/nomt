@@ -8,7 +8,7 @@ use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
 use ops::overflow;
 use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
-use std::{fs::File, mem, path::Path, sync::Arc};
+use std::{collections::HashMap, fs::File, mem, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::{
@@ -61,6 +61,7 @@ struct Shared {
     /// if there is no sync in progress.
     secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_cache: leaf_cache::LeafCache,
+    memory_mirror: MemoryMirror,
 }
 
 struct Sync {
@@ -114,6 +115,8 @@ impl Tree {
             bbn_bump,
         )
         .context("failed to reconstruct btree from bbn store file")?;
+
+        assert!(index.is_empty(), "memory mirrors only on fresh trees");
         let shared = Shared {
             io_handle: io_pool.make_handle(),
             page_pool: io_pool.page_pool().clone(),
@@ -124,6 +127,7 @@ impl Tree {
             primary_staging: OrdMap::new(),
             secondary_staging: None,
             leaf_cache: leaf_cache::LeafCache::new(32, leaf_cache_size),
+            memory_mirror: MemoryMirror::new(),
         };
 
         let sync = Sync {
@@ -156,13 +160,17 @@ impl Tree {
         }
 
         // Finally, look up in the btree.
-        ops::lookup_blocking(
+        let out = ops::lookup_blocking(
             key,
             &shared.bbn_index,
             &shared.leaf_cache,
             &shared.leaf_store_rd,
         )
-        .unwrap()
+        .unwrap();
+
+        let mirrored = shared.memory_mirror.lookup(&key);
+        assert_eq!(out, mirrored);
+        out
     }
 
     /// Returns a controller for the sync process. This is blocked by other `sync`s running as well
@@ -323,6 +331,10 @@ impl Tree {
     fn finish_sync(shared: &Arc<RwLock<Shared>>, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
         let mut shared = shared.write();
+
+        // update the mirror to match the committed changes.
+        let secondary_staging = shared.secondary_staging.take().unwrap();
+        shared.memory_mirror.update(secondary_staging);
         shared.secondary_staging = None;
         shared.bbn_index = bbn_index;
     }
@@ -780,4 +792,31 @@ impl ReadTransactionCounter {
 struct ReadTransactionCounterInner {
     read_transactions: Mutex<usize>,
     cvar: Condvar,
+}
+
+struct MemoryMirror {
+    kv: HashMap<Key, Vec<u8>>,
+}
+
+impl MemoryMirror {
+    pub fn new() -> Self {
+        MemoryMirror { kv: HashMap::new() }
+    }
+
+    pub fn lookup(&self, key: &Key) -> Option<Vec<u8>> {
+        self.kv.get(key).cloned()
+    }
+
+    pub fn update(&mut self, tx: OrdMap<Key, ValueChange>) {
+        for (key, change) in tx {
+            match change {
+                ValueChange::Delete => {
+                    self.kv.remove(&key);
+                }
+                ValueChange::Insert(v) | ValueChange::InsertOverflow(v, _) => {
+                    self.kv.insert(key, v);
+                }
+            }
+        }
+    }
 }

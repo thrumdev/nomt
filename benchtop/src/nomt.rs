@@ -54,6 +54,7 @@ impl NomtDB {
         }
         opts.page_cache_upper_levels(page_cache_upper_levels);
         opts.prepopulate_page_cache(prepopulate_page_cache);
+        opts.use_merkle_page_elision(false);
 
         let nomt = Nomt::open(opts).unwrap();
         Self {

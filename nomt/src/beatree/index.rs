@@ -47,6 +47,10 @@ impl Index {
     pub fn into_iter(self) -> impl Iterator<Item = (Key, Arc<BranchNode>)> {
         self.first_key_map.into_iter()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.first_key_map.is_empty()
+    }
 }
 
 struct RangeFromExclusive {
