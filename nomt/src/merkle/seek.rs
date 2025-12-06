@@ -25,6 +25,7 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 
+use std::cmp::Ordering;
 use std::collections::{
     hash_map::{Entry, HashMap},
     VecDeque,
@@ -44,6 +45,8 @@ struct SeekRequest {
     ios: usize,
     parent: Node,
     page_origins: Vec<&'static str>,
+    overlay_deletions: Option<Vec<KeyPath>>,
+    iter_record: Vec<String>,
 }
 
 impl SeekRequest {
@@ -70,6 +73,8 @@ impl SeekRequest {
             ios: 0,
             parent: root,
             page_origins: Vec::new(),
+            overlay_deletions: None,
+            iter_record: Vec::new(),
         };
 
         // The iterator must be advanced until it is blocked.
@@ -189,6 +194,7 @@ impl SeekRequest {
                         read_transaction,
                         leaf_data.key_path,
                         leaf_data.value_hash,
+                        "begin_leaf_fetch",
                     );
                 }
                 return;
@@ -239,6 +245,7 @@ impl SeekRequest {
         read_tx: &BeatreeReadTx,
         key: KeyPath,
         value_hash: ValueHash,
+        source: &'static str,
     ) {
         let parent_preimage = trie::LeafData {
             key_path: key.clone(),
@@ -255,6 +262,10 @@ impl SeekRequest {
         );
 
         println!("Page origins {:?}", self.page_origins);
+        println!("Found leaf from source {source}");
+        println!("Key={:?}", key);
+        println!("B-tree iter steps: {:?}", self.iter_record);
+        println!("Tracked overlay deletions: {:?}", self.overlay_deletions);
 
         let value_stack = overlay.value_stack(key);
         let original_value = read_tx.lookup_sync(key);
@@ -320,27 +331,74 @@ impl SeekRequest {
             beatree_iterator.provide_leaf(leaf);
         }
 
+        if self.overlay_deletions.is_none() {
+            self.overlay_deletions = Some(overlay_deletions.clone());
+        }
+
+        let manage_deletions = |deletions: &[KeyPath], mut cur_idx, key: &KeyPath| {
+            while cur_idx < deletions.len() {
+                match key.cmp(&deletions[cur_idx]) {
+                    Ordering::Less => {
+                        panic!("Some overlay deletions were prior to the beatree leaves");
+                        cur_idx += 1;
+                    }
+                    Ordering::Equal => {
+                        cur_idx += 1;
+                        return (cur_idx, true);
+                    }
+                    Ordering::Greater => return (cur_idx, false),
+                }
+            }
+
+            (cur_idx, false)
+        };
+
         let mut deletions_idx = 0;
-        let (key, value_hash) = loop {
+        let (key, value_hash, source) = loop {
             match beatree_iterator.next() {
                 None => panic!("leaf must exist position={}", self.position.path()),
                 Some(IterOutput::Blocked) => {
                     overlay_deletions.drain(..deletions_idx);
+                    self.iter_record.push(format!("Blocked({})", deletions_idx));
                     return;
                 }
-                Some(IterOutput::Item(key, _value))
+                Some(IterOutput::Item(key, _)) | Some(IterOutput::OverflowItem(key, _, _))
                     if deletions_idx < overlay_deletions.len()
                         && overlay_deletions[deletions_idx] == key =>
                 {
+                    self.iter_record
+                        .push(format!("DeleteSkip({:?})", &key[..8]));
                     deletions_idx += 1;
                     continue;
                 }
-                Some(IterOutput::Item(key, value)) => break (key, H::hash_value(&value)),
-                Some(IterOutput::OverflowItem(key, value_hash, _)) => break (key, value_hash),
+                Some(IterOutput::Item(key, value)) => {
+                    let (new_d_idx, should_skip) =
+                        manage_deletions(&overlay_deletions, deletions_idx, &key);
+                    deletions_idx = new_d_idx;
+                    if should_skip {
+                        continue;
+                    }
+
+                    let s = "continue_leaf_fetch_regular";
+                    self.iter_record.push(format!("Item({:?})", &key[..8]));
+                    break (key, H::hash_value(&value), s);
+                }
+                Some(IterOutput::OverflowItem(key, value_hash, _)) => {
+                    let (new_d_idx, should_skip) =
+                        manage_deletions(&overlay_deletions, deletions_idx, &key);
+                    deletions_idx = new_d_idx;
+                    if should_skip {
+                        continue;
+                    }
+
+                    let s = "continue_leaf_fetch_overflow";
+                    self.iter_record.push(format!("Item({:?})", &key[..8]));
+                    break (key, value_hash, s);
+                }
             }
         };
 
-        self.verify_leaf_vs_parent::<H>(overlay, read_tx, key, value_hash);
+        self.verify_leaf_vs_parent::<H>(overlay, read_tx, key, value_hash, source);
         self.state = RequestState::Completed(Some(trie::LeafData {
             key_path: key,
             value_hash,

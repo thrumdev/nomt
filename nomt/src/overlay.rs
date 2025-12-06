@@ -216,6 +216,7 @@ struct Data {
     status: OverlayStatus,
     parent_status: Option<OverlayStatus>,
     root: Node,
+    prev_root: Node,
 }
 
 impl Drop for Data {
@@ -408,6 +409,7 @@ impl LiveOverlay {
                     status: OverlayStatus::new_live(),
                     parent_status,
                     root,
+                    prev_root,
                 }),
                 seqn: new_seqn,
                 ancestor_data,
@@ -440,6 +442,11 @@ impl LiveOverlay {
         for ancestor in self.ancestor_data.iter() {
             v.push(ancestor.root.clone());
         }
+
+        if let Some(a) = self.ancestor_data.last() {
+            v.push(a.prev_root.clone());
+        }
+
         v
     }
 }
