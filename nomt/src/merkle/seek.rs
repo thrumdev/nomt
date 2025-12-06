@@ -365,15 +365,6 @@ impl SeekRequest {
                     self.iter_record.push(format!("Blocked({})", deletions_idx));
                     return;
                 }
-                Some(IterOutput::Item(key, _)) | Some(IterOutput::OverflowItem(key, _, _))
-                    if deletions_idx < overlay_deletions.len()
-                        && overlay_deletions[deletions_idx] == key =>
-                {
-                    self.iter_record
-                        .push(format!("DeleteSkip({:?})", &key[..8]));
-                    deletions_idx += 1;
-                    continue;
-                }
                 Some(IterOutput::Item(key, value)) => {
                     let (new_d_idx, should_skip) =
                         manage_deletions(&overlay_deletions, deletions_idx, &key);
