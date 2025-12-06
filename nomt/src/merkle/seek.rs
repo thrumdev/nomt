@@ -339,14 +339,17 @@ impl SeekRequest {
             while cur_idx < deletions.len() {
                 match key.cmp(&deletions[cur_idx]) {
                     Ordering::Less => {
-                        panic!("Some overlay deletions were prior to the beatree leaves");
-                        cur_idx += 1;
+                        // key is before the deletion
+                        break;
                     }
                     Ordering::Equal => {
                         cur_idx += 1;
                         return (cur_idx, true);
                     }
-                    Ordering::Greater => return (cur_idx, false),
+                    Ordering::Greater => {
+                        // deletion is before the key. move on until we find a match or go past
+                        cur_idx += 1;
+                    }
                 }
             }
 
@@ -376,6 +379,7 @@ impl SeekRequest {
                         manage_deletions(&overlay_deletions, deletions_idx, &key);
                     deletions_idx = new_d_idx;
                     if should_skip {
+                        self.iter_record.push(format!("Skip({})", new_d_idx));
                         continue;
                     }
 
@@ -388,6 +392,7 @@ impl SeekRequest {
                         manage_deletions(&overlay_deletions, deletions_idx, &key);
                     deletions_idx = new_d_idx;
                     if should_skip {
+                        self.iter_record.push(format!("Skip({})", new_d_idx));
                         continue;
                     }
 
