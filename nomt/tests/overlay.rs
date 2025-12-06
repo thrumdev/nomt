@@ -1,5 +1,6 @@
 mod common;
 
+use bitvec::prelude::*;
 use common::Test;
 
 fn expected_root(items: Vec<([u8; 32], Vec<u8>)>) -> nomt_core::trie::Node {
@@ -251,4 +252,106 @@ fn overlay_deletions() {
     assert_eq!(test.read([131; 32]), None);
 
     let _overlay_b = test.update().0;
+}
+
+macro_rules! key_path {
+    ($($t:tt)+) => {{
+        let mut path = [0u8; 32];
+        let slice = bits![u8, Msb0; $($t)+];
+        path.view_bits_mut::<Msb0>()[..slice.len()].copy_from_bitslice(&slice);
+        path
+    }}
+}
+
+#[test]
+fn overlay_deletions_respected_in_seek() {
+    let mut test = Test::new("overlay_deletions_respected_in_seek");
+
+    // key_a will be on disk, deleted in overlay.
+    let key_a = key_path![0, 0, 1, 0, 1];
+
+    // key_b will be on disk, after key_a
+    let key_b = key_path![0, 0, 1, 0, 1, 1];
+
+    // key_c constrains the leaf node to the path [0, 0, 1]
+    let key_c = key_path![0, 0, 0];
+
+    // populate. [0, 0, 1] is an internal node with children for key_a and key_b
+    test.write(key_a, Some(vec![42]));
+    test.write(key_b, Some(vec![43]));
+    test.write(key_c, Some(vec![44]));
+    let _ = test.commit();
+
+    // first overlay: delete key_a. [0, 0, 1] is now a leaf for key_b
+    test.start_overlay_session(None);
+    test.write(key_a, None);
+    let overlay_a = test.update().0;
+
+    // second overlay: update key_b's value.
+    // the b-tree iterator contains key_a (deleted in overlay) and key_b,
+    // so seek must skip over key_a.
+    test.start_overlay_session([&overlay_a]);
+    test.write(key_b, Some(vec![22]));
+    let overlay_b = test.update().0;
+
+    // Now ensure that the trie root is accurate for overlay_c.
+    assert_eq!(
+        overlay_b.root().into_inner(),
+        expected_root(vec![(key_b, vec![22]), (key_c, vec![44]),]),
+    )
+}
+
+#[test]
+fn overlay_earlier_deletions_respected_in_seek() {
+    let mut test = Test::new("overlay_earlier_deletions_respected_in_seek");
+
+    // key_a will be introduced in one overlay and deleted in the next
+    let key_a = key_path![0, 0, 1, 0, 1];
+
+    // key_b will have a leaf on disk, deleted in an overlay. after key_a
+    let key_b = key_path![0, 0, 1, 0, 1, 1];
+
+    // key_c will have a leaf on disk. after key_b
+    let key_c = key_path![0, 0, 1, 1, 1, 1, 1];
+
+    // key_d will have a leaf on disk with the goal of constraining the leaf node to the path
+    // [0, 0, 1]
+    let key_d = key_path![0, 0, 0];
+
+    // populate. [0, 0, 1] is an internal node with children for key_b and key_c
+    test.write(key_b, Some(vec![42]));
+    test.write(key_c, Some(vec![43]));
+    test.write(key_d, Some(vec![44]));
+    let _ = test.commit();
+
+    // First overlay: introduce key_a and delete key_b. [0, 0, 1] is
+    // now internal with children for key_a and key_c
+    test.start_overlay_session(None);
+    test.write(key_a, Some(vec![24]));
+    test.write(key_b, None);
+    let overlay_a = test.update().0;
+
+    // Second overlay: delete key_a. [0, 0, 1] is now a leaf for key_c
+    test.start_overlay_session([&overlay_a]);
+    test.write(key_a, None);
+    let overlay_b = test.update().0;
+
+    // Third update: update key_c. Seek should skip over deleted key_a to find key_b.
+    // At this point, the ground truth beatree iterator contains key_b and key_c.
+    // Seek will:
+    //   1. encounter the leaf for key_c and initiate a leaf fetch
+    //   2. gather overlay deletions [key_a, key_b]
+    //   3. get first item from btree: key_b > key_a.
+    //   4. ignore the deleted key_a and continue to next deletion, key_b.
+    //   5. find that key_b is deleted, continue to next item.
+    //   6. get next item from btree: key_c == key_c, and return it as the leaf.
+    test.start_overlay_session([&overlay_b, &overlay_a]);
+    test.write(key_c, Some(vec![22]));
+    let overlay_c = test.update().0;
+
+    // Now ensure that the trie root is accurate for overlay_c.
+    assert_eq!(
+        overlay_c.root().into_inner(),
+        expected_root(vec![(key_c, vec![22]), (key_d, vec![44]),]),
+    )
 }

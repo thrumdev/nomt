@@ -25,6 +25,7 @@ use nomt_core::{
     trie_pos::TriePosition,
 };
 
+use std::cmp::Ordering;
 use std::collections::{
     hash_map::{Entry, HashMap},
     VecDeque,
@@ -204,6 +205,27 @@ impl SeekRequest {
             beatree_iterator.provide_leaf(leaf);
         }
 
+        let manage_deletions = |deletions: &[KeyPath], mut cur_idx: usize, key: &KeyPath| {
+            while cur_idx < deletions.len() {
+                match key.cmp(&deletions[cur_idx]) {
+                    Ordering::Less => {
+                        // key is before the deletion
+                        break;
+                    }
+                    Ordering::Equal => {
+                        cur_idx += 1;
+                        return (cur_idx, true);
+                    }
+                    Ordering::Greater => {
+                        // deletion is before the key. move on until we find a match or go past
+                        cur_idx += 1;
+                    }
+                }
+            }
+
+            (cur_idx, false)
+        };
+
         let mut deletions_idx = 0;
         let (key, value_hash) = loop {
             match beatree_iterator.next() {
@@ -212,15 +234,26 @@ impl SeekRequest {
                     overlay_deletions.drain(..deletions_idx);
                     return;
                 }
-                Some(IterOutput::Item(key, _value))
-                    if deletions_idx < overlay_deletions.len()
-                        && overlay_deletions[deletions_idx] == key =>
-                {
-                    deletions_idx += 1;
-                    continue;
+                Some(IterOutput::Item(key, value)) => {
+                    let (new_d_idx, should_skip) =
+                        manage_deletions(&overlay_deletions, deletions_idx, &key);
+                    deletions_idx = new_d_idx;
+                    if should_skip {
+                        continue;
+                    }
+
+                    break (key, H::hash_value(&value));
                 }
-                Some(IterOutput::Item(key, value)) => break (key, H::hash_value(&value)),
-                Some(IterOutput::OverflowItem(key, value_hash, _)) => break (key, value_hash),
+                Some(IterOutput::OverflowItem(key, value_hash, _)) => {
+                    let (new_d_idx, should_skip) =
+                        manage_deletions(&overlay_deletions, deletions_idx, &key);
+                    deletions_idx = new_d_idx;
+                    if should_skip {
+                        continue;
+                    }
+
+                    break (key, value_hash);
+                }
             }
         };
 
