@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "nomt"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "nomt-core"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "arrayvec",
  "bitvec",
