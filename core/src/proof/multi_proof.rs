@@ -18,7 +18,7 @@ use bitvec::prelude::*;
 use core::{cmp::Ordering, ops::Range};
 
 /// This struct includes the terminal node and its depth
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
@@ -32,7 +32,7 @@ pub struct MultiPathProof {
 }
 
 /// A proof of multiple paths through the trie.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
