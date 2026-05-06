@@ -14,7 +14,7 @@ use tokio::{
     },
     time::{error::Elapsed, sleep, timeout},
 };
-use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
+use tokio_serde::{formats::SymmetricalMessagePack, SymmetricallyFramed};
 use tokio_stream::StreamExt as _;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::trace;
@@ -458,12 +458,12 @@ struct Stream {
     rd_stream: SymmetricallyFramed<
         FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>,
         Envelope<ToAgent>,
-        SymmetricalBincode<Envelope<ToAgent>>,
+        SymmetricalMessagePack<Envelope<ToAgent>>,
     >,
     wr_stream: SymmetricallyFramed<
         FramedWrite<BufWriter<OwnedWriteHalf>, LengthDelimitedCodec>,
         Envelope<ToSupervisor>,
-        SymmetricalBincode<Envelope<ToSupervisor>>,
+        SymmetricalMessagePack<Envelope<ToSupervisor>>,
     >,
 }
 
@@ -479,7 +479,7 @@ impl Stream {
                     .max_frame_length(MAX_ENVELOPE_SIZE)
                     .new_codec(),
             ),
-            SymmetricalBincode::default(),
+            SymmetricalMessagePack::default(),
         );
         let wr_stream = SymmetricallyFramed::new(
             FramedWrite::new(
@@ -489,7 +489,7 @@ impl Stream {
                     .max_frame_length(MAX_ENVELOPE_SIZE)
                     .new_codec(),
             ),
-            SymmetricalBincode::default(),
+            SymmetricalMessagePack::default(),
         );
         Self {
             rd_stream,

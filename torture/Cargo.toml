@@ -9,7 +9,6 @@ libc.workspace = true
 anyhow.workspace = true
 cfg-if.workspace = true
 serde.workspace = true
-bincode.workspace = true
 nomt = { path = "../nomt" }
 tokio.workspace = true
 tokio-util.workspace = true

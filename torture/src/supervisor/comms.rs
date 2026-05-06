@@ -19,7 +19,7 @@ use tokio::{
     sync::{oneshot, Mutex},
     time::timeout,
 };
-use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
+use tokio_serde::{formats::SymmetricalMessagePack, SymmetricallyFramed};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
@@ -27,25 +27,25 @@ use crate::message::{self, Envelope, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE};
 
 /// The type definition of a sink which is built:
 ///
-/// - bincode serializer using [`Envelope<ToAgent>`].
+/// - MessagePack serializer using [`Envelope<ToAgent>`].
 /// - length-delimited codec.
 /// - buf writer.
 /// - unix stream (write half).
 type WrStream = SymmetricallyFramed<
     FramedWrite<BufWriter<OwnedWriteHalf>, LengthDelimitedCodec>,
     Envelope<ToAgent>,
-    SymmetricalBincode<Envelope<ToAgent>>,
+    SymmetricalMessagePack<Envelope<ToAgent>>,
 >;
 /// The type definition of a stream which is built:
 ///
 /// - unix stream (read half).
 /// - buf reader.
 /// - length-delimited codec.
-/// - bincode deserializer using [`Envelope<ToSupervisor>`].
+/// - MessagePack deserializer using [`Envelope<ToSupervisor>`].
 type RdStream = SymmetricallyFramed<
     FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>,
     Envelope<ToSupervisor>,
-    SymmetricalBincode<Envelope<ToSupervisor>>,
+    SymmetricalMessagePack<Envelope<ToSupervisor>>,
 >;
 
 /// A means to communicate with an agent.
@@ -147,7 +147,7 @@ pub fn run(stream: UnixStream) -> (RequestResponse, impl Future<Output = anyhow:
                 .max_frame_length(MAX_ENVELOPE_SIZE)
                 .new_codec(),
         ),
-        SymmetricalBincode::default(),
+        SymmetricalMessagePack::default(),
     );
     let rd_stream = SymmetricallyFramed::new(
         FramedRead::new(
@@ -157,7 +157,7 @@ pub fn run(stream: UnixStream) -> (RequestResponse, impl Future<Output = anyhow:
                 .max_frame_length(MAX_ENVELOPE_SIZE)
                 .new_codec(),
         ),
-        SymmetricalBincode::default(),
+        SymmetricalMessagePack::default(),
     );
 
     let timeout = Duration::from_secs(60);
