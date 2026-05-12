@@ -91,6 +91,7 @@ impl Test {
         o.bitbox_seed([0; 16]);
         o.hashtable_buckets(hashtable_buckets);
         o.commit_concurrency(commit_concurrency);
+        o.io_workers(1); // Too many IO workers can run into system rlimits in tests.
         let nomt = Nomt::open(o).unwrap();
         let session =
             nomt.begin_session(SessionParams::default().witness_mode(WitnessMode::read_write()));
