@@ -15,7 +15,7 @@ use crate::{
 };
 use anyhow::Result;
 use lru::LruCache;
-use rand::{distributions::Distribution as _, Rng};
+use rand::{distr::Distribution as _, Rng};
 
 /// An interface for generating new sets of actions.
 pub trait Workload: Send {
@@ -188,7 +188,7 @@ impl<'a> Transaction for LruCacheTransaction<'a> {
 }
 
 pub enum Distribution {
-    Uniform(rand::distributions::Uniform<u64>),
+    Uniform(rand::distr::Uniform<u64>),
     Pareto(rand_distr::Pareto<f64>, u64, u64),
 }
 
@@ -196,7 +196,7 @@ impl Distribution {
     pub fn new(param: StateItemDistribution, low: u64, high: u64) -> Self {
         match param {
             StateItemDistribution::Uniform => {
-                Distribution::Uniform(rand::distributions::Uniform::new(low, high))
+                Distribution::Uniform(rand::distr::Uniform::new(low, high).unwrap())
             }
             StateItemDistribution::Pareto => Distribution::Pareto(
                 // shape of log_4(5) = 1.16 gives an 80/20 relationship

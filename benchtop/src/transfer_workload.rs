@@ -3,7 +3,7 @@ use crate::{
     cli::StateItemDistribution,
     workload::{Distribution, Workload},
 };
-use rand::Rng;
+use rand::RngExt;
 
 #[derive(Clone)]
 pub struct TransferInit {
@@ -113,7 +113,7 @@ impl Workload for TransferWorkload {
             (self.workload_size as f64 * (self.percentage_cold_transfer as f64 / 100.0)) as u64;
         let warm_sends = self.workload_size - cold_sends;
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for i in 0..self.workload_size {
             let send_account = self.distribution.sample(&mut rng);
             let recv_account = if i < warm_sends {
@@ -125,7 +125,7 @@ impl Workload for TransferWorkload {
             } else {
                 // odds of two threads generating the same random account here are
                 // incredibly low.
-                rng.gen_range(self.num_accounts..u64::max_value())
+                rng.random_range(self.num_accounts..u64::max_value())
             };
 
             let send_balance = decode_balance(
