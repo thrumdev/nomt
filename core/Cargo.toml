@@ -12,7 +12,6 @@ license.workspace = true
 
 [dependencies]
 bitvec.workspace = true
-hex.workspace = true
 ruint.workspace = true
 arrayvec.workspace = true
 borsh = { workspace = true, optional = true }

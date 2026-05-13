@@ -13,4 +13,3 @@ license.workspace = true
 nomt-core = { path = "../../core"  }
 commit-batch = { path = "../commit_batch"  }
 anyhow = "1.0.81"
-blake3 = "1.5.1"
