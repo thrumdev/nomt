@@ -15,8 +15,10 @@ use std::{
 
 static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
+#[allow(unused_imports)]
 pub use nomt_test_utils::{account_path, key_diverging_at};
 
+#[allow(dead_code)]
 pub fn expected_root(accounts: u64) -> Node {
     let mut ops = (0..accounts)
         .map(account_path)
@@ -54,6 +56,7 @@ fn fill_missing_keys(g: &mut Gen, excluded: &mut BTreeSet<KeyPath>, target: usiz
     out
 }
 
+#[allow(dead_code)]
 pub fn apply_accesses(t: &mut Test, accesses: &[(KeyPath, KeyReadWrite)]) {
     for (key, access) in accesses {
         match access {
