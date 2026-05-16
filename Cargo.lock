@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "nomt"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "nomt-core"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "arrayvec",
  "bitvec",
