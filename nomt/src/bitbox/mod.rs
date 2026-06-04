@@ -27,8 +27,11 @@ pub use wal::WalBlobBuilder;
 
 mod ht_file;
 mod meta_map;
+mod rehash;
 mod wal;
 pub(crate) mod writeout;
+
+pub(crate) use rehash::{finish_pending_rehash, grow_hashtable};
 
 /// During assigning a bucket to a page, the allocator gave up, meaning that the occupancy rate
 /// is too high.
@@ -651,7 +654,15 @@ fn allocate_bucket(
     meta_map: &mut MetaMap,
     seed: &[u8; 16],
 ) -> Option<BucketIndex> {
-    let mut probe_seq = ProbeSequence::new(page_id, &meta_map, seed);
+    allocate_bucket_raw(page_id.encode(), meta_map, seed)
+}
+
+fn allocate_bucket_raw(
+    page_id: [u8; 32],
+    meta_map: &mut MetaMap,
+    seed: &[u8; 16],
+) -> Option<BucketIndex> {
+    let mut probe_seq = ProbeSequence::new_raw(page_id, &meta_map, seed);
 
     let mut i = 0;
     loop {
@@ -695,7 +706,11 @@ enum ProbeResult {
 
 impl ProbeSequence {
     fn new(page_id: &PageId, meta_map: &MetaMap, seed: &[u8; 16]) -> Self {
-        let hash = hash_page_id(page_id, seed);
+        Self::new_raw(page_id.encode(), meta_map, seed)
+    }
+
+    fn new_raw(page_id: [u8; 32], meta_map: &MetaMap, seed: &[u8; 16]) -> Self {
+        let hash = hash_raw_page_id(page_id, seed);
         Self {
             hash,
             bucket: hash % meta_map.len() as u64,
