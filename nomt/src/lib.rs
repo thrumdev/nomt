@@ -951,6 +951,22 @@ pub fn check_iou_permissions() -> IoUringPermission {
     crate::io::check_iou_permissions()
 }
 
+/// Grow the Bitbox hash table of an offline NOMT database.
+///
+/// This function takes the database directory lock, recovers any pending Bitbox write-ahead log,
+/// rebuilds the hash table with the bucket count configured by [`Options::hashtable_buckets`], and
+/// updates the on-disk metadata. The database must not be open in the current process while this
+/// runs.
+///
+/// Only the [`Options`] path, hashtable bucket count, and preallocation setting are used.
+pub fn grow_hashtable(options: &Options) -> anyhow::Result<()> {
+    store::grow_hashtable(
+        &options.path,
+        options.bitbox_num_pages,
+        options.preallocate_ht,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::hasher::Blake3Hasher;

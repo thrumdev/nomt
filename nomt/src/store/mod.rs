@@ -27,7 +27,7 @@ pub use self::page_loader::{PageLoad, PageLoader};
 pub use bitbox::{BucketIndex, HashTableUtilization, SharedMaybeBucketIndex};
 
 mod flock;
-mod meta;
+pub(crate) mod meta;
 mod page_loader;
 mod sync;
 
@@ -66,6 +66,7 @@ impl Store {
             options.read(true);
             db_dir_fd = options.open(&o.path)?;
             flock = flock::Flock::lock(&o.path, ".lock")?;
+            bitbox::finish_pending_rehash(&o.path, &page_pool)?;
         }
         let db_dir_fd = Arc::new(db_dir_fd);
 
@@ -316,6 +317,25 @@ impl Drop for Shared {
         self.io_pool.shutdown();
         drop(self.flock.take());
     }
+}
+
+pub(crate) fn grow_hashtable(
+    path: &std::path::Path,
+    hashtable_buckets: u32,
+    preallocate_ht: bool,
+) -> anyhow::Result<()> {
+    let page_pool = PagePool::new();
+
+    let db_dir_fd = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.open(path)?
+    };
+    let _flock = flock::Flock::lock(path, ".lock")?;
+
+    bitbox::grow_hashtable(path, &page_pool, hashtable_buckets, preallocate_ht)?;
+    db_dir_fd.sync_all()?;
+    Ok(())
 }
 
 /// An atomic transaction on raw key/value pairs to be applied against the store

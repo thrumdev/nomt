@@ -24,7 +24,7 @@ impl MetaMap {
     }
 
     pub fn full_count(&self) -> usize {
-        self.bitvec
+        self.bitvec[..self.buckets]
             .iter()
             .filter(|&&byte| byte & FULL_MASK != 0)
             .count()
@@ -36,6 +36,10 @@ impl MetaMap {
 
     pub fn set_full(&mut self, bucket: usize, hash: u64) {
         self.bitvec[bucket] = full_entry(hash);
+    }
+
+    pub(super) fn is_full(&self, bucket: usize) -> bool {
+        self.bitvec[bucket] & FULL_MASK != 0
     }
 
     pub fn set_tombstone(&mut self, bucket: usize) {
