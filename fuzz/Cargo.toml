@@ -58,3 +58,10 @@ path = "fuzz_targets/reconstruct_key.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "grow_hashtable"
+path = "fuzz_targets/grow_hashtable.rs"
+test = false
+doc = false
+bench = false

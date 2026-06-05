@@ -108,6 +108,27 @@ pub struct RollbackPayload {
     pub should_crash: Option<Duration>,
 }
 
+/// The parameters for the [`ToAgent::GrowHashtable`] message.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GrowHashtablePayload {
+    /// The requested number of buckets after growth.
+    pub hashtable_buckets: u32,
+    /// Whether to preallocate the replacement hash table file.
+    pub preallocate_ht: bool,
+    /// If Some the supervisor expects growth to crash,
+    /// the crash should happen after the specified amount of time.
+    pub should_crash: Option<Duration>,
+}
+
+/// The hash table utilization reported by an agent.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HashTableUtilization {
+    /// The maximum number of buckets in the hash table.
+    pub capacity: usize,
+    /// The number of occupied buckets in the hash table.
+    pub occupied: usize,
+}
+
 /// The maximum size of an envelope, in the serialized form.
 pub const MAX_ENVELOPE_SIZE: usize = 128 * 1024 * 1024;
 
@@ -138,11 +159,16 @@ pub enum ToAgent {
     /// The supervisor sends this message to the child process to indicate that the child should
     /// perform a rollback.
     Rollback(RollbackPayload),
+    /// The supervisor sends this message to the child process to grow the Bitbox hash table
+    /// offline. The agent drops its open database handle before running this operation.
+    GrowHashtable(GrowHashtablePayload),
     /// The supervisor sends this message to the child process to query the value of a given key.
     Query(Key),
     /// The supervisor sends this message to the child process to query the current sequence number
     /// of the database.
     QuerySyncSeqn,
+    /// The supervisor sends this message to the child process to query hash table utilization.
+    QueryHashTableUtilization,
     /// The supervisor sends this message to the child process to indicate that the child should
     /// do a clean shutdown.
     GracefulShutdown,
@@ -202,8 +228,15 @@ pub enum ToSupervisor {
         /// The outcome of the rollback.
         outcome: Outcome,
     },
+    /// The response to a completed hash table growth request.
+    GrowHashtableResponse {
+        /// The outcome of the growth.
+        outcome: Outcome,
+    },
     /// The response to a query for a key-value pair.
     QueryValue(Option<Value>),
     /// The response to a query for the current sequence number of the database.
     SyncSeqn(u32),
+    /// The response to a query for hash table utilization.
+    HashTableUtilizationResponse(HashTableUtilization),
 }

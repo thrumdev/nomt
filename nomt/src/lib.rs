@@ -967,6 +967,16 @@ pub fn grow_hashtable(options: &Options) -> anyhow::Result<()> {
     )
 }
 
+/// Validate the Bitbox hash table layout of an offline NOMT database.
+///
+/// This function takes the database directory lock, completes any pending Bitbox WAL or rehash
+/// recovery, and then scans the on-disk hash table for layout inconsistencies. The database must
+/// not be open in the current process while this runs.
+#[doc(hidden)]
+pub fn validate_hashtable(options: &Options) -> anyhow::Result<HashTableUtilization> {
+    store::validate_hashtable(&options.path)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::hasher::Blake3Hasher;

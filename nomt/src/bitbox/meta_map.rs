@@ -42,6 +42,12 @@ impl MetaMap {
         self.bitvec[bucket] & FULL_MASK != 0
     }
 
+    pub(super) fn padding_is_empty(&self) -> bool {
+        self.bitvec[self.buckets..]
+            .iter()
+            .all(|&byte| byte == EMPTY)
+    }
+
     pub fn set_tombstone(&mut self, bucket: usize) {
         self.bitvec[bucket] = TOMBSTONE;
     }

@@ -26,6 +26,10 @@ pub enum SwarmFeatures {
     Rollback,
     /// Whether rollback crash should be exercised.
     RollbackCrash,
+    /// Whether the Bitbox hash table should be grown offline during the workload.
+    GrowHashtable,
+    /// Whether offline hash table growth should be crashed.
+    GrowHashtableCrash,
     /// Whether commit crash should be exercised.
     CommitCrash,
     /// Whether to prepopulate the upper levels of the page cache on startup.
@@ -49,6 +53,8 @@ pub fn new_features_set(rng: &mut rand_pcg::Pcg64) -> Vec<SwarmFeatures> {
         SwarmFeatures::Read,
         SwarmFeatures::Rollback,
         SwarmFeatures::RollbackCrash,
+        SwarmFeatures::GrowHashtable,
+        SwarmFeatures::GrowHashtableCrash,
         SwarmFeatures::CommitCrash,
         SwarmFeatures::PrepopulatePageCache,
         SwarmFeatures::NewKeys,

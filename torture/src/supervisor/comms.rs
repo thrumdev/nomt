@@ -106,6 +106,21 @@ impl RequestResponse {
             resp => bail!("unexpected response: {:?}", resp),
         }
     }
+
+    /// Requests the current hash table utilization from the agent.
+    pub async fn send_query_hash_table_utilization(
+        &self,
+    ) -> anyhow::Result<message::HashTableUtilization> {
+        match self
+            .send_request(crate::message::ToAgent::QueryHashTableUtilization)
+            .await?
+        {
+            crate::message::ToSupervisor::HashTableUtilizationResponse(utilization) => {
+                Ok(utilization)
+            }
+            resp => bail!("unexpected response: {:?}", resp),
+        }
+    }
 }
 
 /// A task that handles inbound messages and dispatches them to the corresponding request listener.

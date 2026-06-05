@@ -100,6 +100,12 @@ pub struct WorkloadConfiguration {
     pub max_rollback_commits: usize,
     /// When executing a rollback this is the probability of causing it to crash.
     pub rollback_crash: f64,
+    /// When executing a workload iteration, this is the probability of growing the hash table.
+    pub grow_hashtable: f64,
+    /// The maximum hash table bucket count that growth can request.
+    pub max_hashtable_buckets: u32,
+    /// When growing the hash table this is the probability of causing it to crash.
+    pub grow_hashtable_crash: f64,
     /// Whether trickfs will be used or not.
     ///
     /// If false, enospc_on/off and latency_on/off will all be 0.
@@ -150,6 +156,9 @@ impl WorkloadConfiguration {
             rollback: 0.0,
             commit_crash: 0.0,
             rollback_crash: 0.0,
+            grow_hashtable: 0.0,
+            max_hashtable_buckets: 0,
+            grow_hashtable_crash: 0.0,
             trickfs,
             enospc_on: 0.0,
             enospc_off: 0.0,
@@ -189,6 +198,7 @@ impl WorkloadConfiguration {
         let hashtable_size = (avail_bytes as f64 * hashtable_ratio) as usize;
         let hashtable_buckets = (hashtable_size / 4096) as u32;
         config.hashtable_buckets = hashtable_buckets;
+        config.max_hashtable_buckets = hashtable_buckets;
 
         // Do not use the entire space left by the hashtable
         // for the beatree and rollbacks, instead, leave some room for estimation error.
@@ -319,6 +329,16 @@ impl WorkloadConfiguration {
                 self.max_rollback_commits = rng.random_range(2..100);
             }
             SwarmFeatures::RollbackCrash => self.rollback_crash = rng.random_range(0.01..1.00),
+            SwarmFeatures::GrowHashtable => {
+                self.grow_hashtable = rng.random_range(0.01..0.20);
+                self.max_hashtable_buckets = self
+                    .hashtable_buckets
+                    .saturating_mul(2)
+                    .max(self.hashtable_buckets.saturating_add(1));
+            }
+            SwarmFeatures::GrowHashtableCrash => {
+                self.grow_hashtable_crash = rng.random_range(0.01..1.00)
+            }
             SwarmFeatures::CommitCrash => self.commit_crash = rng.random_range(0.01..1.00),
             SwarmFeatures::PrepopulatePageCache => self.prepopulate_page_cache = true,
             SwarmFeatures::NewKeys => self.new_key = rng.random_range(0.01..=1.00),
