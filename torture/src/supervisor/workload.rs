@@ -353,6 +353,15 @@ impl Workload {
             self.schedule_rollback(should_crash).await?
         }
 
+        if self.scheduled_rollback.is_none()
+            && self.config.hashtable_buckets < self.config.max_hashtable_buckets
+            && self.rng.random_bool(self.config.grow_hashtable)
+        {
+            let should_crash = self.rng.random_bool(self.config.grow_hashtable_crash);
+            self.exercise_grow_hashtable(should_crash).await?;
+            return Ok(());
+        }
+
         let should_crash = self.rng.random_bool(self.config.commit_crash);
         self.exercise_commit(should_crash).await?;
 
@@ -618,6 +627,140 @@ impl Workload {
 
         self.ensure_snapshot_validity().await?;
         Ok(())
+    }
+
+    async fn exercise_grow_hashtable(&mut self, should_crash: bool) -> anyhow::Result<()> {
+        let Some(new_hashtable_buckets) = self.next_hashtable_bucket_count() else {
+            return Ok(());
+        };
+        let old_hashtable_buckets = self.config.hashtable_buckets;
+        let should_crash = if should_crash {
+            trace!(
+                "exercising hash table grow crash from {} to {} buckets",
+                old_hashtable_buckets,
+                new_hashtable_buckets
+            );
+            Some(Duration::from_millis(10))
+        } else {
+            trace!(
+                "exercising hash table grow from {} to {} buckets",
+                old_hashtable_buckets,
+                new_hashtable_buckets
+            );
+            None
+        };
+
+        let grow_outcome = self
+            .rr()
+            .send_request(crate::message::ToAgent::GrowHashtable(
+                crate::message::GrowHashtablePayload {
+                    hashtable_buckets: new_hashtable_buckets,
+                    // The torture workload already sizes the initial table aggressively relative
+                    // to its resource assignment. Keep grow sparse here so this exercises rehash
+                    // correctness instead of mostly testing duplicate preallocation headroom.
+                    preallocate_ht: false,
+                    should_crash,
+                },
+            ))
+            .await?;
+
+        if should_crash.is_some() {
+            let ToSupervisor::Ack = grow_outcome else {
+                return Err(anyhow::anyhow!(
+                    "Hash table grow crash did not execute successfully"
+                ));
+            };
+
+            self.wait_for_crash().await?;
+            self.spawn_new_agent().await?;
+        } else {
+            let ToSupervisor::GrowHashtableResponse { outcome } = grow_outcome else {
+                return Err(anyhow::anyhow!(
+                    "Hash table grow did not execute successfully"
+                ));
+            };
+
+            self.ensure_grow_outcome_validity(&outcome).await?;
+            self.ensure_agent_open_db().await?;
+        }
+
+        self.reconcile_hashtable_growth(old_hashtable_buckets, new_hashtable_buckets)
+            .await?;
+        self.ensure_snapshot_validity().await?;
+        Ok(())
+    }
+
+    async fn ensure_grow_outcome_validity(
+        &mut self,
+        outcome: &crate::message::Outcome,
+    ) -> Result<()> {
+        match outcome {
+            crate::message::Outcome::Success => {
+                if self.enabled_enospc {
+                    return Err(anyhow::anyhow!(
+                        "Hash table grow should have failed with ENOSPC"
+                    ));
+                }
+            }
+            crate::message::Outcome::StorageFull => {
+                if !self.enabled_enospc {
+                    return Err(anyhow::anyhow!("Hash table grow should have succeeded"));
+                }
+
+                self.enabled_enospc = false;
+                self.trick_handle
+                    .as_ref()
+                    .unwrap()
+                    .set_trigger_enospc(false);
+            }
+            crate::message::Outcome::UnknownFailure(err) => {
+                return Err(anyhow::anyhow!(
+                    "Hash table grow failed due to unknown reasons: {}",
+                    err
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_hashtable_growth(
+        &mut self,
+        old_hashtable_buckets: u32,
+        new_hashtable_buckets: u32,
+    ) -> anyhow::Result<()> {
+        let utilization = self.rr().send_query_hash_table_utilization().await?;
+        if utilization.capacity == new_hashtable_buckets as usize {
+            self.config.hashtable_buckets = new_hashtable_buckets;
+        } else if utilization.capacity == old_hashtable_buckets as usize {
+            self.config.hashtable_buckets = old_hashtable_buckets;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unexpected hash table capacity after grow: old={}, requested={}, found={}",
+                old_hashtable_buckets,
+                new_hashtable_buckets,
+                utilization.capacity,
+            ));
+        }
+
+        trace!(
+            "hash table utilization after grow: {}/{}",
+            utilization.occupied,
+            utilization.capacity
+        );
+        Ok(())
+    }
+
+    fn next_hashtable_bucket_count(&mut self) -> Option<u32> {
+        let current = self.config.hashtable_buckets;
+        let max = self.config.max_hashtable_buckets;
+        if current == 0 || current >= max {
+            return None;
+        }
+
+        let remaining = max - current;
+        let max_delta = (current / 8).max(1).min(remaining);
+        let delta = self.rng.random_range(1..=max_delta);
+        Some(current + delta)
     }
 
     async fn wait_for_crash(&mut self) -> anyhow::Result<()> {

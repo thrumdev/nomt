@@ -22,8 +22,9 @@ use tracing::trace;
 use crate::message::Key;
 use crate::{
     message::{
-        self, CommitPayload, Envelope, InitOutcome, KeyValueChange, OpenOutcome, OpenPayload,
-        Outcome, RollbackPayload, ToAgent, ToSupervisor, MAX_ENVELOPE_SIZE,
+        self, CommitPayload, Envelope, GrowHashtablePayload, InitOutcome, KeyValueChange,
+        OpenOutcome, OpenPayload, Outcome, RollbackPayload, ToAgent, ToSupervisor,
+        MAX_ENVELOPE_SIZE,
     },
     panic::panic_to_err,
 };
@@ -126,6 +127,47 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     })
                     .await?;
             }
+            ToAgent::GrowHashtable(GrowHashtablePayload {
+                hashtable_buckets,
+                preallocate_ht,
+                should_crash: Some(crash_delay),
+            }) => {
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Ack,
+                    })
+                    .await?;
+
+                let workdir = workdir.clone();
+                let task = async move {
+                    let start = std::time::Instant::now();
+                    let _ = agent
+                        .grow_hashtable(&workdir, hashtable_buckets, preallocate_ht)
+                        .await;
+                    tracing::info!("hash table grow took {:?}", start.elapsed());
+                };
+
+                crash_task(task, crash_delay, "hash table grow").await;
+                unreachable!();
+            }
+            ToAgent::GrowHashtable(GrowHashtablePayload {
+                hashtable_buckets,
+                preallocate_ht,
+                should_crash: None,
+            }) => {
+                let start = std::time::Instant::now();
+                let outcome = agent
+                    .grow_hashtable(&workdir, hashtable_buckets, preallocate_ht)
+                    .await;
+                tracing::info!("hash table grow took {}ms", start.elapsed().as_millis());
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::GrowHashtableResponse { outcome },
+                    })
+                    .await?;
+            }
             ToAgent::Query(key) => {
                 let value = agent.query(key)?;
                 stream
@@ -141,6 +183,15 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     .send(Envelope {
                         reqno,
                         message: ToSupervisor::SyncSeqn(sync_seqn),
+                    })
+                    .await?;
+            }
+            ToAgent::QueryHashTableUtilization => {
+                let utilization = agent.hash_table_utilization()?;
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::HashTableUtilizationResponse(utilization),
                     })
                     .await?;
             }
@@ -405,6 +456,38 @@ impl Agent {
         rollback_outcome
     }
 
+    /// Grow the Bitbox hash table offline.
+    async fn grow_hashtable(
+        &mut self,
+        workdir: &Path,
+        hashtable_buckets: u32,
+        preallocate_ht: bool,
+    ) -> Outcome {
+        self.session.take();
+        self.nomt.take();
+
+        let mut options = nomt::Options::new();
+        options.path(workdir.join("nomt_db"));
+        options.hashtable_buckets(hashtable_buckets);
+        options.preallocate_ht(preallocate_ht);
+
+        let grow_result = block_in_place(
+            || {
+                nomt::grow_hashtable(&options)?;
+                nomt::validate_hashtable(&options)?;
+                Ok(())
+            },
+            "Panic growing hash table",
+        );
+        let grow_outcome = classify_result(grow_result);
+
+        if !matches!(grow_outcome, Outcome::Success) {
+            trace!("unsuccessful hash table grow: {:?}", grow_outcome);
+        }
+
+        grow_outcome
+    }
+
     fn query(&mut self, key: message::Key) -> Result<Option<message::Value>> {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
@@ -416,6 +499,16 @@ impl Agent {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
         nomt.sync_seqn()
+    }
+
+    fn hash_table_utilization(&mut self) -> Result<message::HashTableUtilization> {
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        let utilization = nomt.hash_table_utilization();
+        Ok(message::HashTableUtilization {
+            capacity: utilization.capacity,
+            occupied: utilization.occupied,
+        })
     }
 }
 

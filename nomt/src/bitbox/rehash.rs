@@ -313,3 +313,171 @@ fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::OpenOptions, path::Path};
+
+    use crate::{
+        bitbox::validate_hashtable, hasher::Blake3Hasher, io::PagePool, store::meta::Meta,
+        trie::KeyPath, KeyReadWrite, Nomt, Options, SessionParams,
+    };
+
+    use super::{
+        grow_hashtable, rehash_to_tmp, sync_dir, write_marker, RehashMarker, MARKER_FILE,
+        TMP_HT_FILE,
+    };
+
+    const OLD_BUCKETS: u32 = 4096;
+    const NEW_BUCKETS: u32 = 8192;
+
+    fn options(path: &Path, buckets: u32) -> Options {
+        let mut options = Options::new();
+        options.path(path);
+        options.bitbox_seed([0; 16]);
+        options.hashtable_buckets(buckets);
+        options.io_workers(1);
+        options.preallocate_ht(false);
+        options
+    }
+
+    fn key(i: u64) -> KeyPath {
+        let mut input = [0u8; 32];
+        input[24..].copy_from_slice(&i.to_be_bytes());
+        *blake3::hash(&input).as_bytes()
+    }
+
+    fn value(i: u64) -> Vec<u8> {
+        let mut value = Vec::with_capacity(16);
+        value.extend_from_slice(&i.to_le_bytes());
+        value.extend_from_slice(&(i * 11).to_le_bytes());
+        value
+    }
+
+    fn commit_range(nomt: &Nomt<Blake3Hasher>, range: std::ops::Range<u64>) {
+        let session = nomt.begin_session(SessionParams::default());
+        let mut operations = range
+            .map(|i| (key(i), KeyReadWrite::Write(Some(value(i)))))
+            .collect::<Vec<_>>();
+        operations.sort_by_key(|(key, _)| *key);
+        for (key, _) in &operations {
+            session.warm_up(*key);
+        }
+
+        session.finish(operations).unwrap().commit(nomt).unwrap();
+    }
+
+    fn create_db(path: &Path) {
+        let nomt = Nomt::<Blake3Hasher>::open(options(path, OLD_BUCKETS)).unwrap();
+        commit_range(&nomt, 0..40);
+        drop(nomt);
+    }
+
+    fn read_meta(path: &Path, page_pool: &PagePool) -> Meta {
+        let meta_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.join("meta"))
+            .unwrap();
+        Meta::read(page_pool, &meta_fd).unwrap()
+    }
+
+    fn write_meta(path: &Path, page_pool: &PagePool, meta: &Meta) {
+        let meta_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.join("meta"))
+            .unwrap();
+        Meta::write(page_pool, &meta_fd, meta).unwrap();
+    }
+
+    fn prepare_tmp_and_marker(path: &Path, page_pool: &PagePool) {
+        let meta = read_meta(path, page_pool);
+        rehash_to_tmp(path, page_pool, &meta, NEW_BUCKETS, false).unwrap();
+        write_marker(
+            path,
+            RehashMarker {
+                old_num_pages: OLD_BUCKETS,
+                new_num_pages: NEW_BUCKETS,
+            },
+        )
+        .unwrap();
+    }
+
+    fn assert_open_db(path: &Path, expected_buckets: usize) {
+        let nomt = Nomt::<Blake3Hasher>::open(options(path, OLD_BUCKETS)).unwrap();
+        assert_eq!(nomt.hash_table_utilization().capacity, expected_buckets);
+        for i in 0..40 {
+            assert_eq!(nomt.read(key(i)).unwrap(), Some(value(i)));
+        }
+    }
+
+    #[test]
+    fn stale_tmp_without_marker_is_replaced_by_next_grow() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path();
+        create_db(path);
+
+        let page_pool = PagePool::new();
+        let meta = read_meta(path, &page_pool);
+        rehash_to_tmp(path, &page_pool, &meta, NEW_BUCKETS, false).unwrap();
+        assert!(path.join(TMP_HT_FILE).exists());
+
+        grow_hashtable(path, &page_pool, NEW_BUCKETS, false).unwrap();
+        assert!(!path.join(TMP_HT_FILE).exists());
+        assert!(!path.join(MARKER_FILE).exists());
+        validate_hashtable(path, &page_pool).unwrap();
+        assert_open_db(path, NEW_BUCKETS as usize);
+    }
+
+    #[test]
+    fn pending_rehash_before_rename_keeps_old_table() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path();
+        create_db(path);
+
+        let page_pool = PagePool::new();
+        prepare_tmp_and_marker(path, &page_pool);
+
+        assert_open_db(path, OLD_BUCKETS as usize);
+        assert!(!path.join(TMP_HT_FILE).exists());
+        assert!(!path.join(MARKER_FILE).exists());
+        validate_hashtable(path, &page_pool).unwrap();
+    }
+
+    #[test]
+    fn pending_rehash_after_rename_updates_meta() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path();
+        create_db(path);
+
+        let page_pool = PagePool::new();
+        prepare_tmp_and_marker(path, &page_pool);
+        std::fs::rename(path.join(TMP_HT_FILE), path.join("ht")).unwrap();
+        sync_dir(path).unwrap();
+
+        assert_open_db(path, NEW_BUCKETS as usize);
+        assert!(!path.join(MARKER_FILE).exists());
+        validate_hashtable(path, &page_pool).unwrap();
+    }
+
+    #[test]
+    fn pending_rehash_after_meta_update_removes_marker() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path();
+        create_db(path);
+
+        let page_pool = PagePool::new();
+        prepare_tmp_and_marker(path, &page_pool);
+        std::fs::rename(path.join(TMP_HT_FILE), path.join("ht")).unwrap();
+        sync_dir(path).unwrap();
+
+        let mut meta = read_meta(path, &page_pool);
+        meta.bitbox_num_pages = NEW_BUCKETS;
+        write_meta(path, &page_pool, &meta);
+
+        assert_open_db(path, NEW_BUCKETS as usize);
+        assert!(!path.join(MARKER_FILE).exists());
+        validate_hashtable(path, &page_pool).unwrap();
+    }
+}

@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use nomt::{
-    grow_hashtable, hasher::Blake3Hasher, trie::KeyPath, KeyReadWrite, Nomt, Options, Root,
-    SessionParams, WitnessMode,
+    grow_hashtable, hasher::Blake3Hasher, trie::KeyPath, validate_hashtable, KeyReadWrite, Nomt,
+    Options, Root, SessionParams, WitnessMode,
 };
 
 fn options(path: &Path, buckets: u32, rollback: bool) -> Options {
@@ -58,6 +58,9 @@ fn grow_hashtable_preserves_data_and_rollback() {
     drop(nomt);
 
     grow_hashtable(&options(path, 8192, true)).unwrap();
+    let utilization = validate_hashtable(&options(path, 8192, true)).unwrap();
+    assert_eq!(utilization.capacity, 8192);
+    assert!(utilization.occupied > 0);
 
     let nomt = Nomt::<Blake3Hasher>::open(options(path, 4096, true)).unwrap();
     assert_eq!(nomt.root(), root_2);

@@ -338,6 +338,22 @@ pub(crate) fn grow_hashtable(
     Ok(())
 }
 
+/// Validate the Bitbox hash table of an offline database while holding the directory lock.
+pub(crate) fn validate_hashtable(path: &std::path::Path) -> anyhow::Result<HashTableUtilization> {
+    let page_pool = PagePool::new();
+
+    let db_dir_fd = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.open(path)?
+    };
+    let _flock = flock::Flock::lock(path, ".lock")?;
+
+    let utilization = bitbox::validate_hashtable(path, &page_pool)?;
+    db_dir_fd.sync_all()?;
+    Ok(utilization)
+}
+
 /// An atomic transaction on raw key/value pairs to be applied against the store
 /// with [`Store::commit`].
 pub struct ValueTransaction {

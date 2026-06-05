@@ -28,10 +28,12 @@ pub use wal::WalBlobBuilder;
 mod ht_file;
 mod meta_map;
 mod rehash;
+mod validate;
 mod wal;
 pub(crate) mod writeout;
 
 pub(crate) use rehash::{finish_pending_rehash, grow_hashtable};
+pub(crate) use validate::validate_hashtable;
 
 /// During assigning a bucket to a page, the allocator gave up, meaning that the occupancy rate
 /// is too high.
