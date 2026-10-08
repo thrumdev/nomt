@@ -367,12 +367,17 @@ impl LeafIterator {
         // the iterator's range.
         let index = self.start.take().map_or(0, |start| {
             let cell_pointers = leaf.cell_pointers();
-            let res = cell_pointers.binary_search_by(|cell_pointer| {
-                let k = super::leaf::node::extract_key(cell_pointer);
-                k.cmp(&start)
-            });
-
-            res.unwrap_or_else(|i| i)
+            let mut left = 0;
+            let mut right = cell_pointers.len();
+            while left < right {
+                let mid = left + (right - left) / 2;
+                match super::leaf::node::extract_key(&cell_pointers[mid]).cmp(&start) {
+                    Ordering::Less => left = mid + 1,
+                    Ordering::Greater => right = mid,
+                    Ordering::Equal => return mid,
+                }
+            }
+            left
         });
 
         let prev_state = std::mem::replace(&mut self.state, LeafIteratorState::Done { last: None });
