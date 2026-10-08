@@ -235,6 +235,27 @@ impl LeafIterator {
     }
 
     fn next<'a>(&'a mut self) -> Option<IterOutput<'a>> {
+        // Most steps remain within the same leaf. Advance its cursor in place instead
+        // of moving the entire state, including its branch and leaf handles, twice.
+        let within_leaf = match &self.state {
+            LeafIteratorState::Proceeding { current, .. } => {
+                let next = current.index + 1;
+                next < current.leaf.n()
+                    && self
+                        .end
+                        .as_ref()
+                        .map_or(true, |end| current.leaf.key(next) < *end)
+            }
+            _ => false,
+        };
+        if within_leaf {
+            let LeafIteratorState::Proceeding { current, .. } = &mut self.state else {
+                unreachable!();
+            };
+            current.index += 1;
+            return Some(current.last_output());
+        }
+
         // This is a so-called "Streaming Iterator", where the items borrow the lifetime
         // of the callsite rather than consuming items from the object - these are somewhat awkward
         // because we first have to advance the state of the iterator and then return a borrow
