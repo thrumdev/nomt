@@ -127,13 +127,6 @@ pub mod blake3 {
         fn hash(value: &[u8]) -> [u8; 32] {
             blake3::hash(value).into()
         }
-
-        fn hash2_32_concat(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(left);
-            hasher.update(right);
-            hasher.finalize().into()
-        }
     }
 }
 
