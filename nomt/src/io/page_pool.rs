@@ -89,8 +89,31 @@ impl FatPage {
 impl Clone for FatPage {
     fn clone(&self) -> Self {
         let mut new_page = self.page_pool.alloc_fat_page();
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: detection establishes AVX2 support. Both live allocations
+            // contain PAGE_SIZE bytes and the new allocation cannot overlap self.
+            unsafe { copy_page_avx2(new_page.as_mut_ptr(), self.as_ptr()) };
+            return new_page;
+        }
         new_page.copy_from_slice(&*self);
         new_page
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_page_avx2(destination: *mut u8, source: *const u8) {
+    use std::arch::x86_64::{_mm256_loadu_si256, _mm256_storeu_si256};
+    for offset in (0..PAGE_SIZE).step_by(128) {
+        let a = _mm256_loadu_si256(source.add(offset).cast());
+        let b = _mm256_loadu_si256(source.add(offset + 32).cast());
+        let c = _mm256_loadu_si256(source.add(offset + 64).cast());
+        let d = _mm256_loadu_si256(source.add(offset + 96).cast());
+        _mm256_storeu_si256(destination.add(offset).cast(), a);
+        _mm256_storeu_si256(destination.add(offset + 32).cast(), b);
+        _mm256_storeu_si256(destination.add(offset + 64).cast(), c);
+        _mm256_storeu_si256(destination.add(offset + 96).cast(), d);
     }
 }
 
