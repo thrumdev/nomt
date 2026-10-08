@@ -61,6 +61,10 @@ pub struct RunParams {
     #[arg(long = "warm-up")]
     pub warm_up: Option<humantime::Duration>,
 
+    /// Warm up with a fixed amount of work, using a separate workload stream.
+    #[arg(long, conflicts_with = "warm_up")]
+    pub warm_up_ops: Option<u64>,
+
     /// Whether to reset the database.
     ///
     /// If this is false, no initialization logic will be run and the database is assumed to

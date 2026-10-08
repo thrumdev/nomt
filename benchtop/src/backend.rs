@@ -89,7 +89,8 @@ impl DB {
         mut timer: Option<&mut Timer>,
         workload: &mut dyn Workload,
         timeout: Option<std::time::Instant>,
-    ) {
+    ) -> u64 {
+        let mut batches = 0;
         while !workload.is_done() {
             if timeout
                 .as_ref()
@@ -105,7 +106,9 @@ impl DB {
                 DB::SpTrie(db) => db.execute(timer, workload),
                 DB::Nomt(db) => db.execute(timer, workload),
             }
+            batches += 1;
         }
+        batches
     }
 
     /// Execute several workloads in parallel, repeatedly, until all done or a time limit is reached.
@@ -117,7 +120,8 @@ impl DB {
         thread_pool: &rayon::ThreadPool,
         workloads: &mut [Box<dyn Workload>],
         timeout: Option<std::time::Instant>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
+        let mut batches = 0;
         while workloads.iter().any(|w| !w.is_done()) {
             if timeout
                 .as_ref()
@@ -137,9 +141,10 @@ impl DB {
                 }
                 DB::Nomt(db) => db.parallel_execute(timer, thread_pool, workloads),
             }
+            batches += 1;
         }
 
-        Ok(())
+        Ok(batches)
     }
 
     /// Print metrics collected by the Backend if it supports metrics collection

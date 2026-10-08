@@ -79,6 +79,15 @@ pub fn run(params: RunParams) -> Result<()> {
         .num_threads(workload_params.workload_concurrency as usize)
         .build()?;
 
+    if let Some(ops) = params.warm_up_ops {
+        let (_, mut warmup_workloads) = workload::parse(&workload_params, ops)?;
+        if workload_params.workload_concurrency == 1 {
+            db.execute(None, &mut *warmup_workloads[0], None);
+        } else {
+            db.parallel_execute(None, &thread_pool, &mut warmup_workloads, None)?;
+        }
+    }
+
     if let Some(t) = warmup_timeout {
         if workload_params.workload_concurrency == 1 {
             db.execute(Some(&mut timer), &mut *workloads[0], Some(t));
@@ -94,11 +103,21 @@ pub fn run(params: RunParams) -> Result<()> {
         .time
         .map(|time_limit| std::time::Instant::now() + time_limit.into());
 
-    if workload_params.workload_concurrency == 1 {
-        db.execute(Some(&mut timer), &mut *workloads[0], timeout);
+    let measurement_start = std::time::Instant::now();
+    let batches = if workload_params.workload_concurrency == 1 {
+        db.execute(Some(&mut timer), &mut *workloads[0], timeout)
     } else {
-        db.parallel_execute(Some(&mut timer), &thread_pool, &mut workloads, timeout)?;
+        db.parallel_execute(Some(&mut timer), &thread_pool, &mut workloads, timeout)?
     };
+    let elapsed = measurement_start.elapsed().as_secs_f64();
+    // Transfer workers together execute exactly `size` transfers per completed batch.
+    // Overlays do not synchronously commit the entire measured workload to disk.
+    if workload_params.name == "transfer" && workload_params.overlay_window_length == 0 {
+        let transfers = batches * workload_params.size;
+        println!("completed_transfers: {transfers}");
+        println!("measurement_seconds: {elapsed:.9}");
+        println!("throughput: {:.3}", transfers as f64 / elapsed);
+    }
 
     db.print_metrics();
     timer.print(workload_params.size);
