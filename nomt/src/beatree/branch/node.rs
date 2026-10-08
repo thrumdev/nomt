@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, sync::OnceLock};
 
 use bitvec::prelude::*;
 
@@ -42,12 +42,14 @@ pub const BRANCH_NODE_BODY_SIZE: usize = BRANCH_NODE_SIZE - BRANCH_NODE_HEADER_S
 /// A branch node, regardless of its level.
 pub struct BranchNode {
     pub(super) page: FatPage,
+    decoded_keys: OnceLock<Box<[Key]>>,
 }
 
 impl BranchNode {
     pub fn new_in(page_pool: &PagePool) -> Self {
         BranchNode {
             page: page_pool.alloc_fat_page(),
+            decoded_keys: OnceLock::new(),
         }
     }
 
@@ -66,6 +68,7 @@ impl BranchNode {
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.decoded_keys.take();
         &mut *self.page
     }
 
@@ -122,6 +125,7 @@ impl BranchNode {
     }
 
     fn cells_mut(&mut self) -> &mut [[u8; 2]] {
+        self.decoded_keys.take();
         let cells_end = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         assert!(cells_end < BRANCH_NODE_BODY_SIZE);
 
@@ -141,6 +145,7 @@ impl BranchNode {
     }
 
     pub fn raw_separators_mut(&mut self, from: usize, to: usize) -> RawSeparatorsMut<'_> {
+        self.decoded_keys.take();
         let RawSeparatorsData {
             start,
             byte_len,
@@ -409,6 +414,16 @@ pub fn compressed_separator_range_size(
 
 // Extract the key at a given index from a BranchNode, taking into account prefix compression.
 pub fn get_key(node: &BranchNode, index: usize) -> Key {
+    // Branch nodes are shared immutably during reads. Decode once per revision;
+    // mutable page access invalidates the cache before changing separators.
+    node.decoded_keys.get_or_init(|| {
+        (0..node.n() as usize)
+            .map(|i| decode_key(node, i))
+            .collect()
+    })[index]
+}
+
+fn decode_key(node: &BranchNode, index: usize) -> Key {
     let prefix = if index < node.prefix_compressed() as usize {
         Some(node.raw_prefix())
     } else {
