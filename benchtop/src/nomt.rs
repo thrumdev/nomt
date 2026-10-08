@@ -40,6 +40,12 @@ impl NomtDB {
 
         let mut opts = Options::new();
         opts.path(nomt_db_folder);
+        if let Ok(seed) = std::env::var("NOMT_BENCH_SEED") {
+            let seed = seed.parse::<u64>().expect("NOMT_BENCH_SEED must be a u64");
+            let mut bytes = [0; 16];
+            bytes[..8].copy_from_slice(&seed.to_le_bytes());
+            opts.bitbox_seed(bytes);
+        }
         opts.commit_concurrency(commit_concurrency);
         opts.io_workers(io_workers);
         opts.metrics(true);
