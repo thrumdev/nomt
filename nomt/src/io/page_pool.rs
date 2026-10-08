@@ -20,7 +20,7 @@ const SLOTS_PER_REGION: usize = 1 << REGION_SLOT_BITS;
 const REGION_BYTE_SIZE: usize = SLOTS_PER_REGION * PAGE_SIZE;
 const REGION_COUNT: usize = 4096;
 
-const TLS_FREELIST_CAPACITY: usize = 1024;
+const TLS_FREELIST_CAPACITY: usize = 256;
 
 /// A page reference to the pool.
 #[derive(Clone)]
