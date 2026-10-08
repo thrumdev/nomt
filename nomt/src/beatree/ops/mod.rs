@@ -131,10 +131,16 @@ pub fn find_key_pos(branch: &BranchNode, key: &Key, low: Option<usize>) -> (bool
     let mut low = low.unwrap_or(0);
     let mut high = branch.n() as usize;
 
+    let key_head = u64::from_be_bytes(key[..8].try_into().unwrap());
     while low < high {
         let mid = low + (high - low) / 2;
+        let candidate = get_key(branch, mid);
+        let candidate_head = u64::from_be_bytes(candidate[..8].try_into().unwrap());
+        let order = key_head
+            .cmp(&candidate_head)
+            .then_with(|| key[8..].cmp(&candidate[8..]));
 
-        match key.cmp(&get_key(branch, mid)) {
+        match order {
             Ordering::Equal => {
                 return (true, mid);
             }
