@@ -130,7 +130,7 @@ pub fn build_trie<H: NodeHasher>(
 
     let mut leaf_ops = ops.into_iter();
 
-    let mut a = None;
+    let mut previous_shared = None;
     let mut b = leaf_ops.next();
     let mut c = leaf_ops.next();
 
@@ -166,7 +166,7 @@ pub fn build_trie<H: NodeHasher>(
     };
 
     while let Some((this_key, this_val)) = b {
-        let n1 = a.as_ref().map(|(k, _)| common_after_prefix(k, &this_key));
+        let n1 = previous_shared;
         let n2 = c.as_ref().map(|(k, _)| common_after_prefix(k, &this_key));
 
         let leaf_data = trie::LeafData {
@@ -240,7 +240,7 @@ pub fn build_trie<H: NodeHasher>(
         }
         pending_siblings.push((last_node, layer));
 
-        a = Some((this_key, this_val));
+        previous_shared = n2;
         b = c;
         c = leaf_ops.next();
     }
