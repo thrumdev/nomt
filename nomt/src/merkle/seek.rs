@@ -525,7 +525,7 @@ pub struct Seeker<H: HashAlgorithm> {
     page_loader: PageLoader,
     processed: usize,
     requests: VecDeque<SeekRequest>,
-    io_waiters: HashMap<IoQuery, Vec<usize>>,
+    io_waiters: HashMap<IoQuery, Vec<usize>, fxhash::FxBuildHasher>,
     io_slab: Slab<IoRequest>,
     /// FIFO, pushed onto back.
     idle_requests: VecDeque<usize>,
@@ -555,7 +555,7 @@ impl<H: HashAlgorithm> Seeker<H> {
             page_loader,
             processed: 0,
             requests: VecDeque::new(),
-            io_waiters: HashMap::new(),
+            io_waiters: HashMap::with_hasher(fxhash::FxBuildHasher::default()),
             io_slab: Slab::new(),
             idle_requests: VecDeque::new(),
             idle_page_loads: VecDeque::new(),
