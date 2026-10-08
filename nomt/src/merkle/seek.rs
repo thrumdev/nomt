@@ -284,12 +284,23 @@ impl SeekRequest {
             beatree_iterator.provide_leaf(leaf);
         }
 
+        // Avoid rehashing identical consecutive short values during reconstruction.
+        let mut previous_value: Option<([u8; 64], usize, ValueHash)> = None;
         // Collect all items in range from the beatree iterator.
         while let Some(iter_output) = beatree_iterator.next() {
             match iter_output {
                 IterOutput::Blocked => return,
                 IterOutput::Item(key, value) => {
-                    collected_leaf_data.push((key, H::hash_value(&value)))
+                    let cached_hash = previous_value
+                        .as_ref()
+                        .and_then(|(bytes, len, hash)| (&bytes[..*len] == value).then_some(*hash));
+                    let value_hash = cached_hash.unwrap_or_else(|| H::hash_value(value));
+                    if cached_hash.is_none() && value.len() <= 64 {
+                        let mut bytes = [0; 64];
+                        bytes[..value.len()].copy_from_slice(value);
+                        previous_value = Some((bytes, value.len(), value_hash));
+                    }
+                    collected_leaf_data.push((key, value_hash))
                 }
                 IterOutput::OverflowItem(key, value_hash, _) => {
                     collected_leaf_data.push((key, value_hash))
