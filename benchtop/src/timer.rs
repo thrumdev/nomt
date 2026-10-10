@@ -89,6 +89,15 @@ impl Timer {
     }
 
     pub fn print(&mut self, workload_size: u64) {
+        if let Some(h) = self.spans.get("durable_commit") {
+            let h = h.borrow();
+            println!("commit_count: {}", h.len());
+            println!("commit_mean_ms: {:.6}", h.mean() / 1_000_000.0);
+            println!(
+                "commit_p95_ms: {:.6}",
+                h.value_at_quantile(0.95) as f64 / 1_000_000.0
+            );
+        }
         println!("{}", self.name);
 
         let expected_spans = ["workload", "read", "commit_and_prove"];
