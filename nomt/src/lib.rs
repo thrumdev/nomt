@@ -124,14 +124,17 @@ impl KeyReadWrite {
         }
     }
 
+    /// Hashes the values. The read value hash lets the merkle update recognize the key's own leaf
+    /// without fetching it.
     fn to_compact<T: HashAlgorithm>(&self) -> crate::merkle::KeyReadWrite {
         let hash = |v: &Value| T::hash_value(v);
         match self {
-            KeyReadWrite::Read(_) => crate::merkle::KeyReadWrite::Read,
+            KeyReadWrite::Read(read) => crate::merkle::KeyReadWrite::Read(read.as_ref().map(hash)),
             KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
-            KeyReadWrite::ReadThenWrite(_, val) => {
-                crate::merkle::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
-            }
+            KeyReadWrite::ReadThenWrite(read, val) => crate::merkle::KeyReadWrite::ReadThenWrite(
+                read.as_ref().map(hash),
+                val.as_ref().map(hash),
+            ),
         }
     }
 }
