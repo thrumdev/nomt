@@ -317,3 +317,57 @@ fn witness_validity_with_concurrent_workers() {
         prev_root = new_root;
     }
 }
+
+#[test]
+fn wrong_read_value_falls_back_to_leaf_fetch() {
+    use nomt::{KeyReadWrite, Nomt, Options, SessionParams, WitnessMode};
+    use nomt_test_utils::key_with_prefix;
+
+    let a = key_with_prefix([false]);
+    let b = key_with_prefix([true]);
+    // Absent, and its seek ends at `a`'s leaf.
+    let x = key_with_prefix((0..256).map(|i| i == 255));
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = Options::new();
+    o.path(dir.path());
+    o.commit_concurrency(1);
+    let nomt = Nomt::<Blake3Hasher>::open(o).unwrap();
+    let session_params = || SessionParams::default().witness_mode(WitnessMode::read_write());
+
+    nomt.begin_session(session_params())
+        .finish(vec![
+            (a, KeyReadWrite::Write(Some(vec![1]))),
+            (b, KeyReadWrite::Write(Some(vec![2]))),
+        ])
+        .unwrap()
+        .commit(&nomt)
+        .unwrap();
+
+    // No warm-up, so the seeks see the reported read values.
+    let mut finished = nomt
+        .begin_session(session_params())
+        .finish(vec![(a, KeyReadWrite::Read(Some(vec![9])))])
+        .unwrap();
+    let reads = finished.take_witness().unwrap().operations.reads;
+    assert_eq!(reads[0].value, Some(*blake3::hash(&[1]).as_bytes()));
+    drop(finished);
+
+    let mut finished = nomt
+        .begin_session(session_params())
+        .finish(vec![(
+            x,
+            KeyReadWrite::ReadThenWrite(Some(vec![1]), Some(vec![3])),
+        )])
+        .unwrap();
+    let expected_root = nomt_core::update::build_trie::<Blake3Hasher>(
+        0,
+        [(a, [1]), (x, [3]), (b, [2])].map(|(k, v)| (k, *blake3::hash(&v).as_bytes())),
+        |_| {},
+    );
+    assert_eq!(finished.root().into_inner(), expected_root);
+    assert_eq!(
+        finished.take_witness().unwrap().operations.reads[0].value,
+        None
+    );
+}

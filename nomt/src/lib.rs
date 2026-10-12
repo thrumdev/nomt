@@ -130,14 +130,16 @@ impl KeyReadWrite {
         }
     }
 
+    /// The read value hash lets the merkle update recognize the key's own leaf without fetching it.
     fn to_compact<T: HashAlgorithm>(&self) -> crate::merkle::KeyReadWrite {
         let hash = |v: &Value| T::hash_value(v);
         match self {
-            KeyReadWrite::Read(_) => crate::merkle::KeyReadWrite::Read,
+            KeyReadWrite::Read(read) => crate::merkle::KeyReadWrite::Read(read.as_ref().map(hash)),
             KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
-            KeyReadWrite::ReadThenWrite(_, val) => {
-                crate::merkle::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
-            }
+            KeyReadWrite::ReadThenWrite(read, val) => crate::merkle::KeyReadWrite::ReadThenWrite(
+                read.as_ref().map(hash),
+                val.as_ref().map(hash),
+            ),
         }
     }
 }
@@ -1041,7 +1043,6 @@ mod tests {
     #[test]
     fn parallel_compaction_matches_sequential() {
         use super::{compact_actuals, KeyReadWrite};
-        use crate::merkle::KeyReadWrite as Compact;
 
         let actuals: Vec<_> = (0u64..131_073)
             .map(|i| {
@@ -1064,18 +1065,7 @@ mod tests {
             let sequential = compact_actuals::<Blake3Hasher>(&actuals[..len], 1);
             for threads in [2, 16] {
                 let parallel = compact_actuals::<Blake3Hasher>(&actuals[..len], threads);
-                assert_eq!(parallel.len(), sequential.len());
-                for ((path, op), (expected_path, expected_op)) in parallel.iter().zip(&sequential) {
-                    assert_eq!(path, expected_path);
-                    match (op, expected_op) {
-                        (Compact::Read, Compact::Read) => {}
-                        (Compact::Write(value), Compact::Write(expected))
-                        | (Compact::ReadThenWrite(value), Compact::ReadThenWrite(expected)) => {
-                            assert_eq!(value, expected);
-                        }
-                        _ => panic!("operation changed: {op:?} != {expected_op:?}"),
-                    }
-                }
+                assert!(parallel == sequential);
             }
         }
     }
