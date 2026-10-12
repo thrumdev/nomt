@@ -176,7 +176,7 @@ fn warm_up_phase<H: HashAlgorithm>(
                     Err(TryRecvError::Disconnected) => break false,
                 };
 
-                seeker.push(warm_up_command.key_path);
+                seeker.push(warm_up_command.key_path, None);
             } else if index == page_idx {
                 seeker.try_recv_page(&mut page_set)?;
             } else {
@@ -520,7 +520,8 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                         break;
                     }
                 } else {
-                    seeker.push(self.shared.read_write[next_push].0);
+                    let (key, read_write) = &self.shared.read_write[next_push];
+                    seeker.push(*key, read_write.read_value_hash());
                     seeker.submit_all(page_set);
                 }
             }
@@ -548,10 +549,10 @@ fn subtrie_ops(read_write: &[(KeyPath, KeyReadWrite)]) -> Vec<(KeyPath, Option<V
     read_write
         .iter()
         .filter_map(|(key, read_write)| match read_write {
-            KeyReadWrite::Write(val) | KeyReadWrite::ReadThenWrite(val) => {
+            KeyReadWrite::Write(val) | KeyReadWrite::ReadThenWrite(_, val) => {
                 Some((key.clone(), val.clone()))
             }
-            KeyReadWrite::Read => None,
+            KeyReadWrite::Read(_) => None,
         })
         .collect::<Vec<_>>()
 }
