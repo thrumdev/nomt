@@ -70,6 +70,36 @@ impl Overlay {
         self.inner.rollback_delta.as_ref()
     }
 
+    /// Move the changes out of the overlay, cloning only what is still shared.
+    ///
+    /// Must be called after marking the overlay committed: if the data has to be detached, the
+    /// remaining copy is dropped later and must not mark the overlay as dropped.
+    pub(super) fn take_committed_changes(
+        &mut self,
+    ) -> (
+        HashMap<PageId, DirtyPage>,
+        HashMap<KeyPath, ValueChange>,
+        Option<crate::rollback::Delta>,
+    ) {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                // Clones only if a live overlay still holds the data. Weak references from
+                // descendants are detached; the data is no longer needed once committed.
+                let data = Arc::make_mut(&mut inner.data);
+                (
+                    std::mem::take(&mut data.pages),
+                    std::mem::take(&mut data.values),
+                    inner.rollback_delta.take(),
+                )
+            }
+            None => (
+                self.page_changes().clone(),
+                self.value_changes().clone(),
+                self.rollback_delta().cloned(),
+            ),
+        }
+    }
+
     /// Mark the overlay as committed and return a marker.
     pub(super) fn mark_committed(&self) -> OverlayMarker {
         let status = self.inner.data.status.clone();
@@ -210,6 +240,7 @@ impl Index {
 }
 
 /// Data associated with a single overlay.
+#[derive(Clone)]
 struct Data {
     pages: HashMap<PageId, DirtyPage>,
     values: HashMap<KeyPath, ValueChange>,
