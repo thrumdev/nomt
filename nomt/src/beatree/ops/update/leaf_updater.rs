@@ -227,15 +227,14 @@ impl LeafUpdater {
             },
         };
 
-        if from == to {
-            // nothing to keep
-            return;
+        if from != to {
+            let values_size = base.node.values_size(from, to);
+            self.ops.push(LeafOp::KeepChunk(from, to, values_size));
+            self.gauge.ingest(to - from, values_size);
         }
 
-        let values_size = base.node.values_size(from, to);
-        self.ops.push(LeafOp::KeepChunk(from, to, values_size));
-        self.gauge.ingest(to - from, values_size);
-
+        // Replacing a cell must reclaim its overflow pages even when no preceding
+        // cells were kept (the first key, or consecutive updated keys).
         if found {
             let (val, overflow) = base.cell(to);
             if overflow {
