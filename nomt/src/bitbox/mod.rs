@@ -438,16 +438,19 @@ fn recover(
 
     wal_fd.seek(SeekFrom::Start(0))?;
 
-    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
-
     // This condition triggers either if:
     //   1. the WAL holds data for a sync that never concluded. Safe to discard.
     //   2. the WAL holds data for a sync that fully concluded. (somehow). Safe to discard.
-    if wal_reader.sync_seqn() != sync_seqn {
+    //
+    // Only the header is read here: the WAL of a sync that never concluded may be incomplete.
+    if WalBlobReader::read_sync_seqn(page_pool, wal_fd)? != sync_seqn {
         // fsync generously here since it's a one-time operation.
         writeout::truncate_wal(wal_fd, true)?;
         return Ok(());
     }
+
+    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
+    debug_assert_eq!(wal_reader.sync_seqn(), sync_seqn);
 
     // The indices of pages (in the metabits page space) that were changed and require updates.
     // Note those are not ht page numbers yet and still require additional conversion.

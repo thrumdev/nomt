@@ -38,6 +38,28 @@ pub struct WalBlobReader {
 }
 
 impl WalBlobReader {
+    /// Read the sequence even when an uncommitted WAL has an incomplete body.
+    pub(crate) fn read_sync_seqn(page_pool: &PagePool, wal_fd: &File) -> anyhow::Result<u32> {
+        use std::os::unix::fs::FileExt;
+
+        // The WAL uses direct I/O, so both the buffer and requested length stay
+        // page-aligned. Only the returned prefix may be shorter than a page.
+        let mut page = page_pool.alloc_fat_page();
+        let len = loop {
+            match wal_fd.read_at(&mut page, 0) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        if len < 5 {
+            bail!("Unexpected end of WAL header");
+        }
+        if page[0] != WAL_ENTRY_TAG_START {
+            bail!("unexpected WAL entry tag at start: {}", page[0]);
+        }
+        Ok(u32::from_le_bytes(page[1..5].try_into().unwrap()))
+    }
+
     /// Creates a new WAL blob reader.
     ///
     /// The `wal_fd` is expected to be positioned at the start of the WAL file. The file must be
