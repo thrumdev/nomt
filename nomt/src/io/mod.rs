@@ -2,7 +2,6 @@
 std::compile_error!("NOMT only supports Unix-based OSs");
 
 use crossbeam_channel::{Receiver, RecvError, SendError, Sender, TryRecvError};
-use page_pool::Page;
 use std::{
     fmt,
     fs::File,
@@ -52,7 +51,9 @@ pub enum IoKind {
     Read(RawFd, u64, FatPage),
     Write(RawFd, u64, FatPage),
     WriteArc(RawFd, u64, Arc<FatPage>),
-    WriteRaw(RawFd, u64, Page),
+    /// Retain the immutable node until its queued write completes, even if
+    /// preparation returns early or unwinds before joining the writeout.
+    WriteShared(RawFd, u64, Arc<dyn AsRef<[u8; PAGE_SIZE]> + Send + Sync>),
 }
 
 impl fmt::Debug for IoKind {
@@ -61,7 +62,7 @@ impl fmt::Debug for IoKind {
             IoKind::Read(fd, pn, _) => write!(f, "Read(fd={}, pn={})", fd, pn),
             IoKind::Write(fd, pn, _) => write!(f, "Write(fd={}, pn={})", fd, pn),
             IoKind::WriteArc(fd, pn, _) => write!(f, "WriteArc(fd={}, pn={})", fd, pn),
-            IoKind::WriteRaw(fd, pn, _) => write!(f, "WriteRaw(fd={}, pn={})", fd, pn),
+            IoKind::WriteShared(fd, pn, _) => write!(f, "WriteShared(fd={}, pn={})", fd, pn),
         }
     }
 }
@@ -77,7 +78,7 @@ impl IoKind {
         match self {
             IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
             IoKind::WriteArc(_, _, _) => panic!("attempted to extract owned buf from write_arc"),
-            IoKind::WriteRaw(_, _, _) => panic!("attempted to extract buf from write_raw"),
+            IoKind::WriteShared(_, _, _) => panic!("attempted to extract buf from write_shared"),
         }
     }
 

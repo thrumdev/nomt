@@ -73,7 +73,8 @@ fn execute(mut command: IoCommand) -> CompleteIo {
                     (page_index * PAGE_SIZE as u64) as libc::off_t,
                 )
             },
-            IoKind::WriteRaw(fd, page_index, ref mut page) => unsafe {
+            IoKind::WriteShared(fd, page_index, ref page) => unsafe {
+                let page: &[u8; PAGE_SIZE] = page.as_ref().as_ref();
                 libc::pwrite(
                     fd,
                     page.as_ptr() as *const libc::c_void,

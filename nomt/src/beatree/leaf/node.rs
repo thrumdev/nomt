@@ -53,6 +53,12 @@ pub struct LeafNode {
     pub inner: FatPage,
 }
 
+impl AsRef<[u8; PAGE_SIZE]> for LeafNode {
+    fn as_ref(&self) -> &[u8; PAGE_SIZE] {
+        (&*self.inner).try_into().unwrap()
+    }
+}
+
 impl LeafNode {
     #[inline]
     pub fn n(&self) -> usize {

@@ -102,7 +102,6 @@ pub fn update(
     let (tx, rx) = crossbeam_channel::bounded(1);
     let post_io_task = move || {
         leaf_stage_outputs.post_io_work.run(&leaf_cache);
-        drop(branch_stage_outputs.post_io_drop);
         leaf_cache.evict();
     };
     spawn_task(&thread_pool, post_io_task, tx);
@@ -138,9 +137,6 @@ pub struct NodesTracker<Node> {
     pub pending_base: Option<(Key, Arc<Node>, Option<Key>)>,
     /// Page numbers which were allocated and discarded entirely during this update.
     pub extra_freed: Vec<PageNumber>,
-    /// Pages which are potentially being written and which must be kept alive until I/O
-    /// is guaranteed complete.
-    pub deferred_drop_pages: Vec<Arc<Node>>,
     pub new_inserted: usize,
 }
 
@@ -152,7 +148,6 @@ impl<Node> NodesTracker<Node> {
             pending_base: None,
             extra_freed: Vec::new(),
             new_inserted: 0,
-            deferred_drop_pages: Vec::new(),
         }
     }
 
@@ -201,7 +196,6 @@ impl<Node> NodesTracker<Node> {
         pn: PageNumber,
     ) {
         self.extra_freed.push(pn);
-        self.deferred_drop_pages.push(node.clone());
         self.pending_base = Some((separator, node, cutoff));
     }
 }

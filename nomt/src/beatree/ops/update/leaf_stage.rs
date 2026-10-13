@@ -717,10 +717,9 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
 
         let page_number = self.leaf_writer.allocate()?;
 
-        let page = leaf.inner.page();
         self.io_handle
             .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
+                kind: IoKind::WriteShared(fd, page_number.0 as u64, leaf.clone()),
                 user_data: 0,
             })
             .expect("I/O Pool Down");

@@ -9,7 +9,7 @@ use crate::{
         ops::bit_ops::{bitwise_memcpy, reconstruct_key},
         Key,
     },
-    io::{page_pool::Page, FatPage, PagePool},
+    io::{FatPage, PagePool, PAGE_SIZE},
 };
 
 // Here is the layout of a branch node:
@@ -44,6 +44,12 @@ pub struct BranchNode {
     pub(super) page: FatPage,
 }
 
+impl AsRef<[u8; PAGE_SIZE]> for BranchNode {
+    fn as_ref(&self) -> &[u8; PAGE_SIZE] {
+        self.as_slice().try_into().unwrap()
+    }
+}
+
 impl BranchNode {
     pub fn new_in(page_pool: &PagePool) -> Self {
         BranchNode {
@@ -53,10 +59,6 @@ impl BranchNode {
 
     pub fn as_slice(&self) -> &[u8] {
         &*self.page
-    }
-
-    pub fn page(&self) -> Page {
-        self.page.page()
     }
 
     pub fn view(&self) -> BranchNodeView<'_> {
