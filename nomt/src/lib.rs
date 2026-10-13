@@ -747,6 +747,73 @@ impl FinishedSession {
 }
 
 impl Overlay {
+    /// Commit a chain of overlays to the underlying database with a single durable write.
+    ///
+    /// The overlays must be consecutive and ordered oldest first, and the parent of the first one
+    /// must already be committed. Each overlay remains a separate step in the rollback log.
+    ///
+    /// This function will block until all ongoing sessions and commits have finished.
+    ///
+    /// This will return an error if I/O fails or if the chain is no longer valid. Nothing is
+    /// committed if the chain is invalid.
+    pub fn commit_batch<T: HashAlgorithm>(
+        mut overlays: Vec<Self>,
+        nomt: &Nomt<T>,
+    ) -> anyhow::Result<()> {
+        if overlays.len() <= 1 {
+            return match overlays.pop() {
+                Some(overlay) => overlay.commit(nomt),
+                None => Ok(()),
+            };
+        }
+        let _write_guard = nomt.access_lock.write();
+        {
+            let shared = nomt.shared.lock();
+            let mut root = shared.root;
+            let mut marker = None;
+            for overlay in &overlays {
+                let parent = marker.as_ref().or(shared.last_commit_marker.as_ref());
+                anyhow::ensure!(
+                    overlay.parent_matches_marker(parent),
+                    "Overlay parent not committed or in batch"
+                );
+                anyhow::ensure!(
+                    overlay.prev_root() == root,
+                    "Overlay batch root chain mismatch"
+                );
+                root = overlay.root();
+                marker = Some(overlay.marker());
+            }
+        }
+        let mut page_batches = Vec::with_capacity(overlays.len());
+        let mut value_batches = Vec::with_capacity(overlays.len());
+        let mut deltas = Vec::new();
+        // Mark every validated ancestor first: dropping detached data must not
+        // temporarily mark an ancestor dead while another overlay references it.
+        for overlay in &overlays {
+            overlay.mark_committed();
+        }
+        for overlay in &mut overlays {
+            let (changes, value_changes, delta) = overlay.take_committed_changes();
+            page_batches.push(changes);
+            value_batches.push(value_changes);
+            deltas.extend(delta);
+        }
+        {
+            // UNWRAP: the batch has more than one overlay.
+            let last = overlays.last().unwrap();
+            let mut shared = nomt.shared.lock();
+            shared.last_commit_marker = Some(last.marker());
+            shared.root = last.root();
+        }
+        nomt.store.commit(
+            overlay::BatchValues(value_batches),
+            nomt.page_cache.clone(),
+            overlay::BatchPages(page_batches),
+            deltas,
+        )
+    }
+
     /// Commit the changes from this overlay to the underlying database.
     ///
     /// This function will block until all ongoing sessions and commits have finished.

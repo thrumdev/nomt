@@ -158,18 +158,17 @@ impl Rollback {
         }
     }
 
-    /// Saves the delta into the log.
-    ///
-    /// This function accepts the final list of operations that should be performed sorted by the
-    /// key paths in ascending order.
-    pub fn commit(&self, delta: Delta) -> anyhow::Result<()> {
-        let delta_bytes = delta.encode();
+    /// Saves the deltas into the log, oldest first. Each delta stays a separate rollback step.
+    pub fn commit(&self, deltas: Vec<Delta>) -> anyhow::Result<()> {
+        let encoded: Vec<_> = deltas.iter().map(Delta::encode).collect();
 
         let mut in_memory = self.shared.in_memory.lock();
         let mut seglog = self.shared.seglog.lock();
 
-        let record_id = seglog.append(&delta_bytes)?;
-        in_memory.push_recent(record_id, delta);
+        let record_ids = seglog.append_batch(encoded.iter().map(Vec::as_slice))?;
+        for (record_id, delta) in record_ids.into_iter().zip(deltas) {
+            in_memory.push_recent(record_id, delta);
+        }
         Ok(())
     }
 
@@ -247,16 +246,19 @@ impl Rollback {
             };
         }
 
-        let prune_to_new_start_live = if in_memory.total_len() > self.shared.max_rollback_log_len {
-            Some(in_memory.pop_oldest().unwrap().0.next().0)
-        } else {
-            None
-        };
+        // A batch commit may push several deltas past the limit.
+        let mut prune_to_new_start_live = None;
+        while in_memory.total_len() > self.shared.max_rollback_log_len {
+            // UNWRAP: the log is longer than the limit, so it is not empty.
+            prune_to_new_start_live = Some(in_memory.pop_oldest().unwrap().0.next().0);
+        }
 
         let (rollback_start_live, rollback_end_live) = seglog.live_range();
 
         WriteoutData {
-            rollback_start_live: rollback_start_live.0,
+            // Publish the start after pruning, so that a reopen does not bring back expired
+            // deltas.
+            rollback_start_live: prune_to_new_start_live.unwrap_or(rollback_start_live.0),
             rollback_end_live: rollback_end_live.0,
             prune_to_new_start_live,
             prune_to_new_end_live: None,
