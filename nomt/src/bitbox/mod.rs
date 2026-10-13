@@ -17,7 +17,7 @@ use crate::{
     io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
     page_cache::{Page, PageCache},
     store::{BucketInfo, DirtyPage},
-    task::{join_task, spawn_task, TaskResult},
+    task::{spawn_task, unwrap_task_result, TaskResult},
 };
 
 use self::{ht_file::HTOffsets, meta_map::MetaMap};
@@ -391,8 +391,12 @@ impl SyncController {
     ///
     /// Must be invoked by the sync thread. Blocking.
     pub fn wait_pre_meta(&self) -> anyhow::Result<()> {
-        join_task(&self.begin_sync_result_rx)?;
-        join_task(&self.pre_meta_result_rx)?;
+        let preparation = self.begin_sync_result_rx.recv().unwrap();
+        // If preparation stopped before spawning the WAL writeout, its sender was dropped and
+        // this returns immediately.
+        let wal = self.pre_meta_result_rx.recv();
+        unwrap_task_result(preparation)?;
+        unwrap_task_result(wal.expect("successful preparation must report WAL readiness"))?;
         Ok(())
     }
 

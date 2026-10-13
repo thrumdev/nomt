@@ -10,7 +10,7 @@ use crate::{
         index::Index,
         Key,
     },
-    task::{join_task, spawn_task},
+    task::{join_task_result, spawn_task},
 };
 
 use super::branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
@@ -88,8 +88,8 @@ pub fn run(
     let mut output = BranchStageOutput::default();
     let mut branch_changeset: Vec<(Key, Option<Arc<BranchNode>>)> = vec![];
 
-    for _ in 0..num_workers {
-        let worker_output = join_task(&worker_result_rx)?;
+    for completed in 0..num_workers {
+        let worker_output = join_task_result(&worker_result_rx, num_workers - completed - 1)?;
         apply_bbn_changes(&mut output, &mut branch_changeset, worker_output);
     }
 

@@ -93,11 +93,14 @@ pub fn update(
     crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages);
     crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages);
 
-    // make sure that all write requests succeeded.
+    // Drain every submitted request, including when an earlier write failed, and keep the first
+    // error.
+    let mut write_result = Ok(());
     for _ in 0..total_io {
         // UNWRAP: we receive only what we sent. No `RecvErr` expected.
-        io_handle.recv().unwrap().result?;
+        write_result = write_result.and(io_handle.recv().unwrap().result);
     }
+    write_result?;
 
     let (tx, rx) = crossbeam_channel::bounded(1);
     let post_io_task = move || {

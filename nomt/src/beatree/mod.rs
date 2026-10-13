@@ -486,8 +486,11 @@ impl SyncController {
     /// This must be called after [`Self::begin_sync`].
     pub fn wait_pre_meta(&mut self) -> std::io::Result<SyncData> {
         join_task(&self.begin_sync_result_rx)?;
-        self.inner.sync.bbn_fsync.wait()?;
-        self.inner.sync.ln_fsync.wait()?;
+        // Both fsyncs have started; wait for both even when one fails.
+        let bbn_result = self.inner.sync.bbn_fsync.wait();
+        let ln_result = self.inner.sync.ln_fsync.wait();
+        bbn_result?;
+        ln_result?;
 
         // UNWRAP: fsync of bbn and ln above ensures that sync_data is Some.
         let sync_data = self.inner.sync_data.lock().take().unwrap();
