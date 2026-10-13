@@ -55,16 +55,11 @@ pub struct PostIoWork {
 
 impl PostIoWork {
     pub(super) fn run(self, leaf_cache: &LeafCache) {
-        // Evict old pages before inserting any replacements.
-        for worker_output in &self.worker_changes {
-            for leaf_entry in worker_output.leaves_tracker.inner.values() {
+        for worker_output in self.worker_changes.into_iter() {
+            for (_, leaf_entry) in worker_output.leaves_tracker.inner {
                 if let Some(pn) = leaf_entry.deleted {
                     leaf_cache.remove(pn);
                 }
-            }
-        }
-        for worker_output in self.worker_changes.into_iter() {
-            for (_, leaf_entry) in worker_output.leaves_tracker.inner {
                 if let Some((leaf, pn)) = leaf_entry.inserted {
                     leaf_cache.insert(pn, leaf);
                 }
