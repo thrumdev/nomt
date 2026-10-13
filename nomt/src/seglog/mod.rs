@@ -409,6 +409,7 @@ struct Recovery {
     start_live: RecordId,
     end_live: RecordId,
     payload_buf: Vec<u8>,
+    last_live_record: Option<RecordId>,
     live_segment_start: Option<usize>,
     live_segment_end: Option<usize>,
 }
@@ -420,6 +421,7 @@ impl Recovery {
             start_live,
             end_live,
             payload_buf: Vec::new(),
+            last_live_record: None,
             live_segment_start: None,
             live_segment_end: None,
         }
@@ -451,23 +453,12 @@ impl Recovery {
         }
 
         // Now do some checks.
-        for i in 0..self.candidates.len() {
-            let candidate = &self.candidates[i];
+        for candidate in &self.candidates {
             if candidate.id == 0 {
                 return Err(anyhow::anyhow!(
                     "Segment ID is nil, file: {}",
                     candidate.path.display()
                 ));
-            }
-            if i > 0 {
-                let prev = &self.candidates[i - 1];
-                if prev.id != candidate.id - 1 {
-                    return Err(anyhow::anyhow!(
-                        "Gap in segment IDs: this {}, last {}",
-                        candidate.id,
-                        prev.id
-                    ));
-                }
             }
         }
 
@@ -507,6 +498,18 @@ impl Recovery {
             let (was_live, became_live, became_nonlive) = self.on_next_record(index, record_id);
 
             if was_live || became_live || became_nonlive {
+                // Live records must be contiguous across segment boundaries. The first one may
+                // come after the manifest's start, if that start is an expired record whose
+                // segment was already pruned.
+                if let Some(last) = self.last_live_record {
+                    ensure!(
+                        record_id == last.next(),
+                        "Live record IDs are not ordered: this {}, expected {}",
+                        record_id,
+                        last.next(),
+                    );
+                }
+                self.last_live_record = Some(record_id);
                 seg_reader.read_payload(&mut self.payload_buf)?;
                 process_record(record_id, &self.payload_buf)?;
             } else {
@@ -521,6 +524,11 @@ impl Recovery {
                 max = Some(record_id);
             }
             last = Some(record_id);
+            // A crash may leave an incomplete header or payload after the manifest's final
+            // committed record. Do not parse that suffix.
+            if record_id == self.end_live {
+                break;
+            }
         }
         // If the segment is empty, we set the min and max to nil. They are always Some after this
         // function returns.
@@ -690,6 +698,19 @@ where
     recovery.scan_root_dir(&root_dir_path, &filename_prefix)?;
     if !empty_live_range {
         for i in 0..recovery.candidates.len() {
+            // Segments after the live range may have been partially removed by an interrupted
+            // recovery, so check for gaps only until the end of the live range is found.
+            if i > 0 {
+                let candidate = &recovery.candidates[i];
+                let prev = &recovery.candidates[i - 1];
+                if prev.id != candidate.id - 1 {
+                    return Err(anyhow::anyhow!(
+                        "Gap in segment IDs: this {}, last {}",
+                        candidate.id,
+                        prev.id
+                    ));
+                }
+            }
             recovery
                 .scan_segment(i, &mut process_record)
                 .with_context(|| {
@@ -698,6 +719,9 @@ where
                         recovery.candidates[i].path.display()
                     )
                 })?;
+            if recovery.candidates[i].max == end_live {
+                break;
+            }
         }
     }
 
@@ -1111,6 +1135,25 @@ mod tests {
         h.new_segment(1)?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
         h.open_log(default_max_segment_size(), 2, 2).unwrap();
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_start_live_in_pruned_segment() -> Result<()> {
+        // The manifest may point at an expired record whose segment was already pruned.
+        let h = TestHarness::new()?;
+        h.new_segment(2)?
+            .write_record(2, &vec![2u8; 10])?
+            .write_record(3, &vec![3u8; 10])?
+            .write()?;
+        let (_log, records) = h.open_log(default_max_segment_size(), 1, 3)?;
+        assert_eq!(
+            records,
+            vec![
+                (RecordId::from(2), vec![2u8; 10]),
+                (RecordId::from(3), vec![3u8; 10]),
+            ]
+        );
         Ok(())
     }
 
