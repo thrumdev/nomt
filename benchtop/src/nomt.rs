@@ -43,6 +43,11 @@ impl NomtDB {
         opts.commit_concurrency(commit_concurrency);
         opts.io_workers(io_workers);
         opts.metrics(true);
+        if let Ok(len) = std::env::var("NOMT_BENCH_ROLLBACK") {
+            let len = len.parse::<u32>().expect("NOMT_BENCH_ROLLBACK must be a u32");
+            opts.rollback(true);
+            opts.max_rollback_log_len(len);
+        }
         if let Some(size) = page_cache_size {
             opts.page_cache_size(size);
         }
@@ -73,8 +78,8 @@ impl NomtDB {
         }
 
         if overlay_window.len() == self.overlay_window_capacity {
-            let _ = timer.as_mut().map(|t| t.record_span("commit_overlay"));
             let overlay = overlay_window.pop_back().unwrap();
+            let _commit_guard = timer.as_mut().map(|t| t.record_span("durable_commit"));
             overlay.commit(&self.nomt).unwrap();
         }
     }
@@ -115,6 +120,7 @@ impl NomtDB {
 
         let finished = session.finish(actual_access).unwrap();
         if self.overlay_window_capacity == 0 {
+            let _commit_guard = timer.as_mut().map(|t| t.record_span("durable_commit"));
             finished.commit(&self.nomt).unwrap();
         } else {
             let new_overlay = finished.into_overlay();
@@ -189,6 +195,7 @@ impl NomtDB {
 
         let finished = session.finish(actual_access).unwrap();
         if self.overlay_window_capacity == 0 {
+            let _commit_guard = timer.as_mut().map(|t| t.record_span("durable_commit"));
             finished.commit(&self.nomt).unwrap();
         } else {
             let new_overlay = finished.into_overlay();
@@ -208,13 +215,13 @@ impl NomtDB {
     }
 }
 
-struct Tx<'a> {
-    timer: Option<&'a mut Timer>,
-    session: &'a Session<Blake3Hasher>,
+struct Tx<'session, 'timer> {
+    timer: Option<&'timer mut Timer>,
+    session: &'session Session<Blake3Hasher>,
     access: FxHashMap<KeyPath, KeyReadWrite>,
 }
 
-impl<'a> Transaction for Tx<'a> {
+impl Transaction for Tx<'_, '_> {
     fn read(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         let key_path = sha2::Sha256::digest(key).into();
         let _timer_guard_read = self.timer.as_mut().map(|t| t.record_span("read"));
