@@ -181,30 +181,26 @@ impl Rollback {
         }
 
         let mut traceback = BTreeMap::new();
-        let mut earliest_record_id = None;
         while n > 0 {
             // Pop the most recent delta from the log and add its original values to the traceback,
             // potentially overwriting some of the values that were added in previous iterations.
             //
             // UNWRAP: we checked above that `n` is greater or equal to the total number of deltas
             //         and `n` is strictly decreasing.
-            let (record_id, delta) = in_memory.pop_recent().unwrap();
-            earliest_record_id = Some(record_id);
+            let (_, delta) = in_memory.pop_recent().unwrap();
             for (key, value) in delta.priors {
                 traceback.insert(key, value);
             }
             n -= 1;
         }
-        // UNWRAP: we checked above that `n` is greater than 0 and that means that there is at
-        //         least one delta that we will remove.
-        let earliest_record_id = earliest_record_id.unwrap();
-
-        // We got the earliest record ID that we will remove. To obtain the new live range start
-        // we need to get the ID of the element prior to that, hence `prev`.
-        //
-        // UNWRAP: `prev` returns `None` iff the record ID is nil. We know that `earliest_record_id`
-        //         can't be nil because there were some elements in the log that we removed.
-        let new_end_live = earliest_record_id.prev().unwrap();
+        // The new end of the live range is the last retained delta, or nil if none is left. The
+        // record before the earliest removed one is not used: it may have expired already, and
+        // would come back after reopening.
+        let new_end_live = in_memory
+            .log
+            .back()
+            .map(|(id, _)| *id)
+            .unwrap_or_else(RecordId::nil);
 
         // Set pending truncate to the new end live.
         //

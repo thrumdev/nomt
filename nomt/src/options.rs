@@ -129,10 +129,11 @@ impl Options {
 
     /// Set the maximum number of commits that can be rolled back.
     ///
-    /// Only relevant if rollback is enabled.
+    /// Only relevant if rollback is enabled. Must be greater than zero.
     ///
     /// Default: 100.
     pub fn max_rollback_log_len(&mut self, max_rollback_log_len: u32) {
+        assert!(max_rollback_log_len > 0);
         self.max_rollback_log_len = max_rollback_log_len;
     }
 

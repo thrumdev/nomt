@@ -57,14 +57,6 @@ impl RecordId {
         RecordId(self.0 + 1)
     }
 
-    pub fn prev(&self) -> Option<RecordId> {
-        if self.0 == 0 {
-            None
-        } else {
-            Some(RecordId(self.0 - 1))
-        }
-    }
-
     fn bytes(&self) -> [u8; 8] {
         self.0.to_le_bytes()
     }
