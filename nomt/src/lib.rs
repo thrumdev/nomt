@@ -767,30 +767,14 @@ impl Overlay {
     /// This will return an error if I/O fails or if the changeset is no longer valid, or if the
     /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
     /// rollback.
-    pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> anyhow::Result<()> {
-        if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
-            anyhow::bail!("Overlay parent not committed");
-        }
-
-        let root = self.root();
-        let page_changes: Vec<_> = self
-            .page_changes()
-            .into_iter()
-            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
-            .collect();
-        let values: Vec<_> = self
-            .value_changes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
-
+    pub fn commit<T: HashAlgorithm>(mut self, nomt: &Nomt<T>) -> anyhow::Result<()> {
         let _write_guard = nomt.access_lock.write();
-
-        let marker = self.mark_committed();
 
         {
             let mut shared = nomt.shared.lock();
+            if !self.parent_matches_marker(shared.last_commit_marker.as_ref()) {
+                anyhow::bail!("Overlay parent not committed");
+            }
             if shared.root != self.prev_root() {
                 anyhow::bail!(
                     "Changeset no longer valid (expected previous root {:?}, got {:?})",
@@ -798,9 +782,11 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = root;
-            shared.last_commit_marker = Some(marker);
+            shared.root = self.root();
+            shared.last_commit_marker = Some(self.mark_committed());
         }
+
+        let (page_changes, values, rollback_delta) = self.take_committed_changes();
 
         if let Some(rollback_delta) = rollback_delta {
             // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
@@ -820,35 +806,19 @@ impl Overlay {
     /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
     /// rollback.
     pub fn try_commit_nonblocking<T: HashAlgorithm>(
-        self,
+        mut self,
         nomt: &Nomt<T>,
     ) -> anyhow::Result<Option<Self>> {
-        if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
-            anyhow::bail!("Overlay parent not committed");
-        }
-
-        let root = self.root();
-        let page_changes: Vec<_> = self
-            .page_changes()
-            .into_iter()
-            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
-            .collect();
-        let values: Vec<_> = self
-            .value_changes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
-
         let write_guard = nomt.access_lock.try_write();
         if write_guard.is_none() {
             return Ok(Some(self));
         }
 
-        let marker = self.mark_committed();
-
         {
             let mut shared = nomt.shared.lock();
+            if !self.parent_matches_marker(shared.last_commit_marker.as_ref()) {
+                anyhow::bail!("Overlay parent not committed");
+            }
             if shared.root != self.prev_root() {
                 anyhow::bail!(
                     "Changeset no longer valid (expected previous root {:?}, got {:?})",
@@ -856,9 +826,11 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = root;
-            shared.last_commit_marker = Some(marker);
+            shared.root = self.root();
+            shared.last_commit_marker = Some(self.mark_committed());
         }
+
+        let (page_changes, values, rollback_delta) = self.take_committed_changes();
 
         if let Some(rollback_delta) = rollback_delta {
             // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
