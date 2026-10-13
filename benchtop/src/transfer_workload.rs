@@ -70,6 +70,7 @@ pub fn build(
     op_limit: u64,
     threads: usize,
     distribution: StateItemDistribution,
+    seed: u64,
 ) -> Vec<TransferWorkload> {
     let thread_workload_size = workload_size / threads as u64;
     let num_accounts_step = num_accounts / threads as u64;
@@ -90,13 +91,7 @@ pub fn build(
                     } else {
                         0
                     },
-                rng: rand::rngs::StdRng::seed_from_u64(
-                    std::env::var("NOMT_BENCH_SEED")
-                        .ok()
-                        .map(|s| s.parse::<u64>().expect("NOMT_BENCH_SEED must be a u64"))
-                        .unwrap_or_else(rand::random)
-                        .wrapping_add(i as u64),
-                ),
+                rng: rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(i as u64)),
                 percentage_cold_transfer,
                 ops_remaining: op_limit / threads as u64,
                 distribution: Distribution::new(distribution, start_account, end_account),

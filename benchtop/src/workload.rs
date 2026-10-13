@@ -31,6 +31,7 @@ pub trait Workload: Send {
 pub fn parse(
     workload_params: &WorkloadParams,
     op_limit: u64,
+    seed: u64,
 ) -> Result<(Box<dyn Workload>, Vec<Box<dyn Workload>>)> {
     let WorkloadParams {
         name,
@@ -72,6 +73,7 @@ pub fn parse(
                     op_limit,
                     threads as usize,
                     distribution,
+                    seed,
                 ),
             ),
         ),
