@@ -15,6 +15,7 @@ mod workload;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, InitParams, RunParams};
+use rand::{RngExt, SeedableRng};
 use timer::Timer;
 
 pub fn main() -> Result<()> {
@@ -28,7 +29,7 @@ pub fn main() -> Result<()> {
 
 pub fn init(params: InitParams) -> Result<()> {
     let workload_params = params.workload;
-    let (mut init, _) = workload::parse(&workload_params, u64::max_value())?;
+    let (mut init, _) = workload::parse(&workload_params, u64::max_value(), 0)?;
 
     let mut db = params.backend.instantiate(
         true,
@@ -48,9 +49,16 @@ pub fn init(params: InitParams) -> Result<()> {
 
 pub fn run(params: RunParams) -> Result<()> {
     let workload_params = params.workload;
+    let mut seeder = rand::rngs::StdRng::seed_from_u64(
+        std::env::var("NOMT_BENCH_SEED")
+            .ok()
+            .map(|s| s.parse::<u64>().expect("NOMT_BENCH_SEED must be a u64"))
+            .unwrap_or_else(rand::random),
+    );
     let (mut init, mut workloads) = workload::parse(
         &workload_params,
         params.limits.ops.unwrap_or(u64::max_value()),
+        seeder.random(),
     )?;
 
     let mut db = params.backend.instantiate(
@@ -80,7 +88,7 @@ pub fn run(params: RunParams) -> Result<()> {
         .build()?;
 
     if let Some(ops) = params.warm_up_ops {
-        let (_, mut warmup_workloads) = workload::parse(&workload_params, ops)?;
+        let (_, mut warmup_workloads) = workload::parse(&workload_params, ops, seeder.random())?;
         if workload_params.workload_concurrency == 1 {
             db.execute(None, &mut *warmup_workloads[0], None);
         } else {
@@ -103,21 +111,11 @@ pub fn run(params: RunParams) -> Result<()> {
         .time
         .map(|time_limit| std::time::Instant::now() + time_limit.into());
 
-    let measurement_start = std::time::Instant::now();
-    let batches = if workload_params.workload_concurrency == 1 {
-        db.execute(Some(&mut timer), &mut *workloads[0], timeout)
+    if workload_params.workload_concurrency == 1 {
+        db.execute(Some(&mut timer), &mut *workloads[0], timeout);
     } else {
-        db.parallel_execute(Some(&mut timer), &thread_pool, &mut workloads, timeout)?
+        db.parallel_execute(Some(&mut timer), &thread_pool, &mut workloads, timeout)?;
     };
-    let elapsed = measurement_start.elapsed().as_secs_f64();
-    // Transfer workers together execute exactly `size` transfers per completed batch.
-    // Overlays do not synchronously commit the entire measured workload to disk.
-    if workload_params.name == "transfer" && workload_params.overlay_window_length == 0 {
-        let transfers = batches * workload_params.size;
-        println!("completed_transfers: {transfers}");
-        println!("measurement_seconds: {elapsed:.9}");
-        println!("throughput: {:.3}", transfers as f64 / elapsed);
-    }
 
     db.print_metrics();
     timer.print(workload_params.size);
