@@ -74,8 +74,8 @@ impl Overlay {
     ///
     /// Must be called after marking the overlay committed: if the data has to be detached, the
     /// remaining copy is dropped later and must not mark the overlay as dropped.
-    pub(super) fn take_committed_changes(
-        &mut self,
+    pub(super) fn into_committed_changes(
+        mut self,
     ) -> (
         HashMap<PageId, DirtyPage>,
         HashMap<KeyPath, ValueChange>,
