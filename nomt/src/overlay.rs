@@ -70,11 +70,113 @@ impl Overlay {
         self.inner.rollback_delta.as_ref()
     }
 
+    /// Move the changes out of the overlay, cloning only what is still shared.
+    ///
+    /// Must be called after marking the overlay committed: if the data has to be detached, the
+    /// remaining copy is dropped later and must not mark the overlay as dropped.
+    pub(super) fn take_committed_changes(
+        &mut self,
+    ) -> (
+        HashMap<PageId, DirtyPage>,
+        HashMap<KeyPath, ValueChange>,
+        Option<crate::rollback::Delta>,
+    ) {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                // Clones only if a live overlay still holds the data. Weak references from
+                // descendants are detached; the data is no longer needed once committed.
+                let data = Arc::make_mut(&mut inner.data);
+                (
+                    std::mem::take(&mut data.pages),
+                    std::mem::take(&mut data.values),
+                    inner.rollback_delta.take(),
+                )
+            }
+            None => (
+                self.page_changes().clone(),
+                self.value_changes().clone(),
+                self.rollback_delta().cloned(),
+            ),
+        }
+    }
+
+    pub(super) fn marker(&self) -> OverlayMarker {
+        OverlayMarker(self.inner.data.status.clone())
+    }
+
     /// Mark the overlay as committed and return a marker.
     pub(super) fn mark_committed(&self) -> OverlayMarker {
         let status = self.inner.data.status.clone();
         status.commit();
         OverlayMarker(status)
+    }
+}
+
+/// Value changes of consecutive overlays, oldest first. Flattened on the beatree sync worker,
+/// which keeps the last change of each key.
+pub(super) struct BatchValues(pub Vec<HashMap<KeyPath, ValueChange>>);
+
+impl IntoIterator for BatchValues {
+    type Item = (KeyPath, ValueChange);
+    type IntoIter = std::vec::IntoIter<(KeyPath, ValueChange)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let mut values = Vec::with_capacity(self.0.iter().map(HashMap::len).sum());
+        for changes in self.0 {
+            values.extend(changes);
+        }
+        values.into_iter()
+    }
+}
+
+/// Page changes of consecutive overlays, oldest first. Merged on the bitbox sync worker.
+pub(super) struct BatchPages(pub Vec<HashMap<PageId, DirtyPage>>);
+
+impl IntoIterator for BatchPages {
+    type Item = (PageId, DirtyPage);
+    type IntoIter = std::collections::hash_map::IntoIter<PageId, DirtyPage>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let capacity = self.0.iter().map(HashMap::len).max().unwrap_or(0);
+        let mut pages: HashMap<PageId, DirtyPage> = HashMap::with_capacity(capacity);
+        for changes in self.0 {
+            for (id, mut page) in changes {
+                match pages.entry(id) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        let previous = entry.get();
+                        if page.diff.cleared() {
+                            // A later clear applies to the original on-disk bucket,
+                            // if this page existed before the batch.
+                            page.bucket = previous.bucket.clone();
+                        } else if previous.diff.cleared() {
+                            // Recreation must overwrite every node, including zeros;
+                            // otherwise WAL replay could retain old page contents.
+                            for slot in 0..crate::page_cache::NODES_PER_PAGE {
+                                page.diff.set_changed(slot);
+                            }
+                            if let Some(bucket) = previous.bucket.allocated() {
+                                if let crate::store::BucketInfo::FreshOrDependent(shared) =
+                                    &page.bucket
+                                {
+                                    shared.set(bucket);
+                                } else {
+                                    page.bucket = crate::store::BucketInfo::Known(bucket);
+                                }
+                            }
+                        } else {
+                            page.diff = previous.diff.join(&page.diff);
+                        }
+                        *entry.get_mut() = page;
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(page);
+                    }
+                }
+            }
+        }
+        // Pages created and then removed within the batch never had disk buckets.
+        pages.retain(|_, page| !page.diff.cleared() || page.bucket.allocated().is_some());
+        pages.into_iter()
     }
 }
 
@@ -210,6 +312,7 @@ impl Index {
 }
 
 /// Data associated with a single overlay.
+#[derive(Clone)]
 struct Data {
     pages: HashMap<PageId, DirtyPage>,
     values: HashMap<KeyPath, ValueChange>,

@@ -278,6 +278,7 @@ impl Store {
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
+        rollback_deltas: impl IntoIterator<Item = crate::rollback::Delta>,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -295,6 +296,7 @@ impl Store {
             self.shared.pages.clone(),
             self.shared.values.clone(),
             self.shared.rollback.clone(),
+            rollback_deltas,
             page_cache,
             updated_pages,
         ) {
@@ -399,6 +401,16 @@ pub enum BucketInfo {
     /// Without this shared state, it would be possible to lose track of the allocated bucket index
     /// from one overlay to the next.
     FreshOrDependent(SharedMaybeBucketIndex),
+}
+
+impl BucketInfo {
+    pub(crate) fn allocated(&self) -> Option<BucketIndex> {
+        match self {
+            Self::Known(bucket) => Some(*bucket),
+            Self::FreshOrDependent(bucket) => bucket.get(),
+            Self::FreshWithNoDependents => None,
+        }
+    }
 }
 
 /// A dirty page to be written to the store.
