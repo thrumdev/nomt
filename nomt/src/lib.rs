@@ -767,7 +767,7 @@ impl Overlay {
     /// This will return an error if I/O fails or if the changeset is no longer valid, or if the
     /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
     /// rollback.
-    pub fn commit<T: HashAlgorithm>(mut self, nomt: &Nomt<T>) -> anyhow::Result<()> {
+    pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> anyhow::Result<()> {
         let _write_guard = nomt.access_lock.write();
 
         {
@@ -786,7 +786,7 @@ impl Overlay {
             shared.last_commit_marker = Some(self.mark_committed());
         }
 
-        let (page_changes, values, rollback_delta) = self.take_committed_changes();
+        let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
         if let Some(rollback_delta) = rollback_delta {
             // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
@@ -806,7 +806,7 @@ impl Overlay {
     /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
     /// rollback.
     pub fn try_commit_nonblocking<T: HashAlgorithm>(
-        mut self,
+        self,
         nomt: &Nomt<T>,
     ) -> anyhow::Result<Option<Self>> {
         let write_guard = nomt.access_lock.try_write();
@@ -830,7 +830,7 @@ impl Overlay {
             shared.last_commit_marker = Some(self.mark_committed());
         }
 
-        let (page_changes, values, rollback_delta) = self.take_committed_changes();
+        let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
         if let Some(rollback_delta) = rollback_delta {
             // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
