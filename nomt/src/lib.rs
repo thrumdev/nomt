@@ -587,15 +587,17 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
-        let rollback_delta = self
-            .rollback_delta
-            .take()
-            .map(|delta_builder| delta_builder.finalize(&actuals));
-
         let merkle_update_handle = self.merkle_updater.update_and_prove::<T>(
             compact_actuals::<T>(&actuals, self.actuals_concurrency),
             self.witness_mode.0,
         )?;
+
+        // Built while the merkle update runs: both only read the store, which is not modified
+        // until the finished session is committed.
+        let rollback_delta = self
+            .rollback_delta
+            .take()
+            .map(|delta_builder| delta_builder.finalize(&actuals));
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
