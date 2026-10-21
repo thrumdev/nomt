@@ -580,11 +580,6 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
-        let rollback_delta = self
-            .rollback_delta
-            .take()
-            .map(|delta_builder| delta_builder.finalize(&actuals));
-
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
             compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
@@ -593,6 +588,13 @@ impl<T: HashAlgorithm> Session<T> {
         let merkle_update_handle = self
             .merkle_updater
             .update_and_prove::<T>(compact_actuals, self.witness_mode.0)?;
+
+        // Built while the merkle update runs: both only read the store, which is not modified
+        // until the finished session is committed.
+        let rollback_delta = self
+            .rollback_delta
+            .take()
+            .map(|delta_builder| delta_builder.finalize(&actuals));
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
