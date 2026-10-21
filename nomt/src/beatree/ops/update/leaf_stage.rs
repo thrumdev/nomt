@@ -57,6 +57,9 @@ impl PostIoWork {
     pub(super) fn run(self, leaf_cache: &LeafCache) {
         for worker_output in self.worker_changes.into_iter() {
             for (_, leaf_entry) in worker_output.leaves_tracker.inner {
+                if let Some(pn) = leaf_entry.deleted {
+                    leaf_cache.remove(pn);
+                }
                 if let Some((leaf, pn)) = leaf_entry.inserted {
                     leaf_cache.insert(pn, leaf);
                 }
