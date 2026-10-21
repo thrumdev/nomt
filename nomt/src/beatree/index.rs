@@ -43,6 +43,11 @@ impl Index {
         self.first_key_map.insert(separator, branch)
     }
 
+    /// Iterate all bottom-level branch nodes.
+    pub fn branches(&self) -> impl Iterator<Item = &Arc<BranchNode>> {
+        self.first_key_map.values()
+    }
+
     #[cfg(test)]
     pub fn into_iter(self) -> impl Iterator<Item = (Key, Arc<BranchNode>)> {
         self.first_key_map.into_iter()
