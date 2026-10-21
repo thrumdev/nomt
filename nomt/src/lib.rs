@@ -580,14 +580,9 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
-        let mut compact_actuals = Vec::with_capacity(actuals.len());
-        for (path, read_write) in &actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
-        }
-
         let merkle_update_handle = self
             .merkle_updater
-            .update_and_prove::<T>(compact_actuals, self.witness_mode.0)?;
+            .update_and_prove::<T>(compact_actuals::<T>(&actuals), self.witness_mode.0)?;
 
         // Built while the merkle update runs: both only read the store, which is not modified
         // until the finished session is committed.
@@ -613,6 +608,34 @@ impl<T: HashAlgorithm> Session<T> {
             take_global_guard: self.access_guard.is_some(),
         })
     }
+}
+
+/// Hashes the values of `actuals` for the merkle update, splitting large inputs across scoped threads.
+fn compact_actuals<T: HashAlgorithm>(
+    actuals: &[(KeyPath, KeyReadWrite)],
+) -> Vec<(KeyPath, crate::merkle::KeyReadWrite)> {
+    const MIN_CHUNK: usize = 2048;
+    let compact = |chunk: &[(KeyPath, KeyReadWrite)]| {
+        chunk
+            .iter()
+            .map(|(path, read_write)| (*path, read_write.to_compact::<T>()))
+            .collect::<Vec<_>>()
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+    let chunk = actuals.len().div_ceil(threads).max(MIN_CHUNK);
+    if actuals.len() <= chunk {
+        return compact(actuals);
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = actuals
+            .chunks(chunk)
+            .map(|chunk| scope.spawn(move || compact(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("compacting thread panicked"))
+            .collect()
+    })
 }
 
 /// A finished session.
