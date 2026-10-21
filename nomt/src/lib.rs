@@ -618,27 +618,44 @@ fn compact_actuals<T: HashAlgorithm>(
     actuals: &[(KeyPath, KeyReadWrite)],
     max_threads: usize,
 ) -> Vec<(KeyPath, crate::merkle::KeyReadWrite)> {
-    const MIN_CHUNK: usize = 2048;
+    const MIN_HASHES_PER_THREAD: usize = 8192;
     let compact = |chunk: &[(KeyPath, KeyReadWrite)]| {
         chunk
             .iter()
             .map(|(path, read_write)| (*path, read_write.to_compact::<T>()))
             .collect::<Vec<_>>()
     };
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(max_threads));
-    let chunk = actuals.len().div_ceil(threads).max(MIN_CHUNK);
-    if actuals.len() <= chunk {
+    if max_threads == 1 || actuals.len() < 2 * MIN_HASHES_PER_THREAD {
         return compact(actuals);
     }
+    let hashes = actuals
+        .iter()
+        .filter(|(_, read_write)| {
+            matches!(
+                read_write,
+                KeyReadWrite::Write(Some(_)) | KeyReadWrite::ReadThenWrite(_, Some(_))
+            )
+        })
+        .count();
+    let threads = max_threads.min(hashes / MIN_HASHES_PER_THREAD);
+    if threads < 2 {
+        return compact(actuals);
+    }
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(threads));
+    if threads == 1 {
+        return compact(actuals);
+    }
+    let chunk = actuals.len().div_ceil(threads);
     std::thread::scope(|scope| {
         let handles: Vec<_> = actuals
             .chunks(chunk)
             .map(|chunk| scope.spawn(move || compact(chunk)))
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("compacting thread panicked"))
-            .collect()
+        let mut output = Vec::with_capacity(actuals.len());
+        for handle in handles {
+            output.extend(handle.join().expect("compacting thread panicked"));
+        }
+        output
     })
 }
 
@@ -1009,6 +1026,48 @@ pub fn validate_hashtable(options: &Options) -> anyhow::Result<HashTableUtilizat
 #[cfg(test)]
 mod tests {
     use crate::hasher::Blake3Hasher;
+
+    #[test]
+    fn parallel_compaction_matches_sequential() {
+        use super::{compact_actuals, KeyReadWrite};
+        use crate::merkle::KeyReadWrite as Compact;
+
+        let actuals: Vec<_> = (0u64..131_073)
+            .map(|i| {
+                let mut path = [0; 32];
+                path[..8].copy_from_slice(&i.to_be_bytes());
+                let value = Some(i.to_le_bytes().to_vec());
+                let read_write = match i % 6 {
+                    0 => KeyReadWrite::Read(None),
+                    1 => KeyReadWrite::Read(value),
+                    2 => KeyReadWrite::Write(None),
+                    3 => KeyReadWrite::Write(value),
+                    4 => KeyReadWrite::ReadThenWrite(value, None),
+                    _ => KeyReadWrite::ReadThenWrite(None, value),
+                };
+                (path, read_write)
+            })
+            .collect();
+
+        for len in [0, 1, 16_383, 16_384, 49_151, 49_152, 49_153, 131_073] {
+            let sequential = compact_actuals::<Blake3Hasher>(&actuals[..len], 1);
+            for threads in [2, 16] {
+                let parallel = compact_actuals::<Blake3Hasher>(&actuals[..len], threads);
+                assert_eq!(parallel.len(), sequential.len());
+                for ((path, op), (expected_path, expected_op)) in parallel.iter().zip(&sequential) {
+                    assert_eq!(path, expected_path);
+                    match (op, expected_op) {
+                        (Compact::Read, Compact::Read) => {}
+                        (Compact::Write(value), Compact::Write(expected))
+                        | (Compact::ReadThenWrite(value), Compact::ReadThenWrite(expected)) => {
+                            assert_eq!(value, expected);
+                        }
+                        _ => panic!("operation changed: {op:?} != {expected_op:?}"),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn session_is_sync() {
