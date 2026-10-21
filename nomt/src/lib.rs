@@ -1020,9 +1020,15 @@ mod tests {
                 for ((path, op), (expected_path, expected_op)) in parallel.iter().zip(&sequential) {
                     assert_eq!(path, expected_path);
                     match (op, expected_op) {
-                        (Compact::Read, Compact::Read) => {}
-                        (Compact::Write(value), Compact::Write(expected))
-                        | (Compact::ReadThenWrite(value), Compact::ReadThenWrite(expected)) => {
+                        (Compact::Read(value), Compact::Read(expected))
+                        | (Compact::Write(value), Compact::Write(expected)) => {
+                            assert_eq!(value, expected);
+                        }
+                        (
+                            Compact::ReadThenWrite(read, value),
+                            Compact::ReadThenWrite(expected_read, expected),
+                        ) => {
+                            assert_eq!(read, expected_read);
                             assert_eq!(value, expected);
                         }
                         _ => panic!("operation changed: {op:?} != {expected_op:?}"),
