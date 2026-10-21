@@ -45,7 +45,11 @@ impl LeafCache {
 
     /// The maximum number of leaves the cache holds.
     pub fn capacity(&self) -> usize {
-        self.inner.shards.iter().map(|shard| shard.lock().max_items).sum()
+        self.inner
+            .shards
+            .iter()
+            .map(|shard| shard.lock().max_items)
+            .sum()
     }
 
     /// Insert a cache entry. This does not evict anything.

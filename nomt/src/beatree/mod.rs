@@ -149,17 +149,16 @@ impl Tree {
         let leaves: Vec<PageNumber> = shared
             .bbn_index
             .branches()
-            .flat_map(|branch| {
-                (0..branch.n() as usize).map(|i| PageNumber(branch.node_pointer(i)))
-            })
+            .flat_map(|branch| (0..branch.n() as usize).map(|i| PageNumber(branch.node_pointer(i))))
             .take(leaf_cache.capacity())
             .collect();
         drop(shared);
 
-        let chunk = leaves.len().div_ceil(threads.max(1)).max(1);
+        // `chunks` panics on 0, so keep the size at least 1 even if there are no leaves.
+        let chunk_size = leaves.len().div_ceil(threads.max(1)).max(1);
+        let (leaf_cache, leaf_store) = (&leaf_cache, &leaf_store);
         std::thread::scope(|scope| {
-            for chunk in leaves.chunks(chunk) {
-                let (leaf_cache, leaf_store) = (&leaf_cache, &leaf_store);
+            for chunk in leaves.chunks(chunk_size) {
                 scope.spawn(move || {
                     for &pn in chunk {
                         let leaf = Arc::new(leaf::node::LeafNode {
