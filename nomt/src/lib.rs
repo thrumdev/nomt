@@ -197,6 +197,7 @@ impl From<[u8; 32]> for Root {
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt<T> {
     merkle_update_pool: UpdatePool,
+    actuals_concurrency: usize,
     /// The handle to the page cache.
     page_cache: PageCache,
     page_pool: PagePool,
@@ -237,6 +238,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         Ok(Self {
             merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
+            actuals_concurrency: o.actuals_concurrency,
             page_cache,
             page_pool,
             store,
@@ -328,6 +330,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         Session {
             store,
+            actuals_concurrency: self.actuals_concurrency,
             merkle_updater: self.merkle_update_pool.begin::<T>(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
@@ -477,6 +480,7 @@ impl SessionParams {
 /// correctness of replaying the same operations.
 pub struct Session<T> {
     store: Store,
+    actuals_concurrency: usize,
     merkle_updater: Updater,
     metrics: Metrics,
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
@@ -580,9 +584,10 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
-        let merkle_update_handle = self
-            .merkle_updater
-            .update_and_prove::<T>(compact_actuals::<T>(&actuals), self.witness_mode.0)?;
+        let merkle_update_handle = self.merkle_updater.update_and_prove::<T>(
+            compact_actuals::<T>(&actuals, self.actuals_concurrency),
+            self.witness_mode.0,
+        )?;
 
         // Built while the merkle update runs: both only read the store, which is not modified
         // until the finished session is committed.
@@ -613,6 +618,7 @@ impl<T: HashAlgorithm> Session<T> {
 /// Hashes the values of `actuals` for the merkle update, splitting large inputs across scoped threads.
 fn compact_actuals<T: HashAlgorithm>(
     actuals: &[(KeyPath, KeyReadWrite)],
+    max_threads: usize,
 ) -> Vec<(KeyPath, crate::merkle::KeyReadWrite)> {
     const MIN_CHUNK: usize = 2048;
     let compact = |chunk: &[(KeyPath, KeyReadWrite)]| {
@@ -621,7 +627,7 @@ fn compact_actuals<T: HashAlgorithm>(
             .map(|(path, read_write)| (*path, read_write.to_compact::<T>()))
             .collect::<Vec<_>>()
     };
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(max_threads));
     let chunk = actuals.len().div_ceil(threads).max(MIN_CHUNK);
     if actuals.len() <= chunk {
         return compact(actuals);
