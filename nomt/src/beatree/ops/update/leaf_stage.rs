@@ -234,7 +234,7 @@ fn filter_leaves_changeset(leaf_changeset: &mut Vec<(Key, Option<PageNumber>)>) 
     // The deleted page was already inserted in the freed_pages, thus,
     // now only the inserted page must be kept, resulting in a standard
     // modification of the same page, but made by two workers.
-    for i in 0..leaf_changeset.len() - 1 {
+    for i in 0..leaf_changeset.len().saturating_sub(1) {
         if leaf_changeset[i].0 == leaf_changeset[i + 1].0 {
             // PANICS: If two changesets refer to the same page, they
             // are expected to be treated as a single one, with one
