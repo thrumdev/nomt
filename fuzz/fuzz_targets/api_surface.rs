@@ -1,17 +1,20 @@
 #![no_main]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use nomt::{
-    hasher::Blake3Hasher, trie::KeyPath, KeyReadWrite, Nomt, Options, SessionParams, Value,
-    WitnessMode,
+    hasher::{Blake3Hasher, ValueHasher},
+    trie::KeyPath,
+    KeyReadWrite, Nomt, Options, SessionParams, Value, WitnessMode,
 };
+use nomt_core::update::build_trie;
 
 fuzz_target!(|run: Run| {
     let db = open_db(run.commit_concurrency);
+    let mut model = BTreeMap::<KeyPath, Value>::new();
 
     for call in run.calls.calls {
         match call {
@@ -33,7 +36,28 @@ fuzz_target!(|run: Run| {
                             session.warm_up(key_path);
                         }
                         SessionCall::CommitAndProve { keys } => {
+                            for (key_path, key_rw) in &keys {
+                                match key_rw {
+                                    KeyReadWrite::Write(Some(value))
+                                    | KeyReadWrite::ReadThenWrite(_, Some(value)) => {
+                                        model.insert(*key_path, value.clone());
+                                    }
+                                    KeyReadWrite::Write(None)
+                                    | KeyReadWrite::ReadThenWrite(_, None) => {
+                                        model.remove(key_path);
+                                    }
+                                    KeyReadWrite::Read(_) => {}
+                                }
+                            }
                             let _ = session.finish(keys).unwrap().commit(&db).unwrap();
+                            let expected_root = build_trie::<Blake3Hasher>(
+                                0,
+                                model
+                                    .iter()
+                                    .map(|(k, v)| (*k, Blake3Hasher::hash_value(v))),
+                                |_| {},
+                            );
+                            assert_eq!(db.root().into_inner(), expected_root);
                             break;
                         }
                         SessionCall::Drop => {
@@ -81,10 +105,17 @@ impl Context {
         input: &mut arbitrary::Unstructured<'_>,
     ) -> arbitrary::Result<Option<Value>> {
         if input.arbitrary()? {
-            let mut size = *input.choose(&[0, 4096])?;
-            if input.arbitrary()? {
-                size += 1;
-            }
+            // Inline leaf values, both sides of the overflow threshold (MAX_LEAF_VALUE_SIZE = 1332)
+            // and overflow values spanning several pages.
+            let size = match input.int_in_range(0..=6)? {
+                0 => 0,
+                1 => input.int_in_range(1..=32)?,
+                2 => input.int_in_range(33..=1331)?,
+                3 => input.int_in_range(1332..=1333)?,
+                4 => input.int_in_range(1334..=4096)?,
+                5 => input.int_in_range(4097..=8192)?,
+                _ => input.int_in_range(8193..=32 * 1024)?,
+            };
             let mut buf = vec![0; size];
             input.fill_buffer(&mut buf)?;
             Ok(Some(buf.into()))
