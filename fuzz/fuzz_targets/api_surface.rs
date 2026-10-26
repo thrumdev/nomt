@@ -52,9 +52,7 @@ fuzz_target!(|run: Run| {
                             let _ = session.finish(keys).unwrap().commit(&db).unwrap();
                             let expected_root = build_trie::<Blake3Hasher>(
                                 0,
-                                model
-                                    .iter()
-                                    .map(|(k, v)| (*k, Blake3Hasher::hash_value(v))),
+                                model.iter().map(|(k, v)| (*k, Blake3Hasher::hash_value(v))),
                                 |_| {},
                             );
                             assert_eq!(db.root().into_inner(), expected_root);
