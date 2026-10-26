@@ -95,7 +95,6 @@ fuzz_target!(|run: Run| {
         return;
     }
 
-    path_proofs.sort_by(|a, b| a.terminal.path().cmp(b.terminal.path()));
     path_proofs.dedup_by(|a, b| a.terminal.path() == b.terminal.path());
     let multi_proof = MultiProof::from_path_proofs(path_proofs);
     let ops = ops.into_iter().collect::<Vec<_>>();
@@ -162,13 +161,13 @@ fn check_claims(
     }
     let mut wrong = value_hash.unwrap_or_default();
     wrong[0] ^= 1;
-    assert!(!matches!(
-        confirm_value(&LeafData {
-            key_path: key,
-            value_hash: wrong,
-        }),
-        Ok(true)
-    ));
+    match confirm_value(&LeafData {
+        key_path: key,
+        value_hash: wrong,
+    }) {
+        Ok(found) => assert!(!found),
+        Err(KeyOutOfScope) => assert!(!in_scope),
+    }
 }
 
 fn bit(key: &KeyPath, depth: usize) -> bool {
