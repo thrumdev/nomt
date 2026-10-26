@@ -20,8 +20,7 @@ use crate::{
     overlay::LiveOverlay,
     task::{join_task, spawn_task, TaskResult},
 };
-use crossbeam::channel::Sender;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
 use parking_lot::Mutex;
@@ -405,7 +404,7 @@ impl ReverseDeltaBuilder {
     pub fn finalize(mut self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
         // wait for all submitted requests to finish.
         let fresh_priors = Arc::new(DashMap::new());
-        let (join_tx, join_rx) = crossbeam::channel::bounded(1);
+        let (join_tx, join_rx) = crossbeam_channel::bounded(1);
         let _ = self
             .command_tx
             .send(DeltaBuilderCommand::Join(join_tx, fresh_priors.clone()));
@@ -463,7 +462,7 @@ impl Drop for ReverseDeltaBuilder {
             // If the builder is dropped, we need to ensure that the worker thread is stopped.
             // We do this by sending a `Join` command.
             let _ = self.command_tx.send(DeltaBuilderCommand::Join(
-                crossbeam::channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
                 Arc::new(DashMap::new()),
             ));
 
