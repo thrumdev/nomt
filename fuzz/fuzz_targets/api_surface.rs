@@ -7,14 +7,14 @@ use libfuzzer_sys::fuzz_target;
 
 use nomt::{
     hasher::{Blake3Hasher, ValueHasher},
-    trie::KeyPath,
+    trie::{KeyPath, ValueHash},
     KeyReadWrite, Nomt, Options, SessionParams, Value, WitnessMode,
 };
 use nomt_core::update::build_trie;
 
 fuzz_target!(|run: Run| {
     let db = open_db(run.commit_concurrency);
-    let mut model = BTreeMap::<KeyPath, Value>::new();
+    let mut model = BTreeMap::<KeyPath, ValueHash>::new();
 
     for call in run.calls.calls {
         match call {
@@ -40,7 +40,7 @@ fuzz_target!(|run: Run| {
                                 match key_rw {
                                     KeyReadWrite::Write(Some(value))
                                     | KeyReadWrite::ReadThenWrite(_, Some(value)) => {
-                                        model.insert(*key_path, value.clone());
+                                        model.insert(*key_path, Blake3Hasher::hash_value(value));
                                     }
                                     KeyReadWrite::Write(None)
                                     | KeyReadWrite::ReadThenWrite(_, None) => {
@@ -52,7 +52,7 @@ fuzz_target!(|run: Run| {
                             let _ = session.finish(keys).unwrap().commit(&db).unwrap();
                             let expected_root = build_trie::<Blake3Hasher>(
                                 0,
-                                model.iter().map(|(k, v)| (*k, Blake3Hasher::hash_value(v))),
+                                model.iter().map(|(k, v)| (*k, *v)),
                                 |_| {},
                             );
                             assert_eq!(db.root().into_inner(), expected_root);
