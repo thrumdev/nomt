@@ -28,7 +28,10 @@ fuzz_target!(|run: Run| {
 
     let sorted_leaves = leaves.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
     let root = node(&sorted_leaves, 0);
-    assert_eq!(root, build_trie::<H>(0, sorted_leaves.iter().copied(), |_| {}));
+    assert_eq!(
+        root,
+        build_trie::<H>(0, sorted_leaves.iter().copied(), |_| {})
+    );
 
     let mut updated = leaves.clone();
     for (key, value) in &ops {
@@ -294,8 +297,14 @@ enum Mutation {
 
 #[derive(Debug, Arbitrary)]
 enum Terminal {
-    Leaf { key_path: KeyPath, value_hash: ValueHash },
-    Terminator { path: KeyPath, depth: u16 },
+    Leaf {
+        key_path: KeyPath,
+        value_hash: ValueHash,
+    },
+    Terminator {
+        path: KeyPath,
+        depth: u16,
+    },
 }
 
 impl Terminal {
