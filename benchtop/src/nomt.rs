@@ -50,7 +50,9 @@ impl NomtDB {
         opts.io_workers(io_workers);
         opts.metrics(true);
         if let Ok(len) = std::env::var("NOMT_BENCH_ROLLBACK") {
-            let len = len.parse::<u32>().expect("NOMT_BENCH_ROLLBACK must be a u32");
+            let len = len
+                .parse::<u32>()
+                .expect("NOMT_BENCH_ROLLBACK must be a u32");
             opts.rollback(true);
             opts.max_rollback_log_len(len);
         }
