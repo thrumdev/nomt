@@ -18,6 +18,7 @@ impl Flock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(lock_path)?;
 
         match crate::sys::unix::try_lock_exclusive(&lock_fd) {

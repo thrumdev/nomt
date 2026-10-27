@@ -30,6 +30,7 @@ impl Sync {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sync(
         &mut self,
         shared: &Shared,

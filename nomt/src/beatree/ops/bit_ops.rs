@@ -329,7 +329,8 @@ pub mod benches {
                 } else {
                     prefix_bytes - 1
                 };
-                let separator_byte_len = (separator_bit_len as usize).div_ceil(8).next_multiple_of(8);
+                let separator_byte_len =
+                    (separator_bit_len as usize).div_ceil(8).next_multiple_of(8);
 
                 group.bench_function(BenchmarkId::new("prefix_len_bits", prefix_bits), |b| {
                     b.iter_batched(
@@ -425,8 +426,9 @@ mod tests {
                 usize::arbitrary(g) % 8
             };
             let separator_bit_len = arbitrary_bit_len(g, 256 - prefix_bit_len);
-            let separator_byte_len =
-                (separator_bit_start + separator_bit_len).div_ceil(8).next_multiple_of(8);
+            let separator_byte_len = (separator_bit_start + separator_bit_len)
+                .div_ceil(8)
+                .next_multiple_of(8);
             let separator_seed = TestKeyPath::arbitrary(g).into_inner();
             let mut separator_bytes = vec![0; separator_byte_len];
             for (index, byte) in separator_bytes.iter_mut().enumerate() {
@@ -531,7 +533,7 @@ mod tests {
     fn reconstruct_key_garbage_in_last_remainder() {
         // There could be the possibility of having garbage in the last remainder
         for left_and_right in 0..2 {
-            for prefix_bit_len in 0..8 {
+            for prefix_bit_len in 0..8usize {
                 let prefix = [255];
 
                 let separator_bit_start_range = if left_and_right == 0 {
@@ -542,9 +544,9 @@ mod tests {
 
                 for separator_bit_start in separator_bit_start_range {
                     for separator_bit_len in prefix_bit_len..=256 - prefix_bit_len {
-                        let separator_byte_len =
-                            (separator_bit_start + separator_bit_len).div_ceil(8)
-                                .next_multiple_of(8);
+                        let separator_byte_len = (separator_bit_start + separator_bit_len)
+                            .div_ceil(8)
+                            .next_multiple_of(8);
                         let separator_bytes = vec![255; separator_byte_len];
 
                         let separator =

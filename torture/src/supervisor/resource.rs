@@ -194,7 +194,8 @@ pub fn process_memory_occupied(pid: u32) -> Option<u64> {
     let mut statm = String::new();
     statm_file.read_to_string(&mut statm).expect(&format_err);
     let occupied_memory = statm
-        .split(' ').nth(1)
+        .split(' ')
+        .nth(1)
         .map(|value| value.parse::<u64>().expect(&format_err))
         .expect(&format_err);
     Some(occupied_memory)

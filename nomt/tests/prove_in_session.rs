@@ -10,13 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn prove_in_session() {
-    let mut accounts = 0;
     let mut t = Test::new("prove_in_session");
 
     let _ = t.read_id(0);
-    for _ in 0..100 {
+    for accounts in 0..100 {
         common::set_balance(&mut t, accounts, 1000);
-        accounts += 1;
     }
     let root = t.commit().0.into_inner();
 
@@ -48,13 +46,11 @@ fn prove_in_session() {
 
 #[test]
 fn prove_in_session_against_overlay() {
-    let mut accounts = 0;
     let mut t = Test::new("prove_in_session_against_overlay");
 
     let _ = t.read_id(0);
-    for _ in 0..100 {
+    for accounts in 0..100 {
         common::set_balance(&mut t, accounts, 1000);
-        accounts += 1;
     }
     let (overlay_a, _) = t.update();
     let root = overlay_a.root().into_inner();

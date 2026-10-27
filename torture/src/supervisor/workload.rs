@@ -303,23 +303,20 @@ impl Workload {
             return Ok(());
         }
 
-        if self.trick_handle.is_some() {
+        if let Some(trick_handle) = self.trick_handle.as_ref() {
             if self.enabled_enospc {
                 let should_turn_off = self.rng.random_bool(self.config.enospc_off);
                 if should_turn_off {
                     info!("unsetting ENOSPC");
                     self.enabled_enospc = false;
-                    self.trick_handle
-                        .as_ref()
-                        .unwrap()
-                        .set_trigger_enospc(false);
+                    trick_handle.set_trigger_enospc(false);
                 }
             } else {
                 let should_turn_on = self.rng.random_bool(self.config.enospc_on);
                 if should_turn_on {
                     info!("setting ENOSPC");
                     self.enabled_enospc = true;
-                    self.trick_handle.as_ref().unwrap().set_trigger_enospc(true);
+                    trick_handle.set_trigger_enospc(true);
                 }
             }
 
@@ -328,20 +325,14 @@ impl Workload {
                 if should_turn_off {
                     info!("unsetting latency injector");
                     self.enabled_latency = false;
-                    self.trick_handle
-                        .as_ref()
-                        .unwrap()
-                        .set_trigger_latency_injector(false);
+                    trick_handle.set_trigger_latency_injector(false);
                 }
             } else {
                 let should_turn_on = self.rng.random_bool(self.config.latency_on);
                 if should_turn_on {
                     info!("setting latency injector");
                     self.enabled_latency = true;
-                    self.trick_handle
-                        .as_ref()
-                        .unwrap()
-                        .set_trigger_latency_injector(true);
+                    trick_handle.set_trigger_latency_injector(true);
                 }
             }
         }
@@ -508,8 +499,7 @@ impl Workload {
     }
 
     async fn schedule_rollback(&mut self, should_crash: bool) -> anyhow::Result<()> {
-        let n_commits_to_rollback =
-            self.rng.random_range(1..self.config.max_rollback_commits);
+        let n_commits_to_rollback = self.rng.random_range(1..self.config.max_rollback_commits);
 
         let last_snapshot = &self.committed;
         let rollback_sync_seqn = last_snapshot.sync_seqn + n_commits_to_rollback as u32;
@@ -927,7 +917,6 @@ impl Workload {
             )
             .await?;
         if let InitOutcome::Success = outcome {
-            
         } else {
             return Err(anyhow::anyhow!("Unexpected init outcome: {:?}", outcome));
         }
@@ -1035,13 +1024,9 @@ impl Workload {
         let mut new_keys = HashSet::with_capacity(changeset_size);
         let mut sum_value_size = 0;
         let mut tot_items = 0;
-        loop {
-            let Some(change) = self.gen_key_value_change(&mut used_keys, &mut new_keys) else {
-                // Stop adding things to the changeset if `gen_key_value_change`
-                // cannot create a new change.
-                break;
-            };
-
+        // Stop adding things to the changeset if `gen_key_value_change`
+        // cannot create a new change.
+        while let Some(change) = self.gen_key_value_change(&mut used_keys, &mut new_keys) {
             if let Some(val) = change.value() {
                 sum_value_size += val.len();
             }
