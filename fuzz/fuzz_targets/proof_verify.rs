@@ -1,20 +1,23 @@
 #![no_main]
 
+mod reference;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use arbitrary::{Arbitrary, Unstructured};
-use bitvec::{order::Msb0, view::BitView};
+use bitvec::view::BitView;
 use libfuzzer_sys::fuzz_target;
 use nomt_core::{
-    hasher::{Blake3Hasher, NodeHasher},
+    hasher::Blake3Hasher,
     proof::{
         verify_multi_proof, verify_multi_proof_update, verify_update, KeyOutOfScope, MultiProof,
         PathProof, PathProofTerminal, PathUpdate,
     },
-    trie::{InternalData, KeyPath, LeafData, Node, ValueHash, TERMINATOR},
+    trie::{KeyPath, LeafData, Node, ValueHash},
     trie_pos::TriePosition,
     update::build_trie,
 };
+use reference::{bit, new_key, node};
 
 type H = Blake3Hasher;
 
@@ -170,28 +173,6 @@ fn check_claims(
     }
 }
 
-fn bit(key: &KeyPath, depth: usize) -> bool {
-    key.view_bits::<Msb0>()[depth]
-}
-
-/// Reference hash of the sub-trie holding `leaves`: sorted, distinct, sharing the first `depth` bits.
-fn node(leaves: &[(KeyPath, ValueHash)], depth: usize) -> Node {
-    match leaves {
-        [] => TERMINATOR,
-        [(key_path, value_hash)] => H::hash_leaf(&LeafData {
-            key_path: *key_path,
-            value_hash: *value_hash,
-        }),
-        _ => {
-            let mid = leaves.partition_point(|(k, _)| !bit(k, depth));
-            H::hash_internal(&InternalData {
-                left: node(&leaves[..mid], depth + 1),
-                right: node(&leaves[mid..], depth + 1),
-            })
-        }
-    }
-}
-
 fn path_proof(mut leaves: &[(KeyPath, ValueHash)], key: &KeyPath) -> PathProof {
     let mut siblings = Vec::new();
     let mut depth = 0;
@@ -267,19 +248,6 @@ impl<'a> Arbitrary<'a> for Run {
             mutations,
         })
     }
-}
-
-/// Mostly derive keys from existing ones, diverging at a chosen bit, so the trie gets deep.
-fn new_key(input: &mut Unstructured<'_>, existing: &[KeyPath]) -> arbitrary::Result<KeyPath> {
-    let mut key: KeyPath = input.arbitrary()?;
-    if !existing.is_empty() && input.ratio(3, 4)? {
-        let base = existing[input.choose_index(existing.len())?];
-        let diverge_at = input.int_in_range(0..=255)?;
-        let bits = key.view_bits_mut::<Msb0>();
-        bits[..diverge_at].copy_from_bitslice(&base.view_bits::<Msb0>()[..diverge_at]);
-        bits.set(diverge_at, !bit(&base, diverge_at));
-    }
-    Ok(key)
 }
 
 #[derive(Debug, Arbitrary)]
