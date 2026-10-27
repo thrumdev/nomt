@@ -10,7 +10,7 @@
 //! Updates are performed while the next fetch is pending, unless all fetches in
 //! the range have completed.
 
-use crossbeam::channel::{Receiver, Select, TryRecvError};
+use crossbeam_channel::{Receiver, Select, TryRecvError};
 
 use nomt_core::{
     page_id::ROOT_PAGE_ID,

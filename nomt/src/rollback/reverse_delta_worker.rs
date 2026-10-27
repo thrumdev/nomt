@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crossbeam::channel::{Receiver, RecvError, Sender};
+use crossbeam_channel::{Receiver, RecvError, Sender};
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
 use threadpool::ThreadPool;
@@ -68,8 +68,8 @@ pub(super) fn start(
     tp: &ThreadPool,
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
 ) -> (Sender<DeltaBuilderCommand>, Receiver<TaskResult<()>>) {
-    let (command_tx, command_rx) = crossbeam::channel::unbounded();
-    let (worker_result_tx, worker_result_rx) = crossbeam::channel::unbounded();
+    let (command_tx, command_rx) = crossbeam_channel::unbounded();
+    let (worker_result_tx, worker_result_rx) = crossbeam_channel::unbounded();
 
     let worker_task = {
         let priors = priors.clone();
@@ -254,7 +254,7 @@ fn run<Store: LoadValueAsync>(
     let raw_completion_rx = worker.store.as_ref().unwrap().raw_completion_stream();
 
     loop {
-        let join = crossbeam::select! {
+        let join = crossbeam_channel::select! {
             recv(command_rx) -> command => match command {
                 Err(RecvError) => {
                     worker.start_shutdown();
