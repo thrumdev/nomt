@@ -135,7 +135,7 @@ pub async fn spawn_agent_into(
     let stream = UnixStream::from_std(sock)?;
 
     let (rr, task) = comms::run(stream);
-    let _ = tokio::spawn(task);
+    tokio::spawn(task);
 
     // Assign a unique ID to the agent.
     static AGENT_COUNT: AtomicUsize = AtomicUsize::new(0);

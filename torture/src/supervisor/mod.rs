@@ -129,7 +129,7 @@ async fn join_interruptable(
     tokio::select! {
         _ = sigint.recv() => {
             control_loop_jh.abort();
-            return ExitReason::Interrupted;
+            ExitReason::Interrupted
         }
         res = &mut control_loop_jh => {
             // Control loop ended before receiving the second ^C.

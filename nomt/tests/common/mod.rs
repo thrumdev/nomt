@@ -259,6 +259,7 @@ impl Arbitrary for ProofCase {
     }
 }
 
+#[allow(dead_code)]
 fn arbitrary_present_access(g: &mut Gen, prior: Value) -> KeyReadWrite {
     match u8::arbitrary(g) % 3 {
         0 => KeyReadWrite::Read(Some(prior)),
@@ -267,6 +268,7 @@ fn arbitrary_present_access(g: &mut Gen, prior: Value) -> KeyReadWrite {
     }
 }
 
+#[allow(dead_code)]
 fn arbitrary_missing_access(g: &mut Gen, allow_read_then_write: bool) -> KeyReadWrite {
     match if allow_read_then_write {
         u8::arbitrary(g) % 3

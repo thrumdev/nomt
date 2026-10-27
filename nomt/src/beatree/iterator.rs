@@ -438,9 +438,7 @@ impl Iterator for NeededLeavesIter {
     type Item = PageNumber;
 
     fn next(&mut self) -> Option<PageNumber> {
-        let Some((branch, mut range)) = self.state.take() else {
-            return None;
-        };
+        let (branch, mut range) = self.state.take()?;
         if let Some(i) = range.next() {
             let key = get_key(&branch, i);
             let pn = branch.node_pointer(i).into();

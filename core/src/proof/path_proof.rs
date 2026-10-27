@@ -117,10 +117,7 @@ pub fn hash_path<H: NodeHasher>(
             (node, sibling)
         };
 
-        let next = InternalData {
-            left,
-            right,
-        };
+        let next = InternalData { left, right };
         node = H::hash_internal(&next);
     }
 

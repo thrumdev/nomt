@@ -233,18 +233,22 @@ impl TestPlan {
         // Verify that all expected keys are in place and have the correct value.
         for (key, expected_value) in expected {
             let actual_value = nomt.read(key).unwrap();
-            if actual_value.is_none() {
-                errors.push(format!(
-                    "missing: the key {:x?} is not present",
-                    hex::encode(key)
-                ));
-            } else if actual_value.as_ref() != Some(&expected_value) {
-                errors.push(format!(
+            match actual_value {
+                None => {
+                    errors.push(format!(
+                        "missing: the key {:x?} is not present",
+                        hex::encode(key)
+                    ));
+                }
+                Some(actual_value) if actual_value != expected_value => {
+                    errors.push(format!(
                     "wrong value: the key {:x?} has the wrong value. Expected {:x?}, found {:x?}",
                     key,
                     hex::encode(expected_value),
-                    hex::encode(actual_value.unwrap())
+                    hex::encode(actual_value)
                 ));
+                }
+                Some(_) => {}
             }
         }
 
@@ -281,10 +285,7 @@ impl TestPlan {
 fn display_keys<'a>(keys: impl IntoIterator<Item = &'a KeyPath>) -> String {
     let mut keys: Vec<_> = keys.into_iter().collect();
     keys.sort();
-    keys.iter()
-        .map(hex::encode)
-        .collect::<Vec<_>>()
-        .join(", ")
+    keys.iter().map(hex::encode).collect::<Vec<_>>().join(", ")
 }
 
 fn display_keys_and_values<'a>(kv: impl IntoIterator<Item = (&'a KeyPath, &'a Value)>) -> String {

@@ -244,9 +244,7 @@ impl<R: Region + Clone> WritePass<R> {
     ///
     /// All write-passes need to be consumed before being dropped to yield the parent region.
     pub fn consume(mut self) -> Option<Self> {
-        let Some(ref parent) = self.parent else {
-            return None;
-        };
+        let parent = self.parent.as_ref()?;
 
         self.consumed = true;
 
@@ -516,6 +514,8 @@ impl<'a, 'pass, T> DerefMut for WriteGuard<'a, 'pass, T> {
 }
 
 /// Whether a region contains values or not.
+///
+/// # Safety
 ///
 /// This trait is unsafe because the memory safety of the [`RwPassCell`]
 /// depends on it being implemented accurately, as well as on the Region trait being

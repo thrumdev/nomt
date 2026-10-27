@@ -368,11 +368,12 @@ impl<T: HashAlgorithm> Nomt<T> {
         // Begin a new session. We do not allow rollback for this operation because that would
         // interfere with the rollback log: if another rollback were to be issued, it must rollback
         // the changes in the rollback log and not the changes performed by the current rollback.
-        let mut session_params = SessionParams::default();
-        session_params.record_rollback_delta = false;
-
-        // We hold a write guard and don't need the session to take any other.
-        session_params.take_global_guard = false;
+        let session_params = SessionParams {
+            record_rollback_delta: false,
+            // We hold a write guard and don't need the session to take any other.
+            take_global_guard: false,
+            ..SessionParams::default()
+        };
         let sess = self.begin_session(session_params);
 
         // Convert the traceback into a series of write commands.

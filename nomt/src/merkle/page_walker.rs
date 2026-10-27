@@ -132,12 +132,7 @@ struct StackPage {
 }
 
 impl StackPage {
-    fn new<H: NodeHasher>(
-        page_id: PageId,
-        page: PageMut,
-        diff: PageDiff,
-        page_origin: PageOrigin,
-    ) -> Self {
+    fn new(page_id: PageId, page: PageMut, diff: PageDiff, page_origin: PageOrigin) -> Self {
         Self {
             elided_children: page.elided_children(),
             page_leaves_counter: page_origin.page_leaves_counter(),
@@ -442,7 +437,7 @@ impl<H: NodeHasher> PageWalker<H> {
                         .unwrap()
                 };
 
-                self.stack.push(StackPage::new::<H>(
+                self.stack.push(StackPage::new(
                     ROOT_PAGE_ID,
                     page,
                     PageDiff::default(),
@@ -484,7 +479,7 @@ impl<H: NodeHasher> PageWalker<H> {
                 };
 
                 self.stack
-                    .push(StackPage::new::<H>(page_id, page, diff, page_origin));
+                    .push(StackPage::new(page_id, page, diff, page_origin));
             }
             self.position.down(bit);
         }
@@ -789,7 +784,7 @@ impl<H: NodeHasher> PageWalker<H> {
             // UNWRAP: all pages on the path to the terminal are present in the page set.
             let (page, page_origin) = page_set.get(&cur_ancestor).unwrap();
 
-            self.stack.push(StackPage::new::<H>(
+            self.stack.push(StackPage::new(
                 cur_ancestor.clone(),
                 page.deep_copy(),
                 PageDiff::default(),
@@ -1080,7 +1075,6 @@ mod tests {
 
     impl PageSet for MockPageSet {
         fn fresh(&self, page_id: &PageId) -> PageMut {
-            
             PageMut::pristine_empty(&self.page_pool, page_id)
         }
 
@@ -1455,10 +1449,12 @@ mod tests {
             })
         };
 
-        let expected_siblings = [(node_hash(path_1, val(1)), 1),
+        let expected_siblings = [
+            (node_hash(path_1, val(1)), 1),
             (node_hash(path_2, val(2)), 2),
             (node_hash(path_3, val(3)), 3),
-            (node_hash(path_4, val(4)), 4)];
+            (node_hash(path_4, val(4)), 4),
+        ];
 
         // replace those leaf nodes one at a time.
         // the sibling stack will be populated as we go.

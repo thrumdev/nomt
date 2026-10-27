@@ -191,7 +191,11 @@ impl BranchUpdater {
             self.ops_tracker.push_chunk(base, from, to);
         }
 
-        if found { Some(to) } else { None }
+        if found {
+            Some(to)
+        } else {
+            None
+        }
     }
 
     // Try to perform a split of the current available ops with a target branch node size.
@@ -268,15 +272,13 @@ fn build_branch(
             &base.node,
             base_range.start,
             compressed_end,
-            ops[ops_range]
-                .iter()
-                .filter_map(|op| {
-                    if let BranchOp::Update(pos, pn) = op {
-                        Some((pos - base_range.start, *pn))
-                    } else {
-                        None
-                    }
-                }),
+            ops[ops_range].iter().filter_map(|op| {
+                if let BranchOp::Update(pos, pn) = op {
+                    Some((pos - base_range.start, *pn))
+                } else {
+                    None
+                }
+            }),
         );
 
         for pos in compressed_end..base_range.end {
@@ -369,8 +371,7 @@ fn build_branch(
     builder.finish()
 }
 
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BranchGauge {
     // key and length of the first separator if any
     first_separator: Option<(Key, usize)>,
@@ -381,7 +382,6 @@ pub struct BranchGauge {
     pub prefix_compressed: Option<usize>,
     n: usize,
 }
-
 
 impl BranchGauge {
     pub fn ingest_key(&mut self, key: Key, len: usize) {
@@ -657,11 +657,7 @@ pub mod tests {
     ) -> Arc<BranchNode> {
         let mut gauge = BranchGauge::default();
         let mut items = Vec::new();
-        loop {
-            let Some(next_key) = keys.next() else {
-                break;
-            };
-
+        for next_key in keys.by_ref() {
             let s_len = separator_len(&next_key);
 
             let size = gauge.body_size_after(next_key, s_len);
@@ -893,7 +889,7 @@ pub mod tests {
             panic!()
         };
 
-        assert!(new_branches.inner.get(&key(0)).is_none());
+        assert!(!new_branches.inner.contains_key(&key(0)));
     }
 
     #[test]

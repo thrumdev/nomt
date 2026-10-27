@@ -133,7 +133,8 @@ fn apply_bbn_changes(
 
     output.submitted_io += worker_output.branches_tracker.extra_freed.len();
     output
-        .freed_pages.append(&mut worker_output.branches_tracker.extra_freed);
+        .freed_pages
+        .append(&mut worker_output.branches_tracker.extra_freed);
     output.post_io_drop.deferred_drop_pages.push(std::mem::take(
         &mut worker_output.branches_tracker.deferred_drop_pages,
     ));
@@ -413,11 +414,7 @@ fn run_worker(
         branch_updater.digest(&mut new_branch_state)?
     {
         has_extended_range = false;
-        if worker_params
-            .range
-            .high
-            .is_some_and(|high| cutoff >= high)
-        {
+        if worker_params.range.high.is_some_and(|high| cutoff >= high) {
             has_extended_range = true;
             request_range_extension(&mut worker_params, &mut new_branch_state.branches_tracker);
         }

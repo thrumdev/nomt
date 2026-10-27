@@ -176,6 +176,7 @@ impl DB {
         SyncController::new(self.clone())
     }
 
+    #[allow(clippy::type_complexity)]
     fn prepare_sync(
         &self,
         sync_seqn: u32,
@@ -309,6 +310,7 @@ pub struct SyncController {
     /// The channel to receive the result of the the begin_sync task.
     begin_sync_result_rx: Receiver<TaskResult<Result<(), BucketExhaustion>>>,
     /// The pages along with their page numbers to write out to the HT file.
+    #[allow(clippy::type_complexity)]
     ht_to_write: Arc<Mutex<Option<Vec<(u64, Arc<FatPage>)>>>>,
 }
 
@@ -346,12 +348,8 @@ impl SyncController {
 
             // if fails The sync coordinator will poison the database and all further commits will
             // be rejected. Therefore, there is no need to perform cleanup.
-            let (ht_pages, cache_updates) = bitbox.prepare_sync(
-                sync_seqn,
-                &page_pool,
-                updated_pages,
-                &mut wal_blob_builder,
-            )?;
+            let (ht_pages, cache_updates) =
+                bitbox.prepare_sync(sync_seqn, &page_pool, updated_pages, &mut wal_blob_builder)?;
             drop(wal_blob_builder);
 
             // Set the hash-table pages before spawning WAL writeout so they don't race with it.

@@ -118,12 +118,10 @@ impl SegmentFileReader {
             self.buf_reader
                 .seek(SeekFrom::Current(-(HEADER_SIZE as i64)))?;
 
-            return Err(std::io::Error::other(
-                anyhow::anyhow!(
-                    "Record payload length is too large: {}",
-                    header.payload_length()
-                ),
-            ));
+            return Err(std::io::Error::other(anyhow::anyhow!(
+                "Record payload length is too large: {}",
+                header.payload_length()
+            )));
         }
         self.payload_length = Some(header.payload_length());
         // It's not enough to just seek to the payload length because the records always span
@@ -358,10 +356,12 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let mut writer = SegmentFileWriter::new(temp_file.reopen().unwrap(), 0);
 
-        let payloads = [vec![1, 2, 3],
+        let payloads = [
+            vec![1, 2, 3],
             vec![4, 5, 6, 7],
             vec![8; RECORD_ALIGNMENT as usize - HEADER_SIZE as usize],
-            vec![9; RECORD_ALIGNMENT as usize * 2 - HEADER_SIZE as usize + 1]];
+            vec![9; RECORD_ALIGNMENT as usize * 2 - HEADER_SIZE as usize + 1],
+        ];
 
         for (i, payload) in payloads.iter().enumerate() {
             writer

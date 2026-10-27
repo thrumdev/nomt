@@ -2,9 +2,9 @@
 //!
 //! Algorithm sketch:
 //!   1. Read in all BBNs from the file. Order them in an in-memory std BTree by the first separator.
-//!     Skip future BBNs according to the commit sequence number.
+//!      Skip future BBNs according to the commit sequence number.
 //!   2. Iterate over BBNs in order, building next level of branches with targeted 75% fullness.
-//!     Create a sorted list of this next layer of BNs as we go.
+//!      Create a sorted list of this next layer of BNs as we go.
 //!   3. Repeat step 2 until the root node is created.
 
 use anyhow::{bail, ensure, Ok, Result};
@@ -60,7 +60,7 @@ pub fn reconstruct(
             separator[prefix.len()..prefix.len() + first.len()].copy_from_bitslice(first);
         }
 
-        if let Some(_) = index.insert(separator, Arc::new(branch)) {
+        if index.insert(separator, Arc::new(branch)).is_some() {
             bail!(
                 "2 branch nodes with same separator, separator={:?}",
                 separator

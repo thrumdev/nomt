@@ -18,7 +18,6 @@ use std::{
     path::Path,
     sync::{atomic::AtomicBool, Arc, LazyLock, Mutex},
     time::{Duration, UNIX_EPOCH},
-    u64,
 };
 
 mod latency;
@@ -726,24 +725,19 @@ impl fuser::Filesystem for Trick {
             .unwrap_or_else(|| panic!("ino {ino} is not in tree"));
         let offset = u64::try_from(offset).unwrap();
         let standard = &[(DOT.as_os_str(), Inode(ino)), (DOTDOT.as_os_str(), parent)];
-        let mut iter = standard
+        let iter = standard
             .iter()
             .copied()
             .chain(container.iter())
             .enumerate()
             .skip(offset as usize);
-        loop {
-            if let Some((offset, (name, ino))) = iter.next() {
-                let inode = self
-                    .lookup_inode(ino)
-                    .unwrap_or_else(|| panic!("{ino:?} cannot be found"));
-                let offset = offset + 1;
-                let buf_is_filled =
-                    reply.add(ino.0, offset.try_into().unwrap(), inode.kind(), name);
-                if buf_is_filled {
-                    break;
-                }
-            } else {
+        for (offset, (name, ino)) in iter {
+            let inode = self
+                .lookup_inode(ino)
+                .unwrap_or_else(|| panic!("{ino:?} cannot be found"));
+            let offset = offset + 1;
+            let buf_is_filled = reply.add(ino.0, offset.try_into().unwrap(), inode.kind(), name);
+            if buf_is_filled {
                 break;
             }
         }

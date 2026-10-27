@@ -7,7 +7,7 @@ use alloc::fmt;
 use bitvec::prelude::*;
 
 /// Encapsulates logic for moving around in paged storage for a binary trie.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[cfg_attr(
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
@@ -63,6 +63,7 @@ impl TriePosition {
 
     /// Parse a `TriePosition` from a bit string.
     #[cfg(test)]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let mut bitvec = BitVec::<u8, Msb0>::new();
         if s.len() > 256 {

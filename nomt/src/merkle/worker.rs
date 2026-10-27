@@ -538,9 +538,7 @@ fn subtrie_ops(read_write: &[(KeyPath, KeyReadWrite)]) -> Vec<(KeyPath, Option<V
     read_write
         .iter()
         .filter_map(|(key, read_write)| match read_write {
-            KeyReadWrite::Write(val) | KeyReadWrite::ReadThenWrite(val) => {
-                Some((*key, *val))
-            }
+            KeyReadWrite::Write(val) | KeyReadWrite::ReadThenWrite(val) => Some((*key, *val)),
             KeyReadWrite::Read => None,
         })
         .collect::<Vec<_>>()

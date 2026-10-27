@@ -624,9 +624,9 @@ fn truncate_head_segment(
 ) -> std::io::Result<SegmentFileWriter> {
     let end = match scan_record_end(path, new_end_live)? {
         None => {
-            return Err(std::io::Error::other(
-                anyhow::anyhow!("Failed to find the last live record in the head segment"),
-            ));
+            return Err(std::io::Error::other(anyhow::anyhow!(
+                "Failed to find the last live record in the head segment"
+            )));
         }
         Some(offset) => offset,
     };
@@ -772,6 +772,7 @@ mod tests {
             })
         }
 
+        #[allow(clippy::type_complexity)]
         fn open_log(
             &self,
             max_segment_size: u64,

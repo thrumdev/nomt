@@ -252,7 +252,6 @@ pub fn build_trie<H: NodeHasher>(
         c = leaf_ops.next();
     }
 
-    
     pending_siblings
         .pop()
         .map(|n| n.0)
@@ -315,7 +314,6 @@ mod tests {
     fn branch_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
         let data = trie::InternalData { left, right };
 
-        
         DummyNodeHasher::hash_internal(&data)
     }
 

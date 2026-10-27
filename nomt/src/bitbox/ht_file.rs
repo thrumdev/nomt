@@ -70,7 +70,11 @@ pub fn open(
 /// Lays out the meta page. If `preallocate` is true, preallocates the blocks for the file.
 pub fn create(path: PathBuf, num_pages: u32, preallocate: bool) -> std::io::Result<()> {
     let ht_path = path.join("ht");
-    let ht_file = OpenOptions::new().write(true).create(true).open(ht_path)?;
+    let ht_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(ht_path)?;
 
     // number of pages + pages required for meta bits.
     let page_count = num_pages + num_meta_byte_pages(num_pages);
@@ -82,7 +86,11 @@ pub fn create(path: PathBuf, num_pages: u32, preallocate: bool) -> std::io::Resu
     drop(ht_file);
 
     let wal_path = path.join("wal");
-    let wal_file = OpenOptions::new().write(true).create(true).open(wal_path)?;
+    let wal_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(wal_path)?;
     wal_file.sync_all()?;
     drop(wal_file);
     Ok(())

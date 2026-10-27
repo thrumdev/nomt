@@ -29,13 +29,9 @@ use crate::task::{join_task, spawn_task};
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
 
 fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNumber)> {
-    let Some((_, branch)) = bbn_index.lookup(key) else {
-        return None;
-    };
+    let (_, branch) = bbn_index.lookup(key)?;
 
-    let Some((i, leaf_pn)) = search_branch(&branch, key) else {
-        return None;
-    };
+    let (i, leaf_pn) = search_branch(&branch, key)?;
     let separator = get_key(&branch, i);
 
     let cutoff = if i + 1 < branch.n() as usize {
@@ -82,6 +78,7 @@ pub struct LeafStageOutput {
 }
 
 /// Change the btree's leaves in the specified way
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     bbn_index: &Index,
     leaf_cache: LeafCache,
@@ -215,7 +212,8 @@ fn apply_worker_changes(
 
     output.submitted_io += worker_output.leaves_tracker.extra_freed.len();
     output
-        .freed_pages.append(&mut worker_output.leaves_tracker.extra_freed);
+        .freed_pages
+        .append(&mut worker_output.leaves_tracker.extra_freed);
 
     output.post_io_work.worker_changes.push(worker_output);
 }
@@ -344,6 +342,7 @@ pub fn enforce_first_leaf_separator(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn prepare_workers(
     bbn_index: &Index,
     changeset: &[(Key, Option<(Vec<u8>, bool)>)],
@@ -435,6 +434,7 @@ fn prepare_workers(
     workers
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reset_leaf_base(
     bbn_index: &Index,
     leaf_cache: &LeafCache,
@@ -551,6 +551,7 @@ struct LeafWorkerOutput {
     overflow_deleted: Vec<Vec<u8>>,
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn run_worker(
     bbn_index: Index,
     leaf_cache: &LeafCache,
@@ -642,11 +643,7 @@ fn run_worker(
 
     while let LeafDigestResult::NeedsMerge(cutoff) = leaf_updater.digest(&mut new_leaf_state)? {
         has_extended_range = false;
-        if worker_params
-            .range
-            .high
-            .is_some_and(|high| cutoff >= high)
-        {
+        if worker_params.range.high.is_some_and(|high| cutoff >= high) {
             has_extended_range = true;
             request_range_extension(&mut worker_params, &mut new_leaf_state.leaves_tracker);
         }

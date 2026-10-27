@@ -32,6 +32,12 @@ pub struct Options {
     pub(crate) page_cache_upper_levels: usize,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Options {
     /// Create a new `Options` instance with the default values and a random bitbox seed.
     pub fn new() -> Self {

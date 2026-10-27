@@ -783,7 +783,7 @@ mod tests {
         };
         assert_eq!(merge_key, key(4));
 
-        assert!(new_leaves.inner.get(&key(1)).is_none());
+        assert!(!new_leaves.inner.contains_key(&key(1)));
 
         updater.reset_base(
             Some(BaseLeaf {
@@ -858,7 +858,7 @@ mod tests {
             panic!()
         };
 
-        assert!(new_leaves.inner.get(&key(1)).is_none());
+        assert!(!new_leaves.inner.contains_key(&key(1)));
     }
 
     #[test]

@@ -531,7 +531,9 @@ fn branch_stage_inner(input: StageInputs) -> TestResult {
     let mut changeset: BTreeMap<[u8; 32], Option<PageNumber>> = insertions.clone();
     changeset.extend(deletions.clone());
 
-    let bbn_page_numbers: BTreeSet<_> = changeset.keys().map(|key| bbn_index.lookup(*key).unwrap().1.bbn_pn())
+    let bbn_page_numbers: BTreeSet<_> = changeset
+        .keys()
+        .map(|key| bbn_index.lookup(*key).unwrap().1.bbn_pn())
         .collect();
 
     let mut new_bbn_index = bbn_index.clone();

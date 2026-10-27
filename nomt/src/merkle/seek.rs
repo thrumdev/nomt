@@ -182,11 +182,8 @@ impl SeekRequest {
             // beatree leaves, and the requests will be woken one after the other when a needed leaf is received.
             // This is less consuming than the overhead introduced by making the second SeekRequest depend
             // on the first one or sharing some data between them.
-            self.state = RequestState::begin_leaves_fetch::<H>(
-                read_transaction,
-                &self.position,
-                page.clone(),
-            );
+            self.state =
+                RequestState::begin_leaves_fetch(read_transaction, &self.position, page.clone());
             self.continue_leaves_fetch::<H>(page_set, overlay, None);
         }
     }
@@ -451,7 +448,7 @@ impl RequestState {
         }
     }
 
-    fn begin_leaves_fetch<H: HashAlgorithm>(
+    fn begin_leaves_fetch(
         read_transaction: &BeatreeReadTx,
         pos: &TriePosition,
         page: Page,
@@ -591,9 +588,7 @@ impl<H: HashAlgorithm> Seeker<H> {
 
     /// Take the result of a complete request.
     pub fn take_completion(&mut self) -> Option<Seek> {
-        if self.requests.front().is_some_and(|r| r.is_completed()) {
-            // UNWRAP: just checked existence.
-            let request = self.requests.pop_front().unwrap();
+        if let Some(request) = self.requests.pop_front_if(|r| r.is_completed()) {
             // PANIC: checked above.
             let RequestState::Completed(terminal) = request.state else {
                 unreachable!()

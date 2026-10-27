@@ -80,6 +80,7 @@ impl Shared {
 }
 
 impl Tree {
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         page_pool: PagePool,
         io_pool: &IoPool,
@@ -92,10 +93,8 @@ impl Tree {
         commit_concurrency: usize,
         leaf_cache_size: usize,
     ) -> Result<Tree> {
-        let ln_freelist_pn = Some(PageNumber(ln_freelist_pn))
-            .filter(|&x| x != FREELIST_EMPTY);
-        let bbn_freelist_pn = Some(PageNumber(bbn_freelist_pn))
-            .filter(|&x| x != FREELIST_EMPTY);
+        let ln_freelist_pn = Some(PageNumber(ln_freelist_pn)).filter(|&x| x != FREELIST_EMPTY);
+        let bbn_freelist_pn = Some(PageNumber(bbn_freelist_pn)).filter(|&x| x != FREELIST_EMPTY);
 
         let ln_bump = PageNumber(ln_bump);
         let bbn_bump = PageNumber(bbn_bump);
@@ -563,6 +562,7 @@ impl ReadTransaction {
     /// If `Ok` is returned, then no I/O command has been submitted along the handle.
     /// If `Err` is returned, then an I/O command has been submitted along the handle, and the
     /// user_data is as specified.
+    #[allow(clippy::result_large_err)]
     pub fn lookup_async(
         &self,
         key: Key,

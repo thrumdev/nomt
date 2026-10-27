@@ -39,8 +39,7 @@ fn fill_and_empty(seed: [u8; 16], commit_concurrency: usize) {
 
     // inserting all the values
     let mut to_check = vec![];
-    for i in 0..db_size {
-        let key = items[i];
+    for (i, &key) in items.iter().enumerate() {
         let value = vec![i as u8; 400];
 
         to_check.push((key, value.clone()));

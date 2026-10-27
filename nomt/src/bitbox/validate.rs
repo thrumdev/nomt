@@ -111,12 +111,10 @@ fn ensure_bucket_reachable(
 ) -> anyhow::Result<()> {
     let hash = hash_raw_page_id(page_label, seed);
     let mut bucket = hash % meta_map.len() as u64;
-    let mut step = 0u64;
     let max_probes = meta_map.len().saturating_mul(2).max(MAX_VALIDATION_PROBES);
 
-    for _ in 0..max_probes {
+    for step in 0..max_probes as u64 {
         bucket += step;
-        step += 1;
         bucket %= meta_map.len() as u64;
 
         let bucket = bucket as usize;

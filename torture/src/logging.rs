@@ -47,9 +47,7 @@ fn env_filter(kind: Kind) -> EnvFilter {
                     .parse(env)
                     .unwrap(),
             ),
-            Err(std::env::VarError::NotPresent) => {
-                None
-            }
+            Err(std::env::VarError::NotPresent) => None,
             Err(std::env::VarError::NotUnicode(_)) => {
                 panic!("Environment variable {} is not unicode", var_name);
             }

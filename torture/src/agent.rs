@@ -547,6 +547,7 @@ fn is_enospc(err: &anyhow::Error) -> bool {
 }
 
 /// Abstraction over the stream of messages from the supervisor.
+#[allow(clippy::type_complexity)]
 struct Stream {
     rd_stream: SymmetricallyFramed<
         FramedRead<BufReader<OwnedReadHalf>, LengthDelimitedCodec>,

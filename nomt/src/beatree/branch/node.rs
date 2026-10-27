@@ -649,7 +649,6 @@ impl BranchNodeBuilder {
                 }
             };
 
-            
             let bit_len = if is_prefix_extension {
                 // carry_prefix is already being applied, so skip bits in the new node's separator
                 separator_bit_start += bit_prefix_len_difference;
