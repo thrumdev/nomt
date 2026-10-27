@@ -20,13 +20,13 @@ fn fill_and_empty(seed: [u8; 16], commit_concurrency: usize) {
     let commit_size = db_size / 16;
 
     let mut items = std::collections::BTreeSet::new();
-    while items.len() < db_size as usize {
+    while items.len() < db_size {
         items.insert(rand_key(&mut rng));
     }
     let mut items: Vec<_> = items.into_iter().collect();
     items.shuffle(&mut rng);
 
-    let mut to_delete: Vec<usize> = (0..db_size as usize).collect();
+    let mut to_delete: Vec<usize> = (0..db_size).collect();
     to_delete.shuffle(&mut rng);
 
     let mut t = Test::new_with_params(

@@ -30,10 +30,10 @@ pub fn leaf_ops_spliced(
     // splice: before / item / after
     // skip deleted.
     ops[..splice_index]
-        .into_iter()
+        .iter()
         .cloned()
         .chain(preserve_value)
-        .chain(ops[splice_index..].into_iter().cloned())
+        .chain(ops[splice_index..].iter().cloned())
         .filter_map(|(k, o)| o.map(move |value| (k, value)))
 }
 
@@ -220,7 +220,7 @@ pub fn build_trie<H: NodeHasher>(
         {
             layer -= 1;
 
-            let sibling = if pending_siblings.last().map_or(false, |l| l.1 == layer + 1) {
+            let sibling = if pending_siblings.last().is_some_and(|l| l.1 == layer + 1) {
                 // unwrap: just checked
                 pending_siblings.pop().unwrap().0
             } else {
@@ -252,11 +252,11 @@ pub fn build_trie<H: NodeHasher>(
         c = leaf_ops.next();
     }
 
-    let new_root = pending_siblings
+    
+    pending_siblings
         .pop()
         .map(|n| n.0)
-        .unwrap_or(trie::TERMINATOR);
-    new_root
+        .unwrap_or(trie::TERMINATOR)
 }
 
 #[cfg(test)]
@@ -304,8 +304,8 @@ mod tests {
     fn leaf(key: u8) -> (LeafData, [u8; 32]) {
         let key = [key; 32];
         let leaf = trie::LeafData {
-            key_path: key.clone(),
-            value_hash: key.clone(),
+            key_path: key,
+            value_hash: key,
         };
 
         let hash = DummyNodeHasher::hash_leaf(&leaf);
@@ -315,8 +315,8 @@ mod tests {
     fn branch_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
         let data = trie::InternalData { left, right };
 
-        let hash = DummyNodeHasher::hash_internal(&data);
-        hash
+        
+        DummyNodeHasher::hash_internal(&data)
     }
 
     #[derive(Default)]

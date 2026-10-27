@@ -240,7 +240,7 @@ fn exec_leaf_stage(
 
     let bbn_index = &TREE_DATA.bbn_index;
     let leaf_cache = LeafCache::new(commit_concurrency, 1024);
-    let leaf_page_numbers = leaf_page_numbers(&bbn_index, changeset.keys().cloned());
+    let leaf_page_numbers = leaf_page_numbers(bbn_index, changeset.keys().cloned());
 
     let io_handle = IO_POOL.make_handle();
     let leaf_stage_output = super::leaf_stage::run(
@@ -336,7 +336,7 @@ fn is_valid_leaf_stage_output(
 
         // all new leaves must respect the half-full requirement except for the last one
         if leaf::node::body_size(n, value_size_sum) < LEAF_MERGE_THRESHOLD {
-            if found_underfull_leaf == true {
+            if found_underfull_leaf {
                 return false;
             }
             found_underfull_leaf = true;
@@ -380,7 +380,7 @@ fn leaf_stage_inner(input: StageInputs) -> TestResult {
     TestResult::from_bool(is_valid_leaf_stage_output(
         leaf_stage_output,
         prior_leaf_page_numbers,
-        deletions.into_iter().map(|(k, _)| k).collect(),
+        deletions.into_keys().collect(),
         insertions
             .into_iter()
             .map(|(k, v)| (k, v.as_option().unwrap().to_vec()))
@@ -531,9 +531,7 @@ fn branch_stage_inner(input: StageInputs) -> TestResult {
     let mut changeset: BTreeMap<[u8; 32], Option<PageNumber>> = insertions.clone();
     changeset.extend(deletions.clone());
 
-    let bbn_page_numbers: BTreeSet<_> = changeset
-        .iter()
-        .map(|(key, _)| bbn_index.lookup(*key).unwrap().1.bbn_pn())
+    let bbn_page_numbers: BTreeSet<_> = changeset.keys().map(|key| bbn_index.lookup(*key).unwrap().1.bbn_pn())
         .collect();
 
     let mut new_bbn_index = bbn_index.clone();

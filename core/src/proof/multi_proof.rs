@@ -252,7 +252,7 @@ impl MultiProof {
             match proof_range.step(&path_proofs) {
                 PathProofRangeStep::Bisect { left, right } => {
                     // insert collected common siblings
-                    siblings.extend(common_siblings.drain(..));
+                    siblings.append(&mut common_siblings);
 
                     // push into the stack the right Bisection and work on the left one
                     proof_range = left;
@@ -341,7 +341,7 @@ impl VerifiedMultiProof {
     /// Fails if the key is out of the scope of this proof.
     pub fn confirm_value(&self, expected_leaf: &LeafData) -> Result<bool, KeyOutOfScope> {
         let index = self.find_index_for(&expected_leaf.key_path)?;
-        Ok(self.confirm_value_inner(&expected_leaf, index))
+        Ok(self.confirm_value_inner(expected_leaf, index))
     }
 
     /// Check whether the specific path with index `index` proves that a key has no value in
@@ -395,7 +395,7 @@ impl VerifiedMultiProof {
             path.terminal.path()[..depth] == expected_leaf.key_path.view_bits::<Msb0>()[..depth];
 
         if in_scope {
-            Ok(self.confirm_value_inner(&expected_leaf, index))
+            Ok(self.confirm_value_inner(expected_leaf, index))
         } else {
             Err(KeyOutOfScope)
         }
@@ -468,7 +468,7 @@ pub fn verify<H: NodeHasher>(
         inner: verified_paths,
         bisections: verified_bisections,
         siblings: multi_proof.siblings.clone(),
-        root: root,
+        root,
     })
 }
 
@@ -670,12 +670,12 @@ impl CommonSiblings {
         while self
             .bisection_stack
             .last()
-            .map_or(false, |b| b.start_depth >= depth)
+            .is_some_and(|b| b.start_depth >= depth)
         {
             let _ = self.bisection_stack.pop();
         }
 
-        while self.stack.last().map_or(false, |(d, _)| *d >= depth) {
+        while self.stack.last().is_some_and(|(d, _)| *d >= depth) {
             let _ = self.stack.pop();
         }
     }
@@ -689,7 +689,7 @@ impl CommonSiblings {
     }
 
     fn pop_if_at_depth(&mut self, depth: usize) -> Option<Node> {
-        if self.stack.last().map_or(false, |(d, _)| *d == depth) {
+        if self.stack.last().is_some_and(|(d, _)| *d == depth) {
             self.stack.pop().map(|(_, n)| n)
         } else {
             None
@@ -752,7 +752,7 @@ pub fn verify_update<H: NodeHasher>(
                     &[]
                 };
 
-                common_siblings.advance(&proof);
+                common_siblings.advance(proof);
                 hash_and_compact_terminal::<H>(
                     &mut pending_siblings,
                     terminal,
@@ -784,7 +784,7 @@ pub fn verify_update<H: NodeHasher>(
             }
 
             // if this is either the first op or this has the same terminal as the previous op...
-            if last_terminal_index.map_or(true, |x| x == next_terminal_index) {
+            if last_terminal_index.is_none_or(|x| x == next_terminal_index) {
                 last_terminal_index = Some(next_terminal_index);
                 working_ops.push((key, op));
                 continue;
@@ -801,7 +801,7 @@ pub fn verify_update<H: NodeHasher>(
                 let terminal = &proof.inner[terminal_index];
                 let next_terminal = Some(&proof.inner[terminal_index + 1]);
 
-                common_siblings.advance(&proof);
+                common_siblings.advance(proof);
                 hash_and_compact_terminal::<H>(
                     &mut pending_siblings,
                     terminal,
@@ -812,12 +812,12 @@ pub fn verify_update<H: NodeHasher>(
             }
 
             // ingest the currently updated terminal.
-            let ops = core::mem::replace(&mut working_ops, Vec::new());
+            let ops = std::mem::take(&mut working_ops);
             working_ops.push((key, op));
 
             let terminal = &proof.inner[updated_index];
             let next_terminal = proof.inner.get(updated_index + 1);
-            common_siblings.advance(&proof);
+            common_siblings.advance(proof);
 
             hash_and_compact_terminal::<H>(
                 &mut pending_siblings,
@@ -862,7 +862,7 @@ fn hash_and_compact_terminal<H: NodeHasher>(
         skip // go to root
     };
 
-    let ops = crate::update::leaf_ops_spliced(leaf, &ops);
+    let ops = crate::update::leaf_ops_spliced(leaf, ops);
     let sub_root = crate::update::build_trie::<H>(skip, ops, |_| {});
 
     let mut cur_node = sub_root;
@@ -878,7 +878,7 @@ fn hash_and_compact_terminal<H: NodeHasher>(
         .rev()
         .take(up_layers)
     {
-        let sibling = if pending_siblings.last().map_or(false, |p| p.1 == cur_layer) {
+        let sibling = if pending_siblings.last().is_some_and(|p| p.1 == cur_layer) {
             // is this even possible? maybe not. but being extra cautious...
             let _ = common_siblings.pop_if_at_depth(cur_layer);
             // UNWRAP: guaranteed to exist.
@@ -1409,7 +1409,7 @@ mod tests {
         let v1 = Blake3Hasher::hash_leaf(&leaf_1);
         let v2 = Blake3Hasher::hash_leaf(&leaf_2);
         let s3 = Blake3Hasher::hash_internal(&InternalData {
-            left: v0.clone(),
+            left: v0,
             right: v2,
         });
         let root = Blake3Hasher::hash_internal(&InternalData {
@@ -1472,7 +1472,7 @@ mod tests {
         let v1 = Blake3Hasher::hash_leaf(&leaf_1);
         let v2 = Blake3Hasher::hash_leaf(&leaf_2);
         let s3 = Blake3Hasher::hash_internal(&InternalData {
-            left: v0.clone(),
+            left: v0,
             right: v2,
         });
         let root = Blake3Hasher::hash_internal(&InternalData {

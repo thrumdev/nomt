@@ -52,7 +52,7 @@ impl BranchNode {
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        &*self.page
+        &self.page
     }
 
     pub fn page(&self) -> Page {
@@ -66,7 +66,7 @@ impl BranchNode {
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut *self.page
+        &mut self.page
     }
 
     pub fn bbn_pn(&self) -> u32 {
@@ -117,7 +117,7 @@ impl BranchNode {
     fn set_prefix(&mut self, key: &[u8; 32]) {
         let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
         let prefix_len = self.prefix_len() as usize;
-        let end = start + ((prefix_len + 7) / 8).next_multiple_of(8);
+        let end = start + prefix_len.div_ceil(8).next_multiple_of(8);
         bitwise_memcpy(&mut self.as_mut_slice()[start..end], 0, key, 0, prefix_len);
     }
 
@@ -173,7 +173,7 @@ impl BranchNode {
 
         let separators_start = BRANCH_NODE_HEADER_SIZE + (n * 2);
         slice[separators_start..].view_bits_mut()[prefix_len..][bit_offset_start..bit_offset_end]
-            .copy_from_bitslice(&separator);
+            .copy_from_bitslice(separator);
     }
 
     pub fn node_pointer(&self, i: usize) -> u32 {
@@ -269,7 +269,7 @@ impl<'a> BranchNodeView<'a> {
         let byte_len = if bit_len == 0 {
             0
         } else {
-            (((bit_start + bit_len) + 7) / 8).next_multiple_of(8)
+            (bit_start + bit_len).div_ceil(8).next_multiple_of(8)
         };
 
         RawSeparatorsData {
@@ -312,7 +312,7 @@ impl<'a> BranchNodeView<'a> {
         let bit_len = self.prefix_len() as usize;
 
         let start = BRANCH_NODE_HEADER_SIZE + self.n() as usize * 2;
-        let end = start + ((bit_len + 7) / 8);
+        let end = start + bit_len.div_ceil(8);
 
         (&self.inner[start..end], bit_len)
     }
@@ -368,7 +368,7 @@ pub type RawSeparatorsMut<'a> = (&'a mut [u8], usize, usize);
 pub fn body_size(prefix_len: usize, total_separator_lengths: usize, n: usize) -> usize {
     // prefix plus separator lengths are measured in bits, which we round
     // up to the next byte boundary. They are preceded by cells and followed by node pointers
-    (n * 2) + (prefix_len + total_separator_lengths + 7) / 8 + (n * 4)
+    (n * 2) + (prefix_len + total_separator_lengths).div_ceil(8) + (n * 4)
 }
 
 /// Given inputs describing a range of compressed separators, output the sum of the separator
@@ -503,7 +503,7 @@ impl BranchNodeBuilder {
         let bit_prefix_len_difference =
             base.prefix_len() as isize - self.branch.prefix_len() as isize;
         let is_prefix_extension = bit_prefix_len_difference.is_positive();
-        let bit_prefix_len_difference = bit_prefix_len_difference.abs() as usize;
+        let bit_prefix_len_difference = bit_prefix_len_difference.unsigned_abs();
 
         // 1. copy and update cells
         // self.separator_bit_offset is the end offset of the last inserted separator
@@ -514,7 +514,7 @@ impl BranchNodeBuilder {
             base_prev_cell_pointer = base.view().cell(from - 1)
         }
 
-        for (base_cell, cell) in (&base.view().cells()[from..to])
+        for (base_cell, cell) in base.view().cells()[from..to]
             .iter()
             .zip(&mut self.branch.cells_mut()[self.index..self.index + n_items])
         {
@@ -528,7 +528,7 @@ impl BranchNodeBuilder {
                 separator_len = separator_len.saturating_sub(bit_prefix_len_difference);
             }
 
-            cell_pointer += separator_len as usize;
+            cell_pointer += separator_len;
             cell.copy_from_slice(&u16::try_from(cell_pointer).unwrap().to_le_bytes());
         }
 
@@ -592,13 +592,13 @@ impl BranchNodeBuilder {
             // the base prefix and added in front of every separator.
             // The interested bits are the last bits of the prefix
 
-            let bits_to_skip = base.prefix_len() as usize - bit_prefix_len_difference as usize;
+            let bits_to_skip = base.prefix_len() as usize - bit_prefix_len_difference;
             let bytes_to_skip = bits_to_skip / 8;
             let prefix_bit_start = bits_to_skip % 8;
 
             let base_prefix_start = BRANCH_NODE_HEADER_SIZE + base.n() as usize * 2;
             let start = base_prefix_start + bytes_to_skip;
-            let byte_len = (((bit_prefix_len_difference as usize) + 7) / 8).next_multiple_of(8);
+            let byte_len = bit_prefix_len_difference.div_ceil(8).next_multiple_of(8);
 
             Some((start, start + byte_len, prefix_bit_start))
         } else {
@@ -644,17 +644,17 @@ impl BranchNodeBuilder {
                 if *bit_start > 7 {
                     // skip some bytes because they are part of the prefix
                     let bytes_to_skip = *bit_start / 8;
-                    *bit_start = *bit_start % 8;
+                    *bit_start %= 8;
                     *byte_init += bytes_to_skip;
                 }
             };
 
-            let bit_len;
-            if is_prefix_extension {
+            
+            let bit_len = if is_prefix_extension {
                 // carry_prefix is already being applied, so skip bits in the new node's separator
                 separator_bit_start += bit_prefix_len_difference;
                 handle_prefix_offset(&mut separator_bit_start, &mut separator_bytes_start);
-                bit_len = base_separator_bit_len;
+                base_separator_bit_len
             } else {
                 // the prefix in the new node is bigger, so skip bits in the base's separator
                 base_separator_bit_start += bit_prefix_len_difference;
@@ -662,8 +662,8 @@ impl BranchNodeBuilder {
                     &mut base_separator_bit_start,
                     &mut base_separator_bytes_start,
                 );
-                bit_len = separator_bit_len;
-            }
+                separator_bit_len
+            };
 
             bitwise_memcpy(
                 &mut self.branch.page

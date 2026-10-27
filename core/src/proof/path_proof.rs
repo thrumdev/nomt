@@ -27,7 +27,7 @@ impl PathProofTerminal {
     /// Return the bit-path to the Terminal Node
     pub fn path(&self) -> &BitSlice<u8, Msb0> {
         match self {
-            Self::Leaf(leaf_data) => &leaf_data.key_path.view_bits(),
+            Self::Leaf(leaf_data) => leaf_data.key_path.view_bits(),
             Self::Terminator(key_path) => key_path.path(),
         }
     }
@@ -118,8 +118,8 @@ pub fn hash_path<H: NodeHasher>(
         };
 
         let next = InternalData {
-            left: left.clone(),
-            right: right.clone(),
+            left,
+            right,
         };
         node = H::hash_internal(&next);
     }
@@ -197,7 +197,7 @@ impl VerifiedPathProof {
         self.in_scope(key_path).map(|_| {
             self.terminal()
                 .as_ref()
-                .map_or(true, |d| &d.key_path != key_path)
+                .is_none_or(|d| &d.key_path != key_path)
         })
     }
 
@@ -303,7 +303,7 @@ pub fn verify_update<H: NodeHasher>(
     // left frontier
     let mut pending_siblings: Vec<(Node, usize)> = Vec::new();
     for (i, path) in paths.iter().enumerate() {
-        let leaf = path.inner.terminal().map(|x| x.clone());
+        let leaf = path.inner.terminal().cloned();
         let ops = &path.ops;
         let skip = path.inner.path().len();
 
@@ -335,7 +335,7 @@ pub fn verify_update<H: NodeHasher>(
             .take(up_layers)
             .zip(path.inner.siblings.iter().rev())
         {
-            let sibling = if pending_siblings.last().map_or(false, |p| p.1 == cur_layer) {
+            let sibling = if pending_siblings.last().is_some_and(|p| p.1 == cur_layer) {
                 // unwrap: checked above
                 pending_siblings.pop().unwrap().0
             } else {

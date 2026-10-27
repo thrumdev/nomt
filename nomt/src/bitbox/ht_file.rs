@@ -39,7 +39,7 @@ pub(super) fn expected_file_len(num_pages: u32) -> u64 {
 }
 
 pub(super) fn num_meta_byte_pages(num_pages: u32) -> u32 {
-    ((num_pages as u64 + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64) as u32
+    (num_pages as u64).div_ceil(PAGE_SIZE as u64) as u32
 }
 
 /// Opens the HT file, checks its length and reads the meta map.
@@ -56,7 +56,7 @@ pub fn open(
     let mut meta_bytes = Vec::with_capacity(meta_byte_pages as usize * PAGE_SIZE);
     for pn in 0..meta_byte_pages {
         let extra_meta_page = io::read_page(page_pool, ht_fd, pn as u64)?;
-        meta_bytes.extend_from_slice(&*extra_meta_page);
+        meta_bytes.extend_from_slice(&extra_meta_page);
     }
 
     Ok((

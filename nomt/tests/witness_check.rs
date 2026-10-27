@@ -58,7 +58,7 @@ fn produced_witness_validity() {
     for (i, witnessed_path) in witness.path_proofs.iter().enumerate() {
         let verified = witnessed_path
             .inner
-            .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root.into_inner())
+            .verify::<Blake3Hasher>(witnessed_path.path.path(), prev_root.into_inner())
             .unwrap();
         for read in witness
             .operations
@@ -87,7 +87,7 @@ fn produced_witness_validity() {
             .skip_while(|r| r.path_index != i)
             .take_while(|r| r.path_index == i)
         {
-            write_ops.push((write.key, write.value.clone()));
+            write_ops.push((write.key, write.value));
         }
 
         if !write_ops.is_empty() {
@@ -158,7 +158,7 @@ fn test_verify_update_with_identical_paths() {
     let witnessed_path = &witness.path_proofs[0];
     let verified_proof = witnessed_path
         .inner
-        .verify::<Blake3Hasher>(&witnessed_path.path.path(), root.into_inner())
+        .verify::<Blake3Hasher>(witnessed_path.path.path(), root.into_inner())
         .unwrap();
 
     // Create two identical PathUpdate objects
@@ -203,7 +203,7 @@ fn property_generated_witnesses_verify() {
         for (i, witnessed_path) in witness.path_proofs.iter().enumerate() {
             let verified = witnessed_path
                 .inner
-                .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root.into_inner())
+                .verify::<Blake3Hasher>(witnessed_path.path.path(), prev_root.into_inner())
                 .unwrap();
 
             for read in witness
@@ -233,7 +233,7 @@ fn property_generated_witnesses_verify() {
                 .skip_while(|w| w.path_index != i)
                 .take_while(|w| w.path_index == i)
             {
-                write_ops.push((write.key, write.value.clone()));
+                write_ops.push((write.key, write.value));
             }
 
             if !write_ops.is_empty() {

@@ -60,7 +60,7 @@ impl Store {
         let should_create = !o.path.exists() || is_directory_empty(o.path.as_path())?;
         if should_create {
             // NB: note TOCTOU here. Deemed acceptable for this case.
-            (db_dir_fd, flock) = create(&page_pool, &o)?;
+            (db_dir_fd, flock) = create(&page_pool, o)?;
         } else {
             let mut options = OpenOptions::new();
             options.read(true);
@@ -94,7 +94,7 @@ impl Store {
             if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
-            options.open(&o.path.join("meta"))?
+            options.open(o.path.join("meta"))?
         };
 
         let ln_fd = {
@@ -104,7 +104,7 @@ impl Store {
             if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
-            Arc::new(options.open(&o.path.join("ln"))?)
+            Arc::new(options.open(o.path.join("ln"))?)
         };
         let bbn_fd = {
             let mut options = OpenOptions::new();
@@ -113,7 +113,7 @@ impl Store {
             if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
-            Arc::new(options.open(&o.path.join("bbn"))?)
+            Arc::new(options.open(o.path.join("bbn"))?)
         };
         let ht_fd = {
             let mut options = OpenOptions::new();
@@ -122,7 +122,7 @@ impl Store {
             if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
-            options.open(&o.path.join("ht"))?
+            options.open(o.path.join("ht"))?
         };
         let wal_fd = {
             let options = &mut OpenOptions::new();
@@ -131,7 +131,7 @@ impl Store {
             if o_direct {
                 options.custom_flags(libc::O_DIRECT);
             }
-            options.open(&o.path.join("wal"))?
+            options.open(o.path.join("wal"))?
         };
 
         #[cfg(target_os = "macos")]

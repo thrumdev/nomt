@@ -92,11 +92,11 @@ pub fn try_answer_left_neighbor<Node>(
 
             if entry.inserted.is_some() {
                 found_next_node = true;
-                new_high_range = entry.next_separator.clone();
+                new_high_range = entry.next_separator;
                 return false;
             }
 
-            separator = entry.next_separator.clone();
+            separator = entry.next_separator;
 
             true
         })
@@ -111,7 +111,7 @@ pub fn try_answer_left_neighbor<Node>(
             // and they will be passed to the left worker
 
             if let Some(low) = separator {
-                if worker_params.range.high.map_or(true, |high| low < high) {
+                if worker_params.range.high.is_none_or(|high| low < high) {
                     // special case where there is one unchanged range left,
                     // which is the last one, up to the worker.range.high
                     found_unchanged_range = true;

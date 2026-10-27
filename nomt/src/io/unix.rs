@@ -65,7 +65,7 @@ fn execute(mut command: IoCommand) -> CompleteIo {
                 )
             },
             IoKind::WriteArc(fd, page_index, ref page) => unsafe {
-                let page: &[u8] = &*page;
+                let page: &[u8] = page;
                 libc::pwrite(
                     fd,
                     page.as_ptr() as *const libc::c_void,

@@ -67,14 +67,14 @@ impl Metrics {
     ///
     /// panics if the specified [`Metric`] is not a Timer
     pub fn record<'a>(&'a self, metric: Metric) -> Option<impl Drop + 'a> {
-        self.metrics.as_ref().and_then(|metrics| {
+        self.metrics.as_ref().map(|metrics| {
             let timer = match metric {
                 Metric::PageFetchTime => &metrics.page_fetch_time,
                 Metric::ValueFetchTime => &metrics.value_fetch_time,
                 _ => panic!("Specified metric is not a Timer"),
             };
 
-            Some(timer.record())
+            timer.record()
         })
     }
 

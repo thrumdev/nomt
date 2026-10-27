@@ -294,7 +294,7 @@ impl Workload {
         if self
             .scheduled_rollback
             .as_ref()
-            .map_or(false, |(r, _)| r.sync_seqn == self.committed.sync_seqn)
+            .is_some_and(|(r, _)| r.sync_seqn == self.committed.sync_seqn)
         {
             // UNWRAP: scheduled_rollback has just be checked to be `Some`
             let (scheduled_rollback, should_crash) = self.scheduled_rollback.take().unwrap();
@@ -509,7 +509,7 @@ impl Workload {
 
     async fn schedule_rollback(&mut self, should_crash: bool) -> anyhow::Result<()> {
         let n_commits_to_rollback =
-            self.rng.random_range(1..self.config.max_rollback_commits) as usize;
+            self.rng.random_range(1..self.config.max_rollback_commits);
 
         let last_snapshot = &self.committed;
         let rollback_sync_seqn = last_snapshot.sync_seqn + n_commits_to_rollback as u32;
@@ -561,7 +561,7 @@ impl Workload {
             .send_request(crate::message::ToAgent::Rollback(
                 crate::message::RollbackPayload {
                     n_commits: n_commits_to_rollback,
-                    should_crash: should_crash.clone(),
+                    should_crash,
                 },
             ))
             .await?;
@@ -790,7 +790,7 @@ impl Workload {
         for change in changeset {
             match change {
                 KeyValueChange::Insert(key, value)
-                    if self.rr().send_request_query(*key).await?.as_ref() != Some(&value) =>
+                    if self.rr().send_request_query(*key).await?.as_ref() != Some(value) =>
                 {
                     return Err(anyhow::anyhow!("Inserted item not present after commit"));
                 }
@@ -899,7 +899,7 @@ impl Workload {
             };
 
             let value = self.rr().send_request_query(*key).await?;
-            if value.as_ref().map_or(true, |v| v != expected_value) {
+            if value.as_ref() != Some(expected_value) {
                 return Err(anyhow::anyhow!(
                     "Wrong key in snapshot,\n key: {:?},\n expected value: {:?},\n found value: {:?}",
                     hex::encode(key),
@@ -927,7 +927,7 @@ impl Workload {
             )
             .await?;
         if let InitOutcome::Success = outcome {
-            ()
+            
         } else {
             return Err(anyhow::anyhow!("Unexpected init outcome: {:?}", outcome));
         }
@@ -978,7 +978,7 @@ impl Workload {
         if let Some(agent) = self.agent.as_ref() {
             if let Some(agent_pid) = agent.pid() {
                 let filename = &self.workload_dir.path().join("backtrace.txt");
-                match pbt::collect_process_backtrace(&filename, agent_pid).await {
+                match pbt::collect_process_backtrace(filename, agent_pid).await {
                     Ok(()) => {
                         tracing::info!("Backtrace collected in {}", filename.display());
                     }
@@ -1060,7 +1060,7 @@ impl Workload {
             }
         }
 
-        changes.sort_by(|a, b| a.key().cmp(&b.key()));
+        changes.sort_by(|a, b| a.key().cmp(b.key()));
 
         (snapshot, reads, changes)
     }
@@ -1079,7 +1079,7 @@ impl Workload {
                     key.copy_from_slice(next_key);
                 }
             }
-            reads.push(key.clone());
+            reads.push(key);
         }
 
         reads
@@ -1098,7 +1098,7 @@ impl Workload {
             let mut key = [0; 32];
             loop {
                 rng.fill_bytes(&mut key);
-                if !self.committed.state.contains_key(&key) && new_keys.insert(key.clone()) {
+                if !self.committed.state.contains_key(&key) && new_keys.insert(key) {
                     return key;
                 }
             }

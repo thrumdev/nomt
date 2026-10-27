@@ -80,7 +80,7 @@ fn scheduler(rx: Receiver<(Reply, Duration)>) {
 
 /// Insert the reply into the scheduled queue following an order by the deadlines.
 fn schedule_new_reply(scheduled: &mut VecDeque<(Reply, Instant)>, reply: Reply, delay: Duration) {
-    let deadline = std::time::Instant::now() + delay.clone();
+    let deadline = std::time::Instant::now() + delay;
     // If two replies happen to have the same deadline, then they will be kept in FIFO order.
     let idx = match scheduled.binary_search_by_key(&deadline, |(_, d)| *d) {
         Ok(idx) => idx + 1,

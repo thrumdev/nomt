@@ -79,7 +79,7 @@ pub fn run(
                 bbn_writer,
                 page_pool,
                 io_handle,
-                &*changeset,
+                &changeset,
                 worker_params,
             )
         };
@@ -128,13 +128,12 @@ fn apply_bbn_changes(
             output.freed_pages.push(deleted_pn);
         }
 
-        branch_changeset.push((key.clone(), changed_branch.inserted.map(|(node, _)| node)));
+        branch_changeset.push((key, changed_branch.inserted.map(|(node, _)| node)));
     }
 
     output.submitted_io += worker_output.branches_tracker.extra_freed.len();
     output
-        .freed_pages
-        .extend(worker_output.branches_tracker.extra_freed.drain(..));
+        .freed_pages.append(&mut worker_output.branches_tracker.extra_freed);
     output.post_io_drop.deferred_drop_pages.push(std::mem::take(
         &mut worker_output.branches_tracker.deferred_drop_pages,
     ));
@@ -144,7 +143,7 @@ fn apply_bbn_changes(
 // who share the pages they have worked on with the extension range protocol.
 // This function filters some work to avoid the incorrect elimination of pages.
 fn filter_branch_changeset(branch_changeset: &mut Vec<(Key, Option<Arc<BranchNode>>)>) {
-    branch_changeset.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+    branch_changeset.sort_by_key(|(k1, _)| *k1);
     let mut to_remove = vec![];
     // If there are two changes with the same separator produced
     // by two workers, one is expected to be deleted and the other
@@ -220,7 +219,7 @@ fn prepare_workers(
     // iter: find endpoint for previous worker and push next worker.
     // look up the branch for the (ops/N)th operation, find out how many ops it covers,
     // and set the end range accordingly.
-    while remaining_workers > 0 && changeset_remaining.len() > 0 {
+    while remaining_workers > 0 && !changeset_remaining.is_empty() {
         let pivot_idx = changeset_remaining.len() / (remaining_workers + 1);
 
         // If pivot_idx == 0 the number of changeset_remaining
@@ -369,7 +368,7 @@ fn run_worker(
     for (key, op) in &changeset[worker_params.op_range.clone()] {
         // ensure key is in scope for branch updater. if not, digest it. merge rightwards until
         // done _or_ key is in scope.
-        while !branch_updater.is_in_scope(&key) {
+        while !branch_updater.is_in_scope(key) {
             // After `digest`, some changed items could have been produced and they could be used
             // to respond to the left neighbor. However, we should only respond if we are sure that
             // we will not introduce changed items with smaller separators later on.
@@ -393,7 +392,7 @@ fn run_worker(
             };
 
             has_extended_range = false;
-            if worker_params.range.high.map_or(false, |high| k >= high) {
+            if worker_params.range.high.is_some_and(|high| k >= high) {
                 has_extended_range = true;
                 request_range_extension(&mut worker_params, &mut new_branch_state.branches_tracker);
             }
@@ -417,7 +416,7 @@ fn run_worker(
         if worker_params
             .range
             .high
-            .map_or(false, |high| cutoff >= high)
+            .is_some_and(|high| cutoff >= high)
         {
             has_extended_range = true;
             request_range_extension(&mut worker_params, &mut new_branch_state.branches_tracker);

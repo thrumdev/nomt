@@ -205,15 +205,15 @@ impl<R: Region + Clone> WritePass<R> {
     /// Panics if any of the regions overlap with each other or are not encompassed by the
     /// region of this pass.
     pub fn split_n(mut self, regions: Vec<R>) -> Vec<Self> {
-        if regions.len() == 0 {
+        if regions.is_empty() {
             return Vec::new();
         }
 
         for (i, region) in regions.iter().enumerate() {
-            assert!(self.region().encompasses(&region));
+            assert!(self.region().encompasses(region));
 
             for other_region in regions.iter().skip(i + 1) {
-                assert!(region.excludes_unique(&other_region));
+                assert!(region.excludes_unique(other_region));
             }
         }
 

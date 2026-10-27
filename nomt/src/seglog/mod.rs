@@ -365,7 +365,7 @@ impl SegmentedLog {
         }
         self.root_dir_fd.sync_data()?;
 
-        if let Some(head_segment_writer) = self.head_segment_writer.take().take() {
+        if let Some(head_segment_writer) = self.head_segment_writer.take() {
             let file = head_segment_writer.into_inner();
             drop(file);
         }
@@ -426,13 +426,13 @@ impl Recovery {
     }
 
     fn scan_root_dir(&mut self, root_dir_path: &PathBuf, filename_prefix: &str) -> Result<()> {
-        let dir = fs::read_dir(&root_dir_path)?;
+        let dir = fs::read_dir(root_dir_path)?;
         for entry in dir {
             let entry = entry?;
             let filename = entry.file_name();
             if let Some(filename) = filename.to_str() {
                 let path = entry.path();
-                if filename.starts_with(&filename_prefix) {
+                if filename.starts_with(filename_prefix) {
                     let id = segment_filename::parse(filename_prefix, filename)?;
                     self.candidates.push(Segment {
                         id,
@@ -517,7 +517,7 @@ impl Recovery {
             if min.is_none() {
                 min = Some(record_id);
             }
-            if max.map_or(true, |max| record_id > max) {
+            if max.is_none_or(|max| record_id > max) {
                 max = Some(record_id);
             }
             last = Some(record_id);
@@ -525,8 +525,8 @@ impl Recovery {
         // If the segment is empty, we set the min and max to nil. They are always Some after this
         // function returns.
         let candidate = &mut self.candidates[index];
-        candidate.min = min.unwrap_or(0.into()).into();
-        candidate.max = max.unwrap_or(0.into()).into();
+        candidate.min = min.unwrap_or(0.into());
+        candidate.max = max.unwrap_or(0.into());
         Ok(())
     }
 
@@ -624,15 +624,14 @@ fn truncate_head_segment(
 ) -> std::io::Result<SegmentFileWriter> {
     let end = match scan_record_end(path, new_end_live)? {
         None => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 anyhow::anyhow!("Failed to find the last live record in the head segment"),
             ));
         }
         Some(offset) => offset,
     };
 
-    let mut file = OpenOptions::new().append(true).write(true).open(path)?;
+    let mut file = OpenOptions::new().append(true).open(path)?;
     file.set_len(end)?;
     file.sync_data()?;
     file.seek(SeekFrom::Start(end))?;
@@ -923,9 +922,9 @@ mod tests {
         assert_eq!(records.len(), 0);
         drop(records);
 
-        let record_id_1 = log.append(&vec![1u8; 10])?;
-        let record_id_2 = log.append(&vec![2u8; 10])?;
-        let record_id_3 = log.append(&vec![3u8; 10])?;
+        let record_id_1 = log.append(&[1u8; 10])?;
+        let record_id_2 = log.append(&[2u8; 10])?;
+        let record_id_3 = log.append(&[3u8; 10])?;
         drop(log);
 
         assert_eq!(record_id_1, RecordId::from(1));
@@ -948,9 +947,9 @@ mod tests {
         let max_segment_size = default_max_segment_size();
         let h = TestHarness::new()?;
 
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 5])?.write()?;
-        h.new_segment(3)?.write_record(3, &vec![3u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 5])?.write()?;
+        h.new_segment(3)?.write_record(3, &[3u8; 10])?.write()?;
         let (_log, records) = h.open_log(max_segment_size, 1, 3)?;
 
         assert_eq!(records.len(), 3);
@@ -968,10 +967,10 @@ mod tests {
         let h = TestHarness::new()?;
 
         h.new_segment(1)?
-            .write_record(1, &vec![1u8; 10])?
-            .write_record(2, &vec![2u8; 10])?
+            .write_record(1, &[1u8; 10])?
+            .write_record(2, &[2u8; 10])?
             .write()?;
-        h.new_segment(2)?.write_record(3, &vec![3u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(3, &[3u8; 10])?.write()?;
         h.assert_segment_file_count(2)?;
         let max_segment_size = default_max_segment_size();
         let (_log, records) = h.open_log(max_segment_size, 1, 2)?;
@@ -993,8 +992,8 @@ mod tests {
         let h = TestHarness::new()?;
 
         h.new_segment(1)?
-            .write_record(1, &vec![1u8; 10])?
-            .write_record(2, &vec![2u8; 10])?
+            .write_record(1, &[1u8; 10])?
+            .write_record(2, &[2u8; 10])?
             .write()?;
         h.new_segment(2)?
             .write_header_only(RecordId::from(3), 16)?
@@ -1022,16 +1021,16 @@ mod tests {
 
         let h = TestHarness::new()?;
         h.new_segment(1)?
-            .write_record(1, &vec![1u8; 10])?
-            .write_record(2, &vec![2u8; 10])?
+            .write_record(1, &[1u8; 10])?
+            .write_record(2, &[2u8; 10])?
             .write()?;
         h.new_segment(2)?
-            .write_record(3, &vec![3u8; 10])?
-            .write_record(4, &vec![4u8; 10])?
+            .write_record(3, &[3u8; 10])?
+            .write_record(4, &[4u8; 10])?
             .write()?;
         h.new_segment(3)?
-            .write_record(5, &vec![5u8; 10])?
-            .write_record(6, &vec![6u8; 10])?
+            .write_record(5, &[5u8; 10])?
+            .write_record(6, &[6u8; 10])?
             .write()?;
 
         let (_log, records) = h.open_log(default_max_segment_size(), 4, 5)?;
@@ -1047,8 +1046,8 @@ mod tests {
     fn recovery_fail_gap_in_segments() -> Result<()> {
         let h = TestHarness::new()?;
 
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(3)?.write_record(3, &vec![3u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(3)?.write_record(3, &[3u8; 10])?.write()?;
         let err = h.open_log(default_max_segment_size(), 1, 3);
         match err {
             Err(err) => {
@@ -1065,8 +1064,8 @@ mod tests {
         let h = TestHarness::new()?;
 
         h.new_segment(1)?
-            .write_record(1, &vec![1u8])?
-            .write_record(3, &vec![2u8])?
+            .write_record(1, &[1u8])?
+            .write_record(3, &[2u8])?
             .write()?;
         let err = h.open_log(default_max_segment_size(), 1, 3);
         match err {
@@ -1092,7 +1091,7 @@ mod tests {
         h.new_segment(1)?
             .write_header_only(RecordId::from(1), 10)?
             .write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
         let err = h.open_log(default_max_segment_size(), 1, 2);
         match err {
             Ok(_) => panic!("Expected error"),
@@ -1109,7 +1108,7 @@ mod tests {
         let h = TestHarness::new()?;
         // Empty non-head segment.
         h.new_segment(1)?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
         h.open_log(default_max_segment_size(), 2, 2).unwrap();
         Ok(())
     }
@@ -1120,12 +1119,12 @@ mod tests {
         let max_segment_size = max_segment_size_for_n_records(2);
         let h = TestHarness::new()?;
         h.new_segment(1)?
-            .write_record(1, &vec![1u8; 10])?
-            .write_record(2, &vec![2u8; 10])?
+            .write_record(1, &[1u8; 10])?
+            .write_record(2, &[2u8; 10])?
             .write()?;
         h.new_segment(2)?
-            .write_record(3, &vec![3u8; 10])?
-            .write_record(4, &vec![4u8; 10])?
+            .write_record(3, &[3u8; 10])?
+            .write_record(4, &[4u8; 10])?
             .write()?;
 
         // Recover the log. Only first two records should be present.
@@ -1135,8 +1134,8 @@ mod tests {
         assert_eq!(records[1], (RecordId::from(2), vec![2u8; 10]));
 
         // Append new records.
-        let record_id_3 = log.append(&vec![5u8; 10])?;
-        let record_id_4 = log.append(&vec![6u8; 10])?;
+        let record_id_3 = log.append(&[5u8; 10])?;
+        let record_id_4 = log.append(&[6u8; 10])?;
         drop(log);
 
         assert_eq!(record_id_3, RecordId::from(3));
@@ -1161,11 +1160,11 @@ mod tests {
         let max_segment_size = max_segment_size_for_n_records(2);
         let h = TestHarness::new()?;
         h.new_segment(1)?
-            .write_record(1, &vec![1u8; 10])?
-            .write_record(2, &vec![2u8; 10])?
+            .write_record(1, &[1u8; 10])?
+            .write_record(2, &[2u8; 10])?
             .write()?;
         h.new_segment(2)?
-            .write_record(3, &vec![3u8; 10])?
+            .write_record(3, &[3u8; 10])?
             .write_header_only(RecordId::from(4), 10)?
             .write()?;
 
@@ -1180,8 +1179,8 @@ mod tests {
         assert_eq!(records[2], (RecordId::from(3), vec![3u8; 10]));
 
         // Append new records.
-        let record_id_4 = log.append(&vec![5u8; 10])?;
-        let record_id_5 = log.append(&vec![6u8; 10])?;
+        let record_id_4 = log.append(&[5u8; 10])?;
+        let record_id_5 = log.append(&[6u8; 10])?;
         drop(log);
 
         assert_eq!(record_id_4, RecordId::from(4));
@@ -1205,9 +1204,9 @@ mod tests {
     #[test]
     fn prune_oldest() -> Result<()> {
         let h = TestHarness::new()?;
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
-        h.new_segment(3)?.write_record(3, &vec![3u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
+        h.new_segment(3)?.write_record(3, &[3u8; 10])?.write()?;
         let (mut log, _records) = h.open_log(default_max_segment_size(), 1, 3)?;
         h.assert_segment_file_count(3)?;
 
@@ -1229,9 +1228,9 @@ mod tests {
     #[test]
     fn prune_recent() -> Result<()> {
         let h = TestHarness::new()?;
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
-        h.new_segment(3)?.write_record(3, &vec![3u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
+        h.new_segment(3)?.write_record(3, &[3u8; 10])?.write()?;
         let (mut log, _records) = h.open_log(default_max_segment_size(), 1, 3)?;
         h.assert_segment_file_count(3)?;
 
@@ -1258,7 +1257,7 @@ mod tests {
     fn test_live_range_empty_log_append() -> Result<()> {
         let h = TestHarness::new()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 0, 0)?;
-        let record_id_1 = log.append(&vec![1u8; 10])?;
+        let record_id_1 = log.append(&[1u8; 10])?;
         assert_eq!(record_id_1, RecordId::from(1));
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(1)));
         Ok(())
@@ -1271,17 +1270,17 @@ mod tests {
         // Test that the new log has live range (0,0)
         let (mut log, _) = h.open_log(default_max_segment_size(), 0, 0)?;
         assert_eq!(log.live_range(), (RecordId::nil(), RecordId::nil()));
-        let record_id_1 = log.append(&vec![1u8; 10])?;
+        let record_id_1 = log.append(&[1u8; 10])?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(1)));
         drop(log);
 
         // Reopen the log and append another record.
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 1)?;
-        let record_id_2 = log.append(&vec![2u8; 10])?;
+        let record_id_2 = log.append(&[2u8; 10])?;
         assert_eq!(log.live_range(), (record_id_1, record_id_2));
 
         // Test that appending to a log with live range (1, 1) updates its live range to (1, 2)
-        let record_id_3 = log.append(&vec![3u8; 10])?;
+        let record_id_3 = log.append(&[3u8; 10])?;
         assert_eq!(log.live_range(), (record_id_1, record_id_3));
 
         Ok(())
@@ -1290,11 +1289,11 @@ mod tests {
     #[test]
     fn test_live_range_append_to_nonempty_log() -> Result<()> {
         let h = TestHarness::new()?;
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
-        let record_id_3 = log.append(&vec![3u8; 10])?;
+        let record_id_3 = log.append(&[3u8; 10])?;
         assert_eq!(log.live_range(), (RecordId::from(1), record_id_3));
         Ok(())
     }
@@ -1302,8 +1301,8 @@ mod tests {
     #[test]
     fn test_live_range_prune_oldest() -> Result<()> {
         let h = TestHarness::new()?;
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
         log.prune_oldest(2.into())?;
@@ -1314,8 +1313,8 @@ mod tests {
     #[test]
     fn test_live_range_prune_recent() -> Result<()> {
         let h = TestHarness::new()?;
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
         log.prune_recent(1.into())?;
@@ -1354,8 +1353,8 @@ mod tests {
     #[test]
     fn test_live_range_prune_recent_to_empty() -> Result<()> {
         let h = TestHarness::new()?;
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
         log.prune_recent(0.into())?;
@@ -1367,8 +1366,8 @@ mod tests {
     #[test]
     fn test_live_range_prune_oldest_to_empty() -> Result<()> {
         let h = TestHarness::new()?;
-        h.new_segment(1)?.write_record(1, &vec![1u8; 10])?.write()?;
-        h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
+        h.new_segment(1)?.write_record(1, &[1u8; 10])?.write()?;
+        h.new_segment(2)?.write_record(2, &[2u8; 10])?.write()?;
         let (mut log, _) = h.open_log(default_max_segment_size(), 1, 2)?;
         assert_eq!(log.live_range(), (RecordId::from(1), RecordId::from(2)));
         log.prune_oldest(0.into())?;

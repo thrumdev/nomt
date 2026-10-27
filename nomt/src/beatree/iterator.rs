@@ -118,9 +118,9 @@ impl BeatreeIterator {
             Action::TakeMemory => match self.memory_values.next().unwrap() {
                 // PANIC: this case is checked previously.
                 (_, ValueChange::Delete) => panic!(),
-                (k, ValueChange::Insert(val)) => return Some(IterOutput::Item(*k, val)),
+                (k, ValueChange::Insert(val)) => Some(IterOutput::Item(*k, val)),
                 (k, ValueChange::InsertOverflow(ref overflow_cell, ref value_hash)) => {
-                    return Some(IterOutput::OverflowItem(*k, *value_hash, overflow_cell))
+                    Some(IterOutput::OverflowItem(*k, *value_hash, overflow_cell))
                 }
             },
         }
@@ -169,13 +169,13 @@ impl CurrentLeaf {
     }
 
     fn is_in_range(&self, end: Option<&Key>) -> bool {
-        end.map_or(true, |end| {
+        end.is_none_or(|end| {
             super::key_cmp(&self.leaf.key(self.index), end).is_lt()
         })
     }
 
     fn is_last_output_in_range(&self, end: Option<&Key>) -> bool {
-        end.map_or(true, |end| {
+        end.is_none_or(|end| {
             super::key_cmp(&self.leaf.key(self.index - 1), end).is_lt()
         })
     }
@@ -245,7 +245,7 @@ impl LeafIterator {
             LeafIteratorState::Proceeding { current, .. } => {
                 let next = current.index + 1;
                 next < current.leaf.n()
-                    && self.end.as_ref().map_or(true, |end| {
+                    && self.end.as_ref().is_none_or(|end| {
                         super::key_cmp(&current.leaf.key(next), end).is_lt()
                     })
             }
@@ -331,14 +331,14 @@ impl LeafIterator {
             // out of range. look up next.
             let next_key = self
                 .index
-                .next_key(get_key(&*branch, next_index_in_branch - 1));
+                .next_key(get_key(&branch, next_index_in_branch - 1));
             match next_key {
                 None => LeafIteratorState::Done { last: Some(last) },
                 Some(k)
                     if self
                         .end
                         .as_ref()
-                        .map_or(false, |end| super::key_cmp(end, &k).is_le()) =>
+                        .is_some_and(|end| super::key_cmp(end, &k).is_le()) =>
                 {
                     LeafIteratorState::Done { last: Some(last) }
                 }
@@ -357,7 +357,7 @@ impl LeafIterator {
             let separator = get_key(&branch, next_index_in_branch);
             if self
                 .end
-                .map_or(true, |end| super::key_cmp(&separator, &end).is_lt())
+                .is_none_or(|end| super::key_cmp(&separator, &end).is_lt())
             {
                 LeafIteratorState::Blocked {
                     index_in_branch: next_index_in_branch,
@@ -458,7 +458,7 @@ impl Iterator for NeededLeavesIter {
             if self
                 .end
                 .as_ref()
-                .map_or(true, |end| super::key_cmp(&key, end).is_lt())
+                .is_none_or(|end| super::key_cmp(&key, end).is_lt())
             {
                 self.state = Some((branch, range));
                 Some(pn)
@@ -467,10 +467,7 @@ impl Iterator for NeededLeavesIter {
             }
         } else {
             let last_separator = get_key(&branch, branch.n() as usize - 1);
-            let next_separator = match self.index.next_key(last_separator) {
-                None => return None,
-                Some(k) => k,
-            };
+            let next_separator = self.index.next_key(last_separator)?;
 
             // UNWRAP: keys returned by `next_key` always exist; qed.
             let next_branch = self.index.lookup(next_separator).unwrap().1;
@@ -517,7 +514,7 @@ impl StagingIterator {
         }
     }
 
-    fn peek<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
+    fn peek(&mut self) -> Option<(&Key, &ValueChange)> {
         let primary_peek = self.primary.peek();
         let secondary_peek = self.secondary.as_mut().and_then(|s| s.peek());
 
@@ -535,7 +532,7 @@ impl StagingIterator {
         }
     }
 
-    fn next<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
+    fn next(&mut self) -> Option<(&Key, &ValueChange)> {
         let primary_peek = self.primary.peek().map(|(k, _)| k);
         let secondary_peek = self
             .secondary
@@ -562,7 +559,7 @@ impl StagingIterator {
         }
     }
 
-    fn next_secondary<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
+    fn next_secondary(&mut self) -> Option<(&Key, &ValueChange)> {
         self.secondary.as_mut().and_then(|s| s.next())
     }
 }
@@ -574,11 +571,11 @@ struct OrdMapOwnedIter {
 }
 
 impl OrdMapOwnedIter {
-    fn peek<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
+    fn peek(&mut self) -> Option<(&Key, &ValueChange)> {
         self.iter.peek().map(|x| (x.0, x.1))
     }
 
-    fn next<'a>(&'a mut self) -> Option<(&'a Key, &'a ValueChange)> {
+    fn next(&mut self) -> Option<(&Key, &ValueChange)> {
         self.iter.next().map(|x| (x.0, x.1))
     }
 }

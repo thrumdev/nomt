@@ -32,7 +32,7 @@ pub fn partial_lookup(key: Key, bbn_index: &Index) -> Option<PageNumber> {
         Some((_, branch)) => branch,
     };
 
-    search_branch(&branch, key.clone()).map(|(_, leaf_pn)| leaf_pn)
+    search_branch(&branch, key).map(|(_, leaf_pn)| leaf_pn)
 }
 
 /// Find the associated value associated with the key in the given leaf node, if any.
@@ -103,13 +103,13 @@ pub fn search_branch(branch: &BranchNode, key: Key) -> Option<(usize, PageNumber
     let (found, pos) = find_key_pos(branch, &key, None);
 
     if found {
-        return Some((pos, branch.node_pointer(pos).into()));
+        Some((pos, branch.node_pointer(pos).into()))
     } else if pos == 0 {
-        return None;
+        None
     } else {
         // first key greater than the one we are looking for has been returned,
         // thus the correct child is the previous one
-        return Some((pos - 1, branch.node_pointer(pos - 1).into()));
+        Some((pos - 1, branch.node_pointer(pos - 1).into()))
     }
 }
 

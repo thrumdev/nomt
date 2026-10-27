@@ -262,7 +262,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
     /// Returns a recent root of the trie.
     pub fn root(&self) -> Root {
-        self.shared.lock().root.clone()
+        self.shared.lock().root
     }
 
     /// Returns true if the trie has no items in it.
@@ -399,7 +399,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        sess.finish(actuals)?.commit(&self)?;
+        sess.finish(actuals)?.commit(self)?;
 
         Ok(())
     }
