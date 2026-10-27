@@ -299,7 +299,7 @@ impl Updater {
 
         let (worker_tx, worker_rx) = crossbeam_channel::bounded(num_workers);
 
-        for write_pass in worker_passes.into_iter() {
+        for (worker_index, write_pass) in worker_passes.into_iter().enumerate() {
             let command = UpdateCommand {
                 shared: shared.clone(),
                 write_pass: write_pass.into_envelope(),
@@ -314,7 +314,7 @@ impl Updater {
                 warm_page_set: warm_page_set.clone(),
                 command,
             };
-            spawn_updater::<H>(&self.worker_tp, params, worker_tx.clone());
+            spawn_updater::<H>(&self.worker_tp, worker_index, params, worker_tx.clone());
         }
 
         Ok(UpdateHandle {
@@ -370,7 +370,7 @@ impl Updater {
 /// A handle for waiting on the results of a commit operation.
 pub struct UpdateHandle {
     shared: Arc<UpdateShared>,
-    worker_rx: Receiver<TaskResult<std::io::Result<WorkerOutput>>>,
+    worker_rx: Receiver<TaskResult<(usize, std::io::Result<WorkerOutput>)>>,
     num_workers: usize,
 }
 
@@ -392,9 +392,15 @@ impl UpdateHandle {
         let mut path_proof_offset = 0;
         let mut witnessed_start = 0;
 
+        // Workers finish in any order, but the witness must follow key order. Worker `i` covers
+        // the `i`-th shard, and shards are in key order.
+        let mut outputs = (0..self.num_workers).map(|_| None).collect::<Vec<_>>();
         for _ in 0..self.num_workers {
-            let output = join_task(&self.worker_rx)?;
+            let (worker_index, output) = join_task(&self.worker_rx);
+            outputs[worker_index] = Some(output?);
+        }
 
+        for output in outputs.into_iter().flatten() {
             if let Some(root) = output.root {
                 assert!(new_root.is_none());
                 new_root = Some(root);
@@ -579,10 +585,15 @@ fn spawn_warm_up<H: HashAlgorithm>(
 
 fn spawn_updater<H: HashAlgorithm>(
     worker_tp: &ThreadPool,
+    worker_index: usize,
     params: worker::UpdateParams,
-    output_tx: Sender<TaskResult<std::io::Result<WorkerOutput>>>,
+    output_tx: Sender<TaskResult<(usize, std::io::Result<WorkerOutput>)>>,
 ) {
-    spawn_task(&worker_tp, || worker::run_update::<H>(params), output_tx);
+    spawn_task(
+        &worker_tp,
+        move || (worker_index, worker::run_update::<H>(params)),
+        output_tx,
+    );
 }
 
 fn get_in_memory_page(
