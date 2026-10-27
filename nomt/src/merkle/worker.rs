@@ -335,7 +335,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
 
             // find batch size.
             for (k, v) in &self.shared.read_write[start_index..] {
-                if !seek_result.position.subtrie_contains(&k) {
+                if !seek_result.position.subtrie_contains(k) {
                     break;
                 }
                 batch_size += 1;
@@ -356,7 +356,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         let is_non_exclusive = seek_result
             .page_id
             .as_ref()
-            .map_or(true, |p_id| !self.region.contains_exclusive(p_id));
+            .is_none_or(|p_id| !self.region.contains_exclusive(p_id));
 
         if is_non_exclusive {
             self.shared.push_pending_subtrie(
@@ -411,7 +411,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         match ops {
             None => self.page_walker.advance(seek_result.position.clone()),
             Some(ref ops) => {
-                let ops = nomt_core::update::leaf_ops_spliced(seek_result.terminal.clone(), &ops);
+                let ops = nomt_core::update::leaf_ops_spliced(seek_result.terminal.clone(), ops);
                 self.page_walker
                     .advance_and_replace(page_set, seek_result.position.clone(), ops)
             }
@@ -458,7 +458,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         while start_index < self.range_end || !seeker.is_empty() {
             let completion = if warmed_up
                 .front()
-                .map_or(false, |res| match seeker.first_key() {
+                .is_some_and(|res| match seeker.first_key() {
                     None => true,
                     Some(k) => &res.key < k,
                 }) {
@@ -530,7 +530,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
 
         self.shared.push_pending_root_nodes(new_nodes);
 
-        return Ok(self.write_pass.consume());
+        Ok(self.write_pass.consume())
     }
 }
 
@@ -539,7 +539,7 @@ fn subtrie_ops(read_write: &[(KeyPath, KeyReadWrite)]) -> Vec<(KeyPath, Option<V
         .iter()
         .filter_map(|(key, read_write)| match read_write {
             KeyReadWrite::Write(val) | KeyReadWrite::ReadThenWrite(val) => {
-                Some((key.clone(), val.clone()))
+                Some((*key, *val))
             }
             KeyReadWrite::Read => None,
         })

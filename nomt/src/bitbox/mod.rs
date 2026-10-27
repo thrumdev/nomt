@@ -285,7 +285,7 @@ impl DB {
         if occupied_buckets_delta < 0 {
             self.shared
                 .occupied_buckets
-                .fetch_sub(occupied_buckets_delta.abs() as usize, Ordering::Relaxed);
+                .fetch_sub(occupied_buckets_delta.unsigned_abs(), Ordering::Relaxed);
         } else if occupied_buckets_delta > 0 {
             self.shared
                 .occupied_buckets
@@ -350,7 +350,7 @@ impl SyncController {
                 sync_seqn,
                 &page_pool,
                 updated_pages,
-                &mut *wal_blob_builder,
+                &mut wal_blob_builder,
             )?;
             drop(wal_blob_builder);
 
@@ -664,7 +664,7 @@ fn allocate_bucket_raw(
     meta_map: &mut MetaMap,
     seed: &[u8; 16],
 ) -> Option<BucketIndex> {
-    let mut probe_seq = ProbeSequence::new_raw(page_id, &meta_map, seed);
+    let mut probe_seq = ProbeSequence::new_raw(page_id, meta_map, seed);
 
     let mut i = 0;
     loop {
@@ -673,7 +673,7 @@ fn allocate_bucket_raw(
             // Give up.
             return None;
         }
-        match probe_seq.next(&meta_map) {
+        match probe_seq.next(meta_map) {
             ProbeResult::PossibleHit(_) => continue,
             ProbeResult::Tombstone(bucket) | ProbeResult::Empty(bucket) => {
                 meta_map.set_full(bucket as usize, probe_seq.hash);

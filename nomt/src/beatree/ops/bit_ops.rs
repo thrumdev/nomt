@@ -59,7 +59,7 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparators
     let mut key = [0u8; 32];
 
     let prefix_bit_len = maybe_prefix.as_ref().map(|p| p.1).unwrap_or(0);
-    let prefix_byte_len = (prefix_bit_len + 7) / 8;
+    let prefix_byte_len = prefix_bit_len.div_ceil(8);
     let prefix_end_bit_offset = prefix_bit_len % 8;
     let (separator_bytes, separator_bit_start, separator_bit_len) = separator;
 
@@ -139,13 +139,13 @@ pub fn bitwise_memcpy(
 
     let mut shift = match destination_bit_start as isize - source_bit_start as isize {
         0 => None,
-        shift if shift < 0 => Some(Shift::Left(shift.abs() as usize)),
+        shift if shift < 0 => Some(Shift::Left(shift.unsigned_abs())),
         shift => Some(Shift::Right(shift as usize, None, None)),
     };
 
     // chunk is an 8-byte slice of the separator which will be cast to a u64 to simplify shifting
     let n_chunks = source.len() / 8;
-    let bytes_to_write = (destination_bit_start + source_bit_len + 7) / 8;
+    let bytes_to_write = (destination_bit_start + source_bit_len).div_ceil(8);
 
     // container of all bits that will not be overwritten
     let mut chunk_data: Option<u64> = None;
@@ -329,7 +329,7 @@ pub mod benches {
                 } else {
                     prefix_bytes - 1
                 };
-                let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+                let separator_byte_len = (separator_bit_len as usize).div_ceil(8).next_multiple_of(8);
 
                 group.bench_function(BenchmarkId::new("prefix_len_bits", prefix_bits), |b| {
                     b.iter_batched(
@@ -415,7 +415,7 @@ mod tests {
             } else {
                 0
             };
-            let prefix_byte_len = (prefix_bit_len + 7) / 8;
+            let prefix_byte_len = prefix_bit_len.div_ceil(8);
             let prefix_seed = TestKeyPath::arbitrary(g).into_inner();
             let prefix_bytes = use_prefix.then(|| prefix_seed[..prefix_byte_len].to_vec());
 
@@ -426,7 +426,7 @@ mod tests {
             };
             let separator_bit_len = arbitrary_bit_len(g, 256 - prefix_bit_len);
             let separator_byte_len =
-                ((separator_bit_start + separator_bit_len + 7) / 8).next_multiple_of(8);
+                (separator_bit_start + separator_bit_len).div_ceil(8).next_multiple_of(8);
             let separator_seed = TestKeyPath::arbitrary(g).into_inner();
             let mut separator_bytes = vec![0; separator_byte_len];
             for (index, byte) in separator_bytes.iter_mut().enumerate() {
@@ -497,8 +497,8 @@ mod tests {
         // one iteration without shifts and then all the subsequent are left shifts
         for i in 0..8 {
             let separator_bit_start = i;
-            let separator_bit_len = 256 - i;
-            let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+            let separator_bit_len: usize = 256 - i;
+            let separator_byte_len = separator_bit_len.div_ceil(8).next_multiple_of(8);
 
             let separator_bytes = vec![170; separator_byte_len];
 
@@ -513,9 +513,9 @@ mod tests {
     #[test]
     fn reconstruct_key_shorter_separator() {
         // test separator smaller then 256 to ensure the garbage at the end is properly removed
-        for separator_bit_len in 0..256 {
+        for separator_bit_len in 0..256usize {
             let separator_bit_start = 0;
-            let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+            let separator_byte_len = separator_bit_len.div_ceil(8).next_multiple_of(8);
 
             let separator_bytes = vec![170; separator_byte_len];
 
@@ -543,7 +543,7 @@ mod tests {
                 for separator_bit_start in separator_bit_start_range {
                     for separator_bit_len in prefix_bit_len..=256 - prefix_bit_len {
                         let separator_byte_len =
-                            ((separator_bit_start + separator_bit_len + 7 as usize) / 8)
+                            (separator_bit_start + separator_bit_len).div_ceil(8)
                                 .next_multiple_of(8);
                         let separator_bytes = vec![255; separator_byte_len];
 
@@ -573,8 +573,8 @@ mod tests {
             }
             let prefix_bit_len = 16 + i;
             let separator_bit_start = i;
-            let separator_bit_len = 256 - prefix_bit_len;
-            let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+            let separator_bit_len: usize = 256 - prefix_bit_len;
+            let separator_byte_len = separator_bit_len.div_ceil(8).next_multiple_of(8);
 
             let separator_bytes = vec![170; separator_byte_len];
 
@@ -600,8 +600,8 @@ mod tests {
 
             for separator_bit_start_offset in 1..(8 - i) {
                 let separator_bit_start = i + separator_bit_start_offset;
-                let separator_bit_len = 256 - prefix_bit_len;
-                let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+                let separator_bit_len: usize = 256 - prefix_bit_len;
+                let separator_byte_len = separator_bit_len.div_ceil(8).next_multiple_of(8);
 
                 let separator_bytes = vec![170; separator_byte_len];
 
@@ -629,8 +629,8 @@ mod tests {
 
             for separator_bit_start_offset in 0..i {
                 let separator_bit_start = separator_bit_start_offset;
-                let separator_bit_len = 256 - prefix_bit_len;
-                let separator_byte_len = ((separator_bit_len as usize + 7) / 8).next_multiple_of(8);
+                let separator_bit_len: usize = 256 - prefix_bit_len;
+                let separator_byte_len = separator_bit_len.div_ceil(8).next_multiple_of(8);
 
                 let separator_bytes = vec![170; separator_byte_len];
 

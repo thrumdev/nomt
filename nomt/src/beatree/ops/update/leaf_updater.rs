@@ -38,7 +38,7 @@ impl BaseLeaf {
         let interesed_cell_pointers = &self.node.cell_pointers()[self.low..];
         let res = interesed_cell_pointers.binary_search_by(|cell_pointer| {
             let k = leaf_node::extract_key(cell_pointer);
-            k.cmp(&key)
+            k.cmp(key)
         });
 
         // the returned position is relative to `cell_pointers[self.low..]`
@@ -48,13 +48,13 @@ impl BaseLeaf {
             Ok(pos) => {
                 let absolute_pos = self.low + pos;
                 self.low = absolute_pos + 1;
-                return Some((true, absolute_pos));
+                Some((true, absolute_pos))
             }
             // If the key is not present, then `self.low` is updated to point to
             // the first key bigger than the one we looked for
             Err(pos) => {
-                self.low = self.low + pos;
-                return Some((false, self.low));
+                self.low += pos;
+                Some((false, self.low))
             }
         }
     }
@@ -126,7 +126,7 @@ impl LeafUpdater {
     }
 
     pub fn is_in_scope(&self, key: &Key) -> bool {
-        self.cutoff.map_or(true, |k| *key < k)
+        self.cutoff.is_none_or(|k| *key < k)
     }
 
     pub fn reset_base(&mut self, base: Option<BaseLeaf>, cutoff: Option<Key>) {

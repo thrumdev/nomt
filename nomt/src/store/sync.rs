@@ -71,7 +71,7 @@ impl Sync {
             rollback_start_live,
             rollback_end_live,
         };
-        Meta::write(&shared.io_pool.page_pool(), &shared.meta_fd, &new_meta)?;
+        Meta::write(shared.io_pool.page_pool(), &shared.meta_fd, &new_meta)?;
         self.sync_seqn += 1;
 
         if let Some(PanicOnSyncMode::PostMeta) = self.panic_on_sync {

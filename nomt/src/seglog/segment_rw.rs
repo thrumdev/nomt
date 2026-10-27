@@ -45,7 +45,7 @@ impl SegmentFileWriter {
         // Calculate the next aligned position.
         let record_alignment = RECORD_ALIGNMENT as u64;
         let current_end = self.file_size + payload.len() as u64;
-        let next_pos = if current_end % record_alignment == 0 {
+        let next_pos = if current_end.is_multiple_of(record_alignment) {
             current_end
         } else {
             ((current_end / record_alignment) + 1) * record_alignment
@@ -118,8 +118,7 @@ impl SegmentFileReader {
             self.buf_reader
                 .seek(SeekFrom::Current(-(HEADER_SIZE as i64)))?;
 
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 anyhow::anyhow!(
                     "Record payload length is too large: {}",
                     header.payload_length()
@@ -131,8 +130,7 @@ impl SegmentFileReader {
         // an integer number of pages.
         let cur_pos = self.buf_reader.stream_position()?;
         let record_alignment = RECORD_ALIGNMENT as u64;
-        let next_pos = ((cur_pos + self.payload_length.unwrap() as u64 + record_alignment - 1)
-            / record_alignment)
+        let next_pos = (cur_pos + self.payload_length.unwrap() as u64).div_ceil(record_alignment)
             * record_alignment;
         self.next_pos = Some(next_pos);
         Ok(Some(header))
@@ -167,7 +165,7 @@ impl SegmentFileReader {
 
     /// Returns the current position of the reader.
     pub fn pos(&mut self) -> std::io::Result<u64> {
-        Ok(self.buf_reader.stream_position()?)
+        self.buf_reader.stream_position()
     }
 }
 
@@ -360,12 +358,10 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let mut writer = SegmentFileWriter::new(temp_file.reopen().unwrap(), 0);
 
-        let payloads = vec![
-            vec![1, 2, 3],
+        let payloads = [vec![1, 2, 3],
             vec![4, 5, 6, 7],
             vec![8; RECORD_ALIGNMENT as usize - HEADER_SIZE as usize],
-            vec![9; RECORD_ALIGNMENT as usize * 2 - HEADER_SIZE as usize + 1],
-        ];
+            vec![9; RECORD_ALIGNMENT as usize * 2 - HEADER_SIZE as usize + 1]];
 
         for (i, payload) in payloads.iter().enumerate() {
             writer
@@ -411,7 +407,7 @@ mod tests {
         let mut writer = SegmentFileWriter::new(temp_file.reopen().unwrap(), 0);
 
         // Write a header with a payload length larger than MAX_RECORD_PAYLOAD_SIZE
-        let oversized_payload_length = MAX_RECORD_PAYLOAD_SIZE as u32 + 1;
+        let oversized_payload_length = MAX_RECORD_PAYLOAD_SIZE + 1;
         writer
             .write_header(oversized_payload_length, RecordId(1))
             .unwrap();

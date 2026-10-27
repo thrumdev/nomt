@@ -207,7 +207,7 @@ impl BranchOpsTracker {
         let mut gauge = BranchGauge::default();
 
         while pos < self.ops.len() && gauge.body_size() < target {
-            match *&self.ops[pos] {
+            match self.ops[pos] {
                 BranchOp::Insert(key, _) => {
                     if gauge.body_size_after(key, separator_len(&key)) > BRANCH_NODE_BODY_SIZE {
                         // Rare case: body was artifically small due to long shared prefix.
@@ -462,7 +462,7 @@ mod tests {
         // to the ops is just after the target.
         let mut rightsized = false;
         ops_tracker.ops = (0..)
-            .map(|i| key(i))
+            .map(key)
             .take_while(|key| {
                 let res = !rightsized;
                 rightsized = gauge.body_size_after(*key, separator_len(key)) >= target;
@@ -566,13 +566,13 @@ mod tests {
             })
             .take_while(|keep_chunk| {
                 let res = !rightsized;
-                rightsized = gauge.body_size_after_chunk(&base, &keep_chunk) >= target;
+                rightsized = gauge.body_size_after_chunk(&base, keep_chunk) >= target;
                 if res {
-                    gauge.ingest_chunk(&base, &keep_chunk);
+                    gauge.ingest_chunk(&base, keep_chunk);
                 }
                 res
             })
-            .map(|keep_chunk| BranchOp::KeepChunk(keep_chunk))
+            .map(BranchOp::KeepChunk)
             .collect();
 
         let n_ops = ops_tracker.ops.len();
@@ -605,7 +605,7 @@ mod tests {
         // to the ops is just after BRANCH_MERGE_THRESHOLD.
         let mut rightsized = false;
         ops_tracker.ops = (0..)
-            .map(|i| compressed_key(i))
+            .map(compressed_key)
             .take_while(|key| {
                 let res = !rightsized;
                 rightsized =
@@ -654,7 +654,7 @@ mod tests {
         // to the ops is just after BRANCH_MERGE_THRESHOLD.
         let mut rightsized = false;
         ops_tracker.ops = (0..)
-            .map(|i| compressed_key(i))
+            .map(compressed_key)
             .take_while(|key| {
                 let res = !rightsized;
                 rightsized =
@@ -701,7 +701,7 @@ mod tests {
         // Collect BranchOp::Insert into ops_tracker.ops until the gauge associated
         // to the ops is just after the BRANCH_MERGE_THRESHOLD / 2
         ops_tracker.ops = (0..)
-            .map(|i| compressed_key(i))
+            .map(compressed_key)
             .take_while(|key| {
                 if gauge.body_size_after(*key, separator_len(key)) >= BRANCH_MERGE_THRESHOLD / 2 {
                     false
@@ -774,7 +774,7 @@ mod tests {
         // Collect BranchOp::Insert into updater.ops until the gauge associated
         // to the ops is just after the BRANCH_MERGE_THRESHOLD / 2
         ops_tracker.ops = (0..)
-            .map(|i| compressed_key(i))
+            .map(compressed_key)
             .take_while(|key| {
                 if gauge.body_size_after(*key, separator_len(key)) >= BRANCH_MERGE_THRESHOLD / 2 {
                     false
@@ -822,14 +822,14 @@ mod tests {
             .take_while(|keep_chunk| {
                 let res = !rightsized;
                 rightsized =
-                    gauge.body_size_after_chunk(&base, &keep_chunk) >= BRANCH_MERGE_THRESHOLD;
+                    gauge.body_size_after_chunk(&base, keep_chunk) >= BRANCH_MERGE_THRESHOLD;
                 if res {
-                    gauge.ingest_chunk(&base, &keep_chunk);
+                    gauge.ingest_chunk(&base, keep_chunk);
                     total_kept_itmes += keep_chunk.end - keep_chunk.start;
                 }
                 res
             })
-            .map(|keep_chunk| BranchOp::KeepChunk(keep_chunk))
+            .map(BranchOp::KeepChunk)
             .collect();
 
         ops_tracker.ops.extend(keep_ops);

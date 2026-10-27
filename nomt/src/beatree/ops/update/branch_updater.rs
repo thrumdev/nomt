@@ -42,14 +42,14 @@ impl BaseBranch {
         if found {
             // the key was present return its index and point to the right after key
             self.low = pos + 1;
-            return Some((true, pos));
+            Some((true, pos))
         } else if pos == self.low {
             // there are no keys left bigger than the specified one
-            return None;
+            None
         } else {
             // key was not present, return and point to the smallest bigger key
             self.low = pos;
-            return Some((false, pos));
+            Some((false, pos))
         }
     }
 
@@ -152,7 +152,7 @@ impl BranchUpdater {
     }
 
     pub fn is_in_scope(&self, key: &Key) -> bool {
-        self.cutoff.map_or(true, |k| *key < k)
+        self.cutoff.is_none_or(|k| *key < k)
     }
 
     pub fn reset_base(&mut self, base: Option<BaseBranch>, cutoff: Option<Key>) {
@@ -168,10 +168,7 @@ impl BranchUpdater {
     // Collect in `self.ops` all separators that are skipped.
     // Returns the index at which 'up_to' was found, otherwise, returns None.
     fn keep_up_to(&mut self, up_to: Option<&Key>) -> Option<usize> {
-        if self.base.is_none() {
-            // empty db
-            return None;
-        }
+        self.base.as_ref()?;
 
         // UNWRAP: self.base is not None
         let base = self.base.as_mut().unwrap();
@@ -187,18 +184,14 @@ impl BranchUpdater {
                 base.low = base_n;
                 (false, base_n)
             }
-            Some(up_to) => match base.find_key(up_to) {
-                Some(res) => res,
-                // already at the end
-                None => return None,
-            },
+            Some(up_to) => base.find_key(up_to)?,
         };
 
         if from != to {
             self.ops_tracker.push_chunk(base, from, to);
         }
 
-        return if found { Some(to) } else { None };
+        if found { Some(to) } else { None }
     }
 
     // Try to perform a split of the current available ops with a target branch node size.
@@ -235,7 +228,7 @@ fn build_branch(
     ops: &[BranchOp],
     gauge: &BranchGauge,
 ) -> BranchNode {
-    let branch = BranchNode::new_in(&page_pool);
+    let branch = BranchNode::new_in(page_pool);
 
     let mut builder = BranchNodeBuilder::new(
         branch,
@@ -283,8 +276,7 @@ fn build_branch(
                     } else {
                         None
                     }
-                })
-                .into_iter(),
+                }),
         );
 
         for pos in compressed_end..base_range.end {
@@ -378,6 +370,7 @@ fn build_branch(
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 pub struct BranchGauge {
     // key and length of the first separator if any
     first_separator: Option<(Key, usize)>,
@@ -389,17 +382,6 @@ pub struct BranchGauge {
     n: usize,
 }
 
-impl Default for BranchGauge {
-    fn default() -> Self {
-        BranchGauge {
-            first_separator: None,
-            prefix_len: 0,
-            sum_separator_lengths: 0,
-            prefix_compressed: None,
-            n: 0,
-        }
-    }
-}
 
 impl BranchGauge {
     pub fn ingest_key(&mut self, key: Key, len: usize) {
@@ -998,14 +980,14 @@ pub mod tests {
         assert!(new_branch_1.prefix_compressed() != new_branch_1.n());
 
         assert_eq!(
-            get_key(&new_branch_1, new_branch_1.n() as usize - 1),
+            get_key(new_branch_1, new_branch_1.n() as usize - 1),
             key2(0)
         );
 
         let branch_1_body_size = {
             let mut gauge = BranchGauge::default();
             for i in 0..new_branch_1.n() as usize {
-                let key = get_key(&new_branch_1, i);
+                let key = get_key(new_branch_1, i);
                 gauge.ingest_key(key, separator_len(&key))
             }
             gauge.body_size()

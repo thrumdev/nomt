@@ -13,7 +13,7 @@ fn last_layer_trie() {
     );
 
     let key1 = [170; 32];
-    let mut key2 = key1.clone();
+    let mut key2 = key1;
     key2[31] = 171;
 
     // write two leaf nodes at the last layer of the trie

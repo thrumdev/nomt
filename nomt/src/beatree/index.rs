@@ -22,7 +22,7 @@ impl Index {
     pub fn lookup(&self, key: Key) -> Option<(Key, Arc<BranchNode>)> {
         self.first_key_map
             .get_prev(&key)
-            .map(|(sep, b)| (sep.clone(), b.clone()))
+            .map(|(sep, b)| (*sep, b.clone()))
     }
 
     /// Get the first separator greater than the given key.

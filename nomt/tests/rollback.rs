@@ -130,8 +130,7 @@ impl TestPlan {
 
                 let value: Vec<u8> = if overflow {
                     // 32KB
-                    std::iter::repeat(blake3::hash(&key).as_bytes())
-                        .take(1024)
+                    std::iter::repeat_n(blake3::hash(&key).as_bytes(), 1024)
                         .flatten()
                         .copied()
                         .collect()
@@ -142,7 +141,7 @@ impl TestPlan {
 
                 per_commit_insert.insert(key, value.clone());
                 every_key.insert(key);
-                state_emu.insert(key.clone(), value.clone());
+                state_emu.insert(key, value.clone());
             }
 
             // Remove 1 key (if possible) each iteration
@@ -184,12 +183,12 @@ impl TestPlan {
             let session = nomt.begin_session(SessionParams::default());
             let mut operations = Vec::new();
             for (key, value) in to_insert[commit_no].iter() {
-                operations.push((key.clone(), KeyReadWrite::Write(Some(value.clone()))));
+                operations.push((*key, KeyReadWrite::Write(Some(value.clone()))));
             }
             for key in to_remove[commit_no].iter() {
-                operations.push((key.clone(), KeyReadWrite::Write(None)));
+                operations.push((*key, KeyReadWrite::Write(None)));
             }
-            operations.sort_by_key(|(key, _)| key.clone());
+            operations.sort_by_key(|(key, _)| *key);
             let finished = session.finish(operations).unwrap();
             finished.commit(&nomt).unwrap();
             let post_root = nomt.root();
@@ -210,14 +209,14 @@ impl TestPlan {
             let session = nomt.begin_session(SessionParams::default());
             let mut operations = Vec::new();
             for (key, value) in self.to_insert[commit_no].iter() {
-                operations.push((key.clone(), KeyReadWrite::Write(Some(value.clone()))));
+                operations.push((*key, KeyReadWrite::Write(Some(value.clone()))));
             }
             for key in self.to_remove[commit_no].iter() {
-                operations.push((key.clone(), KeyReadWrite::Write(None)));
+                operations.push((*key, KeyReadWrite::Write(None)));
             }
-            operations.sort_by_key(|(key, _)| key.clone());
+            operations.sort_by_key(|(key, _)| *key);
             let finished = session.finish(operations).unwrap();
-            finished.commit(&nomt).unwrap();
+            finished.commit(nomt).unwrap();
         }
     }
 
@@ -283,7 +282,7 @@ fn display_keys<'a>(keys: impl IntoIterator<Item = &'a KeyPath>) -> String {
     let mut keys: Vec<_> = keys.into_iter().collect();
     keys.sort();
     keys.iter()
-        .map(|k| hex::encode(k))
+        .map(hex::encode)
         .collect::<Vec<_>>()
         .join(", ")
 }

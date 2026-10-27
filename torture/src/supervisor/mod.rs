@@ -136,14 +136,14 @@ async fn join_interruptable(
             match res {
                 Ok(Ok(())) => {
                     // We received the first interrupt meaning that the control loop was cancelled.
-                    return ExitReason::Interrupted
+                    ExitReason::Interrupted
                 },
-                Ok(Err(e)) => return ExitReason::Error(e),
+                Ok(Err(e)) => ExitReason::Error(e),
                 Err(join_err) => {
                     // UNWRAP: the task cannot be cancelled because the only place it can get
                     // cancelled is here and we don't cancel it. So it must be a panic.
                     let panic_box = join_err.try_into_panic().unwrap();
-                    return ExitReason::Panic(panic_box);
+                    ExitReason::Panic(panic_box)
                 },
             }
         }

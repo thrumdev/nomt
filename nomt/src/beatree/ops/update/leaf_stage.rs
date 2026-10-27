@@ -105,10 +105,10 @@ pub fn run(
             ValueChange::Insert(v) => Ok((*k, Some((v.clone(), false)))),
             ValueChange::InsertOverflow(large_value, value_hash) => {
                 let (pages, num_writes) =
-                    overflow::chunk(&large_value, &leaf_writer, &page_pool, &io_handle)?;
+                    overflow::chunk(large_value, &leaf_writer, &page_pool, &io_handle)?;
                 overflow_io += num_writes;
 
-                let cell = overflow::encode_cell(large_value.len(), value_hash.clone(), &pages);
+                let cell = overflow::encode_cell(large_value.len(), *value_hash, &pages);
                 Ok((*k, Some((cell, true))))
             }
             ValueChange::Delete => Ok((*k, None)),
@@ -150,12 +150,12 @@ pub fn run(
             // end of this scope, not the end of `run_worker`.
             run_worker(
                 bbn_index,
-                &*leaf_cache,
+                &leaf_cache,
                 leaf_reader,
                 leaf_writer,
                 io_handle,
                 &mut prepared_leaves_iter,
-                &*changeset,
+                &changeset,
                 worker_params,
             )
         };
@@ -215,8 +215,7 @@ fn apply_worker_changes(
 
     output.submitted_io += worker_output.leaves_tracker.extra_freed.len();
     output
-        .freed_pages
-        .extend(worker_output.leaves_tracker.extra_freed.drain(..));
+        .freed_pages.append(&mut worker_output.leaves_tracker.extra_freed);
 
     output.post_io_work.worker_changes.push(worker_output);
 }
@@ -225,7 +224,7 @@ fn apply_worker_changes(
 // who share the pages they have worked on with the extension range protocol.
 // This function filters some work to avoid the incorrect elimination of pages.
 fn filter_leaves_changeset(leaf_changeset: &mut Vec<(Key, Option<PageNumber>)>) {
-    leaf_changeset.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+    leaf_changeset.sort_by_key(|(k1, _)| *k1);
     let mut to_remove = vec![];
     // If there are two changes with the same separator produced
     // by two workers, one is expected to be deleted and the other
@@ -294,8 +293,7 @@ pub fn enforce_first_leaf_separator(
     loop {
         // `separator` is being eliminated, so it must exist in the previous state
         maybe_new_first = indexed_leaf(bbn_index, separator)
-            .map(|(_, maybe_next_separator, _)| maybe_next_separator)
-            .flatten()
+            .and_then(|(_, maybe_next_separator, _)| maybe_next_separator)
             .map(|next_separator| {
                 // UNWRAP: the leaf_pn of a just indexed leaf. It must exist.
                 indexed_leaf(bbn_index, next_separator)
@@ -313,7 +311,7 @@ pub fn enforce_first_leaf_separator(
 
         match &leaf_changeset[idx] {
             // The previous leaf, candidate to be the new first one has been eliminated.
-            (separator, None) if maybe_new_first.map_or(false, |(s, _)| s == *separator) => {
+            (separator, None) if maybe_new_first.is_some_and(|(s, _)| s == *separator) => {
                 idx += 1;
             }
             // The candidate will be the new first leaf or a new leaf with a smaller
@@ -324,12 +322,12 @@ pub fn enforce_first_leaf_separator(
 
     if let Some((separator, Some(_))) = leaf_changeset.get(idx).copied() {
         // New leaf with a separator smaller or equal to the candidate.
-        if maybe_new_first.map_or(true, |(s, _)| s >= separator) {
+        if maybe_new_first.is_none_or(|(s, _)| s >= separator) {
             leaf_changeset[0].1 = leaf_changeset[idx].1;
             // If the new leaf corresponds to an update of the candidate,
             // remove the older separator.
             // Otherwise just remove the new first leaf entry.
-            if maybe_new_first.map_or(false, |(s, _)| s == separator) {
+            if maybe_new_first.is_some_and(|(s, _)| s == separator) {
                 leaf_changeset[idx].1 = None;
             } else {
                 leaf_changeset.remove(idx);
@@ -375,7 +373,7 @@ fn prepare_workers(
     // iter: find endpoint for previous worker and push next worker.
     // look up the leaf for the (ops/N)th operation, find out how many ops it covers,
     // and set the end range accordingly.
-    while remaining_workers > 0 && changeset_remaining.len() > 0 {
+    while remaining_workers > 0 && !changeset_remaining.is_empty() {
         let pivot_idx = changeset_remaining.len() / (remaining_workers + 1);
 
         // If pivot_idx == 0 the number of changeset_remaining
@@ -506,7 +504,7 @@ fn reset_leaf_base_fresh(
     // fast path: this leaf was expected to be used and prepared. avoid heavy index lookup.
     if prepared_leaves
         .peek()
-        .map_or(false, |prepared| prepared.separator <= key)
+        .is_some_and(|prepared| prepared.separator <= key)
     {
         // UNWRAP: we just checked.
         // note that the separator < key condition above only fails if we need to merge with an
@@ -578,7 +576,7 @@ fn run_worker(
     // point leaf updater at first leaf.
     reset_leaf_base(
         &bbn_index,
-        &leaf_cache,
+        leaf_cache,
         &leaf_reader,
         &mut new_leaf_state.leaves_tracker,
         &mut leaf_updater,
@@ -590,7 +588,7 @@ fn run_worker(
     for (key, op) in &changeset[worker_params.op_range.clone()] {
         // ensure key is in scope for leaf updater. if not, digest it. merge rightwards until
         // done _or_ key is in scope.
-        while !leaf_updater.is_in_scope(&key) {
+        while !leaf_updater.is_in_scope(key) {
             // After `digest`, some changed items could have been produced and they could be used
             // to respond to the left neighbor. However, we should only respond if we are sure that
             // we will not introduce changed items with smaller separators later on.
@@ -613,7 +611,7 @@ fn run_worker(
             };
 
             has_extended_range = false;
-            if worker_params.range.high.map_or(false, |high| k >= high) {
+            if worker_params.range.high.is_some_and(|high| k >= high) {
                 has_extended_range = true;
                 super::extend_range_protocol::request_range_extension(
                     &mut worker_params,
@@ -647,7 +645,7 @@ fn run_worker(
         if worker_params
             .range
             .high
-            .map_or(false, |high| cutoff >= high)
+            .is_some_and(|high| cutoff >= high)
         {
             has_extended_range = true;
             request_range_extension(&mut worker_params, &mut new_leaf_state.leaves_tracker);
@@ -750,8 +748,8 @@ fn preload_and_prepare(
     let mut changeset_leaves: Vec<PreparedLeaf> = Vec::new();
     let mut submissions = 0;
     for key in changeset {
-        if let Some(ref last) = changeset_leaves.last() {
-            if last.cutoff.map_or(true, |c| key < c) {
+        if let Some(last) = changeset_leaves.last() {
+            if last.cutoff.is_none_or(|c| key < c) {
                 continue;
             }
         }

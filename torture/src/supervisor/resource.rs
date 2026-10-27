@@ -7,7 +7,7 @@ use std::{
 use rand::{prelude::*, SeedableRng};
 
 /// 1GiB is the minimum amount of space that can be assigned to a workload.
-const MIN_ASSIGNED_SPACE: u64 = 1 * (1 << 30);
+const MIN_ASSIGNED_SPACE: u64 = 1 << 30;
 
 /// 5GiB is the maximum amount of memory that can be assigned to a workload
 /// which will use both disk and memory.
@@ -194,9 +194,7 @@ pub fn process_memory_occupied(pid: u32) -> Option<u64> {
     let mut statm = String::new();
     statm_file.read_to_string(&mut statm).expect(&format_err);
     let occupied_memory = statm
-        .split(' ')
-        .skip(1)
-        .next()
+        .split(' ').nth(1)
         .map(|value| value.parse::<u64>().expect(&format_err))
         .expect(&format_err);
     Some(occupied_memory)
@@ -216,7 +214,7 @@ fn mem_info() -> (u64, u64) {
             .split('\n')
             .find(|entry| entry.starts_with(name))
             .and_then(|entry| entry.split(':').nth(1))
-            .and_then(|value| value.trim_start().split(' ').nth(0))
+            .and_then(|value| value.trim_start().split(' ').next())
             .and_then(|value| value.parse::<u64>().ok())
     };
     // /proc/meminfo shows values in KiB.
@@ -269,7 +267,6 @@ pub fn is_exceeding_resources(
     fn dir_size(path: &Path) -> u64 {
         std::fs::read_dir(path)
             .unwrap()
-            .into_iter()
             .filter_map(|entry| entry.ok())
             .map(|entry| {
                 let entry_metadata = entry.metadata().unwrap();

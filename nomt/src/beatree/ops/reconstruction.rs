@@ -48,7 +48,7 @@ pub fn reconstruct(
             pn
         );
 
-        let mut branch = BranchNode::new_in(&page_pool);
+        let mut branch = BranchNode::new_in(page_pool);
         branch.as_mut_slice().copy_from_slice(node);
 
         let mut separator = [0u8; 32];
@@ -136,14 +136,14 @@ impl SeqFileReader {
         })
     }
 
-    pub fn next<'a>(&'a mut self) -> Result<Option<(u32, &'a [u8])>> {
+    pub fn next(&mut self) -> Result<Option<(u32, &[u8])>> {
         if self.pn >= self.bump {
             return Ok(None);
         }
 
         let node = unsafe {
             let offset = self.pn as usize * BRANCH_NODE_SIZE;
-            let ptr = self.ptr.offset(offset as isize);
+            let ptr = self.ptr.add(offset);
             std::slice::from_raw_parts(ptr, BRANCH_NODE_SIZE)
         };
 

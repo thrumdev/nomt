@@ -346,7 +346,7 @@ fn seeded_key(seed: u64) -> KeyPath {
     let mut rng = Lcg64Xsh32::from_seed(rng_seed);
     let mut key = [0; 32];
 
-    for chunk in key.chunks_exact_mut(4) {
+    for chunk in key.as_chunks_mut::<4>().0 {
         chunk.copy_from_slice(&rng.next_u32().to_le_bytes());
     }
 

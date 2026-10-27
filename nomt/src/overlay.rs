@@ -286,7 +286,7 @@ impl LiveOverlay {
             .unwrap_or(&parent.data)
             .parent_status
             .as_ref()
-            .map_or(false, |status| !status.is_committed())
+            .is_some_and(|status| !status.is_committed())
         {
             return Err(InvalidAncestors::Incomplete);
         }
@@ -307,7 +307,7 @@ impl LiveOverlay {
     pub(super) fn page(&self, page_id: &PageId) -> Option<&DirtyPage> {
         self.parent
             .as_ref()
-            .and_then(|parent| parent.index.pages.get(&page_id))
+            .and_then(|parent| parent.index.pages.get(page_id))
             .and_then(|seqn| seqn.checked_sub(self.min_seqn))
             .map(|seqn_diff| {
                 if seqn_diff as usize == self.ancestor_data.len() {
@@ -355,11 +355,11 @@ impl LiveOverlay {
     }
 
     /// Iterate all value changes within the given key bounds.
-    pub(super) fn value_iter<'a>(
-        &'a self,
+    pub(super) fn value_iter(
+        &self,
         start: KeyPath,
         end: Option<KeyPath>,
-    ) -> impl Iterator<Item = (KeyPath, &'a ValueChange)> {
+    ) -> impl Iterator<Item = (KeyPath, &ValueChange)> {
         self.parent
             .as_ref()
             .map(move |parent| {
@@ -367,7 +367,7 @@ impl LiveOverlay {
                     .index
                     .values
                     .range(start..)
-                    .take_while(move |(k, _)| end.as_ref().map_or(true, |end| end > k))
+                    .take_while(move |(k, _)| end.as_ref().is_none_or(|end| end > k))
                     .filter_map(|(k, seqn)| seqn.checked_sub(self.min_seqn).map(|s| (k, s)))
                     .map(|(k, seqn_diff)| (*k, self.value_inner(k, seqn_diff)))
             })
@@ -632,7 +632,7 @@ mod tests {
             LiveOverlay::new(ancestors.iter().take(2)),
             Err(InvalidAncestors::Incomplete)
         ));
-        assert!(matches!(LiveOverlay::new(ancestors.iter().take(3)), Ok(_)));
+        assert!(LiveOverlay::new(ancestors.iter().take(3)).is_ok());
     }
 
     #[test]
@@ -721,7 +721,7 @@ mod tests {
             LiveOverlay::new(ancestors.iter().take(1)),
             Err(InvalidAncestors::Incomplete)
         ));
-        assert!(matches!(LiveOverlay::new(ancestors.iter().take(2)), Ok(_)));
+        assert!(LiveOverlay::new(ancestors.iter().take(2)).is_ok());
     }
 
     #[test]

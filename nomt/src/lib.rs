@@ -252,7 +252,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
     /// Returns a recent root of the trie.
     pub fn root(&self) -> Root {
-        self.shared.lock().root.clone()
+        self.shared.lock().root
     }
 
     /// Returns true if the trie has no items in it.
@@ -383,7 +383,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        sess.finish(actuals)?.commit(&self)?;
+        sess.finish(actuals)?.commit(self)?;
 
         Ok(())
     }
@@ -582,7 +582,7 @@ impl<T: HashAlgorithm> Session<T> {
         }
         let mut compact_actuals = Vec::with_capacity(actuals.len());
         for (path, read_write) in &actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
+            compact_actuals.push((*path, read_write.to_compact::<T>()));
         }
 
         let merkle_update_handle = self

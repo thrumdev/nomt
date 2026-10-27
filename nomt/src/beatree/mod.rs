@@ -92,11 +92,9 @@ impl Tree {
         commit_concurrency: usize,
         leaf_cache_size: usize,
     ) -> Result<Tree> {
-        let ln_freelist_pn = Some(ln_freelist_pn)
-            .map(PageNumber)
+        let ln_freelist_pn = Some(PageNumber(ln_freelist_pn))
             .filter(|&x| x != FREELIST_EMPTY);
-        let bbn_freelist_pn = Some(bbn_freelist_pn)
-            .map(PageNumber)
+        let bbn_freelist_pn = Some(PageNumber(bbn_freelist_pn))
             .filter(|&x| x != FREELIST_EMPTY);
 
         let ln_bump = PageNumber(ln_bump);

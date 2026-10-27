@@ -96,17 +96,17 @@ impl PageSet {
 
 impl super::page_walker::PageSet for PageSet {
     fn fresh(&self, page_id: &PageId) -> PageMut {
-        let page = PageMut::pristine_empty(&self.page_pool, &page_id);
-        page
+        
+        PageMut::pristine_empty(&self.page_pool, page_id)
     }
 
     fn contains(&self, page_id: &PageId) -> bool {
-        self.map.contains_key(&page_id)
+        self.map.contains_key(page_id)
     }
 
     fn get(&self, page_id: &PageId) -> Option<(Page, PageOrigin)> {
         self.map
-            .get(&page_id)
+            .get(page_id)
             .map(|(p, page_origin)| (p.clone(), page_origin.clone()))
             .or_else(|| self.get_warmed_up(page_id))
     }

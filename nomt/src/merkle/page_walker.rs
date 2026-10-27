@@ -392,7 +392,7 @@ impl<H: NodeHasher> PageWalker<H> {
                 );
                 self.down(page_set, &down[1..], true);
             } else {
-                self.down(page_set, &down, true);
+                self.down(page_set, down, true);
             }
 
             if self.position.is_root() {
@@ -747,8 +747,8 @@ impl<H: NodeHasher> PageWalker<H> {
         match page_id {
             Some(page_id) => {
                 if let Some(ref parent_page) = self.parent_page {
-                    assert!(&page_id != &parent_page);
-                    assert!(page_id.is_descendant_of(&parent_page));
+                    assert!(page_id != parent_page);
+                    assert!(page_id.is_descendant_of(parent_page));
                 }
             }
             None => assert!(self.parent_page.is_none()),
@@ -780,7 +780,7 @@ impl<H: NodeHasher> PageWalker<H> {
             .stack
             .last()
             .map(|item| item.page_id.clone())
-            .or(self.parent_page.as_ref().map(|p| p.clone()));
+            .or(self.parent_page.clone());
 
         let start_len = self.stack.len();
         let mut cur_ancestor = page_id;
@@ -1080,8 +1080,8 @@ mod tests {
 
     impl PageSet for MockPageSet {
         fn fresh(&self, page_id: &PageId) -> PageMut {
-            let page = PageMut::pristine_empty(&self.page_pool, page_id);
-            page
+            
+            PageMut::pristine_empty(&self.page_pool, page_id)
         }
 
         fn contains(&self, page_id: &PageId) -> bool {
@@ -1455,12 +1455,10 @@ mod tests {
             })
         };
 
-        let expected_siblings = vec![
-            (node_hash(path_1, val(1)), 1),
+        let expected_siblings = [(node_hash(path_1, val(1)), 1),
             (node_hash(path_2, val(2)), 2),
             (node_hash(path_3, val(3)), 3),
-            (node_hash(path_4, val(4)), 4),
-        ];
+            (node_hash(path_4, val(4)), 4)];
 
         // replace those leaf nodes one at a time.
         // the sibling stack will be populated as we go.
@@ -2145,7 +2143,7 @@ mod tests {
         updates.iter().find(|update| update.page_id == ROOT_PAGE_ID);
         updates
             .iter()
-            .find(|update| update.page_id.length_dependent_encoding() == &[24]);
+            .find(|update| update.page_id.length_dependent_encoding() == [24]);
         page_set.apply(updates);
 
         let mut page_id = ROOT_PAGE_ID;
@@ -2160,7 +2158,7 @@ mod tests {
             page_id,
             trie_pos![0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0],
             &mut page_set,
-            ops.into_iter(),
+            ops,
         )
         .unwrap()
         .collect();
@@ -2168,7 +2166,7 @@ mod tests {
         // Make sure that elision bitfield was updated correctly.
         let reconstructed_page = reconstructed_pages
             .iter()
-            .find(|(page_id, _, _, _, _)| page_id.length_dependent_encoding() == &[24, 24])
+            .find(|(page_id, _, _, _, _)| page_id.length_dependent_encoding() == [24, 24])
             .map(|(_, page, _, _, _)| page)
             .unwrap();
 
@@ -2190,7 +2188,7 @@ mod tests {
                 .map(|idx| correct_pages.remove(idx).page)
                 .unwrap();
 
-            let page = if page_id.length_dependent_encoding() == &[24, 24] {
+            let page = if page_id.length_dependent_encoding() == [24, 24] {
                 // The correct pages are build without elision,
                 // so the elided children bitfield is not present.
                 let mut no_bitfield_page = page.deep_copy();

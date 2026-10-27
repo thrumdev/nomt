@@ -45,7 +45,7 @@ impl WalBlobReader {
     pub fn new(page_pool: &PagePool, mut wal_fd: &File) -> anyhow::Result<Self> {
         let stat = wal_fd.metadata()?;
         let file_size = stat.len() as usize;
-        if file_size % PAGE_SIZE != 0 {
+        if !file_size.is_multiple_of(PAGE_SIZE) {
             anyhow::bail!("WAL file size is not a multiple of the page size");
         }
 
@@ -62,7 +62,7 @@ impl WalBlobReader {
                 Err(e) => return Err(e.into()),
             };
             pn += 1;
-            wal.extend_from_slice(&*page);
+            wal.extend_from_slice(&page);
         }
 
         let mut reader = Self {

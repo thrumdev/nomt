@@ -427,7 +427,7 @@ impl Agent {
 
         // Perform the commit.
         let commit_result =
-            block_in_place(|| session.finish(actuals)?.commit(&nomt), "Panic in commit");
+            block_in_place(|| session.finish(actuals)?.commit(nomt), "Panic in commit");
         let commit_outcome = classify_result(commit_result);
 
         // Log the outcome if it was not successful.
@@ -521,7 +521,7 @@ where
     F: FnOnce() -> anyhow::Result<R> + Send,
 {
     tokio::task::block_in_place(|| {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(task))
             .unwrap_or_else(|e| panic_to_err(panic_context, e))
     })
 }
