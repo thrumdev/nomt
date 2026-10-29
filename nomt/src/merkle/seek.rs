@@ -38,6 +38,9 @@ const MAX_INFLIGHT: usize = 1024;
 
 struct SeekRequest {
     key: KeyPath,
+    /// Hash of the value the caller read for `key`, if it exists. A terminal leaf whose hash
+    /// matches `(key, known_value_hash)` is this key's leaf, so it needs no beatree fetch.
+    known_value_hash: Option<ValueHash>,
     position: TriePosition,
     page_id: Option<PageId>,
     siblings: Vec<Node>,
@@ -50,18 +53,27 @@ impl SeekRequest {
         read_transaction: &BeatreeReadTx,
         overlay: &LiveOverlay,
         key: KeyPath,
+        known_value_hash: Option<ValueHash>,
         root: Node,
     ) -> SeekRequest {
         let state = if trie::is_terminator::<H>(&root) {
             RequestState::Completed(None)
         } else if trie::is_leaf::<H>(&root) {
-            RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &TriePosition::new())
+            RequestState::resolve_leaf::<H>(
+                read_transaction,
+                overlay,
+                &TriePosition::new(),
+                &root,
+                key,
+                known_value_hash,
+            )
         } else {
             RequestState::Seeking
         };
 
         let mut request = SeekRequest {
             key,
+            known_value_hash,
             position: TriePosition::new(),
             page_id: None,
             siblings: Vec::new(),
@@ -144,8 +156,14 @@ impl SeekRequest {
             }
 
             if trie::is_leaf::<H>(&cur_node) {
-                self.state =
-                    RequestState::begin_leaf_fetch::<H>(read_transaction, overlay, &self.position);
+                self.state = RequestState::resolve_leaf::<H>(
+                    read_transaction,
+                    overlay,
+                    &self.position,
+                    &cur_node,
+                    self.key,
+                    self.known_value_hash,
+                );
                 if let RequestState::FetchingLeaf { .. } = self.state {
                     self.continue_leaf_fetch::<H>(None);
                 }
@@ -412,6 +430,28 @@ enum RequestState {
 }
 
 impl RequestState {
+    /// Resolves the leaf node `leaf_node` at `pos`: without I/O if it is the leaf of `key` with the
+    /// known value hash, otherwise by fetching the leaf data from the beatree.
+    fn resolve_leaf<H: HashAlgorithm>(
+        read_transaction: &BeatreeReadTx,
+        overlay: &LiveOverlay,
+        pos: &TriePosition,
+        leaf_node: &Node,
+        key: KeyPath,
+        known_value_hash: Option<ValueHash>,
+    ) -> Self {
+        if let Some(value_hash) = known_value_hash {
+            let leaf = trie::LeafData {
+                key_path: key,
+                value_hash,
+            };
+            if H::hash_leaf(&leaf) == *leaf_node {
+                return RequestState::Completed(Some(leaf));
+            }
+        }
+        Self::begin_leaf_fetch::<H>(read_transaction, overlay, pos)
+    }
+
     fn begin_leaf_fetch<H: HashAlgorithm>(
         read_transaction: &BeatreeReadTx,
         overlay: &LiveOverlay,
@@ -634,12 +674,15 @@ impl<H: HashAlgorithm> Seeker<H> {
     }
 
     /// Push a request for key path.
-    pub fn push(&mut self, key: KeyPath) {
+    ///
+    /// `known_value_hash` is the hash of the value the caller read for `key`, if any.
+    pub fn push(&mut self, key: KeyPath, known_value_hash: Option<ValueHash>) {
         let request_index = self.processed + self.requests.len();
         self.requests.push_back(SeekRequest::new::<H>(
             &self.beatree_read_transaction,
             &self.overlay,
             key,
+            known_value_hash,
             self.root,
         ));
         self.idle_requests.push_back(request_index);
