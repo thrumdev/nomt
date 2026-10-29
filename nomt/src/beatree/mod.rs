@@ -141,6 +141,36 @@ impl Tree {
         })
     }
 
+    /// Fill the leaf cache with leaves, up to its capacity, reading them on `threads` threads.
+    pub fn prepopulate_leaf_cache(&self, threads: usize) {
+        let shared = self.shared.read();
+        let leaf_cache = shared.leaf_cache.clone();
+        let leaf_store = shared.leaf_store_rd.clone();
+        let leaves: Vec<PageNumber> = shared
+            .bbn_index
+            .branches()
+            .flat_map(|branch| (0..branch.n() as usize).map(|i| PageNumber(branch.node_pointer(i))))
+            .take(leaf_cache.capacity())
+            .collect();
+        drop(shared);
+
+        // `chunks` panics on 0, so keep the size at least 1 even if there are no leaves.
+        let chunk_size = leaves.len().div_ceil(threads.max(1)).max(1);
+        let (leaf_cache, leaf_store) = (&leaf_cache, &leaf_store);
+        std::thread::scope(|scope| {
+            for chunk in leaves.chunks(chunk_size) {
+                scope.spawn(move || {
+                    for &pn in chunk {
+                        let leaf = Arc::new(leaf::node::LeafNode {
+                            inner: leaf_store.query(pn),
+                        });
+                        leaf_cache.insert(pn, leaf);
+                    }
+                });
+            }
+        });
+    }
+
     /// Lookup a key in the btree. This blocks the current thread.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let shared = self.shared.read();

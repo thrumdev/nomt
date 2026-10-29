@@ -234,6 +234,9 @@ impl<T: HashAlgorithm> Nomt<T> {
             let io_handle = store.io_pool().make_handle();
             merkle::prepopulate_cache(io_handle, &page_cache, &store, o.page_cache_upper_levels)?;
         }
+        if o.prepopulate_leaf_cache {
+            store.prepopulate_leaf_cache(o.commit_concurrency);
+        }
 
         Ok(Self {
             merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
