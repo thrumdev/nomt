@@ -18,7 +18,6 @@ threadpool.workspace = true
 bitvec.workspace = true
 twox-hash.workspace = true
 fxhash.workspace = true
-dashmap.workspace = true
 crossbeam.workspace = true
 crossbeam-channel.workspace = true
 slab.workspace = true
