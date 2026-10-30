@@ -1069,6 +1069,7 @@ dependencies = [
  "crossbeam-channel",
  "dashmap",
  "fxhash",
+ "getrandom 0.4.2",
  "hex",
  "hex-literal",
  "imbl",
