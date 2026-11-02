@@ -36,3 +36,11 @@ fn many_coexisting_sessions_with_rollback() {
     let db = open(dir.path(), |o| o.rollback(true));
     finish_newest_of(&db, 4);
 }
+
+#[test]
+fn many_coexisting_sessions_with_warm_up() {
+    // Each live session has a warm-up worker running until the session finishes.
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(dir.path(), |o| o.warm_up(true));
+    finish_newest_of(&db, 4);
+}
