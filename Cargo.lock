@@ -1115,6 +1115,7 @@ dependencies = [
  "bitvec",
  "libfuzzer-sys",
  "nomt",
+ "nomt-core",
  "tempfile",
 ]
 
