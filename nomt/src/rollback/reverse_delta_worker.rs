@@ -88,7 +88,7 @@ pub(super) fn start(
         }
     };
 
-    spawn_task(&tp, worker_task, worker_result_tx);
+    spawn_task(tp, worker_task, worker_result_tx);
 
     (command_tx, worker_result_rx)
 }

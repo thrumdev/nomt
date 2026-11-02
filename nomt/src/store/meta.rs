@@ -112,7 +112,7 @@ impl Meta {
             errors.push(format!("invalid magic: {:?}", self.magic));
         }
         if self.version < 1 {
-            errors.push(format!("invalid version: 0"));
+            errors.push("invalid version: 0".to_string());
         } else if self.version > VERSION {
             errors.push(format!(
                 "DB manifest version ({}) is newer than supported ({})",

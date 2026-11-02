@@ -50,7 +50,7 @@ impl SpawnedAgentController {
             }))
             .await?;
         match response {
-            crate::message::ToSupervisor::InitResponse(outcome) => return Ok(outcome),
+            crate::message::ToSupervisor::InitResponse(outcome) => Ok(outcome),
             _ => {
                 panic!("expected init, unexpected response: {:?}", response);
             }
@@ -81,7 +81,7 @@ impl SpawnedAgentController {
             }))
             .await?;
         match response {
-            crate::message::ToSupervisor::OpenResponse(outcome) => return Ok(outcome),
+            crate::message::ToSupervisor::OpenResponse(outcome) => Ok(outcome),
             _ => {
                 panic!("expected open, unexpected response: {:?}", response);
             }
@@ -135,7 +135,7 @@ pub async fn spawn_agent_into(
     let stream = UnixStream::from_std(sock)?;
 
     let (rr, task) = comms::run(stream);
-    let _ = tokio::spawn(task);
+    tokio::spawn(task);
 
     // Assign a unique ID to the agent.
     static AGENT_COUNT: AtomicUsize = AtomicUsize::new(0);

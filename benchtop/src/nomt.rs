@@ -19,6 +19,7 @@ pub struct NomtDB {
 }
 
 impl NomtDB {
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         reset: bool,
         commit_concurrency: usize,
@@ -99,7 +100,7 @@ impl NomtDB {
         }
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
-        self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
+        self.commit_overlay(&mut overlay_window, timer.as_deref_mut());
 
         let session_params = SessionParams::default().witness_mode(WitnessMode::read_write());
 
@@ -152,7 +153,7 @@ impl NomtDB {
 
         let _timer_guard_total = timer.as_mut().map(|t| t.record_span("workload"));
 
-        self.commit_overlay(&mut overlay_window, timer.as_mut().map(|t| &mut **t));
+        self.commit_overlay(&mut overlay_window, timer.as_deref_mut());
 
         let session_params = SessionParams::default().witness_mode(WitnessMode::read_write());
 
@@ -166,7 +167,7 @@ impl NomtDB {
 
         let use_timer = timer.is_some();
         thread_pool.in_place_scope(|scope| {
-            for (workload, result) in workloads.into_iter().zip(results.iter_mut()) {
+            for (workload, result) in workloads.iter_mut().zip(results.iter_mut()) {
                 let session = &session;
                 scope.spawn(move |_| {
                     let mut workload_timer = if use_timer {
@@ -196,8 +197,7 @@ impl NomtDB {
         let mut actual_access: Vec<_> = results
             .into_iter()
             .flatten()
-            .map(|(access, _)| access)
-            .flatten()
+            .flat_map(|(access, _)| access)
             .collect();
         actual_access.sort_by_key(|(k, _)| *k);
 

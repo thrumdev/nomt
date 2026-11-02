@@ -134,7 +134,7 @@ impl Workload for TransferWorkload {
             } else {
                 // odds of two threads generating the same random account here are
                 // incredibly low.
-                rng.random_range(self.num_accounts..u64::max_value())
+                rng.random_range(self.num_accounts..u64::MAX)
             };
 
             let send_balance = decode_balance(

@@ -51,7 +51,7 @@ impl<'a> Arbitrary<'a> for Run {
 
         // Destination must be long enough to store the source.
         let destination_bit_start = input.int_in_range(0..=7)?;
-        let min_destination_len = (destination_bit_start + source.bit_len + 7) / 8;
+        let min_destination_len = (destination_bit_start + source.bit_len).div_ceil(8);
         let destination_len = input.int_in_range(min_destination_len..=MAX_BYTES_LEN)?;
         let mut destination_bytes = vec![0; destination_len];
         input.fill_buffer(&mut destination_bytes)?;
@@ -70,7 +70,7 @@ impl<'a> Arbitrary<'a> for Run {
 
 impl<'a> Arbitrary<'a> for Source {
     fn arbitrary(input: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let bytes_len = (input.int_in_range(0..=MAX_BYTES_LEN)? as usize).next_multiple_of(8);
+        let bytes_len = input.int_in_range(0..=MAX_BYTES_LEN)?.next_multiple_of(8);
 
         let mut bytes: Vec<u8> = vec![0; bytes_len];
         input.fill_buffer(&mut bytes)?;

@@ -48,6 +48,7 @@ fn encode_id(id: u64) -> [u8; 8] {
 }
 
 /// Build N `RwWorkload`s, one for each thread.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     reads: u8,
     writes: u8,

@@ -3,10 +3,10 @@
 //!
 //! All nodes are 256 bits. There are three kinds of nodes.
 //!   1. Internal nodes, which each have two children. The value of an internal node is
-//!       given by hashing the concatenation of the two child nodes and setting the MSB to 0.
+//!      given by hashing the concatenation of the two child nodes and setting the MSB to 0.
 //!   2. Leaf nodes, which have zero children. The value of a leaf node is given by hashing
-//!       the concatenation of the 256-bit lookup path and the hash of the value stored at the leaf,
-//!       and setting the MSB to 1.
+//!      the concatenation of the 256-bit lookup path and the hash of the value stored at the leaf,
+//!      and setting the MSB to 1.
 //!   3. [`TERMINATOR`] nodes, which have the special value of all 0s. These nodes have no children
 //!      and serve as a stand-in for an empty sub-trie at any height. Terminator nodes enable the
 //!      trie to be tractably represented.

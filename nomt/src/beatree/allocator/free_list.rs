@@ -76,8 +76,7 @@ impl FreeList {
         let pns = self
             .portions
             .iter()
-            .map(|&(ref pn, ref pns)| std::iter::once(pn).chain(pns))
-            .flatten()
+            .flat_map(|(pn, pns)| std::iter::once(pn).chain(pns))
             .copied();
 
         BTreeSet::from_iter(pns)
@@ -185,7 +184,7 @@ impl FreeList {
         }
 
         // append the released free list pages
-        to_push.extend(self.released_portions.drain(..));
+        to_push.append(&mut self.released_portions);
 
         let new_pages = self.preallocate(&mut to_push, bump);
         let pages = self.push_and_encode(page_pool, &to_push, new_pages);
@@ -327,12 +326,12 @@ impl FreeList {
             let head_full = self
                 .portions
                 .last()
-                .map_or(true, |h| h.1.len() == MAX_PNS_PER_PAGE);
+                .is_none_or(|h| h.1.len() == MAX_PNS_PER_PAGE);
 
             let fragmentation = self
                 .portions
                 .last()
-                .map_or(false, |h| h.1.len() == MAX_PNS_PER_PAGE - 1)
+                .is_some_and(|h| h.1.len() == MAX_PNS_PER_PAGE - 1)
                 && new_pages.peek().is_some()
                 && i + 1 == to_push.len();
 
@@ -369,7 +368,7 @@ impl FreeList {
 
             Some((
                 *head_pn,
-                encode_free_list_page(page_pool, prev_pn, &head_pns),
+                encode_free_list_page(page_pool, prev_pn, head_pns),
             ))
         } else {
             None
@@ -415,7 +414,7 @@ fn encode_free_list_page(page_pool: &PagePool, prev: PageNumber, pns: &[PageNumb
         let mut e = FreeListPageMut(&mut page[..]);
         e.set_prev_pn(prev);
         e.set_item_count(pns.len() as u16);
-        for (i, pn) in pns.into_iter().enumerate() {
+        for (i, pn) in pns.iter().enumerate() {
             e.set_item(i, *pn);
         }
     }
@@ -443,7 +442,7 @@ impl<'a> CleanFreeList<'a> {
                 portions[n_portions - 2].1[MAX_PNS_PER_PAGE - n - 1]
             } else {
                 let portion_offset = 2 + (n / MAX_PNS_PER_PAGE);
-                n = n % MAX_PNS_PER_PAGE;
+                n %= MAX_PNS_PER_PAGE;
 
                 portions[n_portions - portion_offset].1[MAX_PNS_PER_PAGE - n - 1]
             }
@@ -454,7 +453,7 @@ impl<'a> CleanFreeList<'a> {
             } else {
                 n -= head_len;
                 let portion_offset = 2 + (n / MAX_PNS_PER_PAGE);
-                n = n % MAX_PNS_PER_PAGE;
+                n %= MAX_PNS_PER_PAGE;
 
                 portions[n_portions - portion_offset].1[MAX_PNS_PER_PAGE - n - 1]
             }

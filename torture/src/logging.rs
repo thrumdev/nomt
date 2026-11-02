@@ -47,9 +47,7 @@ fn env_filter(kind: Kind) -> EnvFilter {
                     .parse(env)
                     .unwrap(),
             ),
-            Err(std::env::VarError::NotPresent) => {
-                return None;
-            }
+            Err(std::env::VarError::NotPresent) => None,
             Err(std::env::VarError::NotUnicode(_)) => {
                 panic!("Environment variable {} is not unicode", var_name);
             }
@@ -67,7 +65,7 @@ where
         .with_thread_ids(false)
         .with_thread_names(false)
         .compact()
-        .with_timer(fmt::time::SystemTime::default());
+        .with_timer(fmt::time::SystemTime);
 
     fmt::Subscriber::builder()
         .with_env_filter(env_filter(kind))

@@ -14,7 +14,7 @@ fn main() -> Result<()> {
         // Constructing the verified operations
         let verified = witnessed_path
             .inner
-            .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root.into_inner())
+            .verify::<Blake3Hasher>(witnessed_path.path.path(), prev_root.into_inner())
             .unwrap();
 
         // Among all read operations performed the ones that interact

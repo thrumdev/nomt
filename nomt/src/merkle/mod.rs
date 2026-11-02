@@ -571,7 +571,7 @@ fn spawn_warm_up<H: HashAlgorithm>(
     let (finish_tx, finish_rx) = channel::bounded(1);
 
     spawn_task(
-        &worker_tp,
+        worker_tp,
         move || worker::run_warm_up::<H>(params, warmup_rx, finish_rx),
         output_tx,
     );
@@ -590,7 +590,7 @@ fn spawn_updater<H: HashAlgorithm>(
     output_tx: Sender<TaskResult<(usize, std::io::Result<WorkerOutput>)>>,
 ) {
     spawn_task(
-        &worker_tp,
+        worker_tp,
         move || (worker_index, worker::run_update::<H>(params)),
         output_tx,
     );

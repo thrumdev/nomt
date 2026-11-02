@@ -95,7 +95,7 @@ impl PageId {
 
         let leading_zeros = uint.leading_zeros();
         let bit_count = 256 - leading_zeros;
-        let sextets = (bit_count + 5) / 6;
+        let sextets = bit_count.div_ceil(6);
 
         if bit_count == 0 {
             return Ok(ROOT_PAGE_ID);
