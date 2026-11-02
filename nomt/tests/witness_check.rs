@@ -281,7 +281,7 @@ fn witness_validity_with_concurrent_workers() {
             .iter()
             .map(|p| {
                 p.inner
-                    .verify::<Blake3Hasher>(&p.path.path(), prev_root.into_inner())
+                    .verify::<Blake3Hasher>(p.path.path(), prev_root.into_inner())
                     .unwrap()
             })
             .collect::<Vec<_>>();

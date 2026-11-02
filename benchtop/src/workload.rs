@@ -28,6 +28,7 @@ pub trait Workload: Send {
     fn is_done(&self) -> bool;
 }
 
+#[allow(clippy::type_complexity)]
 pub fn parse(
     workload_params: &WorkloadParams,
     op_limit: u64,

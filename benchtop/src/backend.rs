@@ -21,6 +21,7 @@ impl Backend {
     // If reset is true, then erase any previous backend's database
     // and restart from an empty database.
     // Otherwise, use the already present database.
+    #[allow(clippy::too_many_arguments)]
     pub fn instantiate(
         &self,
         reset: bool,
@@ -93,7 +94,7 @@ impl DB {
         while !workload.is_done() {
             if timeout
                 .as_ref()
-                .map_or(false, |t| std::time::Instant::now() > *t)
+                .is_some_and(|t| std::time::Instant::now() > *t)
             {
                 break;
             }
@@ -121,7 +122,7 @@ impl DB {
         while workloads.iter().any(|w| !w.is_done()) {
             if timeout
                 .as_ref()
-                .map_or(false, |t| std::time::Instant::now() > *t)
+                .is_some_and(|t| std::time::Instant::now() > *t)
             {
                 break;
             }
