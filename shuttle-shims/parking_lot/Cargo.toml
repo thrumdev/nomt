@@ -1,0 +1,14 @@
+[package]
+name = "parking_lot"
+version = "0.12.3"
+edition = "2021"
+publish = false
+
+[features]
+arc_lock = ["shuttle-parking_lot-impl/arc_lock"]
+send_guard = ["shuttle-parking_lot-impl/send_guard"]
+
+[dependencies]
+shuttle = "0.9.9"
+shuttle-parking_lot-impl = "0.1.3"
+lock_api = "0.4"

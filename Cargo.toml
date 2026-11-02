@@ -10,7 +10,7 @@ members = [
     "trickfs",
     "trickfs/trickmnt",
 ]
-exclude = ["benchtop"]
+exclude = ["benchtop", "shuttle-shims"]
 
 [workspace.package]
 authors = ["thrum"]
