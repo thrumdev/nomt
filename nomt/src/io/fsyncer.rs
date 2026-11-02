@@ -43,10 +43,10 @@ impl Fsyncer {
             cv: Condvar::new(),
             s: Mutex::new(State::Idle),
         });
-        #[cfg(not(shuttle))]
-        use std::thread::Builder;
         #[cfg(shuttle)]
         use shuttle::thread::Builder;
+        #[cfg(not(shuttle))]
+        use std::thread::Builder;
         let _thread = Builder::new()
             .name(name)
             .spawn({

@@ -10,8 +10,8 @@ mod common;
 use bitvec::prelude::*;
 use common::{account_path, Test};
 use nomt::{
-    hasher::Blake3Hasher, proof, trie::KeyPath, trie::LeafData, KeyReadWrite, Nomt, Options,
-    Root, SessionParams,
+    hasher::Blake3Hasher, proof, trie::KeyPath, trie::LeafData, KeyReadWrite, Nomt, Options, Root,
+    SessionParams,
 };
 #[cfg(shuttle)]
 use shuttle::thread;
