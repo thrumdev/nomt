@@ -1,0 +1,12 @@
+[package]
+name = "crossbeam-channel"
+version = "0.5.15"
+edition = "2021"
+publish = false
+
+[dependencies]
+shuttle = "0.9.9"
+
+[features]
+default = ["std"]
+std = []

@@ -38,6 +38,9 @@ io-uring.workspace = true
 [target.'cfg(loom)'.dependencies]
 loom.workspace = true
 
+[target.'cfg(shuttle)'.dependencies]
+shuttle = "0.9.9"
+
 [dev-dependencies]
 rand_pcg.workspace = true
 hex-literal.workspace = true
@@ -50,7 +53,7 @@ blake3.workspace = true
 nomt-test-utils = { path = "../nomt-test-utils" }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(nomt_sync_io)', 'cfg(shuttle)'] }
 
 [[bench]]
 name = "beatree"
