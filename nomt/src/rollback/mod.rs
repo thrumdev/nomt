@@ -56,7 +56,6 @@ struct InMemory {
 }
 
 struct Shared {
-    worker_tp: ThreadPool,
     sync_tp: ThreadPool,
     in_memory: Mutex<InMemory>,
     seglog: Mutex<SegmentedLog>,
@@ -92,8 +91,6 @@ impl InMemory {
     }
 }
 
-const ROLLBACK_TP_SIZE: usize = 2;
-
 /// This structure manages the rollback log. Modifications to the rollback log are made using
 /// [`ReverseDeltaBuilder`] supplied to [`Rollback::commit`].
 #[derive(Clone)]
@@ -125,7 +122,6 @@ impl Rollback {
             },
         )?;
         let shared = Arc::new(Shared {
-            worker_tp: ThreadPool::with_name("rollback-worker".into(), ROLLBACK_TP_SIZE),
             sync_tp: ThreadPool::with_name("rollback-sync".into(), 1),
             in_memory: Mutex::new(in_memory),
             seglog: Mutex::new(seglog),
@@ -146,8 +142,7 @@ impl Rollback {
     // generality is primarily for testing.
     fn delta_builder_inner(&self, store: impl LoadValueAsync) -> ReverseDeltaBuilder {
         let priors = Arc::new(DashMap::new());
-        let (command_tx, worker_result_rx) =
-            reverse_delta_worker::start(store, &self.shared.worker_tp, priors.clone());
+        let (command_tx, worker_result_rx) = reverse_delta_worker::start(store, priors.clone());
 
         ReverseDeltaBuilder {
             command_tx,
@@ -170,27 +165,6 @@ impl Rollback {
         let record_id = seglog.append(&delta_bytes)?;
         in_memory.push_recent(record_id, delta);
         Ok(())
-    }
-
-    /// Saves the delta into the log, unless the locks are already held by another thread.
-    ///
-    /// If commit is blocked, it returns the delta back to the caller.
-    pub fn commit_nonblocking(&self, delta: Delta) -> anyhow::Result<Option<Delta>> {
-        let delta_bytes = delta.encode();
-
-        // Try to lock the in-memory log and the seglog.
-        let mut in_memory = match self.shared.in_memory.try_lock() {
-            Some(lock) => lock,
-            None => return Ok(Some(delta)), // Another thread is holding the lock.
-        };
-        let mut seglog = match self.shared.seglog.try_lock() {
-            Some(lock) => lock,
-            None => return Ok(Some(delta)), // Another thread is holding the lock.
-        };
-
-        let record_id = seglog.append(&delta_bytes)?;
-        in_memory.push_recent(record_id, delta);
-        Ok(None)
     }
 
     /// Truncates the rollback log by removing the last `n` deltas.

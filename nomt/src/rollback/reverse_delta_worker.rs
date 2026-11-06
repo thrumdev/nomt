@@ -3,13 +3,12 @@ use std::{collections::HashMap, sync::Arc};
 use crossbeam_channel::{Receiver, RecvError, Sender};
 use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
-use threadpool::ThreadPool;
 
 use crate::{
     beatree::{self, AsyncLookup, OverflowPageInfo, ReadTransaction},
     io::{CompleteIo, FatPage, IoHandle},
     overlay::LiveOverlay,
-    task::{spawn_task, TaskResult},
+    task::{spawn_thread_task, TaskResult},
 };
 
 /// A trait for asynchronously loading values from the store.
@@ -61,11 +60,10 @@ pub(super) enum DeltaBuilderCommand {
     Join(Sender<()>, Arc<DashMap<KeyPath, Option<Vec<u8>>>>),
 }
 
-/// Start the reverse delta builder. The thread pool must have at least 2 threads or else the worker
-/// will never conclude.
+/// Start the reverse delta builder on a thread of its own, which runs until the builder is
+/// finalized or dropped.
 pub(super) fn start(
     store: impl LoadValueAsync,
-    tp: &ThreadPool,
     priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
 ) -> (Sender<DeltaBuilderCommand>, Receiver<TaskResult<()>>) {
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
@@ -88,7 +86,7 @@ pub(super) fn start(
         }
     };
 
-    spawn_task(&tp, worker_task, worker_result_tx);
+    spawn_thread_task("rollback-worker", worker_task, worker_result_tx);
 
     (command_tx, worker_result_rx)
 }
