@@ -494,3 +494,100 @@ fn test_rollback_read_then_write() {
     nomt.rollback(1).unwrap();
     assert_eq!(nomt.read(key).unwrap(), None);
 }
+
+/// A NOMT with rollback enabled and the given rollback log length, in `path`.
+fn open_with_log_len(path: &std::path::Path, max_rollback_log_len: u32) -> Nomt<Blake3Hasher> {
+    let mut o = Options::new();
+    o.path(path);
+    o.bitbox_seed([0; 16]);
+    o.hashtable_buckets(4096);
+    o.io_workers(1);
+    o.rollback(true);
+    o.max_rollback_log_len(max_rollback_log_len);
+    Nomt::open(o).unwrap()
+}
+
+/// Commit `i` writes key `i`, so the state after commit `n` is keys `1..=n`.
+fn commit_key(nomt: &Nomt<Blake3Hasher>, i: u8) {
+    let session = nomt.begin_session(SessionParams::default());
+    let key = [i; 32];
+    session.warm_up(key);
+    session
+        .finish(vec![(key, KeyReadWrite::Write(Some(vec![i])))])
+        .unwrap()
+        .commit(nomt)
+        .unwrap();
+}
+
+fn assert_state_after_commit(nomt: &Nomt<Blake3Hasher>, n: u8, max: u8) {
+    for i in 1..=max {
+        let expected = (i <= n).then(|| vec![i]);
+        assert_eq!(
+            nomt.read([i; 32]).unwrap(),
+            expected,
+            "key {i}, state after commit {n}"
+        );
+    }
+}
+
+#[test]
+fn test_rollback_log_len_holds_across_reopen() {
+    for log_len in 1..=3u8 {
+        let commits = log_len + 2;
+
+        // Rolling back the whole log, then reopening, must not bring back a delta that was pruned.
+        let dir = tempfile::tempdir().unwrap();
+        let nomt = open_with_log_len(dir.path(), log_len as u32);
+        for i in 1..=commits {
+            commit_key(&nomt, i);
+        }
+        nomt.rollback(log_len as usize).unwrap();
+        assert!(nomt.rollback(1).is_err());
+        drop(nomt);
+        let nomt = open_with_log_len(dir.path(), log_len as u32);
+        assert!(
+            nomt.rollback(1).is_err(),
+            "log_len {log_len}: rolled back past the log after reopen"
+        );
+        assert_state_after_commit(&nomt, commits - log_len, commits);
+        drop(nomt);
+
+        // A reopened log holds exactly the last `log_len` deltas, not also the last pruned one.
+        let dir = tempfile::tempdir().unwrap();
+        let nomt = open_with_log_len(dir.path(), log_len as u32);
+        for i in 1..=commits {
+            commit_key(&nomt, i);
+        }
+        drop(nomt);
+        let nomt = open_with_log_len(dir.path(), log_len as u32);
+        assert!(
+            nomt.rollback(log_len as usize + 1).is_err(),
+            "log_len {log_len}: reopened log holds a pruned delta"
+        );
+        nomt.rollback(log_len as usize).unwrap();
+        assert_state_after_commit(&nomt, commits - log_len, commits);
+        assert!(nomt.rollback(1).is_err());
+    }
+}
+
+#[test]
+fn test_rollback_log_shrinks_to_smaller_len_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let nomt = open_with_log_len(dir.path(), 4);
+    for i in 1..=4 {
+        commit_key(&nomt, i);
+    }
+    drop(nomt);
+
+    // The next commit prunes the log down to the new length, not just by one delta.
+    let nomt = open_with_log_len(dir.path(), 1);
+    commit_key(&nomt, 5);
+    assert!(nomt.rollback(2).is_err(), "log holds more than its length");
+    nomt.rollback(1).unwrap();
+    assert_state_after_commit(&nomt, 4, 5);
+    drop(nomt);
+
+    let nomt = open_with_log_len(dir.path(), 1);
+    assert!(nomt.rollback(1).is_err());
+    assert_state_after_commit(&nomt, 4, 5);
+}
