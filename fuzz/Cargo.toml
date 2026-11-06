@@ -73,3 +73,17 @@ path = "fuzz_targets/proof_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "concurrent_sessions"
+path = "fuzz_targets/concurrent_sessions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "concurrent_rollback"
+path = "fuzz_targets/concurrent_rollback.rs"
+test = false
+doc = false
+bench = false
