@@ -86,6 +86,10 @@ impl InMemory {
         self.log.pop_front()
     }
 
+    fn oldest_record_id(&self) -> Option<RecordId> {
+        self.log.front().map(|(record_id, _)| *record_id)
+    }
+
     // Returns the total number of deltas, including the staged one.
     fn total_len(&self) -> usize {
         self.log.len()
@@ -231,29 +235,42 @@ impl Rollback {
 
         let pending_truncate = in_memory.pending_truncate.take();
 
+        // The manifest is written with the range returned here before `writeout_end` prunes the
+        // log, so the range must be what stays live after pruning: the deltas still in memory.
+        // Recording more would let a reopen load deltas that were pruned or truncated away.
+
         // NOTE: for now, if there is a pending truncate, we ignore everything else.
         if let Some(pending_truncate) = pending_truncate {
-            let rollback_start_live = std::cmp::min(seglog.live_range().0 .0, pending_truncate);
+            // A truncate that removed every delta empties the log. `pending_truncate` then points
+            // before the oldest live delta, at one that was pruned earlier.
+            let (rollback_start_live, rollback_end_live) = match in_memory.oldest_record_id() {
+                Some(oldest) => (oldest.0, pending_truncate),
+                None => (0, 0),
+            };
             return WriteoutData {
                 rollback_start_live,
-                rollback_end_live: pending_truncate,
+                rollback_end_live,
                 prune_to_new_start_live: None,
-                prune_to_new_end_live: Some(pending_truncate),
+                prune_to_new_end_live: Some(rollback_end_live),
             };
         }
 
-        let prune_to_new_start_live = if in_memory.total_len() > self.shared.max_rollback_log_len {
-            Some(in_memory.pop_oldest().unwrap().0.next().0)
-        } else {
-            None
+        let mut pruned = false;
+        while in_memory.total_len() > self.shared.max_rollback_log_len {
+            in_memory.pop_oldest();
+            pruned = true;
+        }
+
+        let (_, end_live) = seglog.live_range();
+        let (rollback_start_live, rollback_end_live) = match in_memory.oldest_record_id() {
+            Some(oldest) => (oldest.0, end_live.0),
+            None => (0, 0),
         };
 
-        let (rollback_start_live, rollback_end_live) = seglog.live_range();
-
         WriteoutData {
-            rollback_start_live: rollback_start_live.0,
-            rollback_end_live: rollback_end_live.0,
-            prune_to_new_start_live,
+            rollback_start_live,
+            rollback_end_live,
+            prune_to_new_start_live: pruned.then_some(rollback_start_live),
             prune_to_new_end_live: None,
         }
     }
