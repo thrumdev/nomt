@@ -73,3 +73,10 @@ path = "fuzz_targets/proof_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "overlay"
+path = "fuzz_targets/overlay.rs"
+test = false
+doc = false
+bench = false
