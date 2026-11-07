@@ -142,33 +142,42 @@ pub enum BucketInfo {
 /// Whether a key was read or written.
 #[derive(Debug, Clone)]
 pub enum KeyReadWrite {
-    /// The key was read.
-    Read,
+    /// The key was read. Contains the read value hash or `None` if absent.
+    Read(Option<ValueHash>),
     /// The key was written. Contains the written value or `None` if deleted.
     Write(Option<ValueHash>),
-    /// The key was both read and written. Contains the written value of `None` if deleted.
-    ReadThenWrite(Option<ValueHash>),
+    /// The key was both read and written. Contains the read value hash (or `None` if absent) and
+    /// the written value hash (or `None` if deleted).
+    ReadThenWrite(Option<ValueHash>, Option<ValueHash>),
 }
 
 impl KeyReadWrite {
     fn is_write(&self) -> bool {
         match self {
-            KeyReadWrite::Read => false,
-            KeyReadWrite::Write(_) | KeyReadWrite::ReadThenWrite(_) => true,
+            KeyReadWrite::Read(_) => false,
+            KeyReadWrite::Write(_) | KeyReadWrite::ReadThenWrite(_, _) => true,
         }
     }
 
     fn is_read(&self) -> bool {
         match self {
-            KeyReadWrite::Read | KeyReadWrite::ReadThenWrite(_) => true,
+            KeyReadWrite::Read(_) | KeyReadWrite::ReadThenWrite(_, _) => true,
             KeyReadWrite::Write(_) => false,
+        }
+    }
+
+    /// The hash of the value the key was read with, if it was read and present.
+    fn read_value_hash(&self) -> Option<ValueHash> {
+        match self {
+            KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) => *v,
+            KeyReadWrite::Write(_) => None,
         }
     }
 
     fn written_value(&self) -> Option<Option<ValueHash>> {
         match self {
-            KeyReadWrite::Read => None,
-            KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(v) => {
+            KeyReadWrite::Read(_) => None,
+            KeyReadWrite::Write(v) | KeyReadWrite::ReadThenWrite(_, v) => {
                 Some(v.as_ref().map(|vh| *vh))
             }
         }
@@ -339,7 +348,7 @@ impl Updater {
             true, // collect witness
         );
 
-        seeker.push(key_path);
+        seeker.push(key_path, None);
         let mut page_set = PageSet::new(self.page_pool.clone(), None);
 
         // Blocking I/O loop.
