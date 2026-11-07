@@ -160,9 +160,16 @@ pub fn build_trie<H: NodeHasher>(
     }
 
     let common_after_prefix = |k1: &KeyPath, k2: &KeyPath| {
-        let x = &k1.view_bits::<Msb0>()[skip..];
-        let y = &k2.view_bits::<Msb0>()[skip..];
-        shared_bits(x, y)
+        let first_byte = skip / 8;
+        let shared = k1[first_byte..]
+            .iter()
+            .zip(&k2[first_byte..])
+            .position(|(a, b)| a != b)
+            .map_or(256, |i| {
+                (first_byte + i) * 8
+                    + (k1[first_byte + i] ^ k2[first_byte + i]).leading_zeros() as usize
+            });
+        shared - skip
     };
 
     while let Some((this_key, this_val)) = b {
