@@ -19,7 +19,23 @@ pub fn spawn_task<F, R>(
     });
 }
 
-/// Blocks waiting for completion of the task spawned with [`spawn_task`].
+/// Like [`spawn_task`], but on a new thread of its own. For tasks that live as long as something
+/// the caller holds (e.g. a session), which would otherwise starve a fixed-size pool.
+pub fn spawn_thread_task<F, R>(name: &str, task: F, tx: crossbeam_channel::Sender<TaskResult<R>>)
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
+            let _ = tx.send(res);
+        })
+        .expect("failed to spawn thread");
+}
+
+/// Blocks waiting for completion of the task spawned with [`spawn_task`] or [`spawn_thread_task`].
 /// It requires the receiver associated to the sender used to spawn the task.
 ///
 /// Panics if the sender is dropped.

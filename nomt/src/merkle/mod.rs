@@ -23,7 +23,7 @@ use crate::{
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
     store::{BucketIndex, DirtyPage, SharedMaybeBucketIndex, Store},
-    task::{join_task, spawn_task, TaskResult},
+    task::{join_task, spawn_task, spawn_thread_task, TaskResult},
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
@@ -220,7 +220,7 @@ impl UpdatePool {
         };
 
         let warm_up = if self.do_warm_up {
-            Some(spawn_warm_up::<H>(&self.worker_tp, params))
+            Some(spawn_warm_up::<H>(params))
         } else {
             None
         };
@@ -562,16 +562,15 @@ struct WarmUpHandle {
     output_rx: Receiver<TaskResult<std::io::Result<WarmUpOutput>>>,
 }
 
-fn spawn_warm_up<H: HashAlgorithm>(
-    worker_tp: &ThreadPool,
-    params: worker::WarmUpParams,
-) -> WarmUpHandle {
+/// The warm-up runs until its session finishes, so it gets a thread of its own rather than one of
+/// the commit workers: coexisting sessions would otherwise occupy all of them.
+fn spawn_warm_up<H: HashAlgorithm>(params: worker::WarmUpParams) -> WarmUpHandle {
     let (warmup_tx, warmup_rx) = channel::unbounded();
     let (output_tx, output_rx) = channel::bounded(1);
     let (finish_tx, finish_rx) = channel::bounded(1);
 
-    spawn_task(
-        worker_tp,
+    spawn_thread_task(
+        "nomt-warm-up",
         move || worker::run_warm_up::<H>(params, warmup_rx, finish_rx),
         output_tx,
     );
@@ -590,7 +589,7 @@ fn spawn_updater<H: HashAlgorithm>(
     output_tx: Sender<TaskResult<(usize, std::io::Result<WorkerOutput>)>>,
 ) {
     spawn_task(
-        worker_tp,
+        &worker_tp,
         move || (worker_index, worker::run_update::<H>(params)),
         output_tx,
     );
