@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3.1", features = ["derive"] }
 tempfile.workspace = true
 bitvec.workspace = true
+nomt-core = { path = "../core" }
 
 [dependencies.nomt]
 path = "../nomt"
@@ -62,6 +63,13 @@ bench = false
 [[bin]]
 name = "grow_hashtable"
 path = "fuzz_targets/grow_hashtable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proof_verify"
+path = "fuzz_targets/proof_verify.rs"
 test = false
 doc = false
 bench = false
