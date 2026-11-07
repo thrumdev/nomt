@@ -483,13 +483,22 @@ impl SyncController {
 
     /// Finishes sync.
     ///
-    /// Has to be called after the manifest is updated. Must be invoked by the sync
-    /// thread. Blocking.
-    pub fn post_meta(&mut self) {
-        let pre_swap_rx = self.inner.pre_swap_rx.lock().take().unwrap();
-        join_task(&pre_swap_rx);
-        let bbn_index = self.inner.bbn_index.lock().take().unwrap();
-        Tree::finish_sync(&self.inner.shared, bbn_index);
+    /// Has to be called after the manifest is updated. Non-blocking: the returned task must be
+    /// joined before the commit completes.
+    pub fn post_meta(&mut self) -> Receiver<TaskResult<()>> {
+        let inner = self.inner.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        spawn_task(
+            &self.inner.sync.tp,
+            move || {
+                let pre_swap_rx = inner.pre_swap_rx.lock().take().unwrap();
+                join_task(&pre_swap_rx);
+                let bbn_index = inner.bbn_index.lock().take().unwrap();
+                Tree::finish_sync(&inner.shared, bbn_index);
+            },
+            tx,
+        );
+        rx
     }
 }
 

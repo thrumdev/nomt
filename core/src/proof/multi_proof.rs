@@ -275,6 +275,12 @@ pub enum MultiProofVerificationError {
     PathsOutOfOrder,
     /// Extra siblings were provided.
     TooManySiblings,
+    /// Fewer siblings were provided than the paths require.
+    TooFewSiblings,
+    /// A path's depth exceeds the length of its terminal's path.
+    InvalidDepth,
+    /// A path's terminal position is a prefix of another path.
+    PathPrefixOfAnother,
 }
 
 #[derive(Debug, Clone)]
@@ -424,9 +430,19 @@ pub fn verify<H: NodeHasher>(
     let mut verified_bisections = Vec::new();
     for i in 0..multi_proof.paths.len() {
         let path = &multi_proof.paths[i];
+        if path.depth > path.terminal.path().len() {
+            return Err(MultiProofVerificationError::InvalidDepth);
+        }
         if i > 0 {
-            if path.terminal.path() <= multi_proof.paths[i - 1].terminal.path() {
+            let prev = &multi_proof.paths[i - 1];
+            if path.terminal.path() <= prev.terminal.path() {
                 return Err(MultiProofVerificationError::PathsOutOfOrder);
+            }
+            // Terminals must sit in disjoint subtrees: neighbours diverge above both depths.
+            // `verify_range` relies on this for every depth and slice bound it computes.
+            let shared = shared_bits(path.terminal.path(), prev.terminal.path());
+            if shared >= path.depth || shared >= prev.depth {
+                return Err(MultiProofVerificationError::PathPrefixOfAnother);
             }
         }
     }
@@ -480,6 +496,9 @@ fn verify_range<H: NodeHasher>(
         // nodes, hash them up, and return that
         let terminal_path = &paths[0];
         let unique_len = terminal_path.depth - start_depth;
+        if siblings.len() < unique_len {
+            return Err(MultiProofVerificationError::TooFewSiblings);
+        }
 
         let node = hash_path::<H>(
             terminal_path.terminal.node::<H>(),
@@ -508,7 +527,10 @@ fn verify_range<H: NodeHasher>(
     );
 
     let common_len = start_depth + common_bits;
-    // TODO: if `common_len` == 256 the multi-proof is malformed. error
+    // `common_len` < 256: `verify` rejects neighbouring paths that share a terminal's position.
+    if siblings.len() < common_bits {
+        return Err(MultiProofVerificationError::TooFewSiblings);
+    }
 
     let uncommon_start_len = common_len + 1;
 
@@ -901,7 +923,7 @@ fn hash_and_compact_terminal<H: NodeHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::{verify, verify_update, MultiProof};
+    use super::{verify, verify_update, MultiProof, MultiProofVerificationError};
 
     use crate::proof::multi_proof::{
         MultiVerifyUpdateError, VerifiedMultiPath, VerifiedMultiProof,
@@ -1966,5 +1988,65 @@ mod tests {
             MultiVerifyUpdateError::PathPrefixOfAnother => (),
             _ => panic!(),
         }
+    }
+
+    fn malformed_path(first_byte: u8, depth: usize) -> super::MultiPathProof {
+        let mut key_path = [0; 32];
+        key_path[0] = first_byte;
+        super::MultiPathProof {
+            terminal: PathProofTerminal::Leaf(LeafData {
+                key_path,
+                value_hash: [0; 32],
+            }),
+            depth,
+        }
+    }
+
+    fn verify_malformed(paths: Vec<super::MultiPathProof>) -> MultiProofVerificationError {
+        let multi_proof = MultiProof {
+            paths,
+            siblings: Vec::new(),
+        };
+        verify::<Blake3Hasher>(&multi_proof, TERMINATOR).unwrap_err()
+    }
+
+    #[test]
+    fn verify_rejects_depth_beyond_terminal_path() {
+        let path = super::MultiPathProof {
+            terminal: PathProofTerminal::Terminator(TriePosition::new()),
+            depth: 152,
+        };
+        assert_eq!(
+            verify_malformed(vec![path]),
+            MultiProofVerificationError::InvalidDepth
+        );
+    }
+
+    #[test]
+    fn verify_rejects_path_prefix_of_another() {
+        let terminator = super::MultiPathProof {
+            terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth([0; 32], 1)),
+            depth: 1,
+        };
+        assert_eq!(
+            verify_malformed(vec![terminator, malformed_path(0, 2)]),
+            MultiProofVerificationError::PathPrefixOfAnother
+        );
+        assert_eq!(
+            verify_malformed(vec![malformed_path(0, 1), malformed_path(0b0100_0000, 2)]),
+            MultiProofVerificationError::PathPrefixOfAnother
+        );
+    }
+
+    #[test]
+    fn verify_rejects_too_few_siblings() {
+        assert_eq!(
+            verify_malformed(vec![malformed_path(0, 2)]),
+            MultiProofVerificationError::TooFewSiblings
+        );
+        assert_eq!(
+            verify_malformed(vec![malformed_path(0, 3), malformed_path(0b0010_0000, 3)]),
+            MultiProofVerificationError::TooFewSiblings
+        );
     }
 }

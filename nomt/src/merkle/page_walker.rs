@@ -952,38 +952,24 @@ impl<H: NodeHasher> PageWalker<H> {
 /// Count the number of leaves present *only* in the provided page,
 /// without jumping into child pages.
 fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
-    // A simpler linear scan cannot be done because the page could contain some garbage.
+    // Follow only reachable nodes: unused slots can contain garbage. A page has
+    // DEPTH levels, so depth-first traversal needs at most DEPTH + 1 pending nodes.
+    let mut pending = [0usize; DEPTH + 1];
+    pending[1] = 1;
+    let mut len = 2;
     let mut counter = 0;
-
-    // We just need the node indexes within a page,
-    // so we treat this as the root page starting from the root position.
-    let mut pos = TriePosition::new();
-    let initial_depth = pos.depth();
-    pos.down(false);
-
-    loop {
-        let node = page.node(pos.node_index());
-        // Continue to traverse the left child if the current node is internal,
-        // stop if we reach the end of the page.
-        if trie::is_internal::<H>(&node) && pos.depth_in_page() != DEPTH {
-            pos.down(false);
-            continue;
+    while len != 0 {
+        len -= 1;
+        let index = pending[len];
+        match NodeKind::of::<H>(&page.node(index)) {
+            NodeKind::Leaf => counter += 1,
+            NodeKind::Internal if index < (1 << DEPTH) - 2 => {
+                pending[len] = index * 2 + 2;
+                pending[len + 1] = index * 2 + 3;
+                len += 2;
+            }
+            _ => {}
         }
-
-        if trie::is_leaf::<H>(&node) {
-            counter += 1;
-        }
-
-        // Going up until I reach a leaf sibling or the node I started from.
-        while pos.depth() != initial_depth && pos.peek_last_bit() {
-            pos.up(1);
-        }
-
-        if pos.depth() == initial_depth {
-            break;
-        }
-
-        pos.sibling();
     }
     counter
 }

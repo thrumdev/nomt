@@ -5,7 +5,13 @@
 use bitvec::prelude::*;
 use io::PagePool;
 use metrics::{Metric, Metrics};
-use std::{mem, sync::Arc};
+use std::{
+    mem,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use merkle::{UpdatePool, Updater};
 use nomt_core::{
@@ -200,6 +206,7 @@ impl From<[u8; 32]> for Root {
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt<T> {
     merkle_update_pool: UpdatePool,
+    actuals_concurrency: usize,
     /// The handle to the page cache.
     page_cache: PageCache,
     page_pool: PagePool,
@@ -240,6 +247,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         Ok(Self {
             merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
+            actuals_concurrency: o.actuals_concurrency,
             page_cache,
             page_pool,
             store,
@@ -270,7 +278,11 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// This is used for testing for now.
     #[doc(hidden)]
     pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
-        let _guard = self.access_lock.read();
+        let _guard = if thread_has_live_session() {
+            self.access_lock.read_recursive()
+        } else {
+            self.access_lock.read()
+        };
         self.store.load_value(path)
     }
 
@@ -296,7 +308,8 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// Create a new [`Session`] object with the given parameters.
     ///
     /// This will block if there are any ongoing commits or rollbacks. Multiple sessions may
-    /// coexist.
+    /// coexist. A thread that already holds a live session doesn't wait for a commit or rollback
+    /// queued behind it, which would deadlock.
     ///
     /// The [`Session`] is a read-only handle on the database and is used to create a changeset to
     /// be applied to the database. Sessions provide read interfaces and additionally coordinate
@@ -314,7 +327,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         // indefinitely for us to finish.
         let access_guard = params
             .take_global_guard
-            .then(|| RwLock::read_arc(&self.access_lock));
+            .then(|| SessionAccessGuard::acquire(&self.access_lock));
 
         let store = self.store.clone();
         let rollback_delta = if params.record_rollback_delta {
@@ -331,6 +344,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         Session {
             store,
+            actuals_concurrency: self.actuals_concurrency,
             merkle_updater: self.merkle_update_pool.begin::<T>(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
@@ -471,6 +485,49 @@ impl SessionParams {
     }
 }
 
+thread_local! {
+    /// Live sessions created on this thread. Shared with each session, which may be dropped on
+    /// another thread.
+    static THREAD_SESSIONS: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+}
+
+fn thread_has_live_session() -> bool {
+    THREAD_SESSIONS.with(|n| n.load(Ordering::Relaxed) > 0)
+}
+
+/// A session's read guard on `access_lock`.
+///
+/// parking_lot's `RwLock` is fair: once a commit or rollback queues for the write side, new
+/// readers wait behind it. That commit waits for every live session, so a thread opening a second
+/// session would deadlock; such a thread takes the read lock recursively, past the queued writer.
+/// Every other thread waits, so overlapping sessions can't hold a commit off indefinitely.
+struct SessionAccessGuard {
+    _guard: ArcRwLockReadGuard<parking_lot::RawRwLock, ()>,
+    thread_sessions: Arc<AtomicUsize>,
+}
+
+impl SessionAccessGuard {
+    fn acquire(lock: &Arc<RwLock<()>>) -> Self {
+        let thread_sessions = THREAD_SESSIONS.with(Arc::clone);
+        let guard = if thread_sessions.load(Ordering::Relaxed) > 0 {
+            RwLock::read_arc_recursive(lock)
+        } else {
+            RwLock::read_arc(lock)
+        };
+        thread_sessions.fetch_add(1, Ordering::Relaxed);
+        Self {
+            _guard: guard,
+            thread_sessions,
+        }
+    }
+}
+
+impl Drop for SessionAccessGuard {
+    fn drop(&mut self) {
+        self.thread_sessions.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// A session presents a way of interaction with the trie.
 ///
 /// The session enables the application to perform reads and prepare writes.
@@ -480,6 +537,7 @@ impl SessionParams {
 /// correctness of replaying the same operations.
 pub struct Session<T> {
     store: Store,
+    actuals_concurrency: usize,
     merkle_updater: Updater,
     metrics: Metrics,
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
@@ -487,7 +545,7 @@ pub struct Session<T> {
     witness_mode: WitnessMode,
     // Note: this needs to be after rollback_delta and merkle_updater in declaration order,
     // so this is dropped after all read transactions are taken, even when the session is dropped.
-    access_guard: Option<ArcRwLockReadGuard<parking_lot::RawRwLock, ()>>,
+    access_guard: Option<SessionAccessGuard>,
     prev_root: Root,
     _marker: std::marker::PhantomData<T>,
 }
@@ -583,19 +641,17 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
+        let merkle_update_handle = self.merkle_updater.update_and_prove::<T>(
+            compact_actuals::<T>(&actuals, self.actuals_concurrency),
+            self.witness_mode.0,
+        )?;
+
+        // Built while the merkle update runs: both only read the store, which is not modified
+        // until the finished session is committed.
         let rollback_delta = self
             .rollback_delta
             .take()
             .map(|delta_builder| delta_builder.finalize(&actuals));
-
-        let mut compact_actuals = Vec::with_capacity(actuals.len());
-        for (path, read_write) in &actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
-        }
-
-        let merkle_update_handle = self
-            .merkle_updater
-            .update_and_prove::<T>(compact_actuals, self.witness_mode.0)?;
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
@@ -614,6 +670,50 @@ impl<T: HashAlgorithm> Session<T> {
             take_global_guard: self.access_guard.is_some(),
         })
     }
+}
+
+/// Hashes the values of `actuals` for the merkle update, splitting large inputs across scoped threads.
+fn compact_actuals<T: HashAlgorithm>(
+    actuals: &[(KeyPath, KeyReadWrite)],
+    max_threads: usize,
+) -> Vec<(KeyPath, crate::merkle::KeyReadWrite)> {
+    const MIN_HASHES_PER_THREAD: usize = 8192;
+    let compact = |chunk: &[(KeyPath, KeyReadWrite)]| {
+        chunk
+            .iter()
+            .map(|(path, read_write)| (*path, read_write.to_compact::<T>()))
+            .collect::<Vec<_>>()
+    };
+    if max_threads == 1 || actuals.len() < 2 * MIN_HASHES_PER_THREAD {
+        return compact(actuals);
+    }
+    let hashes: usize = actuals
+        .iter()
+        .map(|(_, read_write)| match read_write {
+            KeyReadWrite::Read(v) | KeyReadWrite::Write(v) => v.is_some() as usize,
+            KeyReadWrite::ReadThenWrite(r, w) => r.is_some() as usize + w.is_some() as usize,
+        })
+        .sum();
+    let threads = max_threads.min(hashes / MIN_HASHES_PER_THREAD);
+    if threads < 2 {
+        return compact(actuals);
+    }
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(threads));
+    if threads == 1 {
+        return compact(actuals);
+    }
+    let chunk = actuals.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = actuals
+            .chunks(chunk)
+            .map(|chunk| scope.spawn(move || compact(chunk)))
+            .collect();
+        let mut output = Vec::with_capacity(actuals.len());
+        for handle in handles {
+            output.extend(handle.join().expect("compacting thread panicked"));
+        }
+        output
+    })
 }
 
 /// A finished session.
@@ -694,18 +794,13 @@ impl FinishedSession {
             shared.last_commit_marker = None;
         }
 
-        if let Some(rollback_delta) = self.rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
-
         nomt.store.commit(
             self.value_transaction.into_iter(),
             nomt.page_cache.clone(),
             self.merkle_output
                 .updated_pages
                 .into_frozen_iter(/* into_overlay */ false),
+            self.rollback_delta,
         )
     }
 
@@ -717,7 +812,7 @@ impl FinishedSession {
     /// The changeset may be invalidated if another competing session, overlay, or rollback was
     /// committed.
     pub fn try_commit_nonblocking<T: HashAlgorithm>(
-        mut self,
+        self,
         nomt: &Nomt<T>,
     ) -> Result<Option<Self>, anyhow::Error> {
         let write_guard = self
@@ -726,15 +821,6 @@ impl FinishedSession {
             .flatten();
         if write_guard.is_none() {
             return Ok(Some(self));
-        }
-
-        if let Some(rollback_delta) = self.rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            if let Some(delta) = rollback.commit_nonblocking(rollback_delta)? {
-                self.rollback_delta = Some(delta);
-                return Ok(Some(self));
-            }
         }
 
         {
@@ -756,6 +842,7 @@ impl FinishedSession {
             self.merkle_output
                 .updated_pages
                 .into_frozen_iter(/* into_overlay */ false),
+            self.rollback_delta,
         )?;
 
         Ok(None)
@@ -771,29 +858,13 @@ impl Overlay {
     /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
     /// rollback.
     pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> anyhow::Result<()> {
-        if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
-            anyhow::bail!("Overlay parent not committed");
-        }
-
-        let root = self.root();
-        let page_changes: Vec<_> = self
-            .page_changes()
-            .into_iter()
-            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
-            .collect();
-        let values: Vec<_> = self
-            .value_changes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
-
         let _write_guard = nomt.access_lock.write();
-
-        let marker = self.mark_committed();
 
         {
             let mut shared = nomt.shared.lock();
+            if !self.parent_matches_marker(shared.last_commit_marker.as_ref()) {
+                anyhow::bail!("Overlay parent not committed");
+            }
             if shared.root != self.prev_root() {
                 anyhow::bail!(
                     "Changeset no longer valid (expected previous root {:?}, got {:?})",
@@ -801,18 +872,18 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = root;
-            shared.last_commit_marker = Some(marker);
+            shared.root = self.root();
+            shared.last_commit_marker = Some(self.mark_committed());
         }
 
-        if let Some(rollback_delta) = rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
+        let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
-        nomt.store
-            .commit(values, nomt.page_cache.clone(), page_changes)
+        nomt.store.commit(
+            values,
+            nomt.page_cache.clone(),
+            page_changes,
+            rollback_delta,
+        )
     }
 
     /// Commit the changes from this overlay to the underlying database without blocking.
@@ -826,32 +897,16 @@ impl Overlay {
         self,
         nomt: &Nomt<T>,
     ) -> anyhow::Result<Option<Self>> {
-        if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
-            anyhow::bail!("Overlay parent not committed");
-        }
-
-        let root = self.root();
-        let page_changes: Vec<_> = self
-            .page_changes()
-            .into_iter()
-            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
-            .collect();
-        let values: Vec<_> = self
-            .value_changes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
-
         let write_guard = nomt.access_lock.try_write();
         if write_guard.is_none() {
             return Ok(Some(self));
         }
 
-        let marker = self.mark_committed();
-
         {
             let mut shared = nomt.shared.lock();
+            if !self.parent_matches_marker(shared.last_commit_marker.as_ref()) {
+                anyhow::bail!("Overlay parent not committed");
+            }
             if shared.root != self.prev_root() {
                 anyhow::bail!(
                     "Changeset no longer valid (expected previous root {:?}, got {:?})",
@@ -859,18 +914,18 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = root;
-            shared.last_commit_marker = Some(marker);
+            shared.root = self.root();
+            shared.last_commit_marker = Some(self.mark_committed());
         }
 
-        if let Some(rollback_delta) = rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
+        let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
-        nomt.store
-            .commit(values, nomt.page_cache.clone(), page_changes)?;
+        nomt.store.commit(
+            values,
+            nomt.page_cache.clone(),
+            page_changes,
+            rollback_delta,
+        )?;
 
         Ok(None)
     }
@@ -985,9 +1040,143 @@ mod tests {
     use crate::hasher::Blake3Hasher;
 
     #[test]
+    fn parallel_compaction_matches_sequential() {
+        use super::{compact_actuals, KeyReadWrite};
+        use crate::merkle::KeyReadWrite as Compact;
+
+        let actuals: Vec<_> = (0u64..131_073)
+            .map(|i| {
+                let mut path = [0; 32];
+                path[..8].copy_from_slice(&i.to_be_bytes());
+                let value = Some(i.to_le_bytes().to_vec());
+                let read_write = match i % 6 {
+                    0 => KeyReadWrite::Read(None),
+                    1 => KeyReadWrite::Read(value),
+                    2 => KeyReadWrite::Write(None),
+                    3 => KeyReadWrite::Write(value),
+                    4 => KeyReadWrite::ReadThenWrite(value, None),
+                    _ => KeyReadWrite::ReadThenWrite(None, value),
+                };
+                (path, read_write)
+            })
+            .collect();
+
+        for len in [0, 1, 16_383, 16_384, 24_575, 24_576, 24_577, 131_073] {
+            let sequential = compact_actuals::<Blake3Hasher>(&actuals[..len], 1);
+            for threads in [2, 16] {
+                let parallel = compact_actuals::<Blake3Hasher>(&actuals[..len], threads);
+                assert_eq!(parallel.len(), sequential.len());
+                for ((path, op), (expected_path, expected_op)) in parallel.iter().zip(&sequential) {
+                    assert_eq!(path, expected_path);
+                    match (op, expected_op) {
+                        (Compact::Read(value), Compact::Read(expected))
+                        | (Compact::Write(value), Compact::Write(expected)) => {
+                            assert_eq!(value, expected);
+                        }
+                        (
+                            Compact::ReadThenWrite(read, write),
+                            Compact::ReadThenWrite(expected_read, expected_write),
+                        ) => {
+                            assert_eq!((read, write), (expected_read, expected_write));
+                        }
+                        _ => panic!("operation changed: {op:?} != {expected_op:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn session_is_sync() {
         fn is_sync<T: Sync>() {}
 
         is_sync::<crate::Session<Blake3Hasher>>();
+    }
+
+    #[test]
+    fn session_opens_while_commit_waits_for_another_session() {
+        use super::{KeyReadWrite, Nomt, Options, SessionParams};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = Options::new();
+        o.path(dir.path());
+        o.hashtable_buckets(4096);
+        o.io_workers(1);
+        let nomt = std::sync::Arc::new(Nomt::<Blake3Hasher>::open(o).unwrap());
+        let key = [1; 32];
+
+        let first = nomt.begin_session(SessionParams::default());
+        let committer = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                nomt.begin_session(SessionParams::default())
+                    .finish(vec![(key, KeyReadWrite::Write(Some(vec![1])))])
+                    .unwrap()
+                    .commit(&nomt)
+                    .unwrap()
+            }
+        });
+
+        // Wait until the commit is queued for the write lock behind `first`.
+        while nomt.access_lock.try_read().is_some() {
+            std::thread::yield_now();
+        }
+
+        // Neither may wait behind the queued commit: it waits for `first`, held by this thread.
+        let second = nomt.begin_session(SessionParams::default());
+        assert_eq!(nomt.read(key).unwrap(), None);
+        drop((first, second));
+
+        committer.join().unwrap();
+        assert_eq!(nomt.read(key).unwrap(), Some(vec![1]));
+    }
+
+    #[test]
+    fn session_on_another_thread_waits_for_queued_commit() {
+        use super::{KeyReadWrite, Nomt, Options, SessionParams};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = Options::new();
+        o.path(dir.path());
+        o.hashtable_buckets(4096);
+        o.io_workers(1);
+        let nomt = std::sync::Arc::new(Nomt::<Blake3Hasher>::open(o).unwrap());
+        let key = [1; 32];
+
+        let first = nomt.begin_session(SessionParams::default());
+        let committer = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                nomt.begin_session(SessionParams::default())
+                    .finish(vec![(key, KeyReadWrite::Write(Some(vec![1])))])
+                    .unwrap()
+                    .commit(&nomt)
+                    .unwrap()
+            }
+        });
+        while nomt.access_lock.try_read().is_some() {
+            std::thread::yield_now();
+        }
+
+        // This thread holds no session, so its session must queue behind the commit, or a
+        // stream of overlapping sessions could hold the commit off indefinitely.
+        let reader = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                nomt.begin_session(SessionParams::default())
+                    .read(key)
+                    .unwrap()
+            }
+        });
+        for _ in 0..10_000 {
+            if reader.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        drop(first);
+
+        committer.join().unwrap();
+        assert_eq!(reader.join().unwrap(), Some(vec![1]));
     }
 }

@@ -3,7 +3,7 @@ use crate::{
     cli::StateItemDistribution,
     workload::{Distribution, Workload},
 };
-use rand::RngExt;
+use rand::{RngExt, SeedableRng};
 
 #[derive(Clone)]
 pub struct TransferInit {
@@ -70,6 +70,7 @@ pub fn build(
     op_limit: u64,
     threads: usize,
     distribution: StateItemDistribution,
+    seed: u64,
 ) -> Vec<TransferWorkload> {
     let thread_workload_size = workload_size / threads as u64;
     let num_accounts_step = num_accounts / threads as u64;
@@ -84,7 +85,13 @@ pub fn build(
             };
             TransferWorkload {
                 num_accounts,
-                workload_size: thread_workload_size,
+                workload_size: thread_workload_size
+                    + if i == threads - 1 {
+                        workload_size % threads as u64
+                    } else {
+                        0
+                    },
+                rng: rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(i as u64)),
                 percentage_cold_transfer,
                 ops_remaining: op_limit / threads as u64,
                 distribution: Distribution::new(distribution, start_account, end_account),
@@ -95,6 +102,8 @@ pub fn build(
 
 /// A transfer-like workload.
 pub struct TransferWorkload {
+    /// Persistent per-worker random stream, optionally seeded for reproducible benchmarks.
+    rng: rand::rngs::StdRng,
     /// The number of accounts in the system.
     pub num_accounts: u64,
     /// The size of the workload.
@@ -113,13 +122,13 @@ impl Workload for TransferWorkload {
             (self.workload_size as f64 * (self.percentage_cold_transfer as f64 / 100.0)) as u64;
         let warm_sends = self.workload_size - cold_sends;
 
-        let mut rng = rand::rng();
+        let rng = &mut self.rng;
         for i in 0..self.workload_size {
-            let send_account = self.distribution.sample(&mut rng);
+            let send_account = self.distribution.sample(rng);
             let recv_account = if i < warm_sends {
-                let mut r = self.distribution.sample(&mut rng);
+                let mut r = self.distribution.sample(rng);
                 while r == send_account {
-                    r = self.distribution.sample(&mut rng);
+                    r = self.distribution.sample(rng);
                 }
                 r
             } else {

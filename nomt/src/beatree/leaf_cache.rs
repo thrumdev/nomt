@@ -50,6 +50,11 @@ impl LeafCache {
         shard.cache.put(page_number, node);
     }
 
+    /// Remove a superseded page. Existing readers can still reload it from disk.
+    pub(super) fn remove(&self, page_number: PageNumber) {
+        self.inner.shard_for(page_number).cache.pop(&page_number);
+    }
+
     /// Evict all excess items from the cache.
     pub fn evict(&self) {
         for shard in &self.inner.shards {

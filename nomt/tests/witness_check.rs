@@ -256,3 +256,64 @@ fn property_generated_witnesses_verify() {
         .tests(16)
         .quickcheck(property as fn(SessionAccessCase) -> bool);
 }
+
+#[test]
+fn witness_validity_with_concurrent_workers() {
+    // Commit workers may finish in any order; every witnessed operation must still refer to the
+    // path proof that covers its key.
+    let mut t = Test::new_with_params("witness_concurrent_workers", 4, 64_000, None, true);
+    for i in 0..1000 {
+        common::set_balance(&mut t, i, 1000);
+    }
+    let (mut prev_root, _) = t.commit();
+
+    for round in 0..20 {
+        for i in 0..500 {
+            t.read_id(i);
+        }
+        for i in 500..1000 {
+            common::set_balance(&mut t, i, round);
+        }
+        let (new_root, witness) = t.commit();
+
+        let verified = witness
+            .path_proofs
+            .iter()
+            .map(|p| {
+                p.inner
+                    .verify::<Blake3Hasher>(&p.path.path(), prev_root.into_inner())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        for read in &witness.operations.reads {
+            let leaf = LeafData {
+                key_path: read.key,
+                value_hash: read.value.unwrap(),
+            };
+            assert!(verified[read.path_index].confirm_value(&leaf).unwrap());
+        }
+
+        let mut ops_by_path = std::collections::BTreeMap::<usize, Vec<_>>::new();
+        for write in &witness.operations.writes {
+            ops_by_path
+                .entry(write.path_index)
+                .or_default()
+                .push((write.key, write.value));
+        }
+        let mut updates = ops_by_path
+            .into_iter()
+            .map(|(i, ops)| proof::PathUpdate {
+                inner: verified[i].clone(),
+                ops,
+            })
+            .collect::<Vec<_>>();
+        sort_updates_by_path(&mut updates);
+        assert_eq!(
+            proof::verify_update::<Blake3Hasher>(prev_root.into_inner(), &updates).unwrap(),
+            new_root.into_inner(),
+        );
+
+        prev_root = new_root;
+    }
+}
