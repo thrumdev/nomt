@@ -28,7 +28,7 @@ arrayvec = { version = "0.7", default-features = false }
 blake3 = { version = "1.5.1", default-features = false }
 sha2 = { version = "0.10.6", default-features = false }
 anyhow = { version = "1.0.102", features = ["backtrace"] }
-parking_lot = { version = "0.13", features = ["arc_lock", "send_guard"] }
+parking_lot = { version = "0.12.3", features = ["arc_lock", "send_guard"] }
 threadpool = "1.8.1"
 twox-hash = { version = "2.1.0", default-features = false, features = ["std", "xxhash3_64"] }
 fxhash = "0.2.1"
