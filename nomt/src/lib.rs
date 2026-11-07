@@ -5,7 +5,13 @@
 use bitvec::prelude::*;
 use io::PagePool;
 use metrics::{Metric, Metrics};
-use std::{mem, sync::Arc};
+use std::{
+    mem,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use merkle::{UpdatePool, Updater};
 use nomt_core::{
@@ -269,7 +275,11 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// This is used for testing for now.
     #[doc(hidden)]
     pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
-        let _guard = self.access_lock.read();
+        let _guard = if thread_has_live_session() {
+            self.access_lock.read_recursive()
+        } else {
+            self.access_lock.read()
+        };
         self.store.load_value(path)
     }
 
@@ -295,7 +305,8 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// Create a new [`Session`] object with the given parameters.
     ///
     /// This will block if there are any ongoing commits or rollbacks. Multiple sessions may
-    /// coexist.
+    /// coexist. A thread that already holds a live session doesn't wait for a commit or rollback
+    /// queued behind it, which would deadlock.
     ///
     /// The [`Session`] is a read-only handle on the database and is used to create a changeset to
     /// be applied to the database. Sessions provide read interfaces and additionally coordinate
@@ -313,7 +324,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         // indefinitely for us to finish.
         let access_guard = params
             .take_global_guard
-            .then(|| RwLock::read_arc(&self.access_lock));
+            .then(|| SessionAccessGuard::acquire(&self.access_lock));
 
         let store = self.store.clone();
         let rollback_delta = if params.record_rollback_delta {
@@ -471,6 +482,53 @@ impl SessionParams {
     }
 }
 
+// Under shuttle all threads share one OS thread, so the counter must be per shuttle thread.
+#[cfg(shuttle)]
+use shuttle::thread_local;
+
+thread_local! {
+    /// Live sessions created on this thread. Shared with each session, which may be dropped on
+    /// another thread.
+    static THREAD_SESSIONS: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+}
+
+fn thread_has_live_session() -> bool {
+    THREAD_SESSIONS.with(|n| n.load(Ordering::Relaxed) > 0)
+}
+
+/// A session's read guard on `access_lock`.
+///
+/// parking_lot's `RwLock` is fair: once a commit or rollback queues for the write side, new
+/// readers wait behind it. That commit waits for every live session, so a thread opening a second
+/// session would deadlock; such a thread takes the read lock recursively, past the queued writer.
+/// Every other thread waits, so overlapping sessions can't hold a commit off indefinitely.
+struct SessionAccessGuard {
+    _guard: ArcRwLockReadGuard<parking_lot::RawRwLock, ()>,
+    thread_sessions: Arc<AtomicUsize>,
+}
+
+impl SessionAccessGuard {
+    fn acquire(lock: &Arc<RwLock<()>>) -> Self {
+        let thread_sessions = THREAD_SESSIONS.with(Arc::clone);
+        let guard = if thread_sessions.load(Ordering::Relaxed) > 0 {
+            RwLock::read_arc_recursive(lock)
+        } else {
+            RwLock::read_arc(lock)
+        };
+        thread_sessions.fetch_add(1, Ordering::Relaxed);
+        Self {
+            _guard: guard,
+            thread_sessions,
+        }
+    }
+}
+
+impl Drop for SessionAccessGuard {
+    fn drop(&mut self) {
+        self.thread_sessions.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// A session presents a way of interaction with the trie.
 ///
 /// The session enables the application to perform reads and prepare writes.
@@ -488,7 +546,7 @@ pub struct Session<T> {
     witness_mode: WitnessMode,
     // Note: this needs to be after rollback_delta and merkle_updater in declaration order,
     // so this is dropped after all read transactions are taken, even when the session is dropped.
-    access_guard: Option<ArcRwLockReadGuard<parking_lot::RawRwLock, ()>>,
+    access_guard: Option<SessionAccessGuard>,
     prev_root: Root,
     _marker: std::marker::PhantomData<T>,
 }
@@ -1031,5 +1089,92 @@ mod tests {
         fn is_sync<T: Sync>() {}
 
         is_sync::<crate::Session<Blake3Hasher>>();
+    }
+
+    #[test]
+    fn session_opens_while_commit_waits_for_another_session() {
+        use super::{KeyReadWrite, Nomt, Options, SessionParams};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = Options::new();
+        o.path(dir.path());
+        o.hashtable_buckets(4096);
+        o.io_workers(1);
+        let nomt = std::sync::Arc::new(Nomt::<Blake3Hasher>::open(o).unwrap());
+        let key = [1; 32];
+
+        let first = nomt.begin_session(SessionParams::default());
+        let committer = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                nomt.begin_session(SessionParams::default())
+                    .finish(vec![(key, KeyReadWrite::Write(Some(vec![1])))])
+                    .unwrap()
+                    .commit(&nomt)
+                    .unwrap()
+            }
+        });
+
+        // Wait until the commit is queued for the write lock behind `first`.
+        while nomt.access_lock.try_read().is_some() {
+            std::thread::yield_now();
+        }
+
+        // Neither may wait behind the queued commit: it waits for `first`, held by this thread.
+        let second = nomt.begin_session(SessionParams::default());
+        assert_eq!(nomt.read(key).unwrap(), None);
+        drop((first, second));
+
+        committer.join().unwrap();
+        assert_eq!(nomt.read(key).unwrap(), Some(vec![1]));
+    }
+
+    #[test]
+    fn session_on_another_thread_waits_for_queued_commit() {
+        use super::{KeyReadWrite, Nomt, Options, SessionParams};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = Options::new();
+        o.path(dir.path());
+        o.hashtable_buckets(4096);
+        o.io_workers(1);
+        let nomt = std::sync::Arc::new(Nomt::<Blake3Hasher>::open(o).unwrap());
+        let key = [1; 32];
+
+        let first = nomt.begin_session(SessionParams::default());
+        let committer = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                nomt.begin_session(SessionParams::default())
+                    .finish(vec![(key, KeyReadWrite::Write(Some(vec![1])))])
+                    .unwrap()
+                    .commit(&nomt)
+                    .unwrap()
+            }
+        });
+        while nomt.access_lock.try_read().is_some() {
+            std::thread::yield_now();
+        }
+
+        // This thread holds no session, so its session must queue behind the commit, or a
+        // stream of overlapping sessions could hold the commit off indefinitely.
+        let reader = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                nomt.begin_session(SessionParams::default())
+                    .read(key)
+                    .unwrap()
+            }
+        });
+        for _ in 0..10_000 {
+            if reader.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        drop(first);
+
+        committer.join().unwrap();
+        assert_eq!(reader.join().unwrap(), Some(vec![1]));
     }
 }
