@@ -62,8 +62,9 @@ fuzz_target!(|run: Run| {
                     unreachable!("database should be open before rollback")
                 };
                 nomt.rollback(n).unwrap();
+                // A rollback truncates the rollback log and is not itself logged.
+                snapshots.truncate(target + 1);
                 model = snapshots[target].clone();
-                snapshots.push(model.clone());
                 assert_model(nomt, &model, &touched);
             }
             Op::Reopen => {

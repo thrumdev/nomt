@@ -4,7 +4,9 @@ use super::{
     meta::{self, Meta},
     DirtyPage, Shared,
 };
-use crate::{beatree, bitbox, options::PanicOnSyncMode, page_cache::PageCache, rollback};
+use crate::{
+    beatree, bitbox, options::PanicOnSyncMode, page_cache::PageCache, rollback, task::join_task,
+};
 
 pub struct Sync {
     pub(crate) sync_seqn: u32,
@@ -35,6 +37,7 @@ impl Sync {
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
         rollback: Option<rollback::Rollback>,
+        rollback_delta: Option<rollback::Delta>,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) -> anyhow::Result<()> {
@@ -42,17 +45,28 @@ impl Sync {
 
         let mut bitbox_sync = bitbox.sync();
         let mut beatree_sync = beatree.sync();
-        let mut rollback_sync = rollback.map(|rollback| rollback.sync());
+        let mut rollback_sync = rollback.as_ref().map(|rollback| rollback.sync());
 
         bitbox_sync.begin_sync(sync_seqn, page_cache, updated_pages);
         beatree_sync.begin_sync(value_tx);
+
+        // Persist the rollback delta while the trees are being prepared. All of them must
+        // succeed before the manifest references their new state.
+        let rollback_result = match rollback_delta {
+            // UNWRAP: a rollback delta is only produced when rollback is enabled.
+            Some(delta) => rollback.as_ref().unwrap().commit(delta),
+            None => Ok(()),
+        };
+        let bitbox_result = bitbox_sync.wait_pre_meta();
+        let beatree_result = beatree_sync.wait_pre_meta();
+        rollback_result?;
+        bitbox_result?;
+        let beatree_meta_wd = beatree_result?;
+
         let (rollback_start_live, rollback_end_live) = match rollback_sync {
             Some(ref mut rollback) => rollback.begin_sync(),
             None => (0, 0),
         };
-
-        bitbox_sync.wait_pre_meta()?;
-        let beatree_meta_wd = beatree_sync.wait_pre_meta()?;
 
         if let Some(PanicOnSyncMode::PostWal) = self.panic_on_sync {
             panic!("panic_on_sync is true (post-wal)")
@@ -82,8 +96,11 @@ impl Sync {
             rollback.post_meta();
         }
 
-        bitbox_sync.post_meta(shared.io_pool.make_handle())?;
-        beatree_sync.post_meta();
+        // Finish the beatree sync while the hash-table pages are written out.
+        let beatree_post_meta = beatree_sync.post_meta();
+        let bitbox_result = bitbox_sync.post_meta(shared.io_pool.make_handle());
+        join_task(&beatree_post_meta);
+        bitbox_result?;
 
         if let Some(ref rollback) = rollback_sync {
             rollback.wait_post_meta()?;
