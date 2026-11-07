@@ -9,18 +9,19 @@ fn add_remove_1000() {
     let mut accounts = 0;
     let mut t = Test::new("add_remove");
 
+    // These fixtures track the current `common::account_path` distribution.
     let expected_roots = [
         hex!("0000000000000000000000000000000000000000000000000000000000000000"),
-        hex!("4a7a6fe118037086a49ff10484f4d80b0a9f31f1060eeb1c9f0162634604b0d9"),
-        hex!("7d5b013105d7b835225256f2233a458e1a158a53d20e0d3834886df89a26c27b"),
-        hex!("1a290e07bcacfb58ddcd0b9da348c740ca1bf87b05ed96752a1503ed7c187b69"),
-        hex!("5e9abfee6d927b084fed3e1306bbe65f0880d0b7de12522c38813014927f1336"),
-        hex!("57b39e06b2ee98dccd882033eb4136f5376699128b421c83bdc7c6ca96168938"),
-        hex!("7fd75809ef0e2133102eb5e31e47cb577149dcaebb42cddeb2fd6754256b365f"),
-        hex!("7c00cb11ec8262385078613e7b7977e50b0751f8cb2384fdccc048eea02acb63"),
-        hex!("516d6911c3b0a36c9227922ca0273a4aee44886201bd186f7ee7e538a769eaa5"),
-        hex!("381b24719ff91b13d36cf0dd7622f391f4a461452ed7547a46a992ee4a4025aa"),
-        hex!("207793e2ce76c1feb68c7259f883229f985706c8cc2fcf99f481b622a54ba375"),
+        hex!("18a457ed03d9d28f8bf84aa05dc3c8005e35564e91d05bf6131094d4f3398528"),
+        hex!("51c06663bc9f0e754ada8512e3b4f97958007cd37087084ac3b80417e6b7d0be"),
+        hex!("4ea35ff714b076a9467442f65e21ec888651f5120966f2681393e63dfd12645a"),
+        hex!("38e03f8eda1c1d47cad38420bcf467cd9bb08a8be3a81606194db53a94e988ab"),
+        hex!("7849ef9330e40dbe28b2005208c5af476ec43d10695df9b21abeec9df2194667"),
+        hex!("6d1de05e86b0448033a7a8a0d500fcb381396bfded615670b423defad34ce5a8"),
+        hex!("12c9d4879de20229f771bd62d92b860ee1f18cbef04b985625c7a473a6ef708e"),
+        hex!("74b43826e82d1c1ee9f7cd1e260bfdedb9db55504a34e7ddb86552fad5d11f8b"),
+        hex!("4afa73ab74926485eb4322b9c7f58cb70085b17c20cdc31f35017af9ee45a019"),
+        hex!("542b4aae8ba2e202184b04becaed29db107680cf3c58b54d7f2ff615bfbce458"),
     ];
 
     let mut root = Node::default();
@@ -52,4 +53,20 @@ fn add_remove_1000() {
         assert_eq!(root, common::expected_root(accounts));
         assert_eq!(root, expected_roots[10 - i - 1]);
     }
+}
+
+#[test]
+fn delete_missing_key_in_empty_db() {
+    let mut t = Test::new("delete_missing_key_in_empty_db");
+    t.write([0; 32], None);
+    assert_eq!(t.commit().0.into_inner(), Node::default());
+}
+
+#[test]
+fn delete_missing_key_in_non_empty_db() {
+    let mut t = Test::new("delete_missing_key_in_non_empty_db");
+    common::set_balance(&mut t, 0, 1000);
+    let root = t.commit().0;
+    common::kill(&mut t, 1);
+    assert_eq!(t.commit().0, root);
 }

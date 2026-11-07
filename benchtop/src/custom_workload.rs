@@ -109,7 +109,7 @@ impl Workload for RwWorkload {
         let n_reads_fresh = fresh(n_reads);
         let n_writes_fresh = fresh(n_writes);
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for i in 0..n_reads {
             let _ = if i < n_reads_fresh {
@@ -147,6 +147,6 @@ impl Workload for RwWorkload {
 fn rand_key(rng: &mut impl Rng) -> [u8; 32] {
     // keys must be uniformly distributed
     let mut key = [0; 32];
-    rng.fill(&mut key[..16]);
+    rng.fill_bytes(&mut key[..16]);
     key
 }

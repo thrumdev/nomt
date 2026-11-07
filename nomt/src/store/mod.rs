@@ -27,7 +27,7 @@ pub use self::page_loader::{PageLoad, PageLoader};
 pub use bitbox::{BucketIndex, HashTableUtilization, SharedMaybeBucketIndex};
 
 mod flock;
-mod meta;
+pub(crate) mod meta;
 mod page_loader;
 mod sync;
 
@@ -66,6 +66,7 @@ impl Store {
             options.read(true);
             db_dir_fd = options.open(&o.path)?;
             flock = flock::Flock::lock(&o.path, ".lock")?;
+            bitbox::finish_pending_rehash(&o.path, &page_pool)?;
         }
         let db_dir_fd = Arc::new(db_dir_fd);
 
@@ -277,6 +278,7 @@ impl Store {
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
+        rollback_delta: Option<crate::rollback::Delta>,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -294,6 +296,7 @@ impl Store {
             self.shared.pages.clone(),
             self.shared.values.clone(),
             self.shared.rollback.clone(),
+            rollback_delta,
             page_cache,
             updated_pages,
         ) {
@@ -316,6 +319,41 @@ impl Drop for Shared {
         self.io_pool.shutdown();
         drop(self.flock.take());
     }
+}
+
+pub(crate) fn grow_hashtable(
+    path: &std::path::Path,
+    hashtable_buckets: u32,
+    preallocate_ht: bool,
+) -> anyhow::Result<()> {
+    let page_pool = PagePool::new();
+
+    let db_dir_fd = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.open(path)?
+    };
+    let _flock = flock::Flock::lock(path, ".lock")?;
+
+    bitbox::grow_hashtable(path, &page_pool, hashtable_buckets, preallocate_ht)?;
+    db_dir_fd.sync_all()?;
+    Ok(())
+}
+
+/// Validate the Bitbox hash table of an offline database while holding the directory lock.
+pub(crate) fn validate_hashtable(path: &std::path::Path) -> anyhow::Result<HashTableUtilization> {
+    let page_pool = PagePool::new();
+
+    let db_dir_fd = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.open(path)?
+    };
+    let _flock = flock::Flock::lock(path, ".lock")?;
+
+    let utilization = bitbox::validate_hashtable(path, &page_pool)?;
+    db_dir_fd.sync_all()?;
+    Ok(utilization)
 }
 
 /// An atomic transaction on raw key/value pairs to be applied against the store

@@ -7,6 +7,7 @@ pub struct Options {
     pub(crate) path: PathBuf,
     /// The number of commit workers. Values over 64 will be rounded down to 64.
     pub(crate) commit_concurrency: usize,
+    pub(crate) actuals_concurrency: usize,
     /// The number of io_uring instances, or I/O threads on non-Linux platforms.
     pub(crate) io_workers: usize,
     /// Enable or disable metrics collection.
@@ -35,13 +36,12 @@ pub struct Options {
 impl Options {
     /// Create a new `Options` instance with the default values and a random bitbox seed.
     pub fn new() -> Self {
-        use rand::Rng as _;
-        let mut bitbox_seed = [0u8; 16];
-        rand::rngs::OsRng.fill(&mut bitbox_seed);
+        let bitbox_seed: [u8; 16] = rand::random();
 
         Self {
             path: PathBuf::from("nomt_db"),
             commit_concurrency: 1,
+            actuals_concurrency: 16,
             io_workers: 3,
             metrics: false,
             bitbox_num_pages: 64_000,
@@ -73,6 +73,19 @@ impl Options {
     /// May not be zero.
     pub fn commit_concurrency(&mut self, commit_concurrency: usize) {
         self.commit_concurrency = commit_concurrency;
+    }
+
+    /// Set the maximum number of threads hashing actuals per session.
+    ///
+    /// Limited by available CPU parallelism. Set to 1 to hash sequentially.
+    /// Independent of commit and I/O worker concurrency.
+    ///
+    /// Default: 16.
+    ///
+    /// Panics if `max_threads` is zero.
+    pub fn actuals_concurrency(&mut self, max_threads: usize) {
+        assert!(max_threads > 0);
+        self.actuals_concurrency = max_threads;
     }
 
     /// Set metrics collection on or off.

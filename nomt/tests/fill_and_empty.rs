@@ -1,6 +1,6 @@
 mod common;
 use common::Test;
-use rand::{prelude::SliceRandom, Rng, SeedableRng};
+use rand::{prelude::SliceRandom, Rng, RngExt, SeedableRng};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn seed() -> [u8; 16] {

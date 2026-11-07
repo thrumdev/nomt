@@ -4,8 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rand::SeedableRng;
-use rand_distr::Distribution;
+use rand::{distr::Distribution, SeedableRng};
 
 /// Max possible delay, in micros, used as injected latency.
 const MAX_LATENCY_MICROS: u64 = 1000;

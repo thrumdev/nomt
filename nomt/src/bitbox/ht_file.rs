@@ -17,6 +17,12 @@ pub struct HTOffsets {
 }
 
 impl HTOffsets {
+    pub(super) fn new(num_pages: u32) -> Self {
+        Self {
+            data_page_offset: num_meta_byte_pages(num_pages) as u64,
+        }
+    }
+
     /// Returns the page number of the `ix`th item in the data section of the store.
     pub fn data_page_index(&self, ix: u64) -> u64 {
         self.data_page_offset + ix
@@ -28,12 +34,12 @@ impl HTOffsets {
     }
 }
 
-fn expected_file_len(num_pages: u32) -> u64 {
+pub(super) fn expected_file_len(num_pages: u32) -> u64 {
     (num_meta_byte_pages(num_pages) + num_pages) as u64 * PAGE_SIZE as u64
 }
 
-fn num_meta_byte_pages(num_pages: u32) -> u32 {
-    (num_pages + 4095) / PAGE_SIZE as u32
+pub(super) fn num_meta_byte_pages(num_pages: u32) -> u32 {
+    ((num_pages as u64 + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64) as u32
 }
 
 /// Opens the HT file, checks its length and reads the meta map.
@@ -46,16 +52,15 @@ pub fn open(
         anyhow::bail!("Store corrupted; unexpected file length");
     }
 
-    let num_meta_byte_pages = num_meta_byte_pages(num_pages);
-    let mut meta_bytes = Vec::with_capacity(num_meta_byte_pages as usize * PAGE_SIZE);
-    for pn in 0..num_meta_byte_pages {
+    let meta_byte_pages = num_meta_byte_pages(num_pages);
+    let mut meta_bytes = Vec::with_capacity(meta_byte_pages as usize * PAGE_SIZE);
+    for pn in 0..meta_byte_pages {
         let extra_meta_page = io::read_page(page_pool, ht_fd, pn as u64)?;
         meta_bytes.extend_from_slice(&*extra_meta_page);
     }
 
-    let data_page_offset = num_meta_byte_pages as u64;
     Ok((
-        HTOffsets { data_page_offset },
+        HTOffsets::new(num_pages),
         MetaMap::from_bytes(meta_bytes, num_pages as usize),
     ))
 }
@@ -89,7 +94,11 @@ pub fn create(path: PathBuf, num_pages: u32, preallocate: bool) -> std::io::Resu
 /// and may silently fall back to regular allocation.
 ///
 /// After this call, if successful, the file size is set to `len` bytes.
-fn resize_and_prealloc(ht_file: &File, len: u64, preallocate: bool) -> std::io::Result<()> {
+pub(super) fn resize_and_prealloc(
+    ht_file: &File,
+    len: u64,
+    preallocate: bool,
+) -> std::io::Result<()> {
     if !preallocate {
         // If not preallocating, just set the file size and return.
         ht_file.set_len(len)?;

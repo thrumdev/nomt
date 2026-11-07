@@ -288,14 +288,33 @@ impl Iterator for PageIdsIterator {
 mod tests {
     use super::{
         ChildPageIdError, ChildPageIndex, InvalidPageIdBytes, Msb0, PageId, PageIdsIterator, Uint,
-        HIGHEST_ENCODED_42, MAX_CHILD_INDEX, ROOT_PAGE_ID,
+        HIGHEST_ENCODED_42, MAX_CHILD_INDEX, MAX_PAGE_DEPTH, ROOT_PAGE_ID,
     };
     use bitvec::prelude::*;
+    use nomt_test_utils::TestKeyPath;
+    use quickcheck::{Arbitrary, Gen, QuickCheck};
 
     const LOWEST_ENCODED_42: Uint<256, 4> = Uint::from_be_bytes([
         0, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16, 65, 4, 16,
         65, 4, 16, 65, 4, 16, 65,
     ]);
+
+    #[derive(Clone, Debug)]
+    struct PagePathCase {
+        key_path: [u8; 32],
+        level: usize,
+        child_index: u8,
+    }
+
+    impl Arbitrary for PagePathCase {
+        fn arbitrary(g: &mut Gen) -> Self {
+            Self {
+                key_path: TestKeyPath::arbitrary(g).into_inner(),
+                level: usize::arbitrary(g) % MAX_PAGE_DEPTH,
+                child_index: u8::arbitrary(g) & MAX_CHILD_INDEX,
+            }
+        }
+    }
 
     fn child_page_id(page_id: &PageId, child_index: u8) -> Result<PageId, ChildPageIdError> {
         page_id.child_page_id(ChildPageIndex::new(child_index).unwrap())
@@ -517,5 +536,60 @@ mod tests {
             key_path.view_bits_mut::<Msb0>().set(i, false);
         }
         assert_eq!(min_page.max_key_path(), key_path);
+    }
+
+    #[test]
+    fn property_iterator_chain_contains_key_path() {
+        fn property(test_key_path: TestKeyPath) -> bool {
+            let key_path = test_key_path.into_inner();
+            let page_ids = PageIdsIterator::new(key_path).collect::<Vec<_>>();
+
+            assert_eq!(page_ids.len(), MAX_PAGE_DEPTH + 1);
+            assert_eq!(page_ids.first(), Some(&ROOT_PAGE_ID));
+
+            for (depth, page_id) in page_ids.iter().enumerate() {
+                assert_eq!(page_id.depth(), depth);
+                assert!(page_id.min_key_path() <= key_path);
+                assert!(key_path <= page_id.max_key_path());
+            }
+
+            for pair in page_ids.windows(2) {
+                let parent = &pair[0];
+                let child = &pair[1];
+                let child_index = child.child_index_at_level(parent.depth());
+
+                assert_eq!(parent.child_page_id(child_index).unwrap(), child.clone());
+                assert_eq!(child.parent_page_id(), parent.clone());
+            }
+
+            true
+        }
+
+        QuickCheck::new()
+            .tests(64)
+            .quickcheck(property as fn(TestKeyPath) -> bool);
+    }
+
+    #[test]
+    fn property_child_parent_roundtrip() {
+        fn property(case: PagePathCase) -> bool {
+            let page_id = PageIdsIterator::new(case.key_path).nth(case.level).unwrap();
+            let child_index = ChildPageIndex::new(case.child_index).unwrap();
+            let child = page_id.child_page_id(child_index).unwrap();
+
+            assert!(page_id.min_key_path() <= case.key_path);
+            assert!(case.key_path <= page_id.max_key_path());
+            assert_eq!(child.parent_page_id(), page_id.clone());
+            assert_eq!(child.depth(), page_id.depth() + 1);
+            assert!(child.is_descendant_of(&page_id));
+            assert!(page_id.min_key_path() <= child.min_key_path());
+            assert!(child.max_key_path() <= page_id.max_key_path());
+
+            true
+        }
+
+        QuickCheck::new()
+            .tests(64)
+            .quickcheck(property as fn(PagePathCase) -> bool);
     }
 }

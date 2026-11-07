@@ -4,7 +4,7 @@ use crate::beatree::{
     branch::node::benches::*, leaf::node::benches::*, ops::benches::*, ops::bit_ops::benches::*,
     Key,
 };
-use rand::RngCore;
+use rand::Rng as _;
 
 pub fn beatree_benchmark(c: &mut criterion::Criterion) {
     separate_benchmark(c);
@@ -19,7 +19,7 @@ pub fn beatree_benchmark(c: &mut criterion::Criterion) {
 
 // returns two keys a and b where b > a and b shares the first n bits with a
 pub fn get_key_pair(shared_bytes: usize) -> (Key, Key) {
-    let mut rand = rand::thread_rng();
+    let mut rand = rand::rng();
     let mut a = [0; 32];
     rand.fill_bytes(&mut a[0..shared_bytes]);
 
@@ -32,7 +32,7 @@ pub fn get_key_pair(shared_bytes: usize) -> (Key, Key) {
 
 // Get a vector containing `n` random keys that share the first `shared_bytes`
 pub fn get_keys(shared_bytes: usize, n: usize) -> Vec<Key> {
-    let mut rand = rand::thread_rng();
+    let mut rand = rand::rng();
     let mut prefix = [0; 32];
     rand.fill_bytes(&mut prefix[0..shared_bytes]);
 

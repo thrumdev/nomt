@@ -1,8 +1,12 @@
 mod common;
 
 use bitvec::prelude::*;
-use common::Test;
-use nomt_core::trie::LeafData;
+use common::{fresh_test_name, ProofCase, Test};
+use nomt::hasher::Blake3Hasher;
+use nomt_core::hasher::ValueHasher;
+use nomt_core::trie::{KeyPath, LeafData, Node};
+use quickcheck::QuickCheck;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn prove_in_session() {
@@ -133,5 +137,99 @@ fn prove_in_session_no_cache() {
             .expect("verification failed")
             .confirm_nonexistence(&k)
             .unwrap());
+    }
+}
+
+#[test]
+fn property_generated_proofs_verify() {
+    fn property(case: ProofCase) -> bool {
+        let name = fresh_test_name("prove_prop");
+        let sample_keys = case
+            .present_samples
+            .iter()
+            .chain(case.missing_samples.iter())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let base_state = case
+            .state
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let base_root = {
+            let mut t = Test::new(&name);
+            for (key, value) in &case.state {
+                t.write(*key, Some(value.clone()));
+            }
+            let root = t.commit().0.into_inner();
+
+            assert_proofs_match(&t, root, &base_state, &sample_keys);
+
+            let mut overlay_state = base_state.clone();
+            if let Some(update_key) = overlay_state.keys().next().copied() {
+                let updated_value = vec![0xA5, overlay_state.len() as u8];
+                t.write(update_key, Some(updated_value.clone()));
+                overlay_state.insert(update_key, updated_value);
+            } else {
+                let inserted_key = case.missing_samples[0];
+                let inserted_value = vec![0x5A];
+                t.write(inserted_key, Some(inserted_value.clone()));
+                overlay_state.insert(inserted_key, inserted_value);
+            }
+
+            if overlay_state.len() > 1 {
+                let delete_key = overlay_state.keys().last().copied().unwrap();
+                t.write(delete_key, None);
+                overlay_state.remove(&delete_key);
+            }
+
+            let (overlay, _) = t.update();
+            let overlay_root = overlay.root().into_inner();
+            t.start_overlay_session([&overlay]);
+            assert_proofs_match(&t, overlay_root, &overlay_state, &sample_keys);
+
+            root
+        };
+
+        let reopened = Test::new_with_params(&name, 1, 10_000, None, false);
+        assert_proofs_match(&reopened, base_root, &base_state, &sample_keys);
+        true
+    }
+
+    QuickCheck::new()
+        .tests(12)
+        .quickcheck(property as fn(ProofCase) -> bool);
+}
+
+fn assert_proofs_match(
+    test: &Test,
+    root: Node,
+    expected: &BTreeMap<KeyPath, Vec<u8>>,
+    sample_keys: &[KeyPath],
+) {
+    for key in sample_keys {
+        let proof = test.prove(*key);
+        let verified = proof
+            .verify::<nomt::hasher::Blake3Hasher>(key.view_bits::<Msb0>(), root)
+            .expect("verification failed");
+
+        match expected.get(key) {
+            Some(value) => {
+                let expected_leaf = LeafData {
+                    key_path: *key,
+                    value_hash: Blake3Hasher::hash_value(value),
+                };
+                assert_eq!(
+                    proof.terminal.as_leaf_option().unwrap().value_hash,
+                    expected_leaf.value_hash,
+                );
+                assert!(verified.confirm_value(&expected_leaf).unwrap());
+                assert!(proof.terminal.as_leaf_option().is_some());
+            }
+            None => assert!(verified.confirm_nonexistence(key).unwrap()),
+        }
     }
 }

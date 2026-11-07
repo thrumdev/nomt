@@ -248,7 +248,7 @@ fn update<H: HashAlgorithm>(
             } => {
                 let ops = subtrie_ops(&shared.read_write[range_start..range_end]);
                 let ops = nomt_core::update::leaf_ops_spliced(prev_terminal, &ops);
-                root_page_updater.advance_and_replace(&page_set, trie_pos.clone(), ops.clone());
+                root_page_updater.advance_and_replace(&page_set, trie_pos.clone(), ops);
             }
         }
     }
@@ -297,10 +297,10 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
             .binary_search_by_key(&key_range_start, |x| x.0)
             .unwrap_or_else(|i| i);
 
+        // `key_range_end` is inclusive for the worker region, so compute an upper bound here.
         let range_end = shared
             .read_write
-            .binary_search_by_key(&key_range_end, |x| x.0)
-            .unwrap_or_else(|i| i);
+            .partition_point(|(key, _)| *key <= key_range_end);
 
         RangeUpdater {
             shared,

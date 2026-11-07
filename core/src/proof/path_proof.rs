@@ -59,7 +59,7 @@ pub struct PathProof {
     /// The terminal node encountered when looking up a key. This is always either a terminator or
     /// leaf.
     pub terminal: PathProofTerminal,
-    /// Sibling nodes encountered during lookup, in descending order by depth.
+    /// Sibling nodes encountered during lookup, in ascending order by depth.
     pub siblings: Vec<Node>,
 }
 

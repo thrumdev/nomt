@@ -258,11 +258,11 @@ pub mod benches {
         io::PagePool,
     };
     use criterion::{BatchSize, BenchmarkId, Criterion};
-    use rand::Rng;
+    use rand::RngExt;
 
     pub fn leaf_search_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("search_leaf");
-        let mut rand = rand::thread_rng();
+        let mut rand = rand::rng();
 
         let page_pool = PagePool::new();
 
@@ -284,7 +284,7 @@ pub mod benches {
         group.bench_function(BenchmarkId::new("full_leaf", format!("{}-keys", n)), |b| {
             b.iter_batched(
                 || {
-                    let index = rand.gen_range(0..keys.len());
+                    let index = rand.random_range(0..keys.len());
                     keys[index].clone()
                 },
                 |key| leaf.get(&key),

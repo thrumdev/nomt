@@ -24,7 +24,7 @@ use crate::{
 };
 use lazy_static::lazy_static;
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -119,7 +119,7 @@ fn init_beatree() -> TreeData {
     let initial_items: BTreeMap<[u8; 32], Vec<u8>> = KEYS
         .iter()
         .cloned()
-        .map(|key| (key, vec![170u8; rng.gen_range(500..MAX_LEAF_VALUE_SIZE)]))
+        .map(|key| (key, vec![170u8; rng.random_range(500..MAX_LEAF_VALUE_SIZE)]))
         .collect();
 
     let leaf_store = Store::open(&PAGE_POOL, ln_fd.clone(), PageNumber(1), None).unwrap();
@@ -392,7 +392,7 @@ fn leaf_stage_inner(input: StageInputs) -> TestResult {
 fn leaf_stage() {
     let test_result = std::panic::catch_unwind(|| {
         QuickCheck::new()
-            .gen(Gen::new(LEAF_STAGE_CHANGESET_AVG_SIZE))
+            .rng(Gen::new(LEAF_STAGE_CHANGESET_AVG_SIZE))
             .max_tests(MAX_TESTS)
             .quickcheck(leaf_stage_inner as fn(_) -> TestResult)
     });
@@ -414,7 +414,7 @@ fn init_bbn_index(separators: &[[u8; 32]]) -> Index {
     let mut bbn_pn = 0;
 
     while used_separators < separators.len() {
-        let body_size_target = rng.gen_range(BRANCH_MERGE_THRESHOLD..BRANCH_NODE_BODY_SIZE);
+        let body_size_target = rng.random_range(BRANCH_MERGE_THRESHOLD..BRANCH_NODE_BODY_SIZE);
 
         let branch_node = make_branch_until(
             &mut separators[used_separators..].iter().cloned(),
@@ -588,7 +588,7 @@ fn branch_stage_inner(input: StageInputs) -> TestResult {
 fn branch_stage() {
     let test_result = std::panic::catch_unwind(|| {
         QuickCheck::new()
-            .gen(Gen::new(BRANCH_STAGE_CHANGESET_AVG_SIZE))
+            .rng(Gen::new(BRANCH_STAGE_CHANGESET_AVG_SIZE))
             .max_tests(MAX_TESTS)
             .quickcheck(branch_stage_inner as fn(_) -> TestResult)
     });

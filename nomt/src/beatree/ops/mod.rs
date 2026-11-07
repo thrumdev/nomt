@@ -158,11 +158,11 @@ pub mod benches {
         io::{PagePool, PAGE_SIZE},
     };
     use criterion::{BenchmarkId, Criterion};
-    use rand::Rng;
+    use rand::RngExt;
 
     pub fn search_branch_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("search_branch");
-        let mut rand = rand::thread_rng();
+        let mut rand = rand::rng();
         let page_pool = PagePool::new();
 
         for prefix_len_bytes in [1, 4, 8, 12, 16] {
@@ -196,7 +196,7 @@ pub mod benches {
                 |b| {
                     b.iter_batched(
                         || {
-                            let index = rand.gen_range(0..separators.len());
+                            let index = rand.random_range(0..separators.len());
                             separators[index].1.clone()
                         },
                         |separator| super::search_branch(&branch, separator),

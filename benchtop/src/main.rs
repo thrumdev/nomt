@@ -15,6 +15,7 @@ mod workload;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, InitParams, RunParams};
+use rand::{RngExt, SeedableRng};
 use timer::Timer;
 
 pub fn main() -> Result<()> {
@@ -28,7 +29,7 @@ pub fn main() -> Result<()> {
 
 pub fn init(params: InitParams) -> Result<()> {
     let workload_params = params.workload;
-    let (mut init, _) = workload::parse(&workload_params, u64::max_value())?;
+    let (mut init, _) = workload::parse(&workload_params, u64::max_value(), 0)?;
 
     let mut db = params.backend.instantiate(
         true,
@@ -48,9 +49,16 @@ pub fn init(params: InitParams) -> Result<()> {
 
 pub fn run(params: RunParams) -> Result<()> {
     let workload_params = params.workload;
+    let mut seeder = rand::rngs::StdRng::seed_from_u64(
+        std::env::var("NOMT_BENCH_SEED")
+            .ok()
+            .map(|s| s.parse::<u64>().expect("NOMT_BENCH_SEED must be a u64"))
+            .unwrap_or_else(rand::random),
+    );
     let (mut init, mut workloads) = workload::parse(
         &workload_params,
         params.limits.ops.unwrap_or(u64::max_value()),
+        seeder.random(),
     )?;
 
     let mut db = params.backend.instantiate(
@@ -78,6 +86,15 @@ pub fn run(params: RunParams) -> Result<()> {
         .thread_name(|_| "benchtop-workload".into())
         .num_threads(workload_params.workload_concurrency as usize)
         .build()?;
+
+    if let Some(ops) = params.warm_up_ops {
+        let (_, mut warmup_workloads) = workload::parse(&workload_params, ops, seeder.random())?;
+        if workload_params.workload_concurrency == 1 {
+            db.execute(None, &mut *warmup_workloads[0], None);
+        } else {
+            db.parallel_execute(None, &thread_pool, &mut warmup_workloads, None)?;
+        }
+    }
 
     if let Some(t) = warmup_timeout {
         if workload_params.workload_concurrency == 1 {

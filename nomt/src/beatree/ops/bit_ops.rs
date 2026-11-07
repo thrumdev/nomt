@@ -284,7 +284,7 @@ pub fn bitwise_memcpy(
 pub mod benches {
     use crate::beatree::benches::get_key_pair;
     use criterion::{BenchmarkId, Criterion};
-    use rand::RngCore;
+    use rand::Rng as _;
 
     pub fn separate_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("separate");
@@ -308,7 +308,7 @@ pub mod benches {
             };
 
             for prefix_bits in [0, 1, 4, 7, 8, 9, 12, 15, 18] {
-                let mut rand = rand::thread_rng();
+                let mut rand = rand::rng();
                 // 50 to extract multiples of 8 bytes for the separator
                 let mut key = [0; 50];
                 rand.fill_bytes(&mut key);
@@ -393,6 +393,69 @@ mod tests {
         Key,
     };
     use bitvec::{prelude::Msb0, view::BitView};
+    use nomt_test_utils::{DivergingPair, TestKeyPath};
+    use quickcheck::{Arbitrary, Gen, QuickCheck};
+
+    const EDGE_BIT_LENS: &[usize] = &[0, 1, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256];
+
+    #[derive(Clone, Debug)]
+    struct ReconstructCase {
+        prefix_bytes: Option<Vec<u8>>,
+        prefix_bit_len: usize,
+        separator_bytes: Vec<u8>,
+        separator_bit_start: usize,
+        separator_bit_len: usize,
+    }
+
+    impl Arbitrary for ReconstructCase {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let use_prefix = bool::arbitrary(g);
+            let prefix_bit_len = if use_prefix {
+                arbitrary_bit_len(g, 256)
+            } else {
+                0
+            };
+            let prefix_byte_len = (prefix_bit_len + 7) / 8;
+            let prefix_seed = TestKeyPath::arbitrary(g).into_inner();
+            let prefix_bytes = use_prefix.then(|| prefix_seed[..prefix_byte_len].to_vec());
+
+            let separator_bit_start = if bool::arbitrary(g) {
+                [0, 1, 6, 7][usize::arbitrary(g) % 4]
+            } else {
+                usize::arbitrary(g) % 8
+            };
+            let separator_bit_len = arbitrary_bit_len(g, 256 - prefix_bit_len);
+            let separator_byte_len =
+                ((separator_bit_start + separator_bit_len + 7) / 8).next_multiple_of(8);
+            let separator_seed = TestKeyPath::arbitrary(g).into_inner();
+            let mut separator_bytes = vec![0; separator_byte_len];
+            for (index, byte) in separator_bytes.iter_mut().enumerate() {
+                *byte =
+                    separator_seed[index % separator_seed.len()] ^ (index as u8).wrapping_mul(29);
+            }
+
+            Self {
+                prefix_bytes,
+                prefix_bit_len,
+                separator_bytes,
+                separator_bit_start,
+                separator_bit_len,
+            }
+        }
+    }
+
+    fn arbitrary_bit_len(g: &mut Gen, max: usize) -> usize {
+        // EDGE_BIT_LENS is sorted ascending, so a partition point gives the slice of
+        // entries `<= max` without allocating.
+        let valid_count = EDGE_BIT_LENS.partition_point(|len| *len <= max);
+        let interesting = &EDGE_BIT_LENS[..valid_count];
+
+        if bool::arbitrary(g) {
+            interesting[usize::arbitrary(g) % interesting.len()]
+        } else {
+            usize::arbitrary(g) % (max + 1)
+        }
+    }
 
     fn reference_reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparators) -> Key {
         let mut key = [0; 32];
@@ -627,5 +690,85 @@ mod tests {
 
             assert_eq!(expected_res, res);
         }
+    }
+
+    #[test]
+    fn property_reconstruct_key_matches_reference() {
+        fn property(case: ReconstructCase) -> bool {
+            let maybe_prefix = case
+                .prefix_bytes
+                .as_ref()
+                .map(|bytes| (&bytes[..], case.prefix_bit_len));
+            let separator = (
+                &case.separator_bytes[..],
+                case.separator_bit_start,
+                case.separator_bit_len,
+            );
+
+            assert_eq!(
+                reference_reconstruct_key(maybe_prefix, separator),
+                super::reconstruct_key(maybe_prefix, separator),
+            );
+            true
+        }
+
+        QuickCheck::new()
+            .tests(64)
+            .quickcheck(property as fn(ReconstructCase) -> bool);
+    }
+
+    #[test]
+    fn property_prefix_len_matches_reference() {
+        fn property(a: TestKeyPath, b: TestKeyPath) -> bool {
+            let a = a.into_inner();
+            let b = b.into_inner();
+
+            assert_eq!(reference_prefix_len(&a, &b), super::prefix_len(&a, &b));
+            true
+        }
+
+        QuickCheck::new()
+            .tests(64)
+            .quickcheck(property as fn(TestKeyPath, TestKeyPath) -> bool);
+    }
+
+    #[test]
+    fn property_separator_len_matches_reference() {
+        fn property(key: TestKeyPath) -> bool {
+            let key = key.into_inner();
+            let expected = if key == [0u8; 32] {
+                1
+            } else {
+                256 - key.view_bits::<Msb0>().trailing_zeros()
+            };
+
+            assert_eq!(expected, super::separator_len(&key));
+            true
+        }
+
+        QuickCheck::new()
+            .tests(64)
+            .quickcheck(property as fn(TestKeyPath) -> bool);
+    }
+
+    #[test]
+    fn property_separate_matches_reference() {
+        fn property(pair: DivergingPair) -> bool {
+            let (lower, upper) = if pair.left < pair.right {
+                (pair.left, pair.right)
+            } else {
+                (pair.right, pair.left)
+            };
+
+            assert_eq!(
+                reference_separate(&lower, &upper),
+                super::separate(&lower, &upper)
+            );
+            true
+        }
+
+        QuickCheck::new()
+            .tests(64)
+            .quickcheck(property as fn(DivergingPair) -> bool);
     }
 }

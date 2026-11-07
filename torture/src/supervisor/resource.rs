@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rand::{Rng, SeedableRng};
+use rand::{prelude::*, SeedableRng};
 
 /// 1GiB is the minimum amount of space that can be assigned to a workload.
 const MIN_ASSIGNED_SPACE: u64 = 1 * (1 << 30);
@@ -82,7 +82,7 @@ impl ResourceAllocator {
 
         // Force to allocate bigger chunk of memory initially.
         let min = std::cmp::min(MIN_ASSIGNED_SPACE, avail_disk / 2);
-        let assigned_disk = self.rng.gen_range(min..avail_disk);
+        let assigned_disk = self.rng.random_range(min..avail_disk);
 
         // Assign memory
         let mut avail_memory = self.max_memory_avail - self.total_assigned_memory;
@@ -114,7 +114,7 @@ impl ResourceAllocator {
         }
 
         avail_memory = std::cmp::min(avail_memory, MAX_ASSIGNED_ONLY_MEMORY);
-        let assigned_memory = self.rng.gen_range(MIN_ASSIGNED_SPACE..avail_memory);
+        let assigned_memory = self.rng.random_range(MIN_ASSIGNED_SPACE..avail_memory);
 
         self.total_assigned_memory += assigned_memory;
         self.assigned.push((

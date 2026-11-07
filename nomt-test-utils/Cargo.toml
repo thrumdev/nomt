@@ -1,0 +1,15 @@
+[package]
+name = "nomt-test-utils"
+version = "0.1.0"
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+nomt-core = { path = "../core", default-features = false, features = ["std"] }
+quickcheck.workspace = true
+rand.workspace = true
+rand_pcg.workspace = true
