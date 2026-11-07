@@ -55,19 +55,29 @@ impl Overlay {
         }
     }
 
-    /// Get the merkle page changes associated uniquely with this overlay.
-    pub(super) fn page_changes(&self) -> &HashMap<PageId, DirtyPage> {
-        &self.inner.data.pages
-    }
-
-    /// Get the merkle page changes associated uniquely with this overlay.
-    pub(super) fn value_changes(&self) -> &HashMap<KeyPath, ValueChange> {
-        &self.inner.data.values
-    }
-
-    /// Get the rollback delta associated uniquely with this overlay.
-    pub(super) fn rollback_delta(&self) -> Option<&crate::rollback::Delta> {
-        self.inner.rollback_delta.as_ref()
+    /// Move the changes out of the overlay, cloning only what is still shared.
+    ///
+    /// Must be called after marking the overlay committed so dropping the extracted `Data`
+    /// does not mark the overlay as dropped.
+    pub(super) fn into_committed_changes(
+        self,
+    ) -> (
+        HashMap<PageId, DirtyPage>,
+        HashMap<KeyPath, ValueChange>,
+        Option<crate::rollback::Delta>,
+    ) {
+        let (data, rollback_delta) = match Arc::try_unwrap(self.inner) {
+            Ok(inner) => (inner.data, inner.rollback_delta),
+            Err(inner) => (Arc::clone(&inner.data), inner.rollback_delta.clone()),
+        };
+        let (pages, values) = match Arc::try_unwrap(data) {
+            Ok(mut data) => (
+                std::mem::take(&mut data.pages),
+                std::mem::take(&mut data.values),
+            ),
+            Err(data) => (data.pages.clone(), data.values.clone()),
+        };
+        (pages, values, rollback_delta)
     }
 
     /// Mark the overlay as committed and return a marker.
@@ -452,6 +462,93 @@ mod tests {
     #[test]
     fn blank_overlay_ok() {
         assert!(LiveOverlay::new(None).is_ok());
+    }
+
+    fn overlay_with_changes() -> super::Overlay {
+        LiveOverlay::new(None).unwrap().finish(
+            [0; 32],
+            [1; 32],
+            [(
+                ROOT_PAGE_ID,
+                dummy_page(ROOT_PAGE_ID, 1, BucketInfo::FreshWithNoDependents),
+            )]
+            .into_iter()
+            .collect(),
+            [([1; 32], ValueChange::Insert(vec![1, 2, 3]))]
+                .into_iter()
+                .collect(),
+            Some(crate::rollback::Delta {
+                priors: [([1; 32], Some(vec![4, 5, 6]))].into_iter().collect(),
+            }),
+        )
+    }
+
+    #[test]
+    fn committed_changes_move_with_weak_descendants() {
+        let overlay = overlay_with_changes();
+        let child = LiveOverlay::new([&overlay]).unwrap().finish(
+            [1; 32],
+            [2; 32],
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        let value_ptr = overlay.inner.data.values[&[1; 32]]
+            .as_option()
+            .unwrap()
+            .as_ptr();
+        let prior_ptr = overlay.inner.rollback_delta.as_ref().unwrap().priors[&[1; 32]]
+            .as_ref()
+            .unwrap()
+            .as_ptr();
+        let marker = overlay.mark_committed();
+
+        let (pages, values, delta) = overlay.into_committed_changes();
+
+        assert_eq!(pages[&ROOT_PAGE_ID].page.node(0), [1; 32]);
+        assert_eq!(values[&[1; 32]], ValueChange::Insert(vec![1, 2, 3]));
+        assert_eq!(values[&[1; 32]].as_option().unwrap().as_ptr(), value_ptr);
+        let prior = delta.as_ref().unwrap().priors[&[1; 32]].as_ref().unwrap();
+        assert_eq!(prior, &[4, 5, 6]);
+        assert_eq!(prior.as_ptr(), prior_ptr);
+        assert!(child.parent_matches_marker(Some(&marker)));
+        assert!(LiveOverlay::new([&child]).is_ok());
+        assert!(marker.0.is_committed());
+    }
+
+    #[test]
+    fn committed_changes_preserve_live_parent_and_ancestor_data() {
+        for retain_parent in [true, false] {
+            let overlay = overlay_with_changes();
+            let child = LiveOverlay::new([&overlay]).unwrap().finish(
+                [1; 32],
+                [2; 32],
+                HashMap::new(),
+                HashMap::new(),
+                None,
+            );
+            let live = if retain_parent {
+                LiveOverlay::new([&overlay]).unwrap()
+            } else {
+                LiveOverlay::new([&child, &overlay]).unwrap()
+            };
+            let marker = overlay.mark_committed();
+
+            let (pages, values, delta) = overlay.into_committed_changes();
+
+            assert_eq!(pages[&ROOT_PAGE_ID].page.node(0), [1; 32]);
+            assert_eq!(values[&[1; 32]], ValueChange::Insert(vec![1, 2, 3]));
+            assert_eq!(delta.unwrap().priors[&[1; 32]], Some(vec![4, 5, 6]));
+            assert_eq!(live.page(&ROOT_PAGE_ID).unwrap().page.node(0), [1; 32]);
+            assert_eq!(
+                live.value(&[1; 32]),
+                Some(ValueChange::Insert(vec![1, 2, 3]))
+            );
+            assert!(child.parent_matches_marker(Some(&marker)));
+            assert!(LiveOverlay::new([&child]).is_ok());
+            drop(live);
+            assert!(marker.0.is_committed());
+        }
     }
 
     #[test]

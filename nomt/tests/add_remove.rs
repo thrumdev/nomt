@@ -54,3 +54,19 @@ fn add_remove_1000() {
         assert_eq!(root, expected_roots[10 - i - 1]);
     }
 }
+
+#[test]
+fn delete_missing_key_in_empty_db() {
+    let mut t = Test::new("delete_missing_key_in_empty_db");
+    t.write([0; 32], None);
+    assert_eq!(t.commit().0.into_inner(), Node::default());
+}
+
+#[test]
+fn delete_missing_key_in_non_empty_db() {
+    let mut t = Test::new("delete_missing_key_in_non_empty_db");
+    common::set_balance(&mut t, 0, 1000);
+    let root = t.commit().0;
+    common::kill(&mut t, 1);
+    assert_eq!(t.commit().0, root);
+}

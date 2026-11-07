@@ -283,6 +283,7 @@ impl Store {
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
+        rollback_delta: Option<crate::rollback::Delta>,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -300,6 +301,7 @@ impl Store {
             self.shared.pages.clone(),
             self.shared.values.clone(),
             self.shared.rollback.clone(),
+            rollback_delta,
             page_cache,
             updated_pages,
         ) {
