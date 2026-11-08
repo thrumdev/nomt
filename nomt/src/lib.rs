@@ -482,6 +482,10 @@ impl SessionParams {
     }
 }
 
+// Under shuttle all threads share one OS thread, so the counter must be per shuttle thread.
+#[cfg(shuttle)]
+use shuttle::thread_local;
+
 thread_local! {
     /// Live sessions created on this thread. Shared with each session, which may be dropped on
     /// another thread.

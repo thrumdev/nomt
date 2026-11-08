@@ -43,7 +43,11 @@ impl Fsyncer {
             cv: Condvar::new(),
             s: Mutex::new(State::Idle),
         });
-        let _thread = std::thread::Builder::new()
+        #[cfg(shuttle)]
+        use shuttle::thread::Builder;
+        #[cfg(not(shuttle))]
+        use std::thread::Builder;
+        let _thread = Builder::new()
             .name(name)
             .spawn({
                 let shared = shared.clone();

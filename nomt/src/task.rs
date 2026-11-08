@@ -26,7 +26,11 @@ where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
-    std::thread::Builder::new()
+    #[cfg(shuttle)]
+    use shuttle::thread::Builder;
+    #[cfg(not(shuttle))]
+    use std::thread::Builder;
+    Builder::new()
         .name(name.to_string())
         .spawn(move || {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
