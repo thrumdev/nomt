@@ -154,7 +154,7 @@ fn truncate_works() {
             KeyReadWrite::Write(Some(b"new_value2".to_vec())),
         ),
     ]);
-    rollback.commit(delta).unwrap();
+    rollback.commit(vec![delta]).unwrap();
 
     // We want to see the old values for all the keys that have been changed during the commit.
     let traceback = rollback.truncate(1).unwrap().unwrap();
@@ -218,7 +218,7 @@ fn without_tentative_preserve_prior() {
             KeyReadWrite::Write(Some(b"new_value2".to_vec())),
         ),
     ]);
-    rollback.commit(delta).unwrap();
+    rollback.commit(vec![delta]).unwrap();
 
     // We want to see the old values for all the keys that have been changed during the commit.
     let traceback = rollback.truncate(1).unwrap().unwrap();
@@ -270,7 +270,7 @@ fn delta_builder_doesnt_load_read_then_write_priors() {
     )]);
 
     rollback
-        .commit(delta)
+        .commit(vec![delta])
         // This will panic if the delta builder attempts to load from store the prior value for
         // key_1.
         .unwrap();
@@ -301,12 +301,12 @@ fn rollback_writeout_start_and_end() {
     for _ in 0..MAX_ROLLBACK_LOG_LEN + 1 {
         let builder = rollback.delta_builder_inner(store.async_reader());
         let delta = builder.finalize(&[]);
-        rollback.commit(delta).unwrap();
+        rollback.commit(vec![delta]).unwrap();
     }
 
     // expected prune of oldest delta
     let wa = rollback.writeout_start();
-    assert_eq!(wa.rollback_start_live, 1);
+    assert_eq!(wa.rollback_start_live, 2);
     assert_eq!(wa.rollback_end_live, 101);
     assert_eq!(wa.prune_to_new_start_live, Some(2));
     assert_eq!(wa.prune_to_new_end_live, None);
@@ -321,10 +321,10 @@ fn rollback_writeout_start_and_end() {
     // expected prune of oldest delta
     let builder = rollback.delta_builder_inner(store.async_reader());
     let delta = builder.finalize(&[]);
-    rollback.commit(delta).unwrap();
+    rollback.commit(vec![delta]).unwrap();
 
     let wa = rollback.writeout_start();
-    assert_eq!(wa.rollback_start_live, 2);
+    assert_eq!(wa.rollback_start_live, 3);
     assert_eq!(wa.rollback_end_live, 102);
     assert_eq!(wa.prune_to_new_start_live, Some(3));
     assert_eq!(wa.prune_to_new_end_live, None);

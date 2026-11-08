@@ -179,55 +179,77 @@ impl SegmentedLog {
     /// Append a record to the log and return its ID.
     ///
     /// After this function returned, the data is guaranteed to be persisted.
+    #[cfg(test)]
     pub fn append(&mut self, data: &[u8]) -> Result<RecordId> {
-        if data.len() > MAX_RECORD_PAYLOAD_SIZE as usize {
-            return Err(anyhow::anyhow!(
-                "Record payload size is too large: {}",
-                data.len()
-            ));
-        }
+        // UNWRAP: one record in, one ID out.
+        Ok(self.append_batch([data])?.pop().unwrap())
+    }
 
-        let record_id = self.end_live.next();
-
-        // If the head segment is full or doesn't exist, create a new one.
-        let root_dir_fsync = match self.head_segment_writer {
-            None => {
-                self.create_segment(record_id)?;
-                true
+    /// Append records to the log and return their IDs.
+    ///
+    /// After this function returned, all of the records are guaranteed to be persisted.
+    pub fn append_batch<'a>(
+        &mut self,
+        records: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Vec<RecordId>> {
+        let mut ids = Vec::new();
+        let mut root_dir_fsync = false;
+        for data in records {
+            if data.len() > MAX_RECORD_PAYLOAD_SIZE as usize {
+                return Err(anyhow::anyhow!(
+                    "Record payload size is too large: {}",
+                    data.len()
+                ));
             }
-            Some(ref w) if w.file_size() >= self.max_segment_size => {
-                self.create_segment(record_id)?;
-                true
+
+            let record_id = self.end_live.next();
+
+            // If the head segment is full or doesn't exist, create a new one.
+            match self.head_segment_writer {
+                None => {
+                    self.create_segment(record_id)?;
+                    root_dir_fsync = true;
+                }
+                Some(ref mut w) if w.file_size() >= self.max_segment_size => {
+                    // Records of this batch in the ex-head segment are not synced yet.
+                    w.fsync()?;
+                    self.create_segment(record_id)?;
+                    root_dir_fsync = true;
+                }
+                _ => {}
             }
-            _ => false,
-        };
 
-        // UNWRAP: we know that the head segment exists and is the last one.
-        let writer = self.head_segment_writer.as_mut().unwrap();
-        let segment = self.segments.last_mut().unwrap();
+            // UNWRAP: we know that the head segment exists and is the last one.
+            let writer = self.head_segment_writer.as_mut().unwrap();
+            let segment = self.segments.last_mut().unwrap();
 
-        // Write the record to the segment file, fsync and update the segment metadata.
-        writer.write_header(data.len() as u32, record_id)?;
-        writer.write_payload(data)?;
-        writer.fsync()?;
+            // Write the record to the segment file and update the segment metadata.
+            writer.write_header(data.len() as u32, record_id)?;
+            writer.write_payload(data)?;
 
-        // Once the write succeeded, update the live range.
-        self.end_live = record_id;
-        if self.start_live.is_nil() {
-            self.start_live = record_id;
+            // Once the write succeeded, update the live range.
+            self.end_live = record_id;
+            if self.start_live.is_nil() {
+                self.start_live = record_id;
+            }
+            if segment.min.is_nil() {
+                segment.min = record_id;
+            }
+            segment.max = record_id;
+            ids.push(record_id);
         }
-        if segment.min.is_nil() {
-            segment.min = record_id;
-        }
-        segment.max = record_id;
 
+        if !ids.is_empty() {
+            // UNWRAP: a record was written, so the head segment exists.
+            self.head_segment_writer.as_mut().unwrap().fsync()?;
+        }
         if root_dir_fsync {
             // To uphold the guarantees provided by this function we should fsync the directory
             // after a new segment file is created.
             self.root_dir_fd.sync_all()?;
         }
 
-        Ok(record_id)
+        Ok(ids)
     }
 
     /// Create a new segment.
