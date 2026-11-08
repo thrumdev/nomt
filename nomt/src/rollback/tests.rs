@@ -304,9 +304,9 @@ fn rollback_writeout_start_and_end() {
         rollback.commit(delta).unwrap();
     }
 
-    // expected prune of oldest delta
+    // expected prune of oldest delta. The manifest gets the range left after pruning.
     let wa = rollback.writeout_start();
-    assert_eq!(wa.rollback_start_live, 1);
+    assert_eq!(wa.rollback_start_live, 2);
     assert_eq!(wa.rollback_end_live, 101);
     assert_eq!(wa.prune_to_new_start_live, Some(2));
     assert_eq!(wa.prune_to_new_end_live, None);
@@ -324,7 +324,7 @@ fn rollback_writeout_start_and_end() {
     rollback.commit(delta).unwrap();
 
     let wa = rollback.writeout_start();
-    assert_eq!(wa.rollback_start_live, 2);
+    assert_eq!(wa.rollback_start_live, 3);
     assert_eq!(wa.rollback_end_live, 102);
     assert_eq!(wa.prune_to_new_start_live, Some(3));
     assert_eq!(wa.prune_to_new_end_live, None);
@@ -351,4 +351,42 @@ fn rollback_writeout_start_and_end() {
     let (rollback_start_live, rollback_end_live) = rollback.seglog().live_range();
     assert_eq!(rollback_start_live, 3.into());
     assert_eq!(rollback_end_live, 97.into());
+}
+
+#[test]
+fn rollback_writeout_truncate_to_empty_after_prune() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_dir_path = temp_dir.path().join("db");
+    std::fs::create_dir_all(&db_dir_path).unwrap();
+    let db_dir_fd = OpenOptions::new()
+        .read(true)
+        .open(db_dir_path.clone())
+        .unwrap();
+    let store = MockStore::new();
+
+    let rollback = Rollback::read(1, db_dir_path, Arc::new(db_dir_fd), 0, 0).unwrap();
+    for expected_start in [1, 2, 3] {
+        let builder = rollback.delta_builder_inner(store.async_reader());
+        rollback.commit(builder.finalize(&[])).unwrap();
+        let wa = rollback.writeout_start();
+        assert_eq!(
+            (wa.rollback_start_live, wa.rollback_end_live),
+            (expected_start, expected_start)
+        );
+        rollback
+            .writeout_end(wa.prune_to_new_start_live, wa.prune_to_new_end_live)
+            .unwrap();
+    }
+
+    // Truncating the only live delta empties the log rather than reviving delta 2, which was
+    // pruned.
+    rollback.truncate(1).unwrap().unwrap();
+    let wa = rollback.writeout_start();
+    assert_eq!((wa.rollback_start_live, wa.rollback_end_live), (0, 0));
+    assert_eq!(wa.prune_to_new_end_live, Some(0));
+    rollback
+        .writeout_end(wa.prune_to_new_start_live, wa.prune_to_new_end_live)
+        .unwrap();
+    assert_eq!(rollback.seglog().live_range(), (0.into(), 0.into()));
+    assert!(rollback.truncate(1).unwrap().is_none());
 }
