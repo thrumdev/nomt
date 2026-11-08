@@ -38,6 +38,7 @@ crossbeam-channel = "0.5.15"
 slab = "0.4.9"
 rand = "0.10.1"
 ahash = "0.8.11"
+getrandom = { version = "0.4.2", default-features = false }
 imbl = "3.0.0"
 lru = "0.18.0"
 libc = "0.2.155"

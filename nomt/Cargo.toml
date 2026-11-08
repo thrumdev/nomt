@@ -22,7 +22,8 @@ dashmap.workspace = true
 crossbeam.workspace = true
 crossbeam-channel.workspace = true
 slab.workspace = true
-rand.workspace = true
+rand = { workspace = true, optional = true }
+getrandom.workspace = true
 imbl.workspace = true
 lru.workspace = true
 libc.workspace = true
@@ -39,6 +40,7 @@ io-uring.workspace = true
 loom.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
 rand_pcg.workspace = true
 hex-literal.workspace = true
 tempfile.workspace = true
@@ -58,7 +60,7 @@ harness = false
 
 [features]
 default = ["blake3-hasher", "sha2-hasher"]
-benchmarks = ["dep:criterion"]
+benchmarks = ["dep:criterion", "dep:rand"]
 fuzz = []
 borsh = ["dep:borsh", "nomt-core/borsh"]
 blake3-hasher = ["nomt-core/blake3-hasher"]
