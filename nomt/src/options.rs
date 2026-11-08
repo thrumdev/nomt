@@ -30,6 +30,8 @@ pub struct Options {
     /// Whether to prepopulate the upper layers of the page cache on startup.
     /// This incurs some I/O on startup but leads to predictable worst-case performance.
     pub(crate) prepopulate_page_cache: bool,
+    /// Whether to fill the leaf cache with beatree leaves on startup.
+    pub(crate) prepopulate_leaf_cache: bool,
     pub(crate) page_cache_upper_levels: usize,
 }
 
@@ -54,6 +56,7 @@ impl Options {
             page_cache_size: 256,
             leaf_cache_size: 256,
             prepopulate_page_cache: false,
+            prepopulate_leaf_cache: false,
             page_cache_upper_levels: 2,
         }
     }
@@ -183,6 +186,15 @@ impl Options {
     /// Default: false
     pub fn prepopulate_page_cache(&mut self, prepopulate: bool) {
         self.prepopulate_page_cache = prepopulate;
+    }
+
+    /// Sets whether to fill the leaf cache with beatree leaves on startup, up to its capacity.
+    ///
+    /// This reads up to [`Self::leaf_cache_size`] MiB of leaves on startup, so that sessions after
+    /// a restart do not pay for cold leaf reads.
+    /// Default: false
+    pub fn prepopulate_leaf_cache(&mut self, prepopulate: bool) {
+        self.prepopulate_leaf_cache = prepopulate;
     }
 
     /// Sets the number of upper levels of the page tree to keep permanently
