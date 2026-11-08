@@ -128,7 +128,7 @@ fn run_verifier(
             KeyReadWrite::Read(_) => None,
         })
         .collect();
-    updates.sort_by(|a, b| a.0.cmp(&b.0));
+    updates.sort_by_key(|a| a.0);
 
     verify_multi_proof_update::<Blake3Hasher>(&verified, updates)
         .expect("verify_multi_proof_update must succeed")

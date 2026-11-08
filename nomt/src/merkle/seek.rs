@@ -102,11 +102,11 @@ impl SeekRequest {
             RequestState::FetchingLeaf {
                 ref mut needed_leaves,
                 ..
-            } => needed_leaves.next().map(|pn| IoQuery::LeafPage(pn)),
+            } => needed_leaves.next().map(IoQuery::LeafPage),
             RequestState::FetchingLeaves {
                 ref mut needed_leaves,
                 ..
-            } => needed_leaves.next().map(|pn| IoQuery::LeafPage(pn)),
+            } => needed_leaves.next().map(IoQuery::LeafPage),
             RequestState::Completed(_) => None,
         }
     }
@@ -125,7 +125,7 @@ impl SeekRequest {
         };
 
         // terminator should have yielded completion.
-        assert!(self.position.depth() as usize % DEPTH == 0);
+        assert!((self.position.depth() as usize).is_multiple_of(DEPTH));
 
         self.page_id = Some(page_id.clone());
 
@@ -182,11 +182,8 @@ impl SeekRequest {
             // beatree leaves, and the requests will be woken one after the other when a needed leaf is received.
             // This is less consuming than the overhead introduced by making the second SeekRequest depend
             // on the first one or sharing some data between them.
-            self.state = RequestState::begin_leaves_fetch::<H>(
-                read_transaction,
-                &self.position,
-                page.clone(),
-            );
+            self.state =
+                RequestState::begin_leaves_fetch(read_transaction, &self.position, page.clone());
             self.continue_leaves_fetch::<H>(page_set, overlay, None);
         }
     }
@@ -236,17 +233,17 @@ impl SeekRequest {
                 }
                 Some(IterOutput::Item(key, value)) => {
                     let (new_d_idx, should_skip) =
-                        manage_deletions(&overlay_deletions, deletions_idx, &key);
+                        manage_deletions(overlay_deletions, deletions_idx, &key);
                     deletions_idx = new_d_idx;
                     if should_skip {
                         continue;
                     }
 
-                    break (key, H::hash_value(&value));
+                    break (key, H::hash_value(value));
                 }
                 Some(IterOutput::OverflowItem(key, value_hash, _)) => {
                     let (new_d_idx, should_skip) =
-                        manage_deletions(&overlay_deletions, deletions_idx, &key);
+                        manage_deletions(overlay_deletions, deletions_idx, &key);
                     deletions_idx = new_d_idx;
                     if should_skip {
                         continue;
@@ -289,7 +286,7 @@ impl SeekRequest {
             match iter_output {
                 IterOutput::Blocked => return,
                 IterOutput::Item(key, value) => {
-                    collected_leaf_data.push((key, H::hash_value(&value)))
+                    collected_leaf_data.push((key, H::hash_value(value)))
                 }
                 IterOutput::OverflowItem(key, value_hash, _) => {
                     collected_leaf_data.push((key, value_hash))
@@ -432,7 +429,7 @@ impl RequestState {
                 // If an insertion is found within the overlay, it is expected to be
                 // the item associated with the leaf that is being fetched.
                 ValueChange::Insert(value) => H::hash_value(value),
-                ValueChange::InsertOverflow(_, value_hash) => value_hash.clone(),
+                ValueChange::InsertOverflow(_, value_hash) => *value_hash,
             };
 
             return RequestState::Completed(Some(trie::LeafData {
@@ -451,7 +448,7 @@ impl RequestState {
         }
     }
 
-    fn begin_leaves_fetch<H: HashAlgorithm>(
+    fn begin_leaves_fetch(
         read_transaction: &BeatreeReadTx,
         pos: &TriePosition,
         page: Page,
@@ -475,7 +472,7 @@ fn range_bounds(raw_path: KeyPath, depth: usize) -> (KeyPath, Option<KeyPath>) {
         return (KeyPath::default(), None);
     }
     let start = raw_path;
-    let mut end = start.clone();
+    let mut end = start;
     let mut depth = depth - 1;
     loop {
         let end_bits = end.view_bits_mut::<Msb0>();
@@ -591,9 +588,7 @@ impl<H: HashAlgorithm> Seeker<H> {
 
     /// Take the result of a complete request.
     pub fn take_completion(&mut self) -> Option<Seek> {
-        if self.requests.front().map_or(false, |r| r.is_completed()) {
-            // UNWRAP: just checked existence.
-            let request = self.requests.pop_front().unwrap();
+        if let Some(request) = self.requests.pop_front_if(|r| r.is_completed()) {
             // PANIC: checked above.
             let RequestState::Completed(terminal) = request.state else {
                 unreachable!()

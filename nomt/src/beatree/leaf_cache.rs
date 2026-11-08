@@ -40,7 +40,7 @@ impl LeafCache {
     pub fn get(&self, page_number: PageNumber) -> Option<Arc<LeafNode>> {
         let mut shard = self.inner.shard_for(page_number);
 
-        shard.cache.get(&page_number).map(|x| x.clone())
+        shard.cache.get(&page_number).cloned()
     }
 
     /// Insert a cache entry. This does not evict anything.

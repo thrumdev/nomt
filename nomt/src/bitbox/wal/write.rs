@@ -37,7 +37,7 @@ impl Mmap {
     /// updating `self.size` to the new size and potentially `self.ptr` to point to the new
     /// mapping, if the kernel decided to move it.
     fn resize(&mut self, new_size: usize) -> bool {
-        assert!(new_size % PAGE_SIZE == 0);
+        assert!(new_size.is_multiple_of(PAGE_SIZE));
 
         #[cfg(target_os = "linux")]
         unsafe {
@@ -197,7 +197,7 @@ impl WalBlobBuilder {
 
         let ptr = self.mmap.ptr;
         // round up to the nearest page size.
-        let len = (self.cur + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+        let len = self.cur.div_ceil(PAGE_SIZE) * PAGE_SIZE;
 
         // Note we don't madvise(DONTNEED) or any other tricks for now. If we did, then each time
         // we write a page it would need to be mounted and thus zero filled.

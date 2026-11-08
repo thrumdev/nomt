@@ -51,6 +51,7 @@ impl Page {
     /// 2. that the [`PagePool`] is the same that was used to allocate the page.
     /// 3. that the [`PagePool`] is not dropped while the slice is used.
     /// 4. that there is only a single mutable slice into the page at any given time.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn as_mut_slice(&self) -> &mut [u8] {
         std::slice::from_raw_parts_mut(self.as_mut_ptr(), PAGE_SIZE)
     }
@@ -89,7 +90,7 @@ impl FatPage {
 impl Clone for FatPage {
     fn clone(&self) -> Self {
         let mut new_page = self.page_pool.alloc_fat_page();
-        new_page.copy_from_slice(&*self);
+        new_page.copy_from_slice(self);
         new_page
     }
 }

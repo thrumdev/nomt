@@ -101,7 +101,7 @@ impl PageRegion {
 
     /// Whether the region contains a page ID non-exclusively.
     pub fn contains_non_exclusive(&self, page: &PageId) -> bool {
-        self.non_exclusive_max().map_or(false, |non_exclusive_max| {
+        self.non_exclusive_max().is_some_and(|non_exclusive_max| {
             page == &non_exclusive_max || non_exclusive_max.is_descendant_of(page)
         })
     }
