@@ -7,7 +7,6 @@ use crate::{
     rw_pass_cell::{Region, RegionContains, RwPassDomain, WritePass},
     Options,
 };
-use fxhash::FxBuildHasher;
 use lru::LruCache;
 use nomt_core::{
     page::DEPTH,
@@ -15,6 +14,7 @@ use nomt_core::{
     trie::Node,
 };
 use parking_lot::{Mutex, RwLock};
+use rustc_hash::FxBuildHasher;
 use std::{collections::HashMap, fmt, num::NonZeroUsize, sync::Arc};
 
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
