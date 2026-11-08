@@ -562,6 +562,19 @@ struct WarmUpHandle {
     output_rx: Receiver<TaskResult<std::io::Result<WarmUpOutput>>>,
 }
 
+impl Drop for WarmUpHandle {
+    fn drop(&mut self) {
+        // Wait for the worker to stop. It holds a `Store`, and with it the database directory
+        // lock, so a session dropped without finishing must not leave it running past `Nomt`:
+        // reopening the database would then fail to take the lock. Disconnecting the channels
+        // tells the worker its session is gone. After a finished session the output has already
+        // been taken and this returns at once.
+        self.finish_tx = channel::bounded(0).0;
+        self.warmup_tx = channel::unbounded().0;
+        let _ = self.output_rx.recv();
+    }
+}
+
 /// The warm-up runs until its session finishes, so it gets a thread of its own rather than one of
 /// the commit workers: coexisting sessions would otherwise occupy all of them.
 fn spawn_warm_up<H: HashAlgorithm>(params: worker::WarmUpParams) -> WarmUpHandle {
