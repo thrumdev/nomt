@@ -130,14 +130,17 @@ impl KeyReadWrite {
         }
     }
 
+    /// Hashes the values. The read value hash lets the merkle update recognize the key's own leaf
+    /// without fetching it.
     fn to_compact<T: HashAlgorithm>(&self) -> crate::merkle::KeyReadWrite {
         let hash = |v: &Value| T::hash_value(v);
         match self {
-            KeyReadWrite::Read(_) => crate::merkle::KeyReadWrite::Read,
+            KeyReadWrite::Read(read) => crate::merkle::KeyReadWrite::Read(read.as_ref().map(hash)),
             KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
-            KeyReadWrite::ReadThenWrite(_, val) => {
-                crate::merkle::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
-            }
+            KeyReadWrite::ReadThenWrite(read, val) => crate::merkle::KeyReadWrite::ReadThenWrite(
+                read.as_ref().map(hash),
+                val.as_ref().map(hash),
+            ),
         }
     }
 }
@@ -684,15 +687,13 @@ fn compact_actuals<T: HashAlgorithm>(
     if max_threads == 1 || actuals.len() < 2 * MIN_HASHES_PER_THREAD {
         return compact(actuals);
     }
-    let hashes = actuals
+    let hashes: usize = actuals
         .iter()
-        .filter(|(_, read_write)| {
-            matches!(
-                read_write,
-                KeyReadWrite::Write(Some(_)) | KeyReadWrite::ReadThenWrite(_, Some(_))
-            )
+        .map(|(_, read_write)| match read_write {
+            KeyReadWrite::Read(v) | KeyReadWrite::Write(v) => v.is_some() as usize,
+            KeyReadWrite::ReadThenWrite(r, w) => r.is_some() as usize + w.is_some() as usize,
         })
-        .count();
+        .sum();
     let threads = max_threads.min(hashes / MIN_HASHES_PER_THREAD);
     if threads < 2 {
         return compact(actuals);
@@ -1060,7 +1061,7 @@ mod tests {
             })
             .collect();
 
-        for len in [0, 1, 16_383, 16_384, 49_151, 49_152, 49_153, 131_073] {
+        for len in [0, 1, 16_383, 16_384, 24_575, 24_576, 24_577, 131_073] {
             let sequential = compact_actuals::<Blake3Hasher>(&actuals[..len], 1);
             for threads in [2, 16] {
                 let parallel = compact_actuals::<Blake3Hasher>(&actuals[..len], threads);
@@ -1068,10 +1069,15 @@ mod tests {
                 for ((path, op), (expected_path, expected_op)) in parallel.iter().zip(&sequential) {
                     assert_eq!(path, expected_path);
                     match (op, expected_op) {
-                        (Compact::Read, Compact::Read) => {}
-                        (Compact::Write(value), Compact::Write(expected))
-                        | (Compact::ReadThenWrite(value), Compact::ReadThenWrite(expected)) => {
+                        (Compact::Read(value), Compact::Read(expected))
+                        | (Compact::Write(value), Compact::Write(expected)) => {
                             assert_eq!(value, expected);
+                        }
+                        (
+                            Compact::ReadThenWrite(read, write),
+                            Compact::ReadThenWrite(expected_read, expected_write),
+                        ) => {
+                            assert_eq!((read, write), (expected_read, expected_write));
                         }
                         _ => panic!("operation changed: {op:?} != {expected_op:?}"),
                     }
