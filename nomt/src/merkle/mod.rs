@@ -2,7 +2,7 @@
 //!
 //! This splits the work of warming-up and performing the trie update across worker threads.
 
-use crossbeam::channel::{self, Receiver, Sender};
+use crossbeam_channel::{self as channel, Receiver, Sender};
 use page_set::{FrozenSharedPageSet, PageSet};
 use parking_lot::Mutex;
 

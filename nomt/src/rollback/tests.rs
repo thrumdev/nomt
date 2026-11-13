@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fs::OpenOptions, sync::Arc};
 use super::{
     reverse_delta_worker::AsyncPending, BTreeMap, KeyPath, KeyReadWrite, LoadValueAsync, Rollback,
 };
-use crossbeam::channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use hex_literal::hex;
 
 const MAX_ROLLBACK_LOG_LEN: u32 = 100;
@@ -44,7 +44,7 @@ impl MockStore {
     }
 
     fn async_reader(&self) -> MockStoreAsync {
-        let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
+        let (completion_tx, completion_rx) = crossbeam_channel::unbounded();
         MockStoreAsync {
             inner: self.clone(),
             completion_tx,
