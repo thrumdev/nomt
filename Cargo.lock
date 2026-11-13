@@ -1075,6 +1075,7 @@ dependencies = [
  "quickcheck",
  "ruint",
  "serde",
+ "serde_json",
  "sha2",
 ]
 

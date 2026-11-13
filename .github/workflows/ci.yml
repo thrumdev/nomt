@@ -22,6 +22,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --verbose --workspace --locked
       - run: cargo test --verbose --workspace
+      # No workspace member enables these features, so `--workspace` doesn't build the decoders.
+      - run: cargo test --verbose -p nomt-core --features borsh,serde
   benchtop_check:
     name: NOMT - check benchtop
     runs-on: ubuntu-latest

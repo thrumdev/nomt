@@ -2049,4 +2049,56 @@ mod tests {
             MultiProofVerificationError::TooFewSiblings
         );
     }
+
+    /// A proof of absence for every key starting with a 0 bit: the left child of the root is a
+    /// terminator and the right child is `[1; 32]`.
+    #[cfg(any(feature = "borsh", feature = "serde"))]
+    fn terminator_proof() -> MultiProof {
+        MultiProof {
+            paths: vec![super::MultiPathProof {
+                terminal: PathProofTerminal::Terminator(TriePosition::from_path_and_depth(
+                    [0; 32], 1,
+                )),
+                depth: 1,
+            }],
+            siblings: vec![[1; 32]],
+        }
+    }
+
+    #[cfg(any(feature = "borsh", feature = "serde"))]
+    fn terminator_proof_root() -> [u8; 32] {
+        Blake3Hasher::hash_internal(&InternalData {
+            left: TERMINATOR,
+            right: [1; 32],
+        })
+    }
+
+    // Decoding a terminator whose position is deeper than 256 bits used to succeed, and
+    // `verify` then panicked slicing the 256-bit path.
+    #[cfg(feature = "borsh")]
+    #[test]
+    fn borsh_rejects_terminator_deeper_than_256_bits() {
+        let proof = terminator_proof();
+        let mut bytes = borsh::to_vec(&proof).unwrap();
+        let decoded: MultiProof = borsh::from_slice(&bytes).unwrap();
+        assert!(verify::<Blake3Hasher>(&decoded, terminator_proof_root()).is_ok());
+
+        // paths: u32 length, then the `PathProofTerminal` tag, the 32-byte path, the u16 depth.
+        let depth_offset = 4 + 1 + 32;
+        assert_eq!(bytes[depth_offset..depth_offset + 2], 1u16.to_le_bytes());
+        bytes[depth_offset..depth_offset + 2].copy_from_slice(&300u16.to_le_bytes());
+        assert!(borsh::from_slice::<MultiProof>(&bytes).is_err());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_rejects_terminator_deeper_than_256_bits() {
+        let proof = terminator_proof();
+        let mut value = serde_json::to_value(&proof).unwrap();
+        let decoded: MultiProof = serde_json::from_value(value.clone()).unwrap();
+        assert!(verify::<Blake3Hasher>(&decoded, terminator_proof_root()).is_ok());
+
+        value["paths"][0]["terminal"]["Terminator"]["depth"] = 300.into();
+        assert!(serde_json::from_value::<MultiProof>(value).is_err());
+    }
 }

@@ -7,17 +7,70 @@ use alloc::fmt;
 use bitvec::prelude::*;
 
 /// Encapsulates logic for moving around in paged storage for a binary trie.
+///
+/// Deserialization rejects positions that no constructor could produce: a depth beyond 256, or a
+/// node index that does not match the path and depth.
 #[derive(Clone)]
-#[cfg_attr(
-    feature = "borsh",
-    derive(borsh::BorshDeserialize, borsh::BorshSerialize)
-)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TriePosition {
     // The bits after depth are irrelevant.
     path: [u8; 32],
     depth: u16,
     node_index: usize,
+}
+
+/// The fields of a [`TriePosition`] as they appear on the wire, before validation.
+#[cfg(any(feature = "borsh", feature = "serde"))]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshDeserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename = "TriePosition"))]
+struct RawTriePosition {
+    path: [u8; 32],
+    depth: u16,
+    node_index: usize,
+}
+
+#[cfg(any(feature = "borsh", feature = "serde"))]
+impl RawTriePosition {
+    fn validate(self) -> Result<TriePosition, alloc::string::String> {
+        use alloc::format;
+
+        let expected_node_index = match self.depth {
+            0 => 0,
+            1..=256 => node_index(last_page_path(&self.path, self.depth)),
+            depth => return Err(format!("TriePosition depth {depth} exceeds 256")),
+        };
+        if self.node_index != expected_node_index {
+            return Err(format!(
+                "TriePosition node index {} does not match its path (expected {})",
+                self.node_index, expected_node_index
+            ));
+        }
+        Ok(TriePosition {
+            path: self.path,
+            depth: self.depth,
+            node_index: self.node_index,
+        })
+    }
+}
+
+#[cfg(feature = "borsh")]
+impl borsh::BorshDeserialize for TriePosition {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        <RawTriePosition as borsh::BorshDeserialize>::deserialize_reader(reader)?
+            .validate()
+            .map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, e))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for TriePosition {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <RawTriePosition as serde::Deserialize>::deserialize(deserializer)?
+            .validate()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl PartialEq for TriePosition {
@@ -366,5 +419,104 @@ mod tests {
         );
         assert_eq!(p.depth as usize, 255);
         p.down(false);
+    }
+
+    /// Positions reachable through the public API, including some with stale bits past `depth`.
+    #[cfg(any(feature = "borsh", feature = "serde"))]
+    fn sample_positions() -> Vec<TriePosition> {
+        let mut positions = vec![TriePosition::new()];
+        for depth in [1, 2, 5, 6, 7, 12, 13, 128, 255, 256] {
+            positions.push(TriePosition::from_path_and_depth([0xa5; 32], depth));
+        }
+        let mut p = TriePosition::from_path_and_depth([0xff; 32], 20);
+        // Within the same page: the bits past the new depth stay set.
+        p.up(1);
+        positions.push(p.clone());
+        // Across a page boundary.
+        p.up(9);
+        positions.push(p.clone());
+        p.sibling();
+        p.down(false);
+        positions.push(p);
+        positions
+    }
+
+    #[cfg(any(feature = "borsh", feature = "serde"))]
+    fn assert_identical(a: &TriePosition, b: &TriePosition) {
+        assert_eq!(a.raw_path(), b.raw_path());
+        assert_eq!(a.depth(), b.depth());
+        assert_eq!(a.node_index(), b.node_index());
+    }
+
+    #[cfg(feature = "borsh")]
+    mod borsh_decoding {
+        use super::{assert_identical, sample_positions};
+        use crate::trie_pos::TriePosition;
+
+        fn encode(path: [u8; 32], depth: u16, node_index: usize) -> Vec<u8> {
+            // borsh encodes `usize` as `u64`.
+            borsh::to_vec(&(path, depth, node_index as u64)).unwrap()
+        }
+
+        #[test]
+        fn roundtrip_keeps_wire_format() {
+            for pos in sample_positions() {
+                let bytes = borsh::to_vec(&pos).unwrap();
+                assert_eq!(bytes, encode(pos.raw_path(), pos.depth(), pos.node_index()));
+                assert_identical(&borsh::from_slice(&bytes).unwrap(), &pos);
+            }
+        }
+
+        #[test]
+        fn rejects_depth_beyond_256() {
+            for depth in [257, 300, u16::MAX] {
+                let bytes = encode([0xa5; 32], depth, 0);
+                assert!(borsh::from_slice::<TriePosition>(&bytes).is_err());
+            }
+        }
+
+        #[test]
+        fn rejects_inconsistent_node_index() {
+            let pos = TriePosition::from_path_and_depth([0xa5; 32], 13);
+            let bytes = encode(pos.raw_path(), pos.depth(), pos.node_index() + 1);
+            assert!(borsh::from_slice::<TriePosition>(&bytes).is_err());
+            assert!(borsh::from_slice::<TriePosition>(&encode([0; 32], 0, 1)).is_err());
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    mod serde_decoding {
+        use super::{assert_identical, sample_positions};
+        use crate::trie_pos::TriePosition;
+        use serde_json::{json, Value};
+
+        fn encode(path: [u8; 32], depth: u16, node_index: usize) -> Value {
+            json!({ "path": path, "depth": depth, "node_index": node_index })
+        }
+
+        #[test]
+        fn roundtrip_keeps_wire_format() {
+            for pos in sample_positions() {
+                let value = serde_json::to_value(&pos).unwrap();
+                assert_eq!(value, encode(pos.raw_path(), pos.depth(), pos.node_index()));
+                assert_identical(&serde_json::from_value(value).unwrap(), &pos);
+            }
+        }
+
+        #[test]
+        fn rejects_depth_beyond_256() {
+            for depth in [257, 300, u16::MAX] {
+                let value = encode([0xa5; 32], depth, 0);
+                assert!(serde_json::from_value::<TriePosition>(value).is_err());
+            }
+        }
+
+        #[test]
+        fn rejects_inconsistent_node_index() {
+            let pos = TriePosition::from_path_and_depth([0xa5; 32], 13);
+            let value = encode(pos.raw_path(), pos.depth(), pos.node_index() + 1);
+            assert!(serde_json::from_value::<TriePosition>(value).is_err());
+            assert!(serde_json::from_value::<TriePosition>(encode([0; 32], 0, 1)).is_err());
+        }
     }
 }
