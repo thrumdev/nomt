@@ -1,7 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use crossbeam_channel::{Receiver, RecvError, Sender};
-use dashmap::DashMap;
 use nomt_core::trie::KeyPath;
 
 use crate::{
@@ -55,35 +54,36 @@ pub(super) trait AsyncPending {
 pub(super) enum DeltaBuilderCommand {
     /// Start lookup on a key path.
     Lookup(KeyPath),
-    /// Join all outstanding lookups, then send a signal over the channel.
-    /// Replace the priors with the given map.
-    Join(Sender<()>, Arc<DashMap<KeyPath, Option<Vec<u8>>>>),
+    /// Join all outstanding lookups, then send the priors gathered so far over the channel.
+    /// The worker continues with an empty map.
+    Join(Sender<HashMap<KeyPath, Option<Vec<u8>>>>),
 }
 
 /// Start the reverse delta builder on a thread of its own, which runs until the builder is
 /// finalized or dropped.
+///
+/// The worker's result is the priors gathered since the last `Join`.
 pub(super) fn start(
     store: impl LoadValueAsync,
-    priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
-) -> (Sender<DeltaBuilderCommand>, Receiver<TaskResult<()>>) {
+) -> (
+    Sender<DeltaBuilderCommand>,
+    Receiver<TaskResult<HashMap<KeyPath, Option<Vec<u8>>>>>,
+) {
     let (command_tx, command_rx) = crossbeam_channel::unbounded();
     let (worker_result_tx, worker_result_rx) = crossbeam_channel::unbounded();
 
-    let worker_task = {
-        let priors = priors.clone();
-        move || {
-            let worker = ReverseDeltaWorker {
-                store: Some(store),
-                requests: HashMap::new(),
-                priors,
-                shutdown: false,
-                request_index: 0,
-                overflow_request_index: u64::MAX,
-                dormant_request_count: 0,
-            };
+    let worker_task = move || {
+        let worker = ReverseDeltaWorker {
+            store: Some(store),
+            requests: HashMap::new(),
+            priors: HashMap::new(),
+            shutdown: false,
+            request_index: 0,
+            overflow_request_index: u64::MAX,
+            dormant_request_count: 0,
+        };
 
-            run(worker, command_rx);
-        }
+        run(worker, command_rx)
     };
 
     spawn_thread_task("rollback-worker", worker_task, worker_result_tx);
@@ -102,7 +102,7 @@ struct ReverseDeltaWorker<Store: LoadValueAsync> {
     // INVARIANT: store is always `Some` until `joining` is true and requests are empty.
     store: Option<Store>,
     requests: HashMap<u64, LiveRequest<Store::Pending>>,
-    priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>,
+    priors: HashMap<KeyPath, Option<Vec<u8>>>,
     shutdown: bool,
     // regular requests start at 0 and move upwards.
     request_index: u64,
@@ -239,15 +239,15 @@ impl<Store: LoadValueAsync> ReverseDeltaWorker<Store> {
         self.requests.is_empty()
     }
 
-    fn replace_priors(&mut self, new_priors: Arc<DashMap<KeyPath, Option<Vec<u8>>>>) {
-        self.priors = new_priors;
+    fn take_priors(&mut self) -> HashMap<KeyPath, Option<Vec<u8>>> {
+        std::mem::take(&mut self.priors)
     }
 }
 
 fn run<Store: LoadValueAsync>(
     mut worker: ReverseDeltaWorker<Store>,
     command_rx: Receiver<DeltaBuilderCommand>,
-) {
+) -> HashMap<KeyPath, Option<Vec<u8>>> {
     // UNWRAP: the store is always live until shutdown.
     let raw_completion_rx = worker.store.as_ref().unwrap().raw_completion_stream();
 
@@ -262,7 +262,7 @@ fn run<Store: LoadValueAsync>(
                     worker.handle_lookup(key_path);
                     None
                 },
-                Ok(DeltaBuilderCommand::Join(done_joining, new_priors)) => Some((done_joining, new_priors)),
+                Ok(DeltaBuilderCommand::Join(done_joining)) => Some(done_joining),
             },
             recv(raw_completion_rx) -> raw_completion => match raw_completion {
                 // PANIC: completions never disconnect before commands.
@@ -275,7 +275,7 @@ fn run<Store: LoadValueAsync>(
             },
         };
 
-        if let Some((done_joining, new_priors)) = join {
+        if let Some(done_joining) = join {
             while !worker.is_empty() {
                 // UNWRAP: completions never disconnect before `commands` does.
                 let raw_completion = raw_completion_rx.recv().unwrap();
@@ -284,8 +284,7 @@ fn run<Store: LoadValueAsync>(
                 worker.handle_completion(user_data, completion);
             }
 
-            worker.replace_priors(new_priors);
-            let _ = done_joining.send(());
+            let _ = done_joining.send(worker.take_priors());
         }
     }
 
@@ -296,6 +295,7 @@ fn run<Store: LoadValueAsync>(
     }
 
     assert!(worker.is_shut_down());
+    worker.priors
 }
 
 /// The implementation of [`LoadValueAsync`] for the real store.
