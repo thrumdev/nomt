@@ -134,7 +134,9 @@ fn warm_up_phase<H: HashAlgorithm>(
 
     let mut warm_ups = HashMap::new();
 
-    loop {
+    // Breaks with whether the session finished. A disconnected channel means it was dropped
+    // instead: nobody will read the output, so don't wait for the queued warm-ups.
+    let finished = loop {
         if let Some(result) = seeker.take_completion() {
             warm_ups.insert(result.key, result);
             continue;
@@ -147,8 +149,8 @@ fn warm_up_phase<H: HashAlgorithm>(
             if index == finish_no_work_idx {
                 match finish_rx.try_recv() {
                     Err(TryRecvError::Empty) => continue,
-                    Err(_) => panic!("Warm-Up worker, unexpected failure of the finish channel",),
-                    Ok(()) => break,
+                    Err(TryRecvError::Disconnected) => break false,
+                    Ok(()) => break true,
                 }
             } else if index == page_no_work_idx {
                 seeker.try_recv_page(&mut page_set)?;
@@ -161,14 +163,14 @@ fn warm_up_phase<H: HashAlgorithm>(
             if index == finish_idx {
                 match finish_rx.try_recv() {
                     Err(TryRecvError::Empty) => continue,
-                    Err(_) => panic!("Warm-Up worker, unexpected failure of the finish channel",),
-                    Ok(()) => break,
+                    Err(TryRecvError::Disconnected) => break false,
+                    Ok(()) => break true,
                 }
             } else if index == warmup_idx {
                 let warm_up_command = match warmup_rx.try_recv() {
                     Ok(command) => command,
                     Err(TryRecvError::Empty) => continue,
-                    Err(_) => panic!("Warm-Up worker, unexpected failure of the warmup channel"),
+                    Err(TryRecvError::Disconnected) => break false,
                 };
 
                 seeker.push(warm_up_command.key_path);
@@ -178,9 +180,10 @@ fn warm_up_phase<H: HashAlgorithm>(
                 unreachable!()
             }
         }
-    }
+    };
 
-    while !seeker.is_empty() {
+    // Pages still in flight for a dropped session are discarded by the I/O pool.
+    while finished && !seeker.is_empty() {
         if let Some(result) = seeker.take_completion() {
             warm_ups.insert(result.key, result);
             continue;
