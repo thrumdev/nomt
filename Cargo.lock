@@ -1084,10 +1084,13 @@ name = "nomt-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "bincode",
  "bitvec",
+ "borsh",
  "libfuzzer-sys",
  "nomt",
  "nomt-core",
+ "serde",
  "tempfile",
 ]
 
