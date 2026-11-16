@@ -83,6 +83,11 @@ impl Clone for PageId {
 }
 
 impl PageId {
+    /// Build a page ID from its child indices, each below `1 << DEPTH`.
+    pub(crate) fn from_child_indices(path: ArrayVec<u8, MAX_PAGE_DEPTH>) -> Self {
+        PageId { path }
+    }
+
     /// Decode a page ID from its disambiguated representation.
     ///
     /// This can fall out of bounds.

@@ -1,6 +1,6 @@
 use crate::{
     page::DEPTH,
-    page_id::{ChildPageIndex, PageId, ROOT_PAGE_ID},
+    page_id::{ChildPageIndex, PageId},
     trie::KeyPath,
 };
 use alloc::fmt;
@@ -243,20 +243,17 @@ impl TriePosition {
             return None;
         }
 
-        let mut page_id = ROOT_PAGE_ID;
-        for (i, chunk) in self.path().chunks_exact(DEPTH).enumerate() {
-            if (i + 1) * DEPTH == self.depth as usize {
-                return Some(page_id);
-            }
-
-            // UNWRAP: 6 bits never overflows child page index
-            let child_index = ChildPageIndex::new(chunk.load_be::<u8>()).unwrap();
-
-            // UNWRAP: trie position never overflows page tree.
-            page_id = page_id.child_page_id(child_index).unwrap();
+        // The page holding depth `d` lies below `(d - 1) / DEPTH` full pages; each contributes the
+        // 6-bit chunk of the path it covers.
+        let pages = (self.depth as usize - 1) / DEPTH;
+        let mut path = arrayvec::ArrayVec::new();
+        for i in 0..pages {
+            let bit = i * DEPTH;
+            let byte = bit / 8;
+            let pair = u16::from_be_bytes([self.path[byte], self.path[byte + 1]]);
+            path.push((pair >> (16 - DEPTH - bit % 8)) as u8 & ((1 << DEPTH) - 1));
         }
-
-        Some(page_id)
+        Some(PageId::from_child_indices(path))
     }
 
     /// Get the child page index, relative to the current page,
@@ -431,6 +428,31 @@ mod tests {
         );
         assert_eq!(p.depth as usize, 255);
         p.down(false);
+    }
+
+    #[test]
+    fn page_id_matches_child_page_walk() {
+        use crate::{
+            page::DEPTH,
+            page_id::{ChildPageIndex, ROOT_PAGE_ID},
+        };
+        use bitvec::prelude::*;
+
+        assert_eq!(TriePosition::new().page_id(), None);
+        for path in [[0x00; 32], [0xff; 32], [0xa5; 32], [0x5a; 32]] {
+            for depth in 1..=256u16 {
+                let pos = TriePosition::from_path_and_depth(path, depth);
+                let mut expected = ROOT_PAGE_ID;
+                for (i, chunk) in pos.path().chunks_exact(DEPTH).enumerate() {
+                    if (i + 1) * DEPTH == depth as usize {
+                        break;
+                    }
+                    let idx = ChildPageIndex::new(chunk.load_be::<u8>()).unwrap();
+                    expected = expected.child_page_id(idx).unwrap();
+                }
+                assert_eq!(pos.page_id(), Some(expected), "depth {depth}");
+            }
+        }
     }
 
     /// Positions reachable through the public API, including some with stale bits past `depth`.
