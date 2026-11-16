@@ -56,44 +56,63 @@ pub fn separator_len(key: &Key) -> usize {
 // Reconstruct a key starting from a prefix and a misaligned separator.
 // Note: bit offsets starts from 0 going to 7, and the most significant bit is the one with index 0
 pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparators) -> Key {
-    let mut key = [0u8; 32];
+    let (separator_bytes, bit_start, bit_len) = separator;
+    let prefix_bit_len = maybe_prefix.as_ref().map_or(0, |p| p.1);
+    let word =
+        |bytes: &[u8], i: usize| u64::from_be_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
 
-    let prefix_bit_len = maybe_prefix.as_ref().map(|p| p.1).unwrap_or(0);
-    let prefix_byte_len = (prefix_bit_len + 7) / 8;
-    let prefix_end_bit_offset = prefix_bit_len % 8;
-    let (separator_bytes, separator_bit_start, separator_bit_len) = separator;
-
-    // where the separator will start to be stored
-    let start_destination = match prefix_byte_len {
-        0 => 0,
-        len if prefix_end_bit_offset == 0 => len,
-        // overlap between the end of the prefix and the beginning of the separator
-        len => len - 1,
-    };
-
-    // shift the separator and store it in the key
-    bitwise_memcpy(
-        &mut key[start_destination..],
-        prefix_end_bit_offset,
-        separator_bytes,
-        separator_bit_start,
-        separator_bit_len,
-    );
-
-    if prefix_byte_len != 0 {
-        // UNWRAP: prefix_byte_len can be different than 0 only if maybe_prefix is Some
-        let prefix = maybe_prefix.unwrap();
-
-        // copy the prefix into the key up to the penultimate byte
-        key[0..prefix_byte_len - 1].copy_from_slice(&prefix.0[0..prefix_byte_len - 1]);
-
-        // copy the last byte of the prefix without interfering with the separator
-        let mask_shift = 8 - (prefix_bit_len % 8) as u32;
-        let mask = 1u8.checked_shl(mask_shift).map(|m| !(m - 1)).unwrap_or(255);
-        key[prefix_byte_len - 1] |= prefix.0[prefix_byte_len - 1] & mask;
+    // Separator bits, aligned to bit 0 and cut to `bit_len`.
+    let mut buf = [0u8; 40];
+    let n = separator_bytes.len().min(buf.len());
+    buf[..n].copy_from_slice(&separator_bytes[..n]);
+    let mut sep = [0u64; 4];
+    for i in 0..4 {
+        sep[i] = if bit_start == 0 {
+            word(&buf, i)
+        } else {
+            (word(&buf, i) << bit_start) | (word(&buf, i + 1) >> (64 - bit_start))
+        };
+        let lo = i * 64;
+        if bit_len <= lo {
+            sep[i] = 0;
+        } else if bit_len < lo + 64 {
+            sep[i] &= !(u64::MAX >> (bit_len - lo));
+        }
     }
 
-    key
+    // Shift the separator past the prefix.
+    let (word_shift, bit_shift) = (prefix_bit_len / 64, prefix_bit_len % 64);
+    let mut key = [0u64; 4];
+    for j in word_shift..4 {
+        let i = j - word_shift;
+        key[j] = sep[i] >> bit_shift;
+        if bit_shift != 0 && i > 0 {
+            key[j] |= sep[i - 1] << (64 - bit_shift);
+        }
+    }
+
+    // Prefix bits.
+    if let Some((prefix_bytes, prefix_bit_len)) = maybe_prefix {
+        let mut prefix = [0u8; 32];
+        let len = (prefix_bit_len + 7) / 8;
+        prefix[..len].copy_from_slice(&prefix_bytes[..len]);
+        for i in 0..4 {
+            let lo = i * 64;
+            let mut w = word(&prefix, i);
+            if prefix_bit_len <= lo {
+                w = 0;
+            } else if prefix_bit_len < lo + 64 {
+                w &= !(u64::MAX >> (prefix_bit_len - lo));
+            }
+            key[i] |= w;
+        }
+    }
+
+    let mut out = [0u8; 32];
+    for i in 0..4 {
+        out[i * 8..i * 8 + 8].copy_from_slice(&key[i].to_be_bytes());
+    }
+    out
 }
 
 fn first_chunk_mask(bit_start: usize) -> u64 {
@@ -715,6 +734,25 @@ mod tests {
         QuickCheck::new()
             .tests(64)
             .quickcheck(property as fn(ReconstructCase) -> bool);
+    }
+
+    #[test]
+    fn reconstruct_key_all_lengths_and_offsets() {
+        let prefix: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(29) ^ 0xa5).collect();
+        let separator: Vec<u8> = (0..40u8).map(|i| i.wrapping_mul(73) ^ 0x5a).collect();
+        for prefix_bit_len in 0..=256 {
+            for bit_start in 0..8usize {
+                for bit_len in 0..=256 - prefix_bit_len {
+                    let byte_len = ((bit_start + bit_len + 7) / 8).next_multiple_of(8);
+                    let p = (&prefix[..(prefix_bit_len + 7) / 8], prefix_bit_len);
+                    let s = (&separator[..byte_len], bit_start, bit_len);
+                    assert_eq!(
+                        reference_reconstruct_key(Some(p), s),
+                        super::reconstruct_key(Some(p), s)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
