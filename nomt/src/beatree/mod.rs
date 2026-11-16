@@ -40,6 +40,88 @@ pub use ops::bit_ops::*;
 
 pub type Key = [u8; 32];
 
+/// Find `key` among `n` sorted, distinct keys given by `key_at`, with the semantics of
+/// `binary_search`.
+///
+/// Keys are usually hashes, spread evenly, so the position is first guessed from the leading 8
+/// bytes and then located by galloping from the guess. That reads a few keys instead of one per
+/// binary-search probe. Any key distribution gives the exact result; only the number of probes
+/// depends on it.
+pub(crate) fn interpolation_search(
+    n: usize,
+    key: &Key,
+    key_at: impl Fn(usize) -> Key,
+) -> Result<usize, usize> {
+    use std::cmp::Ordering;
+
+    let binary = |mut lo: usize, mut hi: usize| {
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match key_cmp(key, &key_at(mid)) {
+                Ordering::Equal => return Ok(mid),
+                Ordering::Less => hi = mid,
+                Ordering::Greater => lo = mid + 1,
+            }
+        }
+        Err(lo)
+    };
+    if n < 16 {
+        return binary(0, n);
+    }
+
+    let prefix = |k: &Key| u64::from_be_bytes(k[..8].try_into().unwrap());
+    let (first, last, target) = (prefix(&key_at(0)), prefix(&key_at(n - 1)), prefix(key));
+    let guess = if target <= first {
+        0
+    } else if target >= last {
+        n - 1
+    } else {
+        ((target - first) as u128 * (n - 1) as u128 / (last - first) as u128) as usize
+    };
+
+    match key_cmp(key, &key_at(guess)) {
+        Ordering::Equal => Ok(guess),
+        Ordering::Less => {
+            // The answer is at most `hi`, and `key < key_at(hi)`.
+            let mut hi = guess;
+            let mut step = 1;
+            loop {
+                if hi < step {
+                    return binary(0, hi);
+                }
+                let probe = hi - step;
+                match key_cmp(key, &key_at(probe)) {
+                    Ordering::Equal => return Ok(probe),
+                    Ordering::Less => {
+                        hi = probe;
+                        step *= 2;
+                    }
+                    Ordering::Greater => return binary(probe + 1, hi),
+                }
+            }
+        }
+        Ordering::Greater => {
+            // The answer is at least `lo`, and `key > key_at(lo - 1)`.
+            let mut lo = guess + 1;
+            let mut step = 1;
+            loop {
+                let probe = lo + step - 1;
+                if probe >= n {
+                    return binary(lo, n);
+                }
+                match key_cmp(key, &key_at(probe)) {
+                    Ordering::Equal => return Ok(probe),
+                    Ordering::Greater => {
+                        lo = probe + 1;
+                        step *= 2;
+                    }
+                    Ordering::Less => return binary(lo, probe),
+                }
+            }
+        }
+    }
+}
+
 /// Lexicographic order of two keys, compared as four big-endian words instead of a `memcmp` call.
 #[inline]
 pub(crate) fn key_cmp(a: &Key, b: &Key) -> std::cmp::Ordering {

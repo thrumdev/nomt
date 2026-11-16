@@ -255,78 +255,10 @@ fn search(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
 }
 
 /// Find `key` among sorted cell pointers, with the semantics of `binary_search`.
-///
-/// Keys are usually hashes, spread evenly within a leaf, so the position is first guessed from
-/// the leading 8 bytes and then located by galloping from the guess. That touches a couple of
-/// cache lines instead of one per binary-search probe. Any key distribution gives the exact
-/// result; only the number of probes depends on it.
 pub fn search_cells(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
-    use crate::beatree::key_cmp;
-    use std::cmp::Ordering;
-
-    let n = cell_pointers.len();
-    let key_at = |i: usize| extract_key(&cell_pointers[i]);
-    let binary = |lo: usize, hi: usize| {
-        cell_pointers[lo..hi]
-            .binary_search_by(|cell| key_cmp(&extract_key(cell), key))
-            .map(|i| i + lo)
-            .map_err(|i| i + lo)
-    };
-    if n < 16 {
-        return binary(0, n);
-    }
-
-    let prefix = |k: &Key| u64::from_be_bytes(k[..8].try_into().unwrap());
-    let (first, last, target) = (prefix(&key_at(0)), prefix(&key_at(n - 1)), prefix(key));
-    let guess = if target <= first {
-        0
-    } else if target >= last {
-        n - 1
-    } else {
-        ((target - first) as u128 * (n - 1) as u128 / (last - first) as u128) as usize
-    };
-
-    match key_cmp(key, &key_at(guess)) {
-        Ordering::Equal => Ok(guess),
-        Ordering::Less => {
-            // The answer is in [lo, hi], with `key < key_at(hi)`.
-            let mut hi = guess;
-            let mut step = 1;
-            loop {
-                if hi < step {
-                    return binary(0, hi);
-                }
-                let probe = hi - step;
-                match key_cmp(key, &key_at(probe)) {
-                    Ordering::Equal => return Ok(probe),
-                    Ordering::Less => {
-                        hi = probe;
-                        step *= 2;
-                    }
-                    Ordering::Greater => return binary(probe + 1, hi),
-                }
-            }
-        }
-        Ordering::Greater => {
-            // The answer is in [lo, n], with `key > key_at(lo - 1)`.
-            let mut lo = guess + 1;
-            let mut step = 1;
-            loop {
-                let probe = lo + step - 1;
-                if probe >= n {
-                    return binary(lo, n);
-                }
-                match key_cmp(key, &key_at(probe)) {
-                    Ordering::Equal => return Ok(probe),
-                    Ordering::Greater => {
-                        lo = probe + 1;
-                        step *= 2;
-                    }
-                    Ordering::Less => return binary(lo, probe),
-                }
-            }
-        }
-    }
+    crate::beatree::interpolation_search(cell_pointers.len(), key, |i| {
+        extract_key(&cell_pointers[i])
+    })
 }
 
 #[cfg(feature = "benchmarks")]
