@@ -647,17 +647,22 @@ impl<T: HashAlgorithm> Session<T> {
 
         // Built while the merkle update runs: both only read the store, which is not modified
         // until the finished session is committed.
-        let rollback_delta = self
-            .rollback_delta
-            .take()
-            .map(|delta_builder| delta_builder.finalize(&actuals));
-
         let mut tx = self.store.new_value_tx();
-        for (path, read_write) in actuals {
-            if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) = read_write {
-                tx.write_value::<T>(path, value);
+        let rollback_delta = match self.rollback_delta.take() {
+            Some(delta_builder) => Some(
+                delta_builder.finalize(actuals, |path, value| tx.write_value::<T>(path, value)),
+            ),
+            None => {
+                for (path, read_write) in actuals {
+                    if let KeyReadWrite::Write(value) | KeyReadWrite::ReadThenWrite(_, value) =
+                        read_write
+                    {
+                        tx.write_value::<T>(path, value);
+                    }
+                }
+                None
             }
-        }
+        };
 
         let merkle_output = merkle_update_handle.join()?;
         Ok(FinishedSession {
