@@ -369,34 +369,41 @@ impl ReverseDeltaBuilder {
     /// Finalize the delta.
     ///
     /// This function is expected to be called before the store is modified.
-    pub fn finalize(mut self, actuals: &[(KeyPath, KeyReadWrite)]) -> Delta {
+    /// Priors are moved out of `actuals`, and every written value is handed to `on_write` in order.
+    pub fn finalize(
+        mut self,
+        actuals: Vec<(KeyPath, KeyReadWrite)>,
+        mut on_write: impl FnMut(KeyPath, Option<Vec<u8>>),
+    ) -> Delta {
         // wait for all submitted requests to finish and take the tentative values gathered so far.
         let (join_tx, join_rx) = crossbeam_channel::bounded(1);
         let _ = self.command_tx.send(DeltaBuilderCommand::Join(join_tx));
         let mut tentative_priors = join_rx.recv().unwrap_or_default();
 
-        let mut final_priors = HashMap::with_capacity(tentative_priors.len() * 2);
+        let mut final_priors = HashMap::with_capacity(actuals.len());
 
         for (path, read_write) in actuals {
             match read_write {
                 KeyReadWrite::Read(_) => {
                     // The path was read. We don't need to preserve anything.
                 }
-                KeyReadWrite::Write(_) => {
+                KeyReadWrite::Write(value) => {
                     // The path was written. If we have a tentative value, keep it. Otherwise, fetch
                     // the current value from the store.
-                    if let Some((path, value)) = tentative_priors.remove_entry(path) {
+                    if let Some((path, value)) = tentative_priors.remove_entry(&path) {
                         // Tentative speculation was a hit. Keep the entry.
                         final_priors.insert(path, value);
                     } else {
                         // The delta builder was not aware of this write. Initiate a fetch from the store
                         // and record the result as a prior.
-                        let _ = self.command_tx.send(DeltaBuilderCommand::Lookup(*path));
+                        let _ = self.command_tx.send(DeltaBuilderCommand::Lookup(path));
                     }
+                    on_write(path, value);
                 }
-                KeyReadWrite::ReadThenWrite(prior, _) => {
+                KeyReadWrite::ReadThenWrite(prior, value) => {
                     // The path was read and then written. We could just keep the prior value.
-                    final_priors.insert(*path, prior.clone());
+                    final_priors.insert(path, prior);
+                    on_write(path, value);
                 }
             }
         }
