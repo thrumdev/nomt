@@ -89,6 +89,30 @@ pub struct UpdatedPage {
     pub bucket_info: BucketInfo,
 }
 
+/// Everything of an [`UpdatedPage`] but its page data.
+pub struct UpdatedPageMeta {
+    /// The ID of the page.
+    pub page_id: PageId,
+    /// A compact diff indicating all modified slots in the page.
+    pub diff: PageDiff,
+    /// The bucket info associated with the page.
+    pub bucket_info: BucketInfo,
+}
+
+impl UpdatedPage {
+    /// Separate the page data from the rest.
+    pub fn split(self) -> (UpdatedPageMeta, CowPage) {
+        (
+            UpdatedPageMeta {
+                page_id: self.page_id,
+                diff: self.diff,
+                bucket_info: self.bucket_info,
+            },
+            self.page,
+        )
+    }
+}
+
 /// A page which was reconstructed by the page walker.
 struct ReconstructedPage {
     /// The ID of the page.
