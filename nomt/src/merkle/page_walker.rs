@@ -849,7 +849,7 @@ impl<H: NodeHasher> PageWalker<H> {
         // elision and the carrying of elided children do not occur.
         // The stack could be empty if the page is the root page or one of its children,
         // and if the page is the last to be reconstructed.
-        if self.stack.is_empty() || stack_page.page_id.parent_page_id() == ROOT_PAGE_ID {
+        if self.stack.is_empty() || stack_page.page_id.depth() <= 1 {
             if self.reconstruction {
                 push_reconstructed(&mut self.output_pages, stack_page);
             } else {
