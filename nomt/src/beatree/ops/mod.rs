@@ -134,7 +134,7 @@ pub fn find_key_pos(branch: &BranchNode, key: &Key, low: Option<usize>) -> (bool
     while low < high {
         let mid = low + (high - low) / 2;
 
-        match key.cmp(&get_key(branch, mid)) {
+        match crate::beatree::key_cmp(key, &get_key(branch, mid)) {
             Ordering::Equal => {
                 return (true, mid);
             }
