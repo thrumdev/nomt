@@ -22,6 +22,7 @@ use std::{collections::HashMap, fmt, num::NonZeroUsize, sync::Arc};
 // (2^(DEPTH + 1)) - 2
 pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
 
+#[inline]
 fn read_node(data: &FatPage, index: usize) -> Node {
     assert!(index < NODES_PER_PAGE, "index out of bounds");
     let start = index * 32;
@@ -31,6 +32,7 @@ fn read_node(data: &FatPage, index: usize) -> Node {
     node
 }
 
+#[inline]
 fn set_node(data: &mut FatPage, index: usize, node: Node) {
     assert!(index < NODES_PER_PAGE, "index out of bounds");
     let start = index * 32;
@@ -38,6 +40,7 @@ fn set_node(data: &mut FatPage, index: usize, node: Node) {
     data[start..end].copy_from_slice(&node);
 }
 
+#[inline]
 fn read_elided_children(data: &FatPage) -> ElidedChildren {
     // UNWRAP: elided_children slice is 8 bytes long.
     ElidedChildren::from_bytes(data[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32].try_into().unwrap())
@@ -77,21 +80,25 @@ impl PageMut {
     }
 
     /// Read out the node at the given index.
+    #[inline]
     pub fn node(&self, index: usize) -> Node {
         read_node(&self.inner, index)
     }
 
     /// Write the node at the given index.
+    #[inline]
     pub fn set_node(&mut self, index: usize, node: Node) {
         set_node(&mut self.inner, index, node)
     }
 
     /// Read out the bitfield representing which child page has been elided.
+    #[inline]
     pub fn elided_children(&self) -> ElidedChildren {
         read_elided_children(&self.inner)
     }
 
     /// Write the bitfield representing which child page has been elided.
+    #[inline]
     pub fn set_elided_children(&mut self, elided_children: &ElidedChildren) {
         self.inner[PAGE_SIZE - 32 - 8..PAGE_SIZE - 32].copy_from_slice(&elided_children.to_bytes());
     }
@@ -113,11 +120,13 @@ pub struct Page {
 
 impl Page {
     /// Read out the node at the given index.
+    #[inline]
     pub fn node(&self, index: usize) -> Node {
         read_node(&self.inner, index)
     }
 
     /// Read out the bitfield representing which child page has been elided.
+    #[inline]
     pub fn elided_children(&self) -> ElidedChildren {
         read_elided_children(&self.inner)
     }

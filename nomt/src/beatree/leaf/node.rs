@@ -54,6 +54,7 @@ pub struct LeafNode {
 }
 
 impl LeafNode {
+    #[inline]
     pub fn n(&self) -> usize {
         u16::from_le_bytes(self.inner[0..2].try_into().unwrap()) as usize
     }
@@ -62,10 +63,12 @@ impl LeafNode {
         self.inner[0..2].copy_from_slice(&n.to_le_bytes());
     }
 
+    #[inline]
     pub fn key(&self, i: usize) -> Key {
         extract_key(&self.cell_pointers()[i])
     }
 
+    #[inline]
     pub fn value(&self, i: usize) -> (&[u8], bool) {
         let (range, overflow) = self.value_range(self.cell_pointers(), i);
         (&self.inner[range], overflow)
@@ -88,6 +91,7 @@ impl LeafNode {
     }
 
     // returns the range at which the value of a cell is stored
+    #[inline]
     fn value_range(&self, cell_pointers: &[[u8; 34]], index: usize) -> (Range<usize>, bool) {
         let (start, overflow) = cell_offset(cell_pointers, index);
         let end = if index == cell_pointers.len() - 1 {
@@ -99,6 +103,7 @@ impl LeafNode {
         (start..end, overflow)
     }
 
+    #[inline]
     pub fn cell_pointers(&self) -> &[[u8; 34]] {
         let cell_pointers_end = self.n() * 34;
         assert!(cell_pointers_end < LEAF_NODE_BODY_SIZE);
@@ -212,6 +217,7 @@ pub fn body_size(n: usize, value_size_sum: usize) -> usize {
 }
 
 // get the key from the given cell pointer
+#[inline]
 pub fn extract_key(cell_pointer: &[u8; 34]) -> Key {
     let mut buf = [0u8; 32];
     buf.copy_from_slice(&cell_pointer[..32]);
@@ -219,6 +225,7 @@ pub fn extract_key(cell_pointer: &[u8; 34]) -> Key {
 }
 
 // get the cell offset and whether the cell is an overflow cell.
+#[inline]
 fn cell_offset(cell_pointers: &[[u8; 34]], index: usize) -> (usize, bool) {
     let mut buf = [0; 2];
     buf.copy_from_slice(&cell_pointers[index][32..34]);

@@ -34,6 +34,7 @@ impl PageDiff {
     /// Note that some 32-byte slot in the page data has changed.
     ///
     /// The acceptable range is 0..NODES_PER_PAGE. Erases the clear bit.
+    #[inline]
     pub fn set_changed(&mut self, slot_index: usize) {
         assert!(slot_index < NODES_PER_PAGE);
         let word = slot_index / 64;
