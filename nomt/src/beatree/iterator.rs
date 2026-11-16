@@ -72,7 +72,7 @@ impl BeatreeIterator {
                 }
                 (None, Some(_)) => break Action::TakeMemory,
                 (Some((leaves_key, leaf_pending)), Some((memory_key, memory_value))) => {
-                    match (memory_key.cmp(&leaves_key), memory_value) {
+                    match (super::key_cmp(memory_key, &leaves_key), memory_value) {
                         (Ordering::Less, ValueChange::Delete) => {
                             // skip deleted in-memory values that don't correspond to a leaf value.
                             // this can happen when the item was inserted in the earlier overlay,
@@ -169,11 +169,15 @@ impl CurrentLeaf {
     }
 
     fn is_in_range(&self, end: Option<&Key>) -> bool {
-        end.map_or(true, |end| &self.leaf.key(self.index) < end)
+        end.map_or(true, |end| {
+            super::key_cmp(&self.leaf.key(self.index), end).is_lt()
+        })
     }
 
     fn is_last_output_in_range(&self, end: Option<&Key>) -> bool {
-        end.map_or(true, |end| &self.leaf.key(self.index - 1) < end)
+        end.map_or(true, |end| {
+            super::key_cmp(&self.leaf.key(self.index - 1), end).is_lt()
+        })
     }
 
     fn last_output(&self) -> IterOutput<'_> {
@@ -241,10 +245,9 @@ impl LeafIterator {
             LeafIteratorState::Proceeding { current, .. } => {
                 let next = current.index + 1;
                 next < current.leaf.n()
-                    && self
-                        .end
-                        .as_ref()
-                        .map_or(true, |end| current.leaf.key(next) < *end)
+                    && self.end.as_ref().map_or(true, |end| {
+                        super::key_cmp(&current.leaf.key(next), end).is_lt()
+                    })
             }
             _ => false,
         };
@@ -331,7 +334,12 @@ impl LeafIterator {
                 .next_key(get_key(&*branch, next_index_in_branch - 1));
             match next_key {
                 None => LeafIteratorState::Done { last: Some(last) },
-                Some(k) if self.end.as_ref().map_or(false, |end| end <= &k) => {
+                Some(k)
+                    if self
+                        .end
+                        .as_ref()
+                        .map_or(false, |end| super::key_cmp(end, &k).is_le()) =>
+                {
                     LeafIteratorState::Done { last: Some(last) }
                 }
                 Some(k) => {
@@ -347,7 +355,10 @@ impl LeafIterator {
             }
         } else {
             let separator = get_key(&branch, next_index_in_branch);
-            if self.end.map_or(true, |end| separator < end) {
+            if self
+                .end
+                .map_or(true, |end| super::key_cmp(&separator, &end).is_lt())
+            {
                 LeafIteratorState::Blocked {
                     index_in_branch: next_index_in_branch,
                     separator,
@@ -369,7 +380,7 @@ impl LeafIterator {
             let cell_pointers = leaf.cell_pointers();
             let res = cell_pointers.binary_search_by(|cell_pointer| {
                 let k = super::leaf::node::extract_key(cell_pointer);
-                k.cmp(&start)
+                super::key_cmp(&k, &start)
             });
 
             res.unwrap_or_else(|i| i)
@@ -444,7 +455,11 @@ impl Iterator for NeededLeavesIter {
         if let Some(i) = range.next() {
             let key = get_key(&branch, i);
             let pn = branch.node_pointer(i).into();
-            if self.end.as_ref().map_or(true, |end| &key < end) {
+            if self
+                .end
+                .as_ref()
+                .map_or(true, |end| super::key_cmp(&key, end).is_lt())
+            {
                 self.state = Some((branch, range));
                 Some(pn)
             } else {
@@ -510,7 +525,7 @@ impl StagingIterator {
             (None, None) => None,
             (Some(x), None) | (None, Some(x)) => Some(x),
             (Some(primary), Some(secondary)) => {
-                if primary.0 <= secondary.0 {
+                if super::key_cmp(primary.0, secondary.0).is_le() {
                     // if equal, favor the primary (more recent) staging map.
                     Some(primary)
                 } else {
@@ -532,7 +547,7 @@ impl StagingIterator {
             (Some(_), None) => self.primary.next(),
             (None, Some(_)) => self.next_secondary(),
             (Some(primary), Some(secondary)) => {
-                match primary.cmp(&secondary) {
+                match super::key_cmp(primary, secondary) {
                     Ordering::Less => self.primary.next(),
                     Ordering::Equal => {
                         // if equal, favor the primary (more recent) staging map.
