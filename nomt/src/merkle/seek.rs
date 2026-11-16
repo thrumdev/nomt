@@ -388,7 +388,7 @@ impl SeekRequest {
             self.page_id.clone().unwrap(),
             self.position.clone(),
             page_set,
-            final_leaf_data_collection,
+            &final_leaf_data_collection,
         );
 
         if let Some(pages) = maybe_pages {
