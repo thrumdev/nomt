@@ -378,10 +378,7 @@ impl LeafIterator {
         // the iterator's range.
         let index = self.start.take().map_or(0, |start| {
             let cell_pointers = leaf.cell_pointers();
-            let res = cell_pointers.binary_search_by(|cell_pointer| {
-                let k = super::leaf::node::extract_key(cell_pointer);
-                super::key_cmp(&k, &start)
-            });
+            let res = super::leaf::node::search_cells(cell_pointers, &start);
 
             res.unwrap_or_else(|i| i)
         });
