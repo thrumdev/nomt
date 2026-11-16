@@ -141,11 +141,13 @@ impl TriePosition {
     }
 
     /// Whether the position is at the root.
+    #[inline]
     pub fn is_root(&self) -> bool {
         self.depth == 0
     }
 
     /// Get the current `depth` of the position.
+    #[inline]
     pub fn depth(&self) -> u16 {
         self.depth
     }
@@ -165,6 +167,7 @@ impl TriePosition {
     /// Move the position down by 1, towards either the left or right child.
     ///
     /// Panics on depth out of range.
+    #[inline]
     pub fn down(&mut self, bit: bool) {
         assert_ne!(self.depth, 256, "can't descend past 256 bits");
         if self.depth as usize % DEPTH == 0 {
@@ -186,6 +189,7 @@ impl TriePosition {
     /// Move the position up by `d` bits.
     ///
     /// Panics if `d` is greater than the current depth.
+    #[inline]
     pub fn up(&mut self, d: u16) {
         let prev_depth = self.depth;
         let Some(new_depth) = self.depth.checked_sub(d) else {
@@ -212,6 +216,7 @@ impl TriePosition {
     /// Move the position to the sibling node.
     ///
     /// Panic if at the root.
+    #[inline]
     pub fn sibling(&mut self) {
         assert_ne!(self.depth, 0, "can't move to sibling of root node");
         let bits = self.path.view_bits_mut::<Msb0>();
@@ -223,6 +228,7 @@ impl TriePosition {
     /// Peek at the last bit of the path.
     ///
     /// Panics if at the root.
+    #[inline]
     pub fn peek_last_bit(&self) -> bool {
         assert_ne!(self.depth, 0, "can't peek at root node");
         let this_bit_idx = self.depth as usize - 1;
@@ -257,6 +263,7 @@ impl TriePosition {
     /// where the children of the current node are stored.
     ///
     /// Panics if the position is not in the last layer of the page.
+    #[inline]
     pub fn child_page_index(&self) -> ChildPageIndex {
         assert!(self.node_index >= 62);
         ChildPageIndex::new(bottom_node_index(self.node_index)).unwrap()
@@ -273,6 +280,7 @@ impl TriePosition {
     /// Transform a bit-path to the index in a page corresponding to the child node indices.
     ///
     /// Panics if the node is not at a depth in the range 1..=5
+    #[inline]
     pub fn child_node_indices(&self) -> ChildNodeIndices {
         let depth = self.depth_in_page();
         if depth == 0 || depth > DEPTH - 1 {
@@ -283,11 +291,13 @@ impl TriePosition {
     }
 
     /// Get the index of the sibling node within a page.
+    #[inline]
     pub fn sibling_index(&self) -> usize {
         sibling_index(self.node_index)
     }
 
     /// Get the index of the current node within a page.
+    #[inline]
     pub fn node_index(&self) -> usize {
         self.node_index
     }
@@ -296,6 +306,7 @@ impl TriePosition {
     ///
     /// Note that every page has traversed at least 1 bit, therefore the return value would be
     /// between 1 and `DEPTH`, with the exception of the root node, which has traversed 0 bits.
+    #[inline]
     pub fn depth_in_page(&self) -> usize {
         if self.depth == 0 {
             0
@@ -305,6 +316,7 @@ impl TriePosition {
     }
 
     /// Fast path for checking whether this is in the first layer in the page.
+    #[inline]
     pub fn is_first_layer_in_page(&self) -> bool {
         self.node_index & !1 == 0
     }
