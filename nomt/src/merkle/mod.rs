@@ -14,7 +14,13 @@ use nomt_core::{
 };
 use seek::{Seek, Seeker};
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        Arc,
+    },
+};
 
 use crate::{
     beatree::ReadTransaction as BeatreeReadTx,
@@ -23,7 +29,7 @@ use crate::{
     page_cache::{Page, PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
     store::{BucketIndex, DirtyPage, SharedMaybeBucketIndex, Store},
-    task::{join_task, spawn_task, spawn_thread_task, TaskResult},
+    task::{join_task, spawn_thread_task, TaskResult},
     HashAlgorithm, Witness, WitnessedOperations, WitnessedPath, WitnessedRead, WitnessedWrite,
 };
 use threadpool::ThreadPool;
@@ -306,28 +312,41 @@ impl Updater {
 
         let (worker_tx, worker_rx) = crossbeam_channel::bounded(num_workers);
 
-        for (worker_index, write_pass) in worker_passes.into_iter().enumerate() {
-            let command = UpdateCommand {
-                shared: shared.clone(),
-                write_pass: write_pass.into_envelope(),
-            };
+        let tasks = worker_passes
+            .into_iter()
+            .map(|write_pass| {
+                let command = UpdateCommand {
+                    shared: shared.clone(),
+                    write_pass: write_pass.into_envelope(),
+                };
+                Mutex::new(Some(worker::UpdateParams {
+                    page_cache: self.page_cache.clone(),
+                    page_pool: self.page_pool.clone(),
+                    store: self.store.clone(),
+                    root: self.root,
+                    warm_ups: warm_ups.clone(),
+                    warm_page_set: warm_page_set.clone(),
+                    command,
+                }))
+            })
+            .collect();
+        let queue = Arc::new(TaskQueue {
+            next: AtomicUsize::new(0),
+            tasks,
+            output_tx: worker_tx,
+        });
 
-            let params = worker::UpdateParams {
-                page_cache: self.page_cache.clone(),
-                page_pool: self.page_pool.clone(),
-                store: self.store.clone(),
-                root: self.root,
-                warm_ups: warm_ups.clone(),
-                warm_page_set: warm_page_set.clone(),
-                command,
-            };
-            spawn_updater::<H>(&self.worker_tp, worker_index, params, worker_tx.clone());
+        for _ in 0..self.worker_tp.max_count().min(num_workers) {
+            let queue = queue.clone();
+            self.worker_tp.execute(move || run_queued::<H>(&queue));
         }
 
         Ok(UpdateHandle {
             shared,
             worker_rx,
             num_workers,
+            queue,
+            run_queued: run_queued::<H>,
         })
     }
 
@@ -379,11 +398,39 @@ pub struct UpdateHandle {
     shared: Arc<UpdateShared>,
     worker_rx: Receiver<TaskResult<(usize, std::io::Result<WorkerOutput>)>>,
     num_workers: usize,
+    queue: Arc<TaskQueue>,
+    run_queued: fn(&TaskQueue),
+}
+
+/// Update tasks, one per page-cache shard, taken in order by whichever thread is free.
+struct TaskQueue {
+    next: AtomicUsize,
+    tasks: Vec<Mutex<Option<worker::UpdateParams>>>,
+    output_tx: Sender<TaskResult<(usize, std::io::Result<WorkerOutput>)>>,
+}
+
+fn run_queued<H: HashAlgorithm>(queue: &TaskQueue) {
+    loop {
+        let index = queue.next.fetch_add(1, AtomicOrdering::Relaxed);
+        let Some(task) = queue.tasks.get(index) else {
+            return;
+        };
+        // UNWRAP: each index is taken once.
+        let params = task.lock().take().unwrap();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (index, worker::run_update::<H>(params))
+        }));
+        let _ = queue.output_tx.send(res);
+    }
 }
 
 impl UpdateHandle {
     /// Wait on the results of the commit operation.
+    ///
+    /// The calling thread runs update tasks the workers have not started yet.
     pub fn join(self) -> std::io::Result<Output> {
+        (self.run_queued)(&self.queue);
+
         let mut new_root = None;
 
         let mut maybe_witness = self.shared.witness.then_some(Witness {
@@ -587,19 +634,6 @@ fn spawn_warm_up<H: HashAlgorithm>(params: worker::WarmUpParams) -> WarmUpHandle
         finish_tx,
         output_rx,
     }
-}
-
-fn spawn_updater<H: HashAlgorithm>(
-    worker_tp: &ThreadPool,
-    worker_index: usize,
-    params: worker::UpdateParams,
-    output_tx: Sender<TaskResult<(usize, std::io::Result<WorkerOutput>)>>,
-) {
-    spawn_task(
-        &worker_tp,
-        move || (worker_index, worker::run_update::<H>(params)),
-        output_tx,
-    );
 }
 
 fn get_in_memory_page(
