@@ -885,3 +885,47 @@ struct ReadTransactionCounterInner {
     read_transactions: Mutex<usize>,
     cvar: Condvar,
 }
+
+#[cfg(test)]
+mod interpolation_search_tests {
+    use super::{interpolation_search, key_cmp, Key};
+    use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn matches_binary_search() {
+        let mut rng = rand_pcg::Lcg64Xsh32::seed_from_u64(7);
+        // Uniform keys, keys sharing the 8-byte prefix, and keys bunched near zero with a few
+        // outliers, which defeat the position guess.
+        let gens: [&dyn Fn(&mut rand_pcg::Lcg64Xsh32) -> Key; 3] = [
+            &|rng| rng.random(),
+            &|rng| {
+                let mut k: Key = rng.random();
+                k[..8].fill(0x42);
+                k
+            },
+            &|rng| {
+                let mut k: Key = rng.random();
+                if rng.random_ratio(9, 10) {
+                    k[..7].fill(0);
+                }
+                k
+            },
+        ];
+        for gen in gens {
+            for n in (0..40).chain([100, 600]) {
+                let mut keys: Vec<Key> = (0..n).map(|_| gen(&mut rng)).collect();
+                keys.sort_by(key_cmp);
+                keys.dedup();
+                let mut probes = keys.clone();
+                probes.extend((0..2 * n + 2).map(|_| gen(&mut rng)));
+                probes.extend([[0; 32], [0xff; 32]]);
+                for probe in probes {
+                    assert_eq!(
+                        interpolation_search(keys.len(), &probe, |i| keys[i]),
+                        keys.binary_search_by(|k| key_cmp(k, &probe)),
+                    );
+                }
+            }
+        }
+    }
+}
