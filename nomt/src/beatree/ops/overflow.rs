@@ -15,7 +15,7 @@ use crate::{
         leaf::node::{MAX_OVERFLOW_CELL_NODE_POINTERS, MAX_OVERFLOW_VALUE_SIZE},
         PageNumber,
     },
-    io::{page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
+    io::{page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, WriteGroup, PAGE_SIZE},
 };
 
 const BODY_SIZE: usize = PAGE_SIZE - 4;
@@ -23,13 +23,13 @@ const MAX_PNS: usize = BODY_SIZE / 4;
 const HEADER_SIZE: usize = 4;
 
 /// Encode a large value into freshly allocated overflow pages. Returns a vector of page pointers
-/// and the total number of page writes submitted.
+/// and submits writes immediately to the supplied group.
 pub fn chunk(
     value: &[u8],
     leaf_writer: &SyncAllocator,
     page_pool: &PagePool,
-    io_handle: &IoHandle,
-) -> std::io::Result<(Vec<PageNumber>, usize)> {
+    writes: &WriteGroup,
+) -> std::io::Result<Vec<PageNumber>> {
     assert!(!value.is_empty());
 
     let total_pages = total_needed_pages(value.len());
@@ -80,11 +80,11 @@ pub fn chunk(
             kind: IoKind::Write(leaf_writer.store_fd(), pn.0 as u64, page),
             user_data: 0,
         };
-        io_handle.send(command).expect("I/O Pool Down");
+        writes.send(command)?;
     }
     assert!(value.is_empty());
 
-    Ok((cell, total_pages))
+    Ok(cell)
 }
 
 /// Decode an overflow cell, returning the size of the value plus the pages numbers within the cell.

@@ -22,7 +22,7 @@ use crate::beatree::{
     },
     Key, ValueChange,
 };
-use crate::io::{IoCommand, IoHandle, IoKind};
+use crate::io::{IoCommand, IoHandle, IoKind, WriteGroup, WriteGroupCompletion};
 use crate::task::{join_task, spawn_task};
 
 /// Tracker of all changes that happen to leaves during an update
@@ -50,10 +50,27 @@ fn indexed_leaf(bbn_index: &Index, key: Key) -> Option<(Key, Option<Key>, PageNu
 /// Data, including buffers, which may be dropped only once I/O has certainly concluded.
 #[derive(Default)]
 pub struct PostIoWork {
+    overflow_writes: Option<WriteGroupCompletion>,
     worker_changes: Vec<LeafWorkerOutput>,
 }
 
 impl PostIoWork {
+    pub fn wait(&mut self) -> std::io::Result<()> {
+        // Drain every group even if one failed before releasing any owners.
+        let mut result = Ok(());
+        for completion in self
+            .overflow_writes
+            .iter_mut()
+            .chain(self.worker_changes.iter_mut().map(|w| &mut w.completion))
+        {
+            let next = completion.wait();
+            if result.is_ok() {
+                result = next;
+            }
+        }
+        result
+    }
+
     pub(super) fn run(self, leaf_cache: &LeafCache) {
         for worker_output in self.worker_changes.into_iter() {
             for (_, leaf_entry) in worker_output.leaves_tracker.inner {
@@ -75,8 +92,6 @@ pub struct LeafStageOutput {
     pub leaf_changeset: Vec<(Key, Option<PageNumber>)>,
     /// The page numbers of all freed pages.
     pub freed_pages: Vec<PageNumber>,
-    /// The number of submitted I/Os.
-    pub submitted_io: usize,
     /// Work which should be done after I/O but before sync has finished.
     pub post_io_work: PostIoWork,
 }
@@ -96,7 +111,9 @@ pub fn run(
         return Ok(LeafStageOutput::default());
     }
 
-    let mut overflow_io = 0;
+    let mut output = LeafStageOutput::default();
+    let (overflow_writes, completion) = io_handle.write_group();
+    output.post_io_work.overflow_writes = Some(completion);
     let page_pool = leaf_reader.page_pool().clone();
 
     let changeset = changeset
@@ -104,9 +121,8 @@ pub fn run(
         .map(|(k, v)| match v {
             ValueChange::Insert(v) => Ok((*k, Some((v.clone(), false)))),
             ValueChange::InsertOverflow(large_value, value_hash) => {
-                let (pages, num_writes) =
-                    overflow::chunk(&large_value, &leaf_writer, &page_pool, &io_handle)?;
-                overflow_io += num_writes;
+                let pages =
+                    overflow::chunk(&large_value, &leaf_writer, &page_pool, &overflow_writes)?;
 
                 let cell = overflow::encode_cell(large_value.len(), value_hash.clone(), &pages);
                 Ok((*k, Some((cell, true))))
@@ -114,6 +130,8 @@ pub fn run(
             ValueChange::Delete => Ok((*k, None)),
         })
         .collect::<std::io::Result<Vec<_>>>()?;
+
+    drop(overflow_writes);
 
     assert!(num_workers >= 1);
     let workers = prepare_workers(bbn_index, &changeset, num_workers);
@@ -171,9 +189,6 @@ pub fn run(
     // we don't want to block other sync steps on deallocating these memory regions.
     drop(changeset);
 
-    let mut output = LeafStageOutput::default();
-    output.submitted_io += overflow_io;
-
     for _ in 0..num_workers {
         let worker_output = join_task(&worker_result_rx)?;
         apply_worker_changes(&leaf_reader, &mut output, worker_output);
@@ -202,9 +217,6 @@ fn apply_worker_changes(
         }
 
         let new_pn = leaf_entry.inserted.as_ref().map(|(_, pn)| *pn);
-        if new_pn.is_some() {
-            output.submitted_io += 1;
-        }
 
         if let Some(prev_pn) = leaf_entry.deleted {
             output.freed_pages.push(prev_pn);
@@ -213,7 +225,6 @@ fn apply_worker_changes(
         output.leaf_changeset.push((*key, new_pn));
     }
 
-    output.submitted_io += worker_output.leaves_tracker.extra_freed.len();
     output
         .freed_pages
         .extend(worker_output.leaves_tracker.extra_freed.drain(..));
@@ -549,6 +560,8 @@ fn reset_leaf_base_fresh(
 }
 
 struct LeafWorkerOutput {
+    // Drain writes before releasing the tracker on early return.
+    completion: WriteGroupCompletion,
     leaves_tracker: LeavesTracker,
     overflow_deleted: Vec<Vec<u8>>,
 }
@@ -569,10 +582,12 @@ fn run_worker(
     let mut has_extended_range = false;
     let mut has_finished_workload = false;
 
+    let (writes, completion) = io_handle.write_group();
     let mut new_leaf_state = NewLeafHandler {
+        completion,
         leaf_writer,
         leaves_tracker: LeavesTracker::new(),
-        io_handle,
+        io_handle: writes,
     };
 
     // point leaf updater at first leaf.
@@ -693,16 +708,20 @@ fn run_worker(
         }
     }
 
+    drop(new_leaf_state.io_handle);
     Ok(LeafWorkerOutput {
+        completion: new_leaf_state.completion,
         leaves_tracker: new_leaf_state.leaves_tracker,
         overflow_deleted,
     })
 }
 
 struct NewLeafHandler {
+    // Field order closes submission, drains writes, then releases buffer owners.
+    io_handle: WriteGroup,
+    completion: WriteGroupCompletion,
     leaf_writer: SyncAllocator,
     leaves_tracker: LeavesTracker,
-    io_handle: IoHandle,
 }
 
 impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {

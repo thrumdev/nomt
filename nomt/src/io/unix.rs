@@ -38,8 +38,29 @@ fn spawn_worker_thread(
             drop(page_pool);
             return;
         };
-        let complete = execute(packet.command);
-        let _ = packet.completion_sender.send(complete);
+        // The fallback uses synchronous syscalls. Process a bounded batch of
+        // ready commands before releasing grouped-write buffers.
+        let mut packet = packet;
+        let mut completed_writes = Vec::new();
+        for index in 0..64 {
+            let complete = execute(packet.command);
+            match packet.completion {
+                super::CompletionTarget::Individual(sender) => {
+                    let _ = sender.send(complete);
+                }
+                target => completed_writes.push((target, complete)),
+            }
+            if index == 63 {
+                break;
+            }
+            match command_rx.try_recv() {
+                Ok(next) => packet = next,
+                Err(_) => break,
+            }
+        }
+        for (target, complete) in completed_writes {
+            target.finish(complete);
+        }
     };
 
     io_workers_tp.execute(work);

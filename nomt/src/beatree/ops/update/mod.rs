@@ -59,7 +59,7 @@ pub fn update(
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
 
-    let leaf_stage_outputs = leaf_stage::run(
+    let mut leaf_stage_outputs = leaf_stage::run(
         &bbn_index,
         leaf_cache.clone(),
         leaf_reader,
@@ -70,7 +70,7 @@ pub fn update(
         workers,
     )?;
 
-    let branch_stage_outputs = branch_stage::run(
+    let mut branch_stage_outputs = branch_stage::run(
         &mut bbn_index,
         bbn_writer,
         page_pool.clone(),
@@ -86,17 +86,26 @@ pub fn update(
     let (bbn_freelist_pages, bbn_meta) =
         bbn_finisher.finish(&page_pool, branch_stage_outputs.freed_pages)?;
 
-    let mut total_io = leaf_stage_outputs.submitted_io + branch_stage_outputs.submitted_io;
-    total_io += ln_freelist_pages.len();
-    total_io += bbn_freelist_pages.len();
+    let mut leaf_freelist = crate::beatree::writeout::submit_freelist_write(
+        &io_handle,
+        &leaf_store,
+        ln_freelist_pages,
+    )?;
+    let mut branch_freelist = crate::beatree::writeout::submit_freelist_write(
+        &io_handle,
+        &bbn_store,
+        bbn_freelist_pages,
+    )?;
 
-    crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages);
-    crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages);
-
-    // make sure that all write requests succeeded.
-    for _ in 0..total_io {
-        // UNWRAP: we receive only what we sent. No `RecvErr` expected.
-        io_handle.recv().unwrap().result?;
+    // Evaluate every wait before propagating errors, retaining all raw page owners.
+    let results = [
+        leaf_stage_outputs.post_io_work.wait(),
+        branch_stage_outputs.post_io_drop.wait(),
+        leaf_freelist.wait(),
+        branch_freelist.wait(),
+    ];
+    for result in results {
+        result?;
     }
 
     let (tx, rx) = crossbeam_channel::bounded(1);

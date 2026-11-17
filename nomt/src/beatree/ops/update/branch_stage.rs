@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use threadpool::ThreadPool;
 
-use crate::io::{IoCommand, IoHandle, IoKind, PagePool};
+use crate::io::{IoCommand, IoHandle, IoKind, PagePool, WriteGroup, WriteGroupCompletion};
 use crate::{
     beatree::{
         allocator::{PageNumber, SyncAllocator},
@@ -25,7 +25,21 @@ pub type BranchesTracker = super::NodesTracker<BranchNode>;
 /// Data, including buffers, which may be dropped only once I/O has certainly concluded.
 #[derive(Default)]
 pub struct PostIoDrop {
+    completions: Vec<WriteGroupCompletion>,
     deferred_drop_pages: Vec<Vec<Arc<BranchNode>>>,
+}
+
+impl PostIoDrop {
+    pub fn wait(&mut self) -> std::io::Result<()> {
+        let mut result = Ok(());
+        for completion in &mut self.completions {
+            let next = completion.wait();
+            if result.is_ok() {
+                result = next;
+            }
+        }
+        result
+    }
 }
 
 /// Outputs of the branch stage.
@@ -33,8 +47,6 @@ pub struct PostIoDrop {
 pub struct BranchStageOutput {
     /// The page numbers of all freed pages.
     pub freed_pages: Vec<PageNumber>,
-    /// The number of submitted I/Os.
-    pub submitted_io: usize,
     /// Data which should be dropped after all submitted I/Os have concluded.
     pub post_io_drop: PostIoDrop,
 }
@@ -93,8 +105,9 @@ pub fn run(
     // we don't want to block other sync steps on deallocating these memory regions.
     drop(changeset);
 
-    let mut output = BranchStageOutput::default();
     let mut branch_changeset: Vec<(Key, Option<Arc<BranchNode>>)> = vec![];
+    // Drop output (and drain its groups) before branch_changeset on errors.
+    let mut output = BranchStageOutput::default();
 
     for _ in 0..num_workers {
         let worker_output = join_task(&worker_result_rx)?;
@@ -120,10 +133,6 @@ fn apply_bbn_changes(
             continue;
         }
 
-        if changed_branch.inserted.is_some() {
-            output.submitted_io += 1;
-        }
-
         if let Some(deleted_pn) = changed_branch.deleted {
             output.freed_pages.push(deleted_pn);
         }
@@ -131,13 +140,16 @@ fn apply_bbn_changes(
         branch_changeset.push((key.clone(), changed_branch.inserted.map(|(node, _)| node)));
     }
 
-    output.submitted_io += worker_output.branches_tracker.extra_freed.len();
     output
         .freed_pages
         .extend(worker_output.branches_tracker.extra_freed.drain(..));
     output.post_io_drop.deferred_drop_pages.push(std::mem::take(
         &mut worker_output.branches_tracker.deferred_drop_pages,
     ));
+    output
+        .post_io_drop
+        .completions
+        .push(worker_output.completion);
 }
 
 // Branch changeset is created by aggregating the outcomes of multiple workers,
@@ -335,6 +347,8 @@ fn reset_branch_base_fresh(
 }
 
 struct BranchWorkerOutput {
+    // Drain writes before releasing the tracker on early return.
+    completion: WriteGroupCompletion,
     branches_tracker: BranchesTracker,
 }
 
@@ -351,10 +365,12 @@ fn run_worker(
     let mut has_extended_range = false;
     let mut has_finished_workload = false;
 
+    let (writes, completion) = io_handle.write_group();
     let mut new_branch_state = NewBranchHandler {
+        completion,
         bbn_writer,
         branches_tracker: BranchesTracker::new(),
-        io_handle,
+        io_handle: writes,
     };
 
     // point branch updater at first branch.
@@ -460,15 +476,19 @@ fn run_worker(
         }
     }
 
+    drop(new_branch_state.io_handle);
     Ok(BranchWorkerOutput {
+        completion: new_branch_state.completion,
         branches_tracker: new_branch_state.branches_tracker,
     })
 }
 
 struct NewBranchHandler {
+    // Field order closes submission, drains writes, then releases buffer owners.
+    io_handle: WriteGroup,
+    completion: WriteGroupCompletion,
     bbn_writer: SyncAllocator,
     branches_tracker: BranchesTracker,
-    io_handle: IoHandle,
 }
 
 impl super::branch_updater::HandleNewBranch for NewBranchHandler {
