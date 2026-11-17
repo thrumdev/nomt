@@ -40,6 +40,9 @@ use crate::{
     HashAlgorithm, PathProof, WitnessedPath,
 };
 
+/// How many keys seeks may run ahead of the page walker.
+const SEEK_LOOKAHEAD: usize = 32;
+
 pub(super) struct UpdateParams {
     pub page_cache: PageCache,
     pub page_pool: PagePool,
@@ -502,8 +505,12 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                 continue;
             }
 
-            // push work until out of work.
-            while seeker.has_room() && start_index + pushes < self.range_end {
+            // Keep seeks only a little ahead of the walker so the page lines a seek touches are
+            // still cached when the walker updates them, unless they are waiting on I/O.
+            while seeker.has_room()
+                && (pushes < SEEK_LOOKAHEAD || seeker.has_live_requests())
+                && start_index + pushes < self.range_end
+            {
                 let next_push = start_index + pushes;
                 pushes += 1;
 
