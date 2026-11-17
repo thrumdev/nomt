@@ -40,6 +40,19 @@ pub use ops::bit_ops::*;
 
 pub type Key = [u8; 32];
 
+/// Lexicographic order of two keys, compared as four big-endian words instead of a `memcmp` call.
+#[inline]
+pub(crate) fn key_cmp(a: &Key, b: &Key) -> std::cmp::Ordering {
+    for i in 0..4 {
+        let x = u64::from_be_bytes(a[i * 8..i * 8 + 8].try_into().unwrap());
+        let y = u64::from_be_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 #[derive(Clone)]
 pub struct Tree {
     read_transaction_counter: ReadTransactionCounter,

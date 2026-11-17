@@ -320,7 +320,9 @@ impl PageCache {
 
         Self {
             shared: Arc::new(Shared {
-                shards: make_shards(o.commit_concurrency, o.page_cache_size),
+                // One shard per child of the root page. Each shard is a separate merkle update
+                // task on the `commit_concurrency` workers, so they balance the load dynamically.
+                shards: make_shards(NUM_CHILDREN, o.page_cache_size),
                 root_page: RwLock::new(root_page_entry),
                 page_rw_pass_domain: domain,
                 metrics: metrics.into().unwrap_or(Metrics::new(false)),
