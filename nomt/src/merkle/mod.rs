@@ -47,7 +47,7 @@ use nomt_core::page_id::MAX_CHILD_INDEX;
 pub const PAGE_ELISION_THRESHOLD: u64 = 20;
 
 /// Bitfield used to note which child pages are elided and thus require on-the-fly reconstruction.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElidedChildren {
     elided: u64,
 }
