@@ -47,7 +47,7 @@ use nomt_core::page_id::MAX_CHILD_INDEX;
 pub const PAGE_ELISION_THRESHOLD: u64 = 20;
 
 /// Bitfield used to note which child pages are elided and thus require on-the-fly reconstruction.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElidedChildren {
     elided: u64,
 }
@@ -100,28 +100,76 @@ impl UpdatedPages {
         self,
         alloc_dependent: bool,
     ) -> impl Iterator<Item = (PageId, DirtyPage)> {
-        self.0.into_iter().flatten().map(move |updated_page| {
-            let page = updated_page.page.freeze();
-            let dirty = DirtyPage {
-                page,
-                diff: updated_page.diff,
-                bucket: match updated_page.bucket_info {
-                    BucketInfo::Known(b) => crate::store::BucketInfo::Known(b),
-                    BucketInfo::Dependent(b) => crate::store::BucketInfo::FreshOrDependent(b),
-                    BucketInfo::Fresh => {
-                        if alloc_dependent {
-                            crate::store::BucketInfo::FreshOrDependent(SharedMaybeBucketIndex::new(
-                                None,
-                            ))
-                        } else {
-                            crate::store::BucketInfo::FreshWithNoDependents
+        freeze_all(self.0)
+            .into_iter()
+            .flatten()
+            .map(move |(updated_page, page)| {
+                let dirty = DirtyPage {
+                    page,
+                    diff: updated_page.diff,
+                    bucket: match updated_page.bucket_info {
+                        BucketInfo::Known(b) => crate::store::BucketInfo::Known(b),
+                        BucketInfo::Dependent(b) => crate::store::BucketInfo::FreshOrDependent(b),
+                        BucketInfo::Fresh => {
+                            if alloc_dependent {
+                                crate::store::BucketInfo::FreshOrDependent(
+                                    SharedMaybeBucketIndex::new(None),
+                                )
+                            } else {
+                                crate::store::BucketInfo::FreshWithNoDependents
+                            }
                         }
-                    }
-                },
-            };
-            (updated_page.page_id, dirty)
-        })
+                    },
+                };
+                (updated_page.page_id, dirty)
+            })
     }
+}
+
+/// Materialize every updated page, spreading the per-worker lists over threads since each shared
+/// page is copied here. Order is preserved.
+fn freeze_all(updated: Vec<Vec<UpdatedPage>>) -> Vec<Vec<(page_walker::UpdatedPageMeta, Page)>> {
+    let freeze = |pages: Vec<UpdatedPage>| -> Vec<_> {
+        pages
+            .into_iter()
+            .map(|p| {
+                let (meta, page) = p.split();
+                (meta, page.freeze())
+            })
+            .collect()
+    };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(updated.len());
+    if threads <= 1 {
+        return updated.into_iter().map(freeze).collect();
+    }
+    let mut groups: Vec<Vec<(usize, Vec<UpdatedPage>)>> =
+        (0..threads).map(|_| Vec::new()).collect();
+    let len = updated.len();
+    for (i, pages) in updated.into_iter().enumerate() {
+        groups[i % threads].push((i, pages));
+    }
+    let mut out: Vec<Vec<_>> = (0..len).map(|_| Vec::new()).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = groups
+            .into_iter()
+            .map(|group| {
+                scope.spawn(move || {
+                    group
+                        .into_iter()
+                        .map(|(i, pages)| (i, freeze(pages)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (i, frozen) in handle.join().expect("page freezing thread panicked") {
+                out[i] = frozen;
+            }
+        }
+    });
+    out
 }
 
 /// This is akin to the store::BucketInfo, except it has a single variant for fresh pages.

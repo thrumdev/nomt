@@ -54,7 +54,7 @@ use nomt_core::{
 
 use crate::{
     merkle::{page_set::PageOrigin, BucketInfo, ElidedChildren, PAGE_ELISION_THRESHOLD},
-    page_cache::{Page, PageMut},
+    page_cache::{Page, PageMut, NODES_PER_PAGE},
     page_diff::PageDiff,
 };
 
@@ -81,20 +81,44 @@ enum PageWalkerPageOutput {
 pub struct UpdatedPage {
     /// The ID of the page.
     pub page_id: PageId,
-    /// An owned copy of the page, including the modified nodes.
-    pub page: PageMut,
+    /// The page, including the modified nodes.
+    pub page: CowPage,
     /// A compact diff indicating all modified slots in the page.
     pub diff: PageDiff,
     /// The bucket info associated with the page.
     pub bucket_info: BucketInfo,
 }
 
+/// Everything of an [`UpdatedPage`] but its page data.
+pub struct UpdatedPageMeta {
+    /// The ID of the page.
+    pub page_id: PageId,
+    /// A compact diff indicating all modified slots in the page.
+    pub diff: PageDiff,
+    /// The bucket info associated with the page.
+    pub bucket_info: BucketInfo,
+}
+
+impl UpdatedPage {
+    /// Separate the page data from the rest.
+    pub fn split(self) -> (UpdatedPageMeta, CowPage) {
+        (
+            UpdatedPageMeta {
+                page_id: self.page_id,
+                diff: self.diff,
+                bucket_info: self.bucket_info,
+            },
+            self.page,
+        )
+    }
+}
+
 /// A page which was reconstructed by the page walker.
 struct ReconstructedPage {
     /// The ID of the page.
     pub page_id: PageId,
-    /// An owned copy of the page, including the modified nodes.
-    pub page: PageMut,
+    /// The page, including the modified nodes.
+    pub page: CowPage,
     /// Number of leaves present in the child pages of the page.
     pub children_leaves_counter: u64,
     /// A compact diff indicating all reconstructed slots in the page.
@@ -107,8 +131,8 @@ struct ReconstructedPage {
 struct StackPage {
     /// The ID of the page.
     page_id: PageId,
-    /// An owned copy of the page, including the modified nodes.
-    page: PageMut,
+    /// The page, including the modified nodes.
+    page: CowPage,
     /// A compact diff indicating all modified slots in the page.
     diff: PageDiff,
     /// The bucket info associated with the page.
@@ -134,7 +158,7 @@ struct StackPage {
 impl StackPage {
     fn new<H: NodeHasher>(
         page_id: PageId,
-        page: PageMut,
+        page: CowPage,
         diff: PageDiff,
         page_origin: PageOrigin,
     ) -> Self {
@@ -158,6 +182,109 @@ impl StackPage {
             .as_ref()
             .map(|reconstruction_diff| reconstruction_diff.join(&self.diff))
             .unwrap_or(self.diff.clone())
+    }
+}
+
+/// A page being modified by the walker: either a fresh page, or a shared page plus the nodes
+/// changed in it. A shared page is only copied when frozen, so the full-page copy happens when
+/// the updated pages are consumed (`into_overlay` / commit) rather than while walking.
+pub enum CowPage {
+    /// A page owned by the walker.
+    Owned(PageMut),
+    /// An unmodified page with changes on top.
+    Shared {
+        base: Page,
+        // `slots[i]` is one more than the index in `nodes` of the new value of node `i`, or zero.
+        slots: Box<[u8; NODES_PER_PAGE]>,
+        nodes: Vec<Node>,
+        elided_children: Option<ElidedChildren>,
+    },
+}
+
+impl CowPage {
+    /// Changes on top of a shared page.
+    pub fn shared(base: Page) -> Self {
+        CowPage::Shared {
+            base,
+            slots: Box::new([0; NODES_PER_PAGE]),
+            nodes: Vec::new(),
+            elided_children: None,
+        }
+    }
+
+    /// Read out the node at the given index.
+    #[inline]
+    pub fn node(&self, index: usize) -> Node {
+        match self {
+            CowPage::Owned(page) => page.node(index),
+            CowPage::Shared {
+                base, slots, nodes, ..
+            } => match slots[index] {
+                0 => base.node(index),
+                i => nodes[i as usize - 1],
+            },
+        }
+    }
+
+    /// Write the node at the given index.
+    #[inline]
+    pub fn set_node(&mut self, index: usize, node: Node) {
+        match self {
+            CowPage::Owned(page) => page.set_node(index, node),
+            CowPage::Shared { slots, nodes, .. } => match slots[index] {
+                0 => {
+                    nodes.push(node);
+                    slots[index] = nodes.len() as u8;
+                }
+                i => nodes[i as usize - 1] = node,
+            },
+        }
+    }
+
+    /// Read out the bitfield representing which child page has been elided.
+    pub fn elided_children(&self) -> ElidedChildren {
+        match self {
+            CowPage::Owned(page) => page.elided_children(),
+            CowPage::Shared {
+                base,
+                elided_children,
+                ..
+            } => elided_children.unwrap_or_else(|| base.elided_children()),
+        }
+    }
+
+    /// Write the bitfield representing which child page has been elided.
+    pub fn set_elided_children(&mut self, new: &ElidedChildren) {
+        match self {
+            CowPage::Owned(page) => page.set_elided_children(new),
+            CowPage::Shared {
+                elided_children, ..
+            } => *elided_children = Some(*new),
+        }
+    }
+
+    /// Materialize the page, copying a shared page and applying the changes.
+    pub fn freeze(self) -> Page {
+        match self {
+            CowPage::Owned(page) => page.freeze(),
+            CowPage::Shared {
+                base,
+                slots,
+                nodes,
+                elided_children,
+            } => {
+                let mut page = base.deep_copy();
+                for (index, slot) in slots.iter().enumerate() {
+                    if *slot != 0 {
+                        page.set_node(index, nodes[*slot as usize - 1]);
+                    }
+                }
+                if let Some(elided_children) = elided_children {
+                    page.set_elided_children(&elided_children);
+                }
+                page.freeze()
+            }
+        }
     }
 }
 
@@ -231,6 +358,16 @@ impl<H: NodeHasher> PageWalker<H> {
             reconstruction,
             #[cfg(test)]
             inhibit_elision: false,
+        }
+    }
+
+    // A page from the page set to modify on the stack. Updates copy it lazily; the walker-based
+    // reconstruction (used by tests only) keeps copying eagerly, as its pages were always built.
+    fn stack_page(&self, page: Page) -> CowPage {
+        if self.reconstruction {
+            CowPage::Owned(page.deep_copy())
+        } else {
+            CowPage::shared(page)
         }
     }
 
@@ -427,7 +564,7 @@ impl<H: NodeHasher> PageWalker<H> {
             if self.position.is_root() {
                 let (page, page_origin) = if fresh {
                     (
-                        page_set.fresh(&ROOT_PAGE_ID),
+                        CowPage::Owned(page_set.fresh(&ROOT_PAGE_ID)),
                         PageOrigin::Reconstructed {
                             page_leaves_counter: 0,
                             children_leaves_counter: 0,
@@ -438,7 +575,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     // UNWRAP: all pages on the path to the node should be in the cache.
                     page_set
                         .get(&ROOT_PAGE_ID)
-                        .map(|(p, b)| (p.deep_copy(), b))
+                        .map(|(p, b)| (self.stack_page(p), b))
                         .unwrap()
                 };
 
@@ -461,7 +598,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     .unwrap();
 
                 let (page_id, page, diff, page_origin) = if fresh {
-                    let page = page_set.fresh(&child_page_id);
+                    let page = CowPage::Owned(page_set.fresh(&child_page_id));
                     (
                         child_page_id,
                         page,
@@ -477,7 +614,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     let (page, page_origin) = page_set.get(&child_page_id).unwrap();
                     (
                         child_page_id,
-                        page.deep_copy(),
+                        self.stack_page(page),
                         PageDiff::default(),
                         page_origin,
                     )
@@ -791,7 +928,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
             self.stack.push(StackPage::new::<H>(
                 cur_ancestor.clone(),
-                page.deep_copy(),
+                self.stack_page(page),
                 PageDiff::default(),
                 page_origin,
             ));
@@ -951,7 +1088,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
 /// Count the number of leaves present *only* in the provided page,
 /// without jumping into child pages.
-fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
+fn count_leaves<H: NodeHasher>(page: &CowPage) -> u64 {
     // Follow only reachable nodes: unused slots can contain garbage. A page has
     // DEPTH levels, so depth-first traversal needs at most DEPTH + 1 pending nodes.
     let mut pending = [0usize; DEPTH + 1];
