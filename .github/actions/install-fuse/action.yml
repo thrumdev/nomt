@@ -8,9 +8,11 @@ runs:
       shell: bash
       run: sudo apt-get update
 
-    - name: Install FUSE libraries
+    # fuser mounts without libfuse (its pure-Rust mount), so only the setuid
+    # `fusermount3` helper from `fuse3` is needed; no libfuse headers.
+    - name: Install FUSE
       shell: bash
-      run: sudo apt-get install -y libfuse3-dev libfuse-dev
+      run: sudo apt-get install -y fuse3
 
     - name: Allow non-root users to mount FUSE filesystems
       shell: bash
