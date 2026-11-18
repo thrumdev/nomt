@@ -15,15 +15,14 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc, LazyLock, Mutex},
-    time::{Duration, UNIX_EPOCH},
-    u64,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 mod latency;
 
-use fuser::FileAttr;
+use fuser::{Errno, FileAttr, FileHandle, FopenFlags, Generation, INodeNo, OpenFlags, Request};
 use latency::LatencyInjector;
 
 const DEFAULT_TTL: Duration = Duration::from_secs(1);
@@ -170,7 +169,7 @@ impl InodeData {
 
     pub fn mk_file_attrs(&self, ino: Inode) -> FileAttr {
         FileAttr {
-            ino: ino.0,
+            ino: INodeNo(ino.0),
             size: self.size(),
             blocks: self.blocks(),
             atime: UNIX_EPOCH,
@@ -315,7 +314,15 @@ impl Tree {
 }
 
 /// The implementation of the file system.
+///
+/// fuser calls [`fuser::Filesystem`] methods through `&self` and requires the file system to be
+/// `Sync`, so the mutable state lives behind a mutex. Requests are served by a single fuser event
+/// loop thread, so the lock is uncontended.
 pub struct Trick {
+    state: Mutex<TrickState>,
+}
+
+struct TrickState {
     tree: Tree,
     /// Stored inodes. The first inode is the root directory.
     ///
@@ -329,13 +336,31 @@ pub struct Trick {
 
 impl Trick {
     fn new(seed: u64) -> (Self, TrickHandle) {
+        let (state, handle) = TrickState::new(seed);
+        (
+            Trick {
+                state: Mutex::new(state),
+            },
+            handle,
+        )
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, TrickState> {
+        // A panic while serving a request leaves the state as it was at that point, which is
+        // still usable for a test file system, so ignore poisoning.
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl TrickState {
+    fn new(seed: u64) -> (Self, TrickHandle) {
         let trigger_enospc = Arc::new(AtomicBool::new(false));
         let trigger_latency_injector = Arc::new(AtomicBool::new(false));
 
         let tree = Tree::new();
         let inodes = Vec::new();
         let freelist = Vec::new();
-        let mut fs = Trick {
+        let mut fs = TrickState {
             tree,
             inodes,
             freelist,
@@ -351,6 +376,7 @@ impl Trick {
 
         let handle = TrickHandle {
             bg_sess: None.into(),
+            mountpoint: PathBuf::new(),
             trigger_enospc,
             trigger_latency_injector,
         };
@@ -429,78 +455,47 @@ impl Trick {
     }
 }
 
-impl fuser::Filesystem for Trick {
-    fn lookup(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        name: &std::ffi::OsStr,
-        reply: fuser::ReplyEntry,
-    ) {
+/// File system operations. These mirror [`fuser::Filesystem`], which forwards to them with the
+/// state locked.
+impl TrickState {
+    fn lookup(&mut self, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEntry) {
         log::trace!("lookup: parent={}, name={:?}", parent, name);
-        let Some(parent) = self.tree.ino_to_container.get(&Inode(parent)) else {
+        let Some(parent) = self.tree.ino_to_container.get(&Inode(parent.0)) else {
             log::trace!("parent inode doesn't exist");
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         let Some(ino) = parent.lookup_by_name(name) else {
             log::trace!("file doesn't exist");
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         let Some(inode) = self.lookup_inode(ino) else {
             log::error!("inode doesn't exist. This looks like a bug.");
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         let file_attr = inode.mk_file_attrs(ino);
-        let generation = inode.generation;
+        let generation = Generation(inode.generation);
         self.schedule_reply(move || reply.entry(&DEFAULT_TTL, &file_attr, generation));
     }
 
-    fn getattr(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        _fh: Option<u64>,
-        reply: fuser::ReplyAttr,
-    ) {
-        let ino = Inode(ino);
+    fn getattr(&mut self, ino: INodeNo, reply: fuser::ReplyAttr) {
+        let ino = Inode(ino.0);
         let Some(inode) = self.lookup_inode(ino) else {
             log::error!("inode doesn't exist. This looks like a bug.");
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         let file_attr = inode.mk_file_attrs(ino);
         self.schedule_reply(move || reply.attr(&DEFAULT_TTL, &file_attr));
     }
 
-    fn setattr(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        atime: Option<fuser::TimeOrNow>,
-        mtime: Option<fuser::TimeOrNow>,
-        ctime: Option<std::time::SystemTime>,
-        fh: Option<u64>,
-        crtime: Option<std::time::SystemTime>,
-        chgtime: Option<std::time::SystemTime>,
-        bkuptime: Option<std::time::SystemTime>,
-        flags: Option<u32>,
-        reply: fuser::ReplyAttr,
-    ) {
-        // trickfs doesn't track any times, so safely discard.
-        let _ = (atime, mtime, ctime, crtime, chgtime, bkuptime);
-        // discard those as well
-        let _ = (mode, uid, gid, fh, flags);
-        let ino = Inode(ino);
+    fn setattr(&mut self, ino: INodeNo, size: Option<u64>, reply: fuser::ReplyAttr) {
+        let ino = Inode(ino.0);
         let Some(inode) = self.lookup_inode_mut(ino) else {
             log::error!("inode doesn't exist. This looks like a bug.");
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         if let Some(new_size) = size {
@@ -510,75 +505,72 @@ impl fuser::Filesystem for Trick {
         self.schedule_reply(move || reply.attr(&DEFAULT_TTL, &file_attr));
     }
 
-    fn create(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        flags: i32,
-        reply: fuser::ReplyCreate,
-    ) {
-        // we don't really care about these parameters.
-        let _ = (mode, umask, flags);
+    fn create(&mut self, parent: INodeNo, name: &OsStr, reply: fuser::ReplyCreate) {
         if self
             .trigger_enospc
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            reply.error(libc::ENOSPC);
+            reply.error(Errno::ENOSPC);
             return;
         }
-        let Some(parent_container) = self.tree.ino_to_container.get(&Inode(parent)) else {
+        let parent = Inode(parent.0);
+        let Some(parent_container) = self.tree.ino_to_container.get(&parent) else {
             log::trace!("parent inode doesn't exist");
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         if parent_container.lookup_by_name(name).is_some() {
             log::trace!("file already exists");
-            reply.error(libc::EEXIST);
+            reply.error(Errno::EEXIST);
             return;
         }
-        let ino = self.register_inode(InodeData::new_file(Inode(parent)));
+        let ino = self.register_inode(InodeData::new_file(parent));
         // unwrap: we just checked that the parent exists.
         self.tree
             .ino_to_container
-            .get_mut(&Inode(parent))
+            .get_mut(&parent)
             .unwrap()
             .register(name.to_os_string(), ino);
         // unwrap: we just created this inode.
         let inode = self.lookup_inode(ino).unwrap();
         let file_attr = inode.mk_file_attrs(ino);
-        let generation = inode.generation;
-        self.schedule_reply(move || reply.created(&DEFAULT_TTL, &file_attr, generation, 0, 0));
+        let generation = Generation(inode.generation);
+        self.schedule_reply(move || {
+            reply.created(
+                &DEFAULT_TTL,
+                &file_attr,
+                generation,
+                FileHandle(0),
+                FopenFlags::empty(),
+            )
+        });
     }
 
-    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-        match self.lookup_inode(Inode(ino)) {
-            Some(_inode_data) => self.schedule_reply(move || reply.opened(0, 0)),
-            None => reply.error(libc::ENOENT),
+    fn open(&mut self, ino: INodeNo, reply: fuser::ReplyOpen) {
+        match self.lookup_inode(Inode(ino.0)) {
+            Some(_inode_data) => {
+                self.schedule_reply(move || reply.opened(FileHandle(0), FopenFlags::empty()))
+            }
+            None => reply.error(Errno::ENOENT),
         }
     }
 
     fn read(
         &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        offset: u64,
         size: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        flags: OpenFlags,
         reply: fuser::ReplyData,
     ) {
-        let _ = (fh, flags, lock_owner);
-        let Some(inode_data) = self.lookup_inode(Inode(ino)) else {
-            reply.error(libc::ENOENT);
+        let ino = Inode(ino.0);
+        let Some(inode_data) = self.lookup_inode(ino) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         log::trace!(
             "reading {:?} {:#?}",
-            self.reconstruct_full_path(Inode(ino)),
+            self.reconstruct_full_path(ino),
             inode_data
         );
         // TODO: Check the offset.
@@ -587,7 +579,7 @@ impl fuser::Filesystem for Trick {
         // If it is O_DIRECT we just need to serve the entire page.
         let size = size as usize;
         let Ok(offset) = usize::try_from(offset) else {
-            reply.error(libc::EINVAL);
+            reply.error(Errno::EINVAL);
             return;
         };
         let end = offset + size;
@@ -597,7 +589,10 @@ impl fuser::Filesystem for Trick {
             #[cfg(target_os = "linux")]
             let pageworth = has_odirect(flags);
             #[cfg(not(target_os = "linux"))]
-            let pageworth = false;
+            let pageworth = {
+                let _ = flags;
+                false
+            };
             if pageworth {
                 reply.data(&[0u8; 4096]);
             } else {
@@ -620,40 +615,28 @@ impl fuser::Filesystem for Trick {
         });
     }
 
-    fn write(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        data: &[u8],
-        write_flags: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
-        reply: fuser::ReplyWrite,
-    ) {
-        let _ = (fh, flags, write_flags, lock_owner);
+    fn write(&mut self, ino: INodeNo, offset: u64, data: &[u8], reply: fuser::ReplyWrite) {
         let trigger_enospc = self
             .trigger_enospc
             .load(std::sync::atomic::Ordering::Relaxed);
-        let Some(inode_data) = self.lookup_inode_mut(Inode(ino)) else {
-            reply.error(libc::ENOENT);
+        let Some(inode_data) = self.lookup_inode_mut(Inode(ino.0)) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         let Ok(offset) = usize::try_from(offset) else {
-            reply.error(libc::EINVAL);
+            reply.error(Errno::EINVAL);
             return;
         };
         let len = data.len();
         let new_file_sz = offset + len;
         if new_file_sz > MAX_FILE_SIZE as usize {
-            reply.error(libc::EFBIG);
+            reply.error(Errno::EFBIG);
             return;
         }
         // Extension: if the file size is less than the new size, we should extend the file.
         if inode_data.size() < new_file_sz as u64 {
             if trigger_enospc {
-                reply.error(libc::ENOSPC);
+                reply.error(Errno::ENOSPC);
                 return;
             }
             inode_data.set_size(new_file_sz as u64);
@@ -662,70 +645,54 @@ impl fuser::Filesystem for Trick {
         self.schedule_reply(move || reply.written(len as u32));
     }
 
-    fn mkdir(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        reply: fuser::ReplyEntry,
-    ) {
-        let _ = (mode, umask);
+    fn mkdir(&mut self, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEntry) {
         if self
             .trigger_enospc
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            reply.error(libc::ENOSPC);
+            reply.error(Errno::ENOSPC);
             return;
         }
-        let Some(inode_data) = self.lookup_inode_mut(Inode(parent)) else {
-            reply.error(libc::ENOENT);
+        let parent = Inode(parent.0);
+        let Some(inode_data) = self.lookup_inode_mut(parent) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         if !inode_data.is_dir() {
-            reply.error(libc::ENOTDIR);
+            reply.error(Errno::ENOTDIR);
             return;
         }
-        let ino = self.register_inode(InodeData::new_dir(Inode(parent)));
+        let ino = self.register_inode(InodeData::new_dir(parent));
         self.tree.ino_to_container.insert(ino, Container::new());
         self.tree
             .ino_to_container
-            .get_mut(&Inode(parent))
+            .get_mut(&parent)
             .unwrap()
             .register(name.to_os_string(), ino);
         // unwrap: we just created this inode.
         let inode = self.lookup_inode(ino).unwrap();
         let file_attr = inode.mk_file_attrs(ino);
-        let generation = inode.generation;
+        let generation = Generation(inode.generation);
         self.schedule_reply(move || reply.entry(&DEFAULT_TTL, &file_attr, generation));
     }
 
-    fn readdir(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        mut reply: fuser::ReplyDirectory,
-    ) {
-        let _ = fh;
-        let Some(inode_data) = self.lookup_inode_mut(Inode(ino)) else {
-            reply.error(libc::ENOENT);
+    fn readdir(&mut self, ino: INodeNo, offset: u64, mut reply: fuser::ReplyDirectory) {
+        let ino = Inode(ino.0);
+        let Some(inode_data) = self.lookup_inode_mut(ino) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         if !inode_data.is_dir() {
-            reply.error(libc::ENOTDIR);
+            reply.error(Errno::ENOTDIR);
             return;
         }
         let parent = inode_data.parent();
         let container = self
             .tree
             .ino_to_container
-            .get(&Inode(ino))
-            .unwrap_or_else(|| panic!("ino {ino} is not in tree"));
-        let offset = u64::try_from(offset).unwrap();
-        let standard = &[(DOT.as_os_str(), Inode(ino)), (DOTDOT.as_os_str(), parent)];
+            .get(&ino)
+            .unwrap_or_else(|| panic!("{ino:?} is not in tree"));
+        let standard = &[(DOT.as_os_str(), ino), (DOTDOT.as_os_str(), parent)];
         let mut iter = standard
             .iter()
             .copied()
@@ -738,8 +705,12 @@ impl fuser::Filesystem for Trick {
                     .lookup_inode(ino)
                     .unwrap_or_else(|| panic!("{ino:?} cannot be found"));
                 let offset = offset + 1;
-                let buf_is_filled =
-                    reply.add(ino.0, offset.try_into().unwrap(), inode.kind(), name);
+                let buf_is_filled = reply.add(
+                    INodeNo(ino.0),
+                    offset.try_into().unwrap(),
+                    inode.kind(),
+                    name,
+                );
                 if buf_is_filled {
                     break;
                 }
@@ -750,33 +721,28 @@ impl fuser::Filesystem for Trick {
         self.schedule_reply(move || reply.ok());
     }
 
-    fn rmdir(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        reply: fuser::ReplyEmpty,
-    ) {
-        let Some(container) = self.tree.ino_to_container.get(&Inode(parent)) else {
-            reply.error(libc::ENOENT);
+    fn rmdir(&mut self, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let parent = Inode(parent.0);
+        let Some(container) = self.tree.ino_to_container.get(&parent) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         let Some(inode) = container.lookup_by_name(name) else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         let Some(inode_data) = self.lookup_inode(inode) else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         if !inode_data.is_dir() {
-            reply.error(libc::ENOTDIR);
+            reply.error(Errno::ENOTDIR);
             return;
         }
         // unwrap: we checked that the dir exists above.
-        let container = self.tree.ino_to_container.get_mut(&Inode(parent)).unwrap();
+        let container = self.tree.ino_to_container.get_mut(&parent).unwrap();
         let Some(removed_ino) = container.remove(name) else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         if container.count() > 0 {
@@ -786,7 +752,7 @@ impl fuser::Filesystem for Trick {
             // When you do `rm -rf` on a directory, the kernel will first remove all the
             // entries in the directory and then remove the directory itself. So we should
             // not encounter a non-empty directory here.
-            return reply.error(libc::ENOTEMPTY);
+            return reply.error(Errno::ENOTEMPTY);
         }
         // Remove the tree entry corresponding to the removed inode.
         self.tree
@@ -797,57 +763,42 @@ impl fuser::Filesystem for Trick {
         self.schedule_reply(move || reply.ok());
     }
 
-    fn unlink(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        reply: fuser::ReplyEmpty,
-    ) {
-        let Some(inode_data) = self.lookup_inode_mut(Inode(parent)) else {
-            reply.error(libc::ENOENT);
+    fn unlink(&mut self, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let parent = Inode(parent.0);
+        let Some(inode_data) = self.lookup_inode_mut(parent) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         if !inode_data.is_dir() {
-            reply.error(libc::ENOTDIR);
+            reply.error(Errno::ENOTDIR);
             return;
         }
-        let Some(container) = self.tree.ino_to_container.get_mut(&Inode(parent)) else {
-            reply.error(libc::ENOENT);
+        let Some(container) = self.tree.ino_to_container.get_mut(&parent) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         let Some(removed_ino) = container.remove(name) else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         self.remove_inode(removed_ino);
         self.schedule_reply(move || reply.ok());
     }
 
-    fn fallocate(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        length: i64,
-        mode: i32,
-        reply: fuser::ReplyEmpty,
-    ) {
-        let _ = (fh, mode);
+    fn fallocate(&mut self, ino: INodeNo, offset: u64, length: u64, reply: fuser::ReplyEmpty) {
         let trigger_enospc = self
             .trigger_enospc
             .load(std::sync::atomic::Ordering::Relaxed);
-        let Some(inode_data) = self.lookup_inode_mut(Inode(ino)) else {
-            reply.error(libc::ENOENT);
+        let Some(inode_data) = self.lookup_inode_mut(Inode(ino.0)) else {
+            reply.error(Errno::ENOENT);
             return;
         };
         // fallocate should preallocate stuff. We here just gon pretend that we are preallocating.
         // Here we should extend the file if the offset + length is greater than the current file.
-        let new_size = u64::try_from(offset).unwrap() + u64::try_from(length).unwrap();
+        let new_size = offset + length;
         if inode_data.size() < new_size {
             if trigger_enospc {
-                reply.error(libc::ENOSPC);
+                reply.error(Errno::ENOSPC);
                 return;
             }
             inode_data.set_size(new_size);
@@ -855,54 +806,177 @@ impl fuser::Filesystem for Trick {
         self.schedule_reply(move || reply.ok());
     }
 
-    fn fsync(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        datasync: bool,
-        reply: fuser::ReplyEmpty,
-    ) {
-        // fsync doesn't do anything since we are working in-memory, so just return OK.
-        let _ = (ino, fh, datasync);
+    /// fsync and fsyncdir don't do anything since we are working in-memory, so just return OK.
+    fn fsync(&mut self, reply: fuser::ReplyEmpty) {
         if self
             .trigger_enospc
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            reply.error(libc::ENOSPC);
+            reply.error(Errno::ENOSPC);
             return;
         }
         self.schedule_reply(move || reply.ok());
     }
+}
 
-    fn fsyncdir(
-        &mut self,
-        req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        datasync: bool,
+impl fuser::Filesystem for Trick {
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEntry) {
+        self.state().lookup(parent, name, reply)
+    }
+
+    fn getattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: Option<FileHandle>,
+        reply: fuser::ReplyAttr,
+    ) {
+        self.state().getattr(ino, reply)
+    }
+
+    fn setattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<FileHandle>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<fuser::BsdFileFlags>,
+        reply: fuser::ReplyAttr,
+    ) {
+        // trickfs doesn't track times, ownership or permissions, so only the size matters.
+        self.state().setattr(ino, size, reply)
+    }
+
+    fn create(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: fuser::ReplyCreate,
+    ) {
+        self.state().create(parent, name, reply)
+    }
+
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: fuser::ReplyOpen) {
+        self.state().open(ino, reply)
+    }
+
+    fn read(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        size: u32,
+        flags: OpenFlags,
+        _lock_owner: Option<fuser::LockOwner>,
+        reply: fuser::ReplyData,
+    ) {
+        self.state().read(ino, offset, size, flags, reply)
+    }
+
+    fn write(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        data: &[u8],
+        _write_flags: fuser::WriteFlags,
+        _flags: OpenFlags,
+        _lock_owner: Option<fuser::LockOwner>,
+        reply: fuser::ReplyWrite,
+    ) {
+        self.state().write(ino, offset, data, reply)
+    }
+
+    fn mkdir(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        self.state().mkdir(parent, name, reply)
+    }
+
+    fn readdir(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        reply: fuser::ReplyDirectory,
+    ) {
+        self.state().readdir(ino, offset, reply)
+    }
+
+    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
+        self.state().rmdir(parent, name, reply)
+    }
+
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
+        self.state().unlink(parent, name, reply)
+    }
+
+    fn fallocate(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        length: u64,
+        _mode: i32,
         reply: fuser::ReplyEmpty,
     ) {
-        // just like fsync, fsyncdir doesn't do anything.
-        let _ = (req, ino, fh, datasync);
-        if self
-            .trigger_enospc
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            reply.error(libc::ENOSPC);
-            return;
-        }
-        self.schedule_reply(move || reply.ok());
+        self.state().fallocate(ino, offset, length, reply)
+    }
+
+    fn fsync(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        self.state().fsync(reply)
+    }
+
+    fn fsyncdir(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        self.state().fsync(reply)
     }
 }
 
 #[cfg(target_os = "linux")]
-fn has_odirect(flags: i32) -> bool {
-    (flags & libc::O_DIRECT) != 0
+fn has_odirect(flags: OpenFlags) -> bool {
+    (flags.0 & libc::O_DIRECT) != 0
 }
 
 pub struct TrickHandle {
     bg_sess: Mutex<Option<fuser::BackgroundSession>>,
+    mountpoint: PathBuf,
     trigger_enospc: Arc<AtomicBool>,
     trigger_latency_injector: Arc<AtomicBool>,
 }
@@ -922,29 +996,90 @@ impl TrickHandle {
 
     pub fn unmount_and_join(self) {
         if let Some(bg_sess) = self.bg_sess.lock().unwrap().take() {
-            bg_sess.join();
+            if let Err(e) = unmount_and_join(bg_sess, &self.mountpoint) {
+                log::error!("failed to unmount trickfs: {e}");
+            }
         }
     }
 }
 
+/// Unmounts the file system and waits for its session thread to exit.
+///
+/// With `auto_unmount`, fuser 0.18.0 does not unmount on its own: it only closes its socket to the
+/// `fusermount3` watcher, which unmounts only if the file system is dead, and it is still being
+/// served. The session thread then never sees the connection end and joining it hangs. So unmount
+/// through the setuid helper first, like libfuse's `fuse_session_unmount()` does.
+///
+/// Fixed upstream by cberner/fuser@172815c (fuser#407), not yet released. Drop this workaround
+/// once trickfs is on a fuser release that contains it.
+fn unmount_and_join(bg_sess: fuser::BackgroundSession, mountpoint: &Path) -> std::io::Result<()> {
+    let unmounted = fusermount_unmount(mountpoint);
+    // Join even if the unmount failed, so that fuser gets to try on its own.
+    let joined = bg_sess.umount_and_join();
+    unmounted.and(joined)
+}
+
+/// Lazily unmounts a FUSE mount owned by the current user with `fusermount3 -u -z`, falling back
+/// to libfuse2's `fusermount`.
+fn fusermount_unmount(mountpoint: &Path) -> std::io::Result<()> {
+    use std::{io, process::Command};
+    for bin in ["fusermount3", "fusermount"] {
+        match Command::new(bin)
+            .args(["-u", "-z", "-q"])
+            .arg(mountpoint)
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                return Err(io::Error::other(format!(
+                    "{bin} -u {} failed: {status}",
+                    mountpoint.display()
+                )))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "neither fusermount3 nor fusermount found",
+    ))
+}
+
+/// Builds the fuser mount configuration for the given mount options.
+///
+/// `auto_unmount` makes `fusermount3` mount with `allow_other`, which fuser refuses unless the
+/// session ACL says so explicitly. `RootAndOwner` keeps serving only the mounting user (and root),
+/// which is what fuser 0.15 did implicitly. The system's `/etc/fuse.conf` must contain
+/// `user_allow_other` for an unprivileged mount with `auto_unmount`.
+fn mount_config(mount_options: Vec<fuser::MountOption>) -> fuser::Config {
+    let mut config = fuser::Config::default();
+    if mount_options.contains(&fuser::MountOption::AutoUnmount) {
+        config.acl = fuser::SessionACL::RootAndOwner;
+    }
+    config.mount_options = mount_options;
+    config
+}
+
 /// A convenience function to spawn the trick file system.
 ///
-/// This allows directly depending on the libfuse API.
+/// This saves callers from depending on fuser directly.
 pub fn spawn_trick<P: AsRef<Path>>(mountpoint: P, seed: u64) -> std::io::Result<TrickHandle> {
     use fuser::MountOption;
-    let options = &[
+    let config = mount_config(vec![
         MountOption::RW,
         MountOption::AutoUnmount,
         MountOption::FSName("trick".to_string()),
-    ];
+    ]);
     let (fs, mut handle) = Trick::new(seed);
-    handle.bg_sess = Some(fuser::spawn_mount2(fs, &mountpoint, options)?).into();
+    handle.bg_sess = Some(fuser::spawn_mount(fs, &mountpoint, &config)?).into();
+    handle.mountpoint = mountpoint.as_ref().to_path_buf();
     Ok(handle)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Trick;
+    use super::{mount_config, unmount_and_join, Trick};
     use fuser::MountOption;
     use std::{
         fs,
@@ -966,10 +1101,13 @@ mod tests {
     fn mount() {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[MountOption::RO, MountOption::FSName("trick".to_string())];
+        let options = mount_config(vec![
+            MountOption::RO,
+            MountOption::FSName("trick".to_string()),
+        ]);
         let (fs, _handle) = Trick::new(0);
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
-        drop(mount_handle);
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 
     // Create a file to the file system.
@@ -977,39 +1115,45 @@ mod tests {
     fn create_file() {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[MountOption::RW, MountOption::FSName("trick".to_string())];
+        let options = mount_config(vec![
+            MountOption::RW,
+            MountOption::FSName("trick".to_string()),
+        ]);
         let (fs, _handle) = Trick::new(0);
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
         let filename = mountpoint.path().join("file");
         let file = fs::File::create(&filename).unwrap();
         drop(file);
-        drop(mount_handle);
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 
     #[test]
     fn create_then_open_file() {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[MountOption::RW, MountOption::FSName("trick".to_string())];
+        let options = mount_config(vec![
+            MountOption::RW,
+            MountOption::FSName("trick".to_string()),
+        ]);
         let (fs, _handle) = Trick::new(0);
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
         let filename = mountpoint.path().join("file");
         let file = fs::File::create(&filename).unwrap();
         drop(file);
         let file = fs::File::open(&filename).unwrap();
         drop(file);
-        drop(mount_handle);
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 
     fn inner_write_then_read(fs: Trick) {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[
+        let options = mount_config(vec![
             MountOption::RW,
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
-        ];
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+        ]);
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
         let filename = mountpoint.path().join("file");
         let mut file = fs::File::options()
             .create_new(true)
@@ -1025,7 +1169,7 @@ mod tests {
         file.read_to_end(&mut buf).unwrap();
         assert_eq!(test_data, buf.as_slice());
         drop(file);
-        drop(mount_handle);
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 
     #[test]
@@ -1049,13 +1193,13 @@ mod tests {
     fn many_files() {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[
+        let options = mount_config(vec![
             MountOption::RW,
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
-        ];
+        ]);
         let (fs, _handle) = Trick::new(0);
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
         let mut files = Vec::new();
         for i in 0..100 {
             let filename = mountpoint.path().join(format!("file{}", i));
@@ -1072,7 +1216,7 @@ mod tests {
         for file in files {
             drop(file);
         }
-        drop(mount_handle);
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 
     /// Create and remove a file.
@@ -1080,13 +1224,13 @@ mod tests {
     fn unlink() {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[
+        let options = mount_config(vec![
             MountOption::RW,
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
-        ];
+        ]);
         let (fs, _handle) = Trick::new(0);
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
 
         // Create a file
         let filename = mountpoint.path().join("file_to_unlink");
@@ -1095,20 +1239,20 @@ mod tests {
         assert!(filename.exists());
         fs::remove_file(&filename).unwrap();
         assert!(!filename.exists());
-        drop(mount_handle);
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 
     #[test]
     fn mmap_test() {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[
+        let options = mount_config(vec![
             MountOption::RW,
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
-        ];
+        ]);
         let (fs, _handle) = Trick::new(0);
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
 
         let filename = mountpoint.path().join("file");
         let mut file = fs::File::options()
@@ -1134,23 +1278,25 @@ mod tests {
             let data: *mut u8 = data.cast();
             let slice = std::slice::from_raw_parts(data, 4096);
             assert_eq!(&test_data[..], &slice[0..test_data.len()][..]);
+            // The mapping pins the file, which would keep the lazily unmounted file system alive.
+            assert_eq!(libc::munmap(data.cast(), 4096), 0);
         }
 
         drop(file);
-        drop(mount_handle);
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 
     #[test]
     fn out_of_space() {
         init_log();
         let mountpoint = tempfile::tempdir().unwrap();
-        let options = &[
+        let options = mount_config(vec![
             MountOption::RW,
             MountOption::AutoUnmount,
             MountOption::FSName("trick".to_string()),
-        ];
+        ]);
         let (fs, handle) = Trick::new(0);
-        let mount_handle = fuser::spawn_mount2(fs, &mountpoint, options).unwrap();
+        let mount_handle = fuser::spawn_mount(fs, &mountpoint, &options).unwrap();
 
         let filename = mountpoint.path().join("file");
         let mut file = fs::File::options()
@@ -1166,6 +1312,6 @@ mod tests {
         let _ = file.write_all(test_data).unwrap();
 
         drop(file);
-        drop(mount_handle);
+        unmount_and_join(mount_handle, mountpoint.path()).unwrap();
     }
 }
