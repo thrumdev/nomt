@@ -37,7 +37,7 @@ impl Sync {
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
         rollback: Option<rollback::Rollback>,
-        rollback_delta: Option<rollback::Delta>,
+        rollback_deltas: impl IntoIterator<Item = rollback::Delta>,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) -> anyhow::Result<()> {
@@ -50,12 +50,14 @@ impl Sync {
         bitbox_sync.begin_sync(sync_seqn, page_cache, updated_pages);
         beatree_sync.begin_sync(value_tx);
 
-        // Persist the rollback delta while the trees are being prepared. All of them must
+        // Persist the rollback deltas while the trees are being prepared. All of them must
         // succeed before the manifest references their new state.
-        let rollback_result = match rollback_delta {
-            // UNWRAP: a rollback delta is only produced when rollback is enabled.
-            Some(delta) => rollback.as_ref().unwrap().commit(delta),
-            None => Ok(()),
+        let rollback_deltas: Vec<_> = rollback_deltas.into_iter().collect();
+        let rollback_result = if rollback_deltas.is_empty() {
+            Ok(())
+        } else {
+            // UNWRAP: rollback deltas are only produced when rollback is enabled.
+            rollback.as_ref().unwrap().commit(rollback_deltas)
         };
         let bitbox_result = bitbox_sync.wait_pre_meta();
         let beatree_result = beatree_sync.wait_pre_meta();
