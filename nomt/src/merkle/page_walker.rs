@@ -46,7 +46,7 @@ use bitvec::prelude::*;
 use nomt_core::{
     hasher::NodeHasher,
     page::DEPTH,
-    page_id::{PageId, ROOT_PAGE_ID},
+    page_id::{ChildPageIndex, PageId, ROOT_PAGE_ID},
     trie::{self, KeyPath, Node, NodeKind, ValueHash, TERMINATOR},
     trie_pos::TriePosition,
     update::WriteNode,
@@ -798,28 +798,44 @@ impl<H: NodeHasher> PageWalker<H> {
     }
 }
 
-/// Count the number of leaves present *only* in the provided page,
-/// without jumping into child pages.
-fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
-    // Follow only reachable nodes: unused slots can contain garbage. A page has
-    // DEPTH levels, so depth-first traversal needs at most DEPTH + 1 pending nodes.
+/// Index of the first node in the bottom layer of a page.
+const BOTTOM_LAYER_START: usize = (1 << DEPTH) - 2;
+
+/// Visit the nodes of a page reachable from its two top nodes, without jumping into child pages.
+/// Unused slots can contain garbage, so only reachable nodes are visited.
+fn for_each_reachable<H: NodeHasher>(
+    node_at: impl Fn(usize) -> Node,
+    mut visit: impl FnMut(usize, &Node),
+) {
+    // A page has DEPTH levels, so depth-first traversal needs at most DEPTH + 1 pending nodes.
     let mut pending = [0usize; DEPTH + 1];
     pending[1] = 1;
     let mut len = 2;
-    let mut counter = 0;
     while len != 0 {
         len -= 1;
         let index = pending[len];
-        match NodeKind::of::<H>(&page.node(index)) {
-            NodeKind::Leaf => counter += 1,
-            NodeKind::Internal if index < (1 << DEPTH) - 2 => {
-                pending[len] = index * 2 + 2;
-                pending[len + 1] = index * 2 + 3;
-                len += 2;
-            }
-            _ => {}
+        let node = node_at(index);
+        visit(index, &node);
+        if index < BOTTOM_LAYER_START && trie::is_internal::<H>(&node) {
+            pending[len] = index * 2 + 2;
+            pending[len + 1] = index * 2 + 3;
+            len += 2;
         }
     }
+}
+
+/// Count the number of leaves present *only* in the provided page,
+/// without jumping into child pages.
+fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
+    let mut counter = 0;
+    for_each_reachable::<H>(
+        |index| page.node(index),
+        |_, node| {
+            if trie::is_leaf::<H>(node) {
+                counter += 1;
+            }
+        },
+    );
     counter
 }
 
@@ -834,9 +850,10 @@ pub fn reconstruct_pages<H: NodeHasher>(
     page: &Page,
     page_id: PageId,
     position: TriePosition,
-    page_set: &mut impl PageSet,
+    page_set: &impl PageSet,
     leaves: &[(KeyPath, ValueHash)],
 ) -> Option<Vec<(PageId, Page, PageDiff, u64, u64)>> {
+    debug_assert!(leaves.windows(2).all(|w| w[0].0 < w[1].0));
     let subtree_root = page.node(position.node_index());
     // UNWRAP: `position` is at the bottom layer of `page_id`, which has child pages.
     let first_page_id = page_id.child_page_id(position.child_page_index()).unwrap();
@@ -844,20 +861,18 @@ pub fn reconstruct_pages<H: NodeHasher>(
         return None;
     }
 
-    let mut builder = DirectReconstruction::<H, _> {
+    let mut builder = DirectReconstruction {
         page_set,
         output: Vec::new(),
-        _marker: std::marker::PhantomData,
     };
-    let (root, _) = builder.child_page(first_page_id, position.depth() as usize, leaves);
+    let (root, _) = builder.child_page::<H>(first_page_id, position.depth() as usize, leaves);
     assert_eq!(root, subtree_root);
     Some(builder.output)
 }
 
-struct DirectReconstruction<'a, H, P> {
-    page_set: &'a mut P,
+struct DirectReconstruction<'a, P> {
+    page_set: &'a P,
     output: Vec<(PageId, Page, PageDiff, u64, u64)>,
-    _marker: std::marker::PhantomData<H>,
 }
 
 struct WipPage {
@@ -869,15 +884,11 @@ struct WipPage {
     children_leaves: u64,
 }
 
-fn key_bit(key: &KeyPath, bit: usize) -> bool {
-    key[bit / 8] & (0x80 >> (bit % 8)) != 0
-}
-
-impl<'a, H: NodeHasher, P: PageSet> DirectReconstruction<'a, H, P> {
+impl<P: PageSet> DirectReconstruction<'_, P> {
     // Build the page below the node at `base_depth` (which lies in the parent page) from `leaves`,
     // which share the first `base_depth` bits and number at least two. Returns that node and the
     // number of leaves in the new page and its descendants.
-    fn child_page(
+    fn child_page<H: NodeHasher>(
         &mut self,
         page_id: PageId,
         base_depth: usize,
@@ -891,13 +902,18 @@ impl<'a, H: NodeHasher, P: PageSet> DirectReconstruction<'a, H, P> {
             leaves: 0,
             children_leaves: 0,
         };
-        let split = leaves.partition_point(|(k, _)| !key_bit(k, base_depth));
-        let left = self.node(&mut wip, base_depth + 1, 0, &leaves[..split]);
-        let right = self.node(&mut wip, base_depth + 1, 1, &leaves[split..]);
+        let split = leaves.partition_point(|(k, _)| !k.view_bits::<Msb0>()[base_depth]);
+        let left = self.node::<H>(&mut wip, base_depth + 1, 0, &leaves[..split]);
+        let right = self.node::<H>(&mut wip, base_depth + 1, 1, &leaves[split..]);
         let root = H::hash_internal(&trie::InternalData { left, right });
 
-        wip.page.set_elided_children(&wip.elided_children);
         let total = wip.leaves + wip.children_leaves;
+        // The parent elided this page, so the leaves below it must be under the threshold.
+        assert!(
+            total < PAGE_ELISION_THRESHOLD,
+            "{total} leaves below an elided page"
+        );
+        wip.page.set_elided_children(&wip.elided_children);
         self.output.push((
             wip.page_id,
             wip.page.freeze(),
@@ -909,7 +925,7 @@ impl<'a, H: NodeHasher, P: PageSet> DirectReconstruction<'a, H, P> {
     }
 
     // Compute and write the node at `depth`, slot `index` of `wip`, over `leaves`.
-    fn node(
+    fn node<H: NodeHasher>(
         &mut self,
         wip: &mut WipPage,
         depth: usize,
@@ -925,21 +941,20 @@ impl<'a, H: NodeHasher, P: PageSet> DirectReconstruction<'a, H, P> {
                     value_hash: *value_hash,
                 })
             }
-            _ if index >= (1 << DEPTH) - 2 => {
-                let child_index = nomt_core::page_id::ChildPageIndex::new((index - 62) as u8)
+            _ if index >= BOTTOM_LAYER_START => {
+                let child_index = ChildPageIndex::new((index - BOTTOM_LAYER_START) as u8)
                     .expect("bottom layer index");
                 // UNWRAP: a bottom-layer node with two leaves below it never exceeds the page depth.
                 let child_page_id = wip.page_id.child_page_id(child_index.clone()).unwrap();
-                let (node, total) = self.child_page(child_page_id, depth, leaves);
-                debug_assert!(total < PAGE_ELISION_THRESHOLD);
+                let (node, total) = self.child_page::<H>(child_page_id, depth, leaves);
                 wip.elided_children.set_elide(child_index, true);
                 wip.children_leaves += total;
                 node
             }
             _ => {
-                let split = leaves.partition_point(|(k, _)| !key_bit(k, depth));
-                let left = self.node(wip, depth + 1, index * 2 + 2, &leaves[..split]);
-                let right = self.node(wip, depth + 1, index * 2 + 3, &leaves[split..]);
+                let split = leaves.partition_point(|(k, _)| !k.view_bits::<Msb0>()[depth]);
+                let left = self.node::<H>(wip, depth + 1, index * 2 + 2, &leaves[..split]);
+                let right = self.node::<H>(wip, depth + 1, index * 2 + 3, &leaves[split..]);
                 H::hash_internal(&trie::InternalData { left, right })
             }
         };
@@ -959,7 +974,7 @@ mod tests {
         hasher::Blake3Hasher,
         io::PagePool,
         merkle::{page_set::PageOrigin, ElidedChildren},
-        page_cache::{Page, PageMut},
+        page_cache::{Page, PageMut, NODES_PER_PAGE},
         page_diff::PageDiff,
     };
     use bitvec::prelude::*;
@@ -989,6 +1004,8 @@ mod tests {
         page_pool: PagePool,
         inner: HashMap<PageId, Page>,
         reconstructed: HashMap<PageId, (Page, PageOrigin)>,
+        // Fill fresh pages with internal-looking nodes, like unzeroed pool pages.
+        garbage_fresh: bool,
     }
 
     impl Default for MockPageSet {
@@ -1004,6 +1021,7 @@ mod tests {
                 page_pool,
                 inner,
                 reconstructed,
+                garbage_fresh: false,
             }
         }
     }
@@ -1014,11 +1032,27 @@ mod tests {
                 self.inner.insert(page.page_id, page.page.freeze());
             }
         }
+
+        fn insert_reconstructed(&mut self, pages: Vec<(PageId, Page, PageDiff, u64, u64)>) {
+            for (page_id, page, diff, page_leaves_counter, children_leaves_counter) in pages {
+                let origin = PageOrigin::Reconstructed {
+                    page_leaves_counter,
+                    children_leaves_counter,
+                    diff,
+                };
+                self.reconstructed.insert(page_id, (page, origin));
+            }
+        }
     }
 
     impl PageSet for MockPageSet {
         fn fresh(&self, page_id: &PageId) -> PageMut {
-            let page = PageMut::pristine_empty(&self.page_pool, page_id);
+            let mut page = PageMut::pristine_empty(&self.page_pool, page_id);
+            if self.garbage_fresh {
+                for index in 0..NODES_PER_PAGE {
+                    page.set_node(index, [0x01; 32]);
+                }
+            }
             page
         }
 
@@ -1803,29 +1837,10 @@ mod tests {
         let page_id = trie_pos![0, 0, 1, 0, 0, 0, 0].page_id().unwrap();
         let (page, _) = page_set.get(&page_id).unwrap();
         let position = trie_pos![0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0];
-        let maybe_pages = super::reconstruct_pages::<Blake3Hasher>(
-            &page,
-            page_id,
-            position,
-            &mut page_set,
-            &ops2,
-        );
-
-        if let Some(pages) = maybe_pages {
-            for (page_id, page, diff, page_leaves_counter, children_leaves_counter) in pages {
-                page_set.reconstructed.insert(
-                    page_id,
-                    (
-                        page,
-                        PageOrigin::Reconstructed {
-                            page_leaves_counter,
-                            children_leaves_counter,
-                            diff,
-                        },
-                    ),
-                );
-            }
-        }
+        let pages =
+            super::reconstruct_pages::<Blake3Hasher>(&page, page_id, position, &page_set, &ops2)
+                .unwrap();
+        page_set.insert_reconstructed(pages);
 
         // Construct leaves in multiple pages and make sure the parent page's leaves counter has been updated correctly.
         let mut walker = PageWalker::<Blake3Hasher>::new(root, None);
@@ -1907,24 +1922,10 @@ mod tests {
         let page_id = trie_pos![0, 1, 0, 1, 0, 1, 0].page_id().unwrap();
         let (page, _) = page_set.get(&page_id).unwrap();
         let position = trie_pos![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1];
-        let maybe_pages =
-            super::reconstruct_pages::<Blake3Hasher>(&page, page_id, position, &mut page_set, &ops);
-
-        if let Some(pages) = maybe_pages {
-            for (page_id, page, diff, page_leaves_counter, children_leaves_counter) in pages {
-                page_set.reconstructed.insert(
-                    page_id,
-                    (
-                        page,
-                        PageOrigin::Reconstructed {
-                            page_leaves_counter,
-                            children_leaves_counter,
-                            diff,
-                        },
-                    ),
-                );
-            }
-        }
+        let pages =
+            super::reconstruct_pages::<Blake3Hasher>(&page, page_id, position, &page_set, &ops)
+                .unwrap();
+        page_set.insert_reconstructed(pages);
 
         // Construct leaves in multiple pages and make sure the parent page's leaves counter has been updated correctly.
         let mut walker = PageWalker::<Blake3Hasher>::new(root, None);
@@ -2003,24 +2004,10 @@ mod tests {
         let page_id = trie_pos![0, 1, 0, 1, 0, 1, 0].page_id().unwrap();
         let (page, _) = page_set.get(&page_id).unwrap();
         let position = trie_pos![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1];
-        let maybe_pages =
-            super::reconstruct_pages::<Blake3Hasher>(&page, page_id, position, &mut page_set, &ops);
-
-        if let Some(pages) = maybe_pages {
-            for (page_id, page, diff, page_leaves_counter, children_leaves_counter) in pages {
-                page_set.reconstructed.insert(
-                    page_id,
-                    (
-                        page,
-                        PageOrigin::Reconstructed {
-                            page_leaves_counter,
-                            children_leaves_counter,
-                            diff,
-                        },
-                    ),
-                );
-            }
-        }
+        let pages =
+            super::reconstruct_pages::<Blake3Hasher>(&page, page_id, position, &page_set, &ops)
+                .unwrap();
+        page_set.insert_reconstructed(pages);
 
         // Construct leaves in multiple pages and make sure the parent page's leaves counter has been updated correctly.
         let mut walker = PageWalker::<Blake3Hasher>::new(root, None);
@@ -2051,6 +2038,106 @@ mod tests {
 
         let stack_top = walker.stack.last().unwrap();
         assert_eq!(stack_top.children_leaves_counter, Some(0));
+    }
+
+    // Slots below a leaf of a reconstructed page are never written. Updating the trie after
+    // reconstruction must not depend on what they hold.
+    #[test]
+    fn update_after_reconstruction_ignores_unused_slots() {
+        #[rustfmt::skip]
+        let ops = vec![
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0], val(1),),
+            // Leaf at depth 31.
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], val(2),),
+            // Leaf at depth 32.
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0], val(3),),
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0], val(4),),
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1], val(5),),
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1], val(6),),
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0], val(7),),
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1], val(8),),
+            (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1], val(9),),
+        ];
+        #[rustfmt::skip]
+        let new_key = (key_path![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1], val(10));
+
+        let mut page_set = MockPageSet::default();
+        let mut walker = PageWalker::<Blake3Hasher>::new(trie::TERMINATOR, None);
+        walker.advance_and_replace(&page_set, TriePosition::new(), ops.clone());
+        let Output::Root(root, updates) = walker.conclude() else {
+            unreachable!();
+        };
+        page_set.apply(updates);
+
+        page_set.garbage_fresh = true;
+        let page_id = trie_pos![0, 1, 0, 1, 0, 1, 0].page_id().unwrap();
+        let (page, _) = page_set.get(&page_id).unwrap();
+        let position = trie_pos![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1];
+        let pages =
+            super::reconstruct_pages::<Blake3Hasher>(&page, page_id, position, &page_set, &ops)
+                .unwrap();
+        page_set.insert_reconstructed(pages);
+
+        // Delete the depth-31 leaf, and split the depth-32 leaf into two leaves at depth 33,
+        // which lands in slots that were never written.
+        let mut walker = PageWalker::<Blake3Hasher>::new(root, None);
+        #[rustfmt::skip]
+        walker.advance_and_replace(
+            &page_set,
+            trie_pos![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+            vec![],
+        );
+        #[rustfmt::skip]
+        walker.advance_and_replace(
+            &page_set,
+            trie_pos![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0],
+            vec![ops[2], new_key],
+        );
+        let Output::Root(updated_root, _) = walker.conclude() else {
+            unreachable!();
+        };
+
+        let mut expected_ops = ops.clone();
+        expected_ops.remove(1);
+        expected_ops.insert(2, new_key);
+        let mut walker = PageWalker::<Blake3Hasher>::new(trie::TERMINATOR, None);
+        walker.advance_and_replace(&MockPageSet::default(), TriePosition::new(), expected_ops);
+        let Output::Root(expected_root, _) = walker.conclude() else {
+            unreachable!();
+        };
+        assert_eq!(updated_root, expected_root);
+    }
+
+    #[test]
+    #[should_panic(expected = "leaves below an elided page")]
+    fn reconstruct_rejects_subtree_over_threshold() {
+        let leaves: Vec<_> = (0..super::PAGE_ELISION_THRESHOLD as u8)
+            .map(|i| {
+                let mut key_path = [0u8; 32];
+                key_path[1] = i;
+                (key_path, val(i))
+            })
+            .collect();
+        let page_set = MockPageSet::default();
+        let mut walker = PageWalker::<Blake3Hasher>::new(trie::TERMINATOR, None);
+        walker.advance_and_replace(&page_set, TriePosition::new(), leaves.clone());
+        let Output::Root(_, updates) = walker.conclude() else {
+            unreachable!();
+        };
+        let root_page = updates
+            .into_iter()
+            .find(|update| update.page_id == ROOT_PAGE_ID)
+            .unwrap()
+            .page
+            .freeze();
+
+        super::reconstruct_pages::<Blake3Hasher>(
+            &root_page,
+            ROOT_PAGE_ID,
+            trie_pos![0, 0, 0, 0, 0, 0],
+            &page_set,
+            &leaves,
+        );
     }
 
     #[test]
@@ -2098,11 +2185,12 @@ mod tests {
         let page = page_set.get(&page_id).unwrap().0;
 
         // Reconstruct pages which are expected to be elided.
+        let position = trie_pos![0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0];
         let reconstructed_pages: Vec<_> = super::reconstruct_pages::<Blake3Hasher>(
             &page,
-            page_id,
-            trie_pos![0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0],
-            &mut page_set,
+            page_id.clone(),
+            position.clone(),
+            &page_set,
             &ops,
         )
         .unwrap();
@@ -2124,8 +2212,38 @@ mod tests {
             }
         }
 
+        // Reconstruction is skipped once its first page is in the page set.
+        let mut page_set_with_first = MockPageSet::default();
+        let first_page_id = page_id
+            .child_page_id(ChildPageIndex::new(24).unwrap())
+            .unwrap();
+        page_set_with_first
+            .inner
+            .insert(first_page_id, reconstructed_page.clone());
+        assert!(super::reconstruct_pages::<Blake3Hasher>(
+            &page,
+            page_id,
+            position,
+            &page_set_with_first,
+            &ops,
+        )
+        .is_none());
+
+        // Every leaf is counted once, and each page's children count is the sum over its
+        // child pages.
+        let total_leaves: u64 = reconstructed_pages.iter().map(|p| p.3).sum();
+        assert_eq!(total_leaves, ops.len() as u64);
+        for (page_id, _, _, _, children_leaves) in &reconstructed_pages {
+            let below: u64 = reconstructed_pages
+                .iter()
+                .filter(|child| &child.0.parent_page_id() == page_id)
+                .map(|child| child.3 + child.4)
+                .sum();
+            assert_eq!(*children_leaves, below);
+        }
+
         // Ensure reconstructed pages are what we expect.
-        for (page_id, page, _, _, _) in reconstructed_pages {
+        for (page_id, page, diff, page_leaves, _) in reconstructed_pages {
             let correct_page = correct_pages
                 .iter()
                 .position(|correct_page| correct_page.page_id == page_id)
@@ -2144,21 +2262,26 @@ mod tests {
 
             // Unused slots of pool pages hold garbage, so only reachable nodes are compared.
             let correct_page = correct_page.freeze();
-            assert_eq!(reachable_nodes(&correct_page), reachable_nodes(&page));
+            let nodes = reachable_nodes(&page);
+            assert_eq!(reachable_nodes(&correct_page), nodes);
             assert_eq!(correct_page.elided_children(), page.elided_children());
+            let leaves = nodes
+                .iter()
+                .filter(|(_, n)| trie::is_leaf::<Blake3Hasher>(n));
+            assert_eq!(page_leaves, leaves.count() as u64);
+            assert_eq!(diff.count(), nodes.len());
+            assert!(nodes.iter().all(|(index, _)| diff.changed(*index)));
         }
+        // Only the root page and page [24] were not reconstructed.
+        assert_eq!(correct_pages.len(), 2);
     }
 
     fn reachable_nodes(page: &Page) -> Vec<(usize, Node)> {
-        let mut pending = vec![1, 0];
         let mut nodes = Vec::new();
-        while let Some(index) = pending.pop() {
-            let node = page.node(index);
-            nodes.push((index, node));
-            if trie::is_internal::<Blake3Hasher>(&node) && index < (1 << super::DEPTH) - 2 {
-                pending.extend([index * 2 + 3, index * 2 + 2]);
-            }
-        }
+        super::for_each_reachable::<Blake3Hasher>(
+            |index| page.node(index),
+            |index, node| nodes.push((index, *node)),
+        );
         nodes
     }
 }
