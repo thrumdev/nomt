@@ -139,7 +139,7 @@ impl SeekRequest {
         // terminator should have yielded completion.
         assert!(self.position.depth() as usize % DEPTH == 0);
 
-        self.page_id = Some(page_id.clone());
+        self.page_id = Some(page_id);
 
         // take enough bits to get us to the end of this page.
         let bits = self.key.view_bits::<Msb0>()[self.position.depth() as usize..]
@@ -176,17 +176,18 @@ impl SeekRequest {
 
         // The traversal reached the end of the current page, and possibly the next page is being elided.
         // This information resides in the page within the `elided_children` field.
-        //
-        // UNWRAP: `continue_seek` scans multiple `DEPTH` bits, so `position` must be at the last
-        // layer of the current page.
-        let child_page_id = page_id
-            .child_page_id(self.position.child_page_index())
-            .unwrap();
-
         if page
             .elided_children()
             .is_elided(self.position.child_page_index())
         {
+            // UNWRAP: `continue_seek` scans multiple `DEPTH` bits, so `position` must be at the
+            // last layer of the current page.
+            let child_page_id = self
+                .page_id
+                .as_ref()
+                .unwrap()
+                .child_page_id(self.position.child_page_index())
+                .unwrap();
             // Avoid reconstructing already reconstructed pages.
             if page_set.contains(&child_page_id) {
                 return;
@@ -761,7 +762,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                         request.continue_seek::<H>(
                             &self.beatree_read_transaction,
                             &self.overlay,
-                            page_id.clone(),
+                            page_id,
                             &page,
                             self.record_siblings,
                             page_set,
