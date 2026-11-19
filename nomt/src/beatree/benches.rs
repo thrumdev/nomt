@@ -1,5 +1,8 @@
 #![cfg(feature = "benchmarks")]
 
+mod realistic;
+pub use realistic::bit_packing_benchmark;
+
 use crate::beatree::{
     branch::node::benches::*, leaf::node::benches::*, ops::benches::*, ops::bit_ops::benches::*,
     Key,

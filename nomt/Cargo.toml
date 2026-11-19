@@ -52,6 +52,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 name = "beatree"
 harness = false
 
+[[bench]]
+name = "beatree_bits"
+harness = false
+required-features = ["benchmarks"]
+
 [features]
 default = ["blake3-hasher", "sha2-hasher"]
 benchmarks = ["dep:criterion"]
