@@ -19,6 +19,15 @@ mod platform;
 #[path = "unix.rs"]
 mod platform;
 
+mod write_group;
+pub use write_group::{WriteGroup, WriteGroupCompletion};
+
+// Compile and exercise the synchronous backend on Linux too.
+#[cfg(all(test, target_os = "linux"))]
+#[allow(dead_code)]
+#[path = "unix.rs"]
+mod unix_tests;
+
 pub mod fsyncer;
 pub mod page_pool;
 
@@ -119,7 +128,27 @@ pub struct CompleteIo {
 
 struct IoPacket {
     command: IoCommand,
-    completion_sender: Sender<CompleteIo>,
+    completion: CompletionTarget,
+}
+
+enum CompletionTarget {
+    Individual(Sender<CompleteIo>),
+    WriteGroup(write_group::WriteTicket),
+}
+
+impl CompletionTarget {
+    fn finish(self, complete: CompleteIo) {
+        match self {
+            Self::Individual(sender) => {
+                let _ = sender.send(complete);
+            }
+            Self::WriteGroup(ticket) => {
+                let CompleteIo { command, result } = complete;
+                drop(command);
+                ticket.complete(result);
+            }
+        }
+    }
 }
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
@@ -215,7 +244,7 @@ impl IoHandle {
         sender
             .send(IoPacket {
                 command,
-                completion_sender: self.completion_sender.clone(),
+                completion: CompletionTarget::Individual(self.completion_sender.clone()),
             })
             .map_err(|SendError(packet)| SendError(packet.command))
     }
