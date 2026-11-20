@@ -13,7 +13,6 @@
 
 use crate::{page::DEPTH, trie::KeyPath};
 use arrayvec::ArrayVec;
-use bitvec::prelude::*;
 use ruint::Uint;
 
 // The encoded representation of the highest valid page ID: the highest one at layer 42.
@@ -212,35 +211,30 @@ impl PageId {
 
     /// Get the minimum key-path which could land in this page.
     pub fn min_key_path(&self) -> KeyPath {
-        let mut path = KeyPath::default();
-        for (i, child_index) in self.path.iter().enumerate() {
-            let bit_start = i * 6;
-            let bit_end = bit_start + 6;
-            let child_bits = &child_index.view_bits::<Msb0>()[2..8];
-            path.view_bits_mut::<Msb0>()[bit_start..bit_end].copy_from_bitslice(child_bits);
-        }
-
-        for i in (6 * self.path.len())..256 {
-            path.view_bits_mut::<Msb0>().set(i, false);
-        }
-
-        path
+        self.key_path(0x00)
     }
 
     /// Get the maximum key-path which could land in this page.
     pub fn max_key_path(&self) -> KeyPath {
-        let mut path = KeyPath::default();
+        self.key_path(0xFF)
+    }
+
+    /// The key-path whose leading bits are this page's child indices, six bits each, followed by
+    /// `fill` bytes.
+    ///
+    /// Written with plain byte operations: the merkle update calls this for every shard of every
+    /// session, and `bitvec` writes dominate small sessions in unoptimized or
+    /// coverage-instrumented builds.
+    fn key_path(&self, fill: u8) -> KeyPath {
+        let mut path = [fill; 32];
         for (i, child_index) in self.path.iter().enumerate() {
-            let bit_start = i * 6;
-            let bit_end = bit_start + 6;
-            let child_bits = &child_index.view_bits::<Msb0>()[2..8];
-            path.view_bits_mut::<Msb0>()[bit_start..bit_end].copy_from_bitslice(child_bits);
+            // The index's six bits start `i * DEPTH % 8` bits into a 16-bit big-endian window.
+            let (byte, shift) = (i * DEPTH / 8, 10 - i * DEPTH % 8);
+            let window = u16::from_be_bytes([path[byte], path[byte + 1]]);
+            let window =
+                (window & !((MAX_CHILD_INDEX as u16) << shift)) | ((*child_index as u16) << shift);
+            path[byte..byte + 2].copy_from_slice(&window.to_be_bytes());
         }
-
-        for i in (6 * self.path.len())..256 {
-            path.view_bits_mut::<Msb0>().set(i, true);
-        }
-
         path
     }
 }
@@ -292,7 +286,7 @@ impl Iterator for PageIdsIterator {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChildPageIdError, ChildPageIndex, InvalidPageIdBytes, Msb0, PageId, PageIdsIterator, Uint,
+        ChildPageIdError, ChildPageIndex, InvalidPageIdBytes, PageId, PageIdsIterator, Uint,
         HIGHEST_ENCODED_42, MAX_CHILD_INDEX, MAX_PAGE_DEPTH, ROOT_PAGE_ID,
     };
     use bitvec::prelude::*;
@@ -323,6 +317,49 @@ mod tests {
 
     fn child_page_id(page_id: &PageId, child_index: u8) -> Result<PageId, ChildPageIdError> {
         page_id.child_page_id(ChildPageIndex::new(child_index).unwrap())
+    }
+
+    #[test]
+    fn key_path_bounds_match_bitwise_construction() {
+        fn bitwise(page_id: &PageId, fill: bool) -> [u8; 32] {
+            let mut path = [0u8; 32];
+            let bits = path.view_bits_mut::<Msb0>();
+            for (i, child_index) in page_id.path.iter().enumerate() {
+                bits[i * 6..i * 6 + 6].copy_from_bitslice(&child_index.view_bits::<Msb0>()[2..8]);
+            }
+            bits[6 * page_id.path.len()..].fill(fill);
+            path
+        }
+
+        fn prop(case: PagePathCase) -> bool {
+            let mut page_id = ROOT_PAGE_ID;
+            let mut ok = true;
+            for chunk in case
+                .key_path
+                .view_bits::<Msb0>()
+                .chunks_exact(6)
+                .take(MAX_PAGE_DEPTH)
+            {
+                ok &= page_id.min_key_path() == bitwise(&page_id, false);
+                ok &= page_id.max_key_path() == bitwise(&page_id, true);
+                let child = ChildPageIndex::new(chunk.load_be::<u8>()).unwrap();
+                page_id = page_id.child_page_id(child).unwrap();
+            }
+            ok &= page_id.path.len() == MAX_PAGE_DEPTH;
+            ok &= page_id.min_key_path() == bitwise(&page_id, false);
+            ok &= page_id.max_key_path() == bitwise(&page_id, true);
+            ok && page_id.max_descendant().max_key_path() == bitwise(&page_id, true)
+        }
+
+        QuickCheck::new()
+            .tests(2000)
+            .quickcheck(prop as fn(PagePathCase) -> bool);
+
+        let max = ROOT_PAGE_ID.max_descendant();
+        assert_eq!(max.min_key_path(), bitwise(&max, false));
+        assert_eq!(max.max_key_path(), [0xFF; 32]);
+        assert_eq!(ROOT_PAGE_ID.min_key_path(), [0; 32]);
+        assert_eq!(ROOT_PAGE_ID.max_key_path(), [0xFF; 32]);
     }
 
     #[test]
