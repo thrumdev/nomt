@@ -490,8 +490,7 @@ impl SessionParams {
 }
 
 thread_local! {
-    /// Live sessions created on this thread. Shared with each session, which may be dropped on
-    /// another thread.
+    /// Live sessions on this thread. A session stays on the thread that created it.
     static THREAD_SESSIONS: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 }
 
@@ -505,9 +504,14 @@ fn thread_has_live_session() -> bool {
 /// readers wait behind it. That commit waits for every live session, so a thread opening a second
 /// session would deadlock; such a thread takes the read lock recursively, past the queued writer.
 /// Every other thread waits, so overlapping sessions can't hold a commit off indefinitely.
+///
+/// Which thread holds a session is only known from where it was created, so the guard, and with
+/// it the session, must not move to another thread.
 struct SessionAccessGuard {
     _guard: ArcRwLockReadGuard<parking_lot::RawRwLock, ()>,
     thread_sessions: Arc<AtomicUsize>,
+    /// `MutexGuard` is `Sync` but not `Send`.
+    _not_send: std::marker::PhantomData<std::sync::MutexGuard<'static, ()>>,
 }
 
 impl SessionAccessGuard {
@@ -522,6 +526,7 @@ impl SessionAccessGuard {
         Self {
             _guard: guard,
             thread_sessions,
+            _not_send: std::marker::PhantomData,
         }
     }
 }
@@ -539,6 +544,24 @@ impl Drop for SessionAccessGuard {
 /// When the session is finished, the application can confirm the changes by calling
 /// [`Session::finish`] or others and create a [`Witness`] that can be used to prove the
 /// correctness of replaying the same operations.
+///
+/// A session belongs to the thread that created it. Other threads may use it by reference:
+///
+/// ```
+/// fn shareable<T: Sync>() {}
+/// shareable::<nomt::Session<nomt::hasher::Blake3Hasher>>();
+/// ```
+///
+/// but it cannot be moved to another thread:
+///
+/// ```compile_fail
+/// fn movable<T: Send>() {}
+/// movable::<nomt::Session<nomt::hasher::Blake3Hasher>>();
+/// ```
+///
+/// A commit or rollback waits for every live session, and only the thread that holds one may
+/// open another while a commit is waiting. A session held by a different thread than the one
+/// that created it would let that thread wait behind the commit that is waiting for it.
 pub struct Session<T> {
     store: Store,
     actuals_concurrency: usize,
