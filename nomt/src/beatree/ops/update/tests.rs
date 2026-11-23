@@ -243,7 +243,7 @@ fn exec_leaf_stage(
     let leaf_page_numbers = leaf_page_numbers(&bbn_index, changeset.keys().cloned());
 
     let io_handle = IO_POOL.make_handle();
-    let leaf_stage_output = super::leaf_stage::run(
+    let mut leaf_stage_output = super::leaf_stage::run(
         bbn_index,
         leaf_cache,
         leaf_reader,
@@ -258,9 +258,7 @@ fn exec_leaf_stage(
     // we don't actually write the free-list pages so the store is effectively clean.
     let _ = leaf_finisher.finish(&PAGE_POOL, Vec::new()).unwrap();
 
-    for _ in 0..leaf_stage_output.submitted_io {
-        io_handle.recv().unwrap();
-    }
+    leaf_stage_output.post_io_work.wait().unwrap();
 
     TREE_DATA.ln_fd.sync_all().unwrap();
 
@@ -540,7 +538,7 @@ fn branch_stage_inner(input: StageInputs) -> TestResult {
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
 
     let io_handle = IO_POOL.make_handle();
-    let branch_stage_output = super::branch_stage::run(
+    let mut branch_stage_output = super::branch_stage::run(
         &mut new_bbn_index,
         bbn_writer,
         PAGE_POOL.clone(),
@@ -569,9 +567,7 @@ fn branch_stage_inner(input: StageInputs) -> TestResult {
     // we don't actually write the free-list pages so the store is effectively clean.
     let _ = bbn_finisher.finish(&PAGE_POOL, Vec::new()).unwrap();
 
-    for _ in 0..branch_stage_output.submitted_io {
-        io_handle.recv().unwrap();
-    }
+    branch_stage_output.post_io_drop.wait().unwrap();
 
     bbn_fd.sync_all().unwrap();
 

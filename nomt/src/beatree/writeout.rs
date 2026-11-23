@@ -5,19 +5,21 @@
 // updated and then perform some cleanup.
 
 use super::allocator::{PageNumber, Store};
-use crate::io::{FatPage, IoHandle};
+use crate::io::{FatPage, IoHandle, WriteGroupCompletion};
 
 pub fn submit_freelist_write(
     io_handle: &IoHandle,
     store: &Store,
     free_list_pages: Vec<(PageNumber, FatPage)>,
-) {
+) -> std::io::Result<WriteGroupCompletion> {
+    let completion;
+    let writes;
+    (writes, completion) = io_handle.write_group();
     for (pn, page) in free_list_pages {
-        io_handle
-            .send(crate::io::IoCommand {
-                kind: crate::io::IoKind::Write(store.store_fd(), pn.0 as u64, page),
-                user_data: 0,
-            })
-            .unwrap();
+        writes.send(crate::io::IoCommand {
+            kind: crate::io::IoKind::Write(store.store_fd(), pn.0 as u64, page),
+            user_data: 0,
+        })?;
     }
+    Ok(completion)
 }

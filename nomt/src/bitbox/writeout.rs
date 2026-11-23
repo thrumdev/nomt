@@ -39,23 +39,20 @@ pub(super) fn write_ht(
     ht_fd: &File,
     mut ht: Vec<(u64, Arc<FatPage>)>,
 ) -> std::io::Result<()> {
-    let mut sent = 0;
+    let mut completion;
+    let writes;
+    (writes, completion) = io_handle.write_group();
 
     ht.sort_unstable_by_key(|item| item.0);
     for (pn, page) in ht {
-        io_handle
-            .send(IoCommand {
-                kind: IoKind::WriteArc(ht_fd.as_raw_fd(), pn, page),
-                user_data: 0,
-            })
-            .unwrap();
-        sent += 1;
+        writes.send(IoCommand {
+            kind: IoKind::WriteArc(ht_fd.as_raw_fd(), pn, page),
+            user_data: 0,
+        })?;
     }
 
-    while sent > 0 {
-        io_handle.recv().unwrap();
-        sent -= 1;
-    }
+    drop(writes);
+    completion.wait()?;
 
     ht_fd.sync_all()?;
 

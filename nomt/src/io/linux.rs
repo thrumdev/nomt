@@ -37,7 +37,7 @@ pub fn check_iou_permissions() -> super::IoUringPermission {
 
 struct PendingIo {
     command: IoCommand,
-    completion_sender: Sender<CompleteIo>,
+    completion: super::CompletionTarget,
 }
 
 pub fn start_io_worker(
@@ -81,6 +81,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
 
     // Indicates whether the worker detected that it should shutdown.
     let mut shutdown = false;
+    let mut completed_writes = Vec::with_capacity(MAX_IN_FLIGHT);
 
     loop {
         // 1. process completions.
@@ -92,7 +93,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
                 }
                 let PendingIo {
                     command,
-                    completion_sender,
+                    completion,
                 } = pending.remove(completion_event.user_data() as usize);
 
                 // io_uring never uses errno to pass back error information.
@@ -108,14 +109,19 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
                     IoKindResult::Retry => {
                         retries.push_back(IoPacket {
                             command,
-                            completion_sender,
+                            completion,
                         });
                         continue;
                     }
                 };
 
                 let complete = CompleteIo { command, result };
-                let _ = completion_sender.send(complete);
+                match completion {
+                    super::CompletionTarget::Individual(sender) => {
+                        let _ = sender.send(complete);
+                    }
+                    completion => completed_writes.push((completion, complete)),
+                }
             }
         } else if shutdown {
             // No pending IOs and we are shutting down. That means we can exit the worker.
@@ -126,6 +132,9 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
             //
             // So in other words, we plumb `page_pool` all the way here and drop it here only to
             // ensure safety.
+            for (target, complete) in completed_writes.drain(..) {
+                target.finish(complete);
+            }
             drop(page_pool);
             return;
         }
@@ -139,7 +148,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
                 // re-apply partially failed reads and writes
                 // unwrap: known not empty
                 retries.pop_front().unwrap()
-            } else if pending.is_empty() {
+            } else if pending.is_empty() && completed_writes.is_empty() {
                 // block on new I/O if nothing in-flight.
                 match command_rx.recv() {
                     Ok(command) => command,
@@ -162,7 +171,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
             to_submit = true;
             let pending_index = pending.insert(PendingIo {
                 command: next_io.command,
-                completion_sender: next_io.completion_sender,
+                completion: next_io.completion,
             });
 
             let entry = submission_entry(&mut pending.get_mut(pending_index).unwrap().command)
@@ -177,14 +186,27 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
             submit_queue.sync();
         }
 
-        let wait = if pending.len() == MAX_IN_FLIGHT { 1 } else { 0 };
-
         // Do submit handling EINTR.
         loop {
-            match submitter.submit_and_wait(wait) {
+            match submitter.submit() {
                 Ok(_submitted) => break,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => (),
                 other @ Err(_) => panic!("unexpected error: {:?}", other),
+            }
+        }
+
+        // Submit replacement requests before freeing completed buffers. Drain
+        // every iteration, before any blocking wait, including an idle tail.
+        for (target, complete) in completed_writes.drain(..) {
+            target.finish(complete);
+        }
+        if pending.len() == MAX_IN_FLIGHT {
+            loop {
+                match submitter.submit_and_wait(1) {
+                    Ok(_) => break,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => (),
+                    Err(e) => panic!("unexpected error: {e:?}"),
+                }
             }
         }
     }
