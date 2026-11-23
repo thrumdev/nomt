@@ -22,7 +22,7 @@ use crate::beatree::{
     },
     Key, ValueChange,
 };
-use crate::io::{IoCommand, IoHandle, IoKind};
+use crate::io::{page_pool::Page, IoCommand, IoHandle, IoKind, IoVecs};
 use crate::task::{join_task, spawn_task};
 
 /// Tracker of all changes that happen to leaves during an update
@@ -202,9 +202,6 @@ fn apply_worker_changes(
         }
 
         let new_pn = leaf_entry.inserted.as_ref().map(|(_, pn)| *pn);
-        if new_pn.is_some() {
-            output.submitted_io += 1;
-        }
 
         if let Some(prev_pn) = leaf_entry.deleted {
             output.freed_pages.push(prev_pn);
@@ -213,7 +210,9 @@ fn apply_worker_changes(
         output.leaf_changeset.push((*key, new_pn));
     }
 
-    output.submitted_io += worker_output.leaves_tracker.extra_freed.len();
+    // Leaves on consecutive pages share writes, and unused allocations are freed without a
+    // write, so count the writes the worker sent.
+    output.submitted_io += worker_output.submitted_io;
     output
         .freed_pages
         .extend(worker_output.leaves_tracker.extra_freed.drain(..));
@@ -549,6 +548,8 @@ fn reset_leaf_base_fresh(
 }
 
 struct LeafWorkerOutput {
+    // The number of leaf writes sent.
+    submitted_io: usize,
     leaves_tracker: LeavesTracker,
     overflow_deleted: Vec<Vec<u8>>,
 }
@@ -573,6 +574,10 @@ fn run_worker(
         leaf_writer,
         leaves_tracker: LeavesTracker::new(),
         io_handle,
+        reserved: Vec::new(),
+        run_start: 0,
+        run: Vec::new(),
+        submitted: 0,
     };
 
     // point leaf updater at first leaf.
@@ -693,16 +698,52 @@ fn run_worker(
         }
     }
 
+    new_leaf_state.flush_run();
+    new_leaf_state
+        .leaves_tracker
+        .extra_freed
+        .extend(new_leaf_state.reserved);
     Ok(LeafWorkerOutput {
+        submitted_io: new_leaf_state.submitted,
         leaves_tracker: new_leaf_state.leaves_tracker,
         overflow_deleted,
     })
 }
 
+/// Each worker takes this many consecutive allocations at a time so its leaves land on nearby
+/// pages and its writes can be merged.
+const LEAF_ALLOCATION_CHUNK: usize = 32;
+
 struct NewLeafHandler {
     leaf_writer: SyncAllocator,
     leaves_tracker: LeavesTracker,
     io_handle: IoHandle,
+    // Allocated but not yet used page numbers, in reverse allocation order.
+    reserved: Vec<PageNumber>,
+    // Leaves on consecutive pages starting at `run_start`, not yet submitted.
+    run_start: u64,
+    run: Vec<Page>,
+    // The number of writes sent.
+    submitted: usize,
+}
+
+/// The most pages merged into one write: 128 KiB.
+const MAX_WRITE_RUN: usize = 32;
+
+impl NewLeafHandler {
+    fn flush_run(&mut self) {
+        let fd = self.leaf_writer.store_fd();
+        let kind = match self.run.len() {
+            0 => return,
+            1 => IoKind::WriteRaw(fd, self.run_start, self.run[0].clone()),
+            _ => IoKind::WriteRawV(fd, self.run_start, IoVecs::new(&self.run)),
+        };
+        self.run.clear();
+        self.submitted += 1;
+        self.io_handle
+            .send(IoCommand { kind, user_data: 0 })
+            .expect("I/O Pool Down");
+    }
 }
 
 impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
@@ -713,17 +754,22 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
         cutoff: Option<Key>,
     ) -> std::io::Result<()> {
         let leaf = Arc::new(leaf);
-        let fd = self.leaf_writer.store_fd();
 
-        let page_number = self.leaf_writer.allocate()?;
+        if self.reserved.is_empty() {
+            self.reserved = self.leaf_writer.allocate_many(LEAF_ALLOCATION_CHUNK)?;
+            self.reserved.reverse();
+        }
+        // UNWRAP: refilled above.
+        let page_number = self.reserved.pop().unwrap();
 
-        let page = leaf.inner.page();
-        self.io_handle
-            .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
-                user_data: 0,
-            })
-            .expect("I/O Pool Down");
+        let pn = page_number.0 as u64;
+        if self.run.len() == MAX_WRITE_RUN || pn != self.run_start + self.run.len() as u64 {
+            self.flush_run();
+        }
+        if self.run.is_empty() {
+            self.run_start = pn;
+        }
+        self.run.push(leaf.inner.page());
 
         self.leaves_tracker.insert(key, leaf, cutoff, page_number);
         Ok(())

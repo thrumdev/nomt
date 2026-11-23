@@ -53,6 +53,33 @@ pub enum IoKind {
     Write(RawFd, u64, FatPage),
     WriteArc(RawFd, u64, Arc<FatPage>),
     WriteRaw(RawFd, u64, Page),
+    /// Writes consecutive pages starting at the given page number with one vectored write.
+    WriteRawV(RawFd, u64, IoVecs),
+}
+
+/// The buffers of a vectored write, one page each.
+pub struct IoVecs(Vec<libc::iovec>);
+
+// SAFETY: the iovecs point at pages whose owners keep them alive until the write completes, as
+// with `Page`.
+unsafe impl Send for IoVecs {}
+
+impl IoVecs {
+    pub fn new(pages: &[Page]) -> Self {
+        IoVecs(
+            pages
+                .iter()
+                .map(|page| libc::iovec {
+                    iov_base: page.as_ptr() as *mut libc::c_void,
+                    iov_len: PAGE_SIZE,
+                })
+                .collect(),
+        )
+    }
+
+    fn as_slice(&self) -> &[libc::iovec] {
+        &self.0
+    }
 }
 
 impl fmt::Debug for IoKind {
@@ -62,6 +89,9 @@ impl fmt::Debug for IoKind {
             IoKind::Write(fd, pn, _) => write!(f, "Write(fd={}, pn={})", fd, pn),
             IoKind::WriteArc(fd, pn, _) => write!(f, "WriteArc(fd={}, pn={})", fd, pn),
             IoKind::WriteRaw(fd, pn, _) => write!(f, "WriteRaw(fd={}, pn={})", fd, pn),
+            IoKind::WriteRawV(fd, pn, iovs) => {
+                write!(f, "WriteRawV(fd={}, pn={}, n={})", fd, pn, iovs.0.len())
+            }
         }
     }
 }
@@ -77,7 +107,9 @@ impl IoKind {
         match self {
             IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
             IoKind::WriteArc(_, _, _) => panic!("attempted to extract owned buf from write_arc"),
-            IoKind::WriteRaw(_, _, _) => panic!("attempted to extract buf from write_raw"),
+            IoKind::WriteRaw(_, _, _) | IoKind::WriteRawV(_, _, _) => {
+                panic!("attempted to extract buf from write_raw")
+            }
         }
     }
 
@@ -91,6 +123,10 @@ impl IoKind {
             // there should be no unexpected end-of-file that is not aligned with PAGE_SIZE
             // when all previous writes have succeeded.
             IoKind::Read(_, _, _) if res == 0 => IoKindResult::Ok,
+            IoKind::WriteRawV(_, _, iovs) if res == (iovs.0.len() * PAGE_SIZE) as isize => {
+                IoKindResult::Ok
+            }
+            IoKind::WriteRawV(_, _, _) if res >= 0 => IoKindResult::Retry,
             // pread and pwrite return the number of bytes read or written
             _ if res == PAGE_SIZE as isize => IoKindResult::Ok,
             _ if res == -1 => {

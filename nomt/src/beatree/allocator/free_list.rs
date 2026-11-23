@@ -87,6 +87,8 @@ impl FreeList {
         self.portions.last().map(|(head_pn, _)| head_pn).copied()
     }
 
+    // Superseded by `rewrite`; kept for the incremental free-list tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn pop(&mut self) -> Option<PageNumber> {
         let pn;
         let head_empty = {
@@ -110,31 +112,82 @@ impl FreeList {
         Some(pn)
     }
 
-    /// Discards the first `n` items from the free-list.
+    /// Rewrites the whole free-list in address order, starting after the last page used by this
+    /// sync, so that the next sync's consecutive allocations land on nearby pages.
     ///
-    /// This returns the number of items discarded. Runtime is O(n) in the number of free-list
-    /// segments modified.
-    pub fn discard(&mut self, n: usize) -> usize {
-        let mut discarded = 0;
-        while discarded < n {
-            let Some((head_pn, mut head)) = self.portions.pop() else {
-                return discarded;
-            };
-            self.pop = true;
-
-            let to_discard = std::cmp::min(head.len(), n - discarded);
-            head.truncate(head.len() - to_discard);
-
-            if !head.is_empty() {
-                self.portions.push((head_pn, head));
-            } else {
-                self.released_portions.push(head_pn);
-            }
-
-            discarded += to_discard;
+    /// `used` is the number of entries the sync allocated (its first `used` pops). The pages that
+    /// held the previous free-list and the `freed` pages join the list; they stay untouched until
+    /// the next sync. The new free-list pages are the next free entries in address order, or
+    /// are bumped when there are not enough. Returns the pages to write.
+    pub fn rewrite(
+        &mut self,
+        page_pool: &PagePool,
+        used: usize,
+        freed: Vec<PageNumber>,
+        bump: &mut PageNumber,
+    ) -> Vec<(PageNumber, FatPage)> {
+        assert!(!self.pop);
+        if used == 0 && freed.is_empty() {
+            return vec![];
         }
 
-        n
+        // Entries in pop order.
+        let mut order: Vec<PageNumber> = Vec::with_capacity(self.len);
+        for (_, pns) in self.portions.iter().rev() {
+            order.extend(pns.iter().rev());
+        }
+        let remaining = &order[used..];
+
+        let mut entries: Vec<PageNumber> = Vec::with_capacity(order.len() + freed.len());
+        entries.extend(freed);
+        entries.extend(self.portions.iter().map(|(pn, _)| *pn));
+
+        // Take `taken` list pages from the remaining entries and bump the rest, such that the
+        // list pages exactly hold the entries left over.
+        let total = remaining.len() + entries.len();
+        let pages_for = |taken: usize| (total - taken).div_ceil(MAX_PNS_PER_PAGE);
+        let mut taken = 0;
+        while taken < remaining.len() && pages_for(taken + 1) >= taken + 1 {
+            taken += 1;
+        }
+        let mut list_pages: Vec<PageNumber> = remaining[..taken].to_vec();
+        for _ in taken..pages_for(taken) {
+            list_pages.push(*bump);
+            bump.0 += 1;
+        }
+        let cursor = remaining[..taken]
+            .last()
+            .or(order[..used].last())
+            .copied();
+        entries.extend_from_slice(&remaining[taken..]);
+
+        entries.sort_unstable();
+        if let Some(cursor) = cursor {
+            let split = entries.partition_point(|pn| *pn <= cursor);
+            entries.rotate_left(split);
+        }
+
+        // The last portion is the head and pops from its end, so lay the entries out reversed.
+        entries.reverse();
+        list_pages.sort_unstable();
+        self.portions = list_pages
+            .into_iter()
+            .zip(entries.chunks(MAX_PNS_PER_PAGE))
+            .map(|(pn, pns)| (pn, pns.to_vec()))
+            .collect();
+        self.len = entries.len();
+        self.fragmented = false;
+        self.released_portions.clear();
+
+        let mut prev = FREELIST_EMPTY;
+        self.portions
+            .iter()
+            .map(|(pn, pns)| {
+                let page = encode_free_list_page(page_pool, prev, pns);
+                prev = *pn;
+                (*pn, page)
+            })
+            .collect()
     }
 
     /// Get a reference to this free list asserted to be clean. This panics if the free list isn't
@@ -172,6 +225,8 @@ impl FreeList {
     /// fragmentation itself.
     ///
     /// O(n) in the number of pops / pushes.
+    // Superseded by `rewrite`; kept for the incremental free-list tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn commit(
         &mut self,
         page_pool: &PagePool,
@@ -202,6 +257,8 @@ impl FreeList {
 
     // determines the exact number of pops and bumps which are needed in order to fulfill the
     // request. also schedules pushing of all touched pages' previous page numbers.
+    // Superseded by `rewrite`; kept for the incremental free-list tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn preallocate(
         &mut self,
         to_push: &mut Vec<PageNumber>,
@@ -312,6 +369,8 @@ impl FreeList {
         new_pages
     }
 
+    // Superseded by `rewrite`; kept for the incremental free-list tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn push_and_encode(
         &mut self,
         page_pool: &PagePool,
@@ -352,6 +411,8 @@ impl FreeList {
         encoded
     }
 
+    // Superseded by `rewrite`; kept for the incremental free-list tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn push(&mut self, pn: PageNumber) {
         // UNWRAP: `push` is only called when head is not full.
         let head = self.portions.last_mut().unwrap();
@@ -359,6 +420,8 @@ impl FreeList {
         head.1.push(pn);
     }
 
+    // Superseded by `rewrite`; kept for the incremental free-list tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn encode_head(&self, page_pool: &PagePool) -> Option<(PageNumber, FatPage)> {
         if let Some((head_pn, head_pns)) = self.portions.last() {
             let prev_pn = self

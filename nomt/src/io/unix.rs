@@ -73,6 +73,15 @@ fn execute(mut command: IoCommand) -> CompleteIo {
                     (page_index * PAGE_SIZE as u64) as libc::off_t,
                 )
             },
+            IoKind::WriteRawV(fd, page_index, ref iovs) => unsafe {
+                let iovs = iovs.as_slice();
+                libc::pwritev(
+                    fd,
+                    iovs.as_ptr(),
+                    iovs.len() as libc::c_int,
+                    (page_index * PAGE_SIZE as u64) as libc::off_t,
+                )
+            },
             IoKind::WriteRaw(fd, page_index, ref mut page) => unsafe {
                 libc::pwrite(
                     fd,
