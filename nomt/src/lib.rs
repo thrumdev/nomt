@@ -6,6 +6,7 @@ use bitvec::prelude::*;
 use io::PagePool;
 use metrics::{Metric, Metrics};
 use std::{
+    cell::RefCell,
     mem,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -277,7 +278,7 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// This is used for testing for now.
     #[doc(hidden)]
     pub fn read(&self, path: KeyPath) -> anyhow::Result<Option<Value>> {
-        let _guard = if thread_has_live_session() {
+        let _guard = if thread_has_live_session(&self.access_lock) {
             self.access_lock.read_recursive()
         } else {
             self.access_lock.read()
@@ -485,21 +486,50 @@ impl SessionParams {
 }
 
 thread_local! {
-    /// Live sessions created on this thread. Shared with each session, which may be dropped on
-    /// another thread.
-    static THREAD_SESSIONS: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    /// Live sessions created on this thread, counted per database. A database is identified by
+    /// the address of its access lock, which a live session keeps allocated. Each count is shared
+    /// with its sessions, which may be dropped on another thread.
+    static THREAD_SESSIONS: RefCell<Vec<(usize, Arc<AtomicUsize>)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
-fn thread_has_live_session() -> bool {
-    THREAD_SESSIONS.with(|n| n.load(Ordering::Relaxed) > 0)
+fn thread_has_live_session(lock: &Arc<RwLock<()>>) -> bool {
+    let database = Arc::as_ptr(lock) as usize;
+    THREAD_SESSIONS.with(|sessions| {
+        sessions
+            .borrow()
+            .iter()
+            .any(|(key, count)| *key == database && count.load(Ordering::Relaxed) > 0)
+    })
+}
+
+/// The count of this thread's live sessions on the database of `lock`.
+fn thread_sessions(lock: &Arc<RwLock<()>>) -> Arc<AtomicUsize> {
+    let database = Arc::as_ptr(lock) as usize;
+    THREAD_SESSIONS.with(|sessions| {
+        let mut sessions = sessions.borrow_mut();
+        // Forget databases this thread has no session on anymore. Only this thread increments
+        // its counts, so a zero stays zero until the entry is looked up again.
+        sessions.retain(|(key, count)| *key == database || count.load(Ordering::Relaxed) > 0);
+        match sessions.iter().find(|(key, _)| *key == database) {
+            Some((_, count)) => count.clone(),
+            None => {
+                let count = Arc::new(AtomicUsize::new(0));
+                sessions.push((database, count.clone()));
+                count
+            }
+        }
+    })
 }
 
 /// A session's read guard on `access_lock`.
 ///
 /// parking_lot's `RwLock` is fair: once a commit or rollback queues for the write side, new
 /// readers wait behind it. That commit waits for every live session, so a thread opening a second
-/// session would deadlock; such a thread takes the read lock recursively, past the queued writer.
-/// Every other thread waits, so overlapping sessions can't hold a commit off indefinitely.
+/// session on the same database would deadlock; such a thread takes the read lock recursively,
+/// past the queued writer. Every other thread waits, so overlapping sessions can't hold a commit
+/// off indefinitely. Sessions on other databases don't count: they would let a thread that holds
+/// one skip the queue of every database it touches.
 struct SessionAccessGuard {
     _guard: ArcRwLockReadGuard<parking_lot::RawRwLock, ()>,
     thread_sessions: Arc<AtomicUsize>,
@@ -507,7 +537,7 @@ struct SessionAccessGuard {
 
 impl SessionAccessGuard {
     fn acquire(lock: &Arc<RwLock<()>>) -> Self {
-        let thread_sessions = THREAD_SESSIONS.with(Arc::clone);
+        let thread_sessions = thread_sessions(lock);
         let guard = if thread_sessions.load(Ordering::Relaxed) > 0 {
             RwLock::read_arc_recursive(lock)
         } else {
@@ -1118,6 +1148,62 @@ mod tests {
 
         committer.join().unwrap();
         assert_eq!(nomt.read(key).unwrap(), Some(vec![1]));
+    }
+
+    #[test]
+    fn session_held_on_another_database_does_not_skip_a_queued_commit() {
+        use super::{KeyReadWrite, Nomt, Options, SessionParams};
+
+        let open = |dir: &tempfile::TempDir| {
+            let mut o = Options::new();
+            o.path(dir.path());
+            o.hashtable_buckets(4096);
+            o.io_workers(1);
+            std::sync::Arc::new(Nomt::<Blake3Hasher>::open(o).unwrap())
+        };
+        let (dir, other_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (nomt, other) = (open(&dir), open(&other_dir));
+        let key = [1; 32];
+
+        let first = nomt.begin_session(SessionParams::default());
+        let committer = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                nomt.begin_session(SessionParams::default())
+                    .finish(vec![(key, KeyReadWrite::Write(Some(vec![1])))])
+                    .unwrap()
+                    .commit(&nomt)
+                    .unwrap()
+            }
+        });
+        while nomt.access_lock.try_read().is_some() {
+            std::thread::yield_now();
+        }
+
+        // This thread holds a session, but on another database. Its session and its read on
+        // `nomt` must still queue behind the commit.
+        let reader = std::thread::spawn({
+            let nomt = nomt.clone();
+            move || {
+                let _held = other.begin_session(SessionParams::default());
+                let read = nomt.read(key).unwrap();
+                let session_read = nomt
+                    .begin_session(SessionParams::default())
+                    .read(key)
+                    .unwrap();
+                (read, session_read)
+            }
+        });
+        for _ in 0..10_000 {
+            if reader.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        drop(first);
+
+        committer.join().unwrap();
+        assert_eq!(reader.join().unwrap(), (Some(vec![1]), Some(vec![1])));
     }
 
     #[test]
