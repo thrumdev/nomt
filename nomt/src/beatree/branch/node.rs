@@ -129,8 +129,7 @@ impl BranchNode {
         // This is ensured to be within the bounds of the page by the assertion above.
         unsafe {
             std::slice::from_raw_parts_mut(
-                self.page[BRANCH_NODE_HEADER_SIZE..BRANCH_NODE_HEADER_SIZE + 2].as_ptr()
-                    as *mut [u8; 2],
+                self.page[BRANCH_NODE_HEADER_SIZE..cells_end].as_mut_ptr() as *mut [u8; 2],
                 self.n().into(),
             )
         }
