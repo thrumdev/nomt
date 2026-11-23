@@ -8,7 +8,7 @@ use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
 use ops::overflow;
 use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
-use std::{fs::File, mem, path::Path, sync::Arc};
+use std::{fs::File, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::{
@@ -81,15 +81,6 @@ struct Sync {
     commit_concurrency: usize,
     bbn_fsync: Arc<Fsyncer>,
     ln_fsync: Arc<Fsyncer>,
-}
-
-impl Shared {
-    fn take_staged_changeset(&mut self) -> OrdMap<Key, ValueChange> {
-        assert!(self.secondary_staging.is_none());
-        let staged = mem::take(&mut self.primary_staging);
-        self.secondary_staging = Some(staged.clone());
-        staged
-    }
 }
 
 impl Tree {
@@ -219,23 +210,6 @@ impl Tree {
         ReadTransaction { inner }
     }
 
-    /// Commit a set of changes to the btree.
-    ///
-    /// The changeset is a list of key value pairs to be added or removed from the btree.
-    /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
-    // There might be some temptation to unify this with prepare_sync, but this should not be done
-    // because in the future sync and commit will be called on different threads at different times.
-    fn commit(
-        shared: &Arc<RwLock<Shared>>,
-        changeset: impl IntoIterator<Item = (Key, ValueChange)>,
-    ) {
-        let mut inner = shared.write();
-        let staging = &mut inner.primary_staging;
-        for (key, value) in changeset {
-            staging.insert(key, value);
-        }
-    }
-
     /// Dump all changes performed by commits to the underlying storage medium.
     /// The returned received indicates that all eviction has completed and it is safe to swap the
     /// index. This receiver must be blocked on before finishing sync.
@@ -246,9 +220,9 @@ impl Tree {
         sync: &Sync,
         shared: &Arc<RwLock<Shared>>,
         read_transaction_counter: &ReadTransactionCounter,
+        changeset: Vec<(Key, ValueChange)>,
     ) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
         // Take the shared lock. Briefly.
-        let staged_changeset;
         let bbn_index;
         let page_pool;
         let leaf_cache;
@@ -291,8 +265,7 @@ impl Tree {
             // It is safe for a read transaction to be created here, since it follows the conclusion
             // of the most recent sync and therefore references no logically free pages.
 
-            let mut shared = shared.write();
-            staged_changeset = shared.take_staged_changeset();
+            let shared = shared.write();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
             leaf_cache = shared.leaf_cache.clone();
@@ -320,7 +293,7 @@ impl Tree {
             // + All necessary page writes will be issued to the store and their completion waited
             //   upon. However, these changes are not reflected until `finish_sync`.
             ops::update(
-                staged_changeset.clone(),
+                changeset,
                 bbn_index,
                 leaf_cache,
                 leaf_store,
@@ -453,10 +426,17 @@ impl SyncController {
     ) {
         let inner = self.inner.clone();
         let begin_sync_task = move || {
-            Tree::commit(&inner.shared, changeset);
+            // Readers are excluded while a commit runs, so the changes go straight to the update
+            // without being staged for reads.
+            let mut changeset: Vec<_> = changeset.into_iter().collect();
+            changeset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-            let (out_meta, out_bbn_index, out_pre_swap_rx) =
-                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_counter)?;
+            let (out_meta, out_bbn_index, out_pre_swap_rx) = Tree::prepare_sync(
+                &inner.sync,
+                &inner.shared,
+                &inner.read_transaction_counter,
+                changeset,
+            )?;
 
             let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
