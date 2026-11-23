@@ -164,6 +164,22 @@ impl Rollback {
         Ok(())
     }
 
+    /// Returns what [`Self::truncate`] would return for `n`, without touching the rollback log.
+    pub fn traceback(&self, n: usize) -> Option<BTreeMap<KeyPath, Option<Vec<u8>>>> {
+        let in_memory = self.shared.in_memory.lock();
+        if n > in_memory.total_len() {
+            return None;
+        }
+
+        let mut traceback = BTreeMap::new();
+        for (_, delta) in in_memory.log.iter().rev().take(n) {
+            for (key, value) in &delta.priors {
+                traceback.insert(*key, value.clone());
+            }
+        }
+        Some(traceback)
+    }
+
     /// Truncates the rollback log by removing the last `n` deltas.
     ///
     /// This function returns the keys and values that we should apply to the database to restore

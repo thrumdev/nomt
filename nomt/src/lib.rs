@@ -377,7 +377,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         let Some(rollback) = self.store.rollback() else {
             anyhow::bail!("rollback: not enabled");
         };
-        let Some(traceback) = rollback.truncate(n)? else {
+        let Some(traceback) = rollback.traceback(n) else {
             anyhow::bail!("rollback: not enough logged for rolling back");
         };
 
@@ -399,7 +399,12 @@ impl<T: HashAlgorithm> Nomt<T> {
             actuals.push((key, value));
         }
 
-        sess.finish(actuals)?.commit(&self)?;
+        let finished = sess.finish(actuals)?;
+
+        // Only now consume the log: a failure above leaves the store usable, so it must leave
+        // the log as it was. A failure below poisons the store.
+        rollback.truncate(n)?;
+        finished.commit(&self)?;
 
         Ok(())
     }
