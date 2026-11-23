@@ -237,9 +237,11 @@ impl AsyncReader {
 
     /// Submit a request over the I/O handle.
     ///
-    /// Returns `Some` with an index if a request was submitted. Otherwise, `None`.
+    /// Returns `Some` with an index if a request was submitted. Otherwise, `None`: either every
+    /// page has been requested, or the numbers of the remaining pages are in pages that have not
+    /// been completed yet.
     pub fn submit(&mut self, io_handle: &IoHandle, user_data: u64) -> Option<usize> {
-        if self.is_done_requesting() {
+        if self.request_index == self.pages.len() {
             return None;
         }
 
@@ -273,10 +275,6 @@ impl AsyncReader {
         } else {
             None
         }
-    }
-
-    fn is_done_requesting(&self) -> bool {
-        self.request_index == self.total_pages
     }
 
     fn is_done(&self) -> bool {
