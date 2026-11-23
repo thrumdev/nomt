@@ -25,18 +25,19 @@ fn set_fsize_limit(limit: u64) {
 #[test]
 fn ht_write_error_is_reported() {
     let name = "ht_write_error";
-    let mut t = Test::new_with_params(name, 1, 64_000, None, true);
-    for i in 0..ACCOUNTS {
-        common::set_balance(&mut t, i, 1000);
-    }
-    t.commit();
-
-    for i in 0..ACCOUNTS {
-        common::set_balance(&mut t, i, 2000);
-    }
-    set_fsize_limit(FSIZE_LIMIT);
     let (tx, rx) = mpsc::channel();
+    // The database is used on one thread, which this thread watches for a hang.
     std::thread::spawn(move || {
+        let mut t = Test::new_with_params(name, 1, 64_000, None, true);
+        for i in 0..ACCOUNTS {
+            common::set_balance(&mut t, i, 1000);
+        }
+        t.commit();
+
+        for i in 0..ACCOUNTS {
+            common::set_balance(&mut t, i, 2000);
+        }
+        set_fsize_limit(FSIZE_LIMIT);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.commit().0));
         drop(t);
         let _ = tx.send(r.ok());
