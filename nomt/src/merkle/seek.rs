@@ -7,7 +7,7 @@ use crate::{
         ValueChange,
     },
     io::{CompleteIo, FatPage, IoHandle},
-    page_cache::{Page, PageCache, PageMut},
+    page_cache::{ElidedPage, Page, PageCache, PageMut},
     store::{BucketIndex, PageLoad, PageLoader},
     HashAlgorithm,
 };
@@ -131,6 +131,7 @@ impl SeekRequest {
         page: &Page,
         record_siblings: bool,
         page_set: &mut PageSet,
+        page_cache: &PageCache,
     ) {
         let RequestState::Seeking = self.state else {
             panic!("seek past end")
@@ -192,6 +193,31 @@ impl SeekRequest {
                 return;
             }
 
+            // Without overlays, the committed state is current, so a cached elided page can be
+            // used as is. Seeking resumes into it like into a loaded page.
+            if !overlay.has_ancestors() {
+                if let Some(elided) = page_cache.get_elided(&child_page_id) {
+                    debug_assert_eq!(
+                        H::hash_internal(&trie::InternalData {
+                            left: elided.page.node(0),
+                            right: elided.page.node(1),
+                        }),
+                        page.node(self.position.node_index()),
+                        "cached elided page {child_page_id:?} is stale",
+                    );
+                    page_set.insert(
+                        child_page_id,
+                        elided.page,
+                        PageOrigin::Reconstructed {
+                            page_leaves_counter: elided.leaves,
+                            children_leaves_counter: elided.children_leaves,
+                            diff: elided.diff,
+                        },
+                    );
+                    return;
+                }
+            }
+
             // Begin fetching the beatree leaves required for reconstructing the elided pages.
             //
             // NOTE: It could happen that two or more sequential requests end up in the same elided
@@ -205,7 +231,7 @@ impl SeekRequest {
                 &self.position,
                 page.clone(),
             );
-            self.continue_leaves_fetch::<H>(page_set, overlay, None);
+            self.continue_leaves_fetch::<H>(page_set, overlay, page_cache, None);
         }
     }
 
@@ -285,6 +311,7 @@ impl SeekRequest {
         &mut self,
         page_set: &mut PageSet,
         overlay: &LiveOverlay,
+        page_cache: &PageCache,
         leaf: Option<LeafNodeRef>,
     ) {
         let RequestState::FetchingLeaves {
@@ -393,6 +420,18 @@ impl SeekRequest {
 
         if let Some(pages) = maybe_pages {
             for (page_id, page, diff, page_leaves_counter, children_leaves_counter) in pages {
+                // Reconstructed from the committed leaves only: keep it for later sessions.
+                if !overlay.has_ancestors() {
+                    page_cache.insert_elided(
+                        page_id.clone(),
+                        ElidedPage {
+                            page: page.clone(),
+                            diff: diff.clone(),
+                            leaves: page_leaves_counter,
+                            children_leaves: children_leaves_counter,
+                        },
+                    );
+                }
                 page_set.insert(
                     page_id,
                     page,
@@ -765,6 +804,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                             &page,
                             self.record_siblings,
                             page_set,
+                            &self.page_cache,
                         );
                         continue;
                     }
@@ -812,6 +852,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                                     .continue_leaves_fetch::<H>(
                                         page_set,
                                         &self.overlay,
+                                        &self.page_cache,
                                         Some(leaf),
                                     ),
                                 // PANIC: The state cannot be `RequestState::Seeking`, we would have entered
@@ -906,6 +947,7 @@ impl<H: HashAlgorithm> Seeker<H> {
                 &page,
                 self.record_siblings,
                 page_set,
+                &self.page_cache,
             );
 
             if !request.is_completed() {
@@ -944,7 +986,12 @@ impl<H: HashAlgorithm> Seeker<H> {
                     request.continue_leaf_fetch::<H>(Some(leaf.clone()));
                 }
                 RequestState::FetchingLeaves { .. } => {
-                    request.continue_leaves_fetch::<H>(page_set, &self.overlay, Some(leaf.clone()));
+                    request.continue_leaves_fetch::<H>(
+                        page_set,
+                        &self.overlay,
+                        &self.page_cache,
+                        Some(leaf.clone()),
+                    );
                 }
                 // PANIC: This is strictly called only when `IoRequest::Leaf` is received, thus
                 // no `RequestState::Seeking` is expected.

@@ -54,7 +54,7 @@ use nomt_core::{
 
 use crate::{
     merkle::{page_set::PageOrigin, BucketInfo, ElidedChildren, PAGE_ELISION_THRESHOLD},
-    page_cache::{Page, PageMut},
+    page_cache::{ElidedPage, Page, PageMut, ELIDED_CACHE_MIN_LEAVES},
     page_diff::PageDiff,
 };
 
@@ -165,6 +165,8 @@ pub struct PageWalker<H> {
     child_page_roots: Vec<(TriePosition, Node)>,
     root: Node,
     output_pages: Vec<UpdatedPage>,
+    // Elided pages changed by the walk, and pages that stopped being elided (`None`).
+    elided_pages: Vec<(PageId, Option<ElidedPage>)>,
 
     // the stack contains pages (ascending) which are descendants of the parent page, if any.
     stack: Vec<StackPage>,
@@ -191,6 +193,7 @@ impl<H: NodeHasher> PageWalker<H> {
             child_page_roots: Vec::new(),
             root,
             output_pages: Vec::new(),
+            elided_pages: Vec::new(),
             stack: Vec::new(),
             sibling_stack: Vec::new(),
             prev_node: None,
@@ -460,8 +463,20 @@ impl<H: NodeHasher> PageWalker<H> {
 
     /// Conclude walking and updating and return an output - either a new root, or a list
     /// of node changes to apply to the parent page.
-    pub fn conclude(mut self) -> Output {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn conclude(self) -> Output {
+        self.conclude_with_elided_pages().0
+    }
+
+    /// Like [`Self::conclude`], also returning the elided pages changed by the walk and the pages
+    /// that stopped being elided (`None`).
+    pub fn conclude_with_elided_pages(mut self) -> (Output, Vec<(PageId, Option<ElidedPage>)>) {
         self.compact_up(None);
+        let elided_pages = std::mem::take(&mut self.elided_pages);
+        (self.into_output(), elided_pages)
+    }
+
+    fn into_output(self) -> Output {
         let updated_pages = self.output_pages;
 
         if self.parent_page.is_none() {
@@ -769,11 +784,37 @@ impl<H: NodeHasher> PageWalker<H> {
                     .elided_children
                     .set_elide(child_index.clone(), true);
 
+                let elided = |page: Page| ElidedPage {
+                    diff: reachable_nodes::<H>(&page),
+                    page,
+                    leaves: page_leaves_counter,
+                    children_leaves: children_leaves_counter,
+                };
+
+                // Report only pages the page cache keeps, and removals of pages it may hold, so a
+                // large commit does not copy every small elided page it touches.
+                let cached = page_leaves_counter + children_leaves_counter
+                    >= ELIDED_CACHE_MIN_LEAVES;
+                let was_cached = stack_page.page_leaves_counter.unwrap_or(0)
+                    + stack_page.prev_children_leaves_counter.unwrap_or(0)
+                    >= ELIDED_CACHE_MIN_LEAVES;
+
                 // If the page was previously resident in memory we need to clear it.
                 // While reconstructed pages do not need this.
                 if stack_page.bucket_info.is_some() {
+                    if cached {
+                        let page = stack_page.page.snapshot();
+                        self.elided_pages
+                            .push((stack_page.page_id.clone(), Some(elided(page))));
+                    }
                     stack_page.diff.set_cleared();
                     push_updated(&mut self.output_pages, stack_page);
+                } else if cached {
+                    let page_id = stack_page.page_id;
+                    self.elided_pages
+                        .push((page_id, Some(elided(stack_page.page.freeze()))));
+                } else if was_cached {
+                    self.elided_pages.push((stack_page.page_id, None));
                 }
                 return;
             }
@@ -794,6 +835,10 @@ impl<H: NodeHasher> PageWalker<H> {
             .elided_children
             .set_elide(child_index.clone(), false);
 
+        if stack_page.bucket_info.is_none() {
+            // A page that was elided is stored from now on.
+            self.elided_pages.push((stack_page.page_id.clone(), None));
+        }
         push_updated(&mut self.output_pages, stack_page);
     }
 }
@@ -822,6 +867,13 @@ fn for_each_reachable<H: NodeHasher>(
             len += 2;
         }
     }
+}
+
+/// A diff marking every node reachable in the page.
+fn reachable_nodes<H: NodeHasher>(page: &Page) -> PageDiff {
+    let mut diff = PageDiff::default();
+    for_each_reachable::<H>(|index| page.node(index), |index, _| diff.set_changed(index));
+    diff
 }
 
 /// Count the number of leaves present *only* in the provided page,

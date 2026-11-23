@@ -26,7 +26,7 @@ use crate::{
     beatree::ReadTransaction as BeatreeReadTx,
     io::PagePool,
     overlay::LiveOverlay,
-    page_cache::{Page, PageCache, ShardIndex},
+    page_cache::{ElidedPage, Page, PageCache, ShardIndex},
     rw_pass_cell::WritePassEnvelope,
     store::{BucketIndex, DirtyPage, SharedMaybeBucketIndex, Store},
     task::{join_task, spawn_thread_task, TaskResult},
@@ -49,8 +49,12 @@ use nomt_core::page_id::MAX_CHILD_INDEX;
 /// Threshold representing the number of leaves required to be present in the two
 /// subtrees contained in a page to be stored on disk.
 /// If this threshold is not reached, the page will not be stored on disk
-/// and will be constructed on the fly when needed.
-pub const PAGE_ELISION_THRESHOLD: u64 = 20;
+/// and will be constructed on the fly when needed. Elided pages costly to reconstruct are kept in
+/// the page cache instead (see [`crate::page_cache::PageCache::get_elided`]).
+///
+/// At 255, the third level of pages below the root stays elided up to about 60M leaves, which keeps
+/// them out of the hash-table writes of every commit.
+pub const PAGE_ELISION_THRESHOLD: u64 = 255;
 
 /// Bitfield used to note which child pages are elided and thus require on-the-fly reconstruction.
 #[derive(Debug, PartialEq, Eq)]
@@ -442,6 +446,7 @@ impl UpdateHandle {
         });
 
         let mut updated_pages = Vec::new();
+        let mut elided_pages = Vec::new();
 
         let mut path_proof_offset = 0;
         let mut witnessed_start = 0;
@@ -461,6 +466,7 @@ impl UpdateHandle {
             }
 
             updated_pages.push(output.updated_pages);
+            elided_pages.extend(output.elided_pages);
 
             // if the Commit worker collected the witnessed paths
             // then we need to aggregate them
@@ -513,6 +519,7 @@ impl UpdateHandle {
         Ok(Output {
             root: new_root.unwrap(),
             updated_pages: UpdatedPages(updated_pages),
+            elided_pages,
             witness: maybe_witness,
         })
     }
@@ -524,6 +531,9 @@ pub struct Output {
     pub root: Node,
     /// All updated pages from all worker threads. The covered sets of pages are disjoint.
     pub updated_pages: UpdatedPages,
+    /// Elided pages changed by the update, and pages that stopped being elided (`None`), to
+    /// apply to the page cache once the update is committed.
+    pub elided_pages: Vec<(PageId, Option<ElidedPage>)>,
     /// Optional witness
     pub witness: Option<Witness>,
 }
@@ -555,6 +565,7 @@ struct WorkerOutput {
     root: Option<Node>,
     witnessed_paths: Option<Vec<(WitnessedPath, Option<trie::LeafData>, usize)>>,
     updated_pages: Vec<UpdatedPage>,
+    elided_pages: Vec<(PageId, Option<ElidedPage>)>,
 }
 
 impl WorkerOutput {
@@ -563,6 +574,7 @@ impl WorkerOutput {
             root: None,
             witnessed_paths: if witness { Some(Vec::new()) } else { None },
             updated_pages: Vec::new(),
+            elided_pages: Vec::new(),
         }
     }
 }
