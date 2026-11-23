@@ -251,7 +251,14 @@ fn encode_cell_pointer(cell: &mut [u8], key: [u8; 32], offset: usize, overflow: 
 
 // look for key in the node. the return value has the same semantics as std binary_search*.
 fn search(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
-    cell_pointers.binary_search_by(|cell| crate::beatree::key_cmp(&extract_key(cell), key))
+    search_cells(cell_pointers, key)
+}
+
+/// Find `key` among sorted cell pointers, with the semantics of `binary_search`.
+pub fn search_cells(cell_pointers: &[[u8; 34]], key: &Key) -> Result<usize, usize> {
+    crate::beatree::interpolation_search(cell_pointers.len(), key, |i| {
+        extract_key(&cell_pointers[i])
+    })
 }
 
 #[cfg(feature = "benchmarks")]

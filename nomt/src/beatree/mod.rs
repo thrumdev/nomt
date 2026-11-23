@@ -40,6 +40,88 @@ pub use ops::bit_ops::*;
 
 pub type Key = [u8; 32];
 
+/// Find `key` among `n` sorted, distinct keys given by `key_at`, with the semantics of
+/// `binary_search`.
+///
+/// Keys are usually hashes, spread evenly, so the position is first guessed from the leading 8
+/// bytes and then located by galloping from the guess. That reads a few keys instead of one per
+/// binary-search probe. Any key distribution gives the exact result; only the number of probes
+/// depends on it.
+pub(crate) fn interpolation_search(
+    n: usize,
+    key: &Key,
+    key_at: impl Fn(usize) -> Key,
+) -> Result<usize, usize> {
+    use std::cmp::Ordering;
+
+    let binary = |mut lo: usize, mut hi: usize| {
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match key_cmp(key, &key_at(mid)) {
+                Ordering::Equal => return Ok(mid),
+                Ordering::Less => hi = mid,
+                Ordering::Greater => lo = mid + 1,
+            }
+        }
+        Err(lo)
+    };
+    if n < 16 {
+        return binary(0, n);
+    }
+
+    let prefix = |k: &Key| u64::from_be_bytes(k[..8].try_into().unwrap());
+    let (first, last, target) = (prefix(&key_at(0)), prefix(&key_at(n - 1)), prefix(key));
+    let guess = if target <= first {
+        0
+    } else if target >= last {
+        n - 1
+    } else {
+        ((target - first) as u128 * (n - 1) as u128 / (last - first) as u128) as usize
+    };
+
+    match key_cmp(key, &key_at(guess)) {
+        Ordering::Equal => Ok(guess),
+        Ordering::Less => {
+            // The answer is at most `hi`, and `key < key_at(hi)`.
+            let mut hi = guess;
+            let mut step = 1;
+            loop {
+                if hi < step {
+                    return binary(0, hi);
+                }
+                let probe = hi - step;
+                match key_cmp(key, &key_at(probe)) {
+                    Ordering::Equal => return Ok(probe),
+                    Ordering::Less => {
+                        hi = probe;
+                        step *= 2;
+                    }
+                    Ordering::Greater => return binary(probe + 1, hi),
+                }
+            }
+        }
+        Ordering::Greater => {
+            // The answer is at least `lo`, and `key > key_at(lo - 1)`.
+            let mut lo = guess + 1;
+            let mut step = 1;
+            loop {
+                let probe = lo + step - 1;
+                if probe >= n {
+                    return binary(lo, n);
+                }
+                match key_cmp(key, &key_at(probe)) {
+                    Ordering::Equal => return Ok(probe),
+                    Ordering::Greater => {
+                        lo = probe + 1;
+                        step *= 2;
+                    }
+                    Ordering::Less => return binary(lo, probe),
+                }
+            }
+        }
+    }
+}
+
 /// Lexicographic order of two keys, compared as four big-endian words instead of a `memcmp` call.
 #[inline]
 pub(crate) fn key_cmp(a: &Key, b: &Key) -> std::cmp::Ordering {
@@ -802,4 +884,48 @@ impl ReadTransactionCounter {
 struct ReadTransactionCounterInner {
     read_transactions: Mutex<usize>,
     cvar: Condvar,
+}
+
+#[cfg(test)]
+mod interpolation_search_tests {
+    use super::{interpolation_search, key_cmp, Key};
+    use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn matches_binary_search() {
+        let mut rng = rand_pcg::Lcg64Xsh32::seed_from_u64(7);
+        // Uniform keys, keys sharing the 8-byte prefix, and keys bunched near zero with a few
+        // outliers, which defeat the position guess.
+        let gens: [&dyn Fn(&mut rand_pcg::Lcg64Xsh32) -> Key; 3] = [
+            &|rng| rng.random(),
+            &|rng| {
+                let mut k: Key = rng.random();
+                k[..8].fill(0x42);
+                k
+            },
+            &|rng| {
+                let mut k: Key = rng.random();
+                if rng.random_ratio(9, 10) {
+                    k[..7].fill(0);
+                }
+                k
+            },
+        ];
+        for gen in gens {
+            for n in (0..40).chain([100, 600]) {
+                let mut keys: Vec<Key> = (0..n).map(|_| gen(&mut rng)).collect();
+                keys.sort_by(key_cmp);
+                keys.dedup();
+                let mut probes = keys.clone();
+                probes.extend((0..2 * n + 2).map(|_| gen(&mut rng)));
+                probes.extend([[0; 32], [0xff; 32]]);
+                for probe in probes {
+                    assert_eq!(
+                        interpolation_search(keys.len(), &probe, |i| keys[i]),
+                        keys.binary_search_by(|k| key_cmp(k, &probe)),
+                    );
+                }
+            }
+        }
+    }
 }

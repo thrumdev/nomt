@@ -128,7 +128,12 @@ pub fn find_key_pos(branch: &BranchNode, key: &Key, low: Option<usize>) -> (bool
         Ordering::Equal | Ordering::Greater => {}
     }
 
-    let mut low = low.unwrap_or(0);
+    let Some(mut low) = low else {
+        return match crate::beatree::interpolation_search(n, key, |i| get_key(branch, i)) {
+            Ok(pos) => (true, pos),
+            Err(pos) => (false, pos),
+        };
+    };
     let mut high = branch.n() as usize;
 
     while low < high {
