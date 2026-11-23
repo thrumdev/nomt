@@ -44,6 +44,9 @@ struct Shared {
     pages: bitbox::DB,
     rollback: Option<Rollback>,
     io_pool: IoPool,
+    /// Writes out the hash-table pages after the manifest, so the beatree update that runs
+    /// meanwhile does not queue behind them.
+    ht_io_pool: IoPool,
     meta_fd: File,
     value_log_fd: File,
     flock: Option<flock::Flock>,
@@ -88,6 +91,7 @@ impl Store {
         }
 
         let io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
+        let ht_io_pool = io::start_io_pool(o.io_workers, page_pool.clone());
 
         let meta_fd = {
             let mut options = OpenOptions::new();
@@ -232,6 +236,7 @@ impl Store {
                 values,
                 pages,
                 io_pool,
+                ht_io_pool,
                 _db_dir_fd: db_dir_fd,
                 meta_fd,
                 value_log_fd,
@@ -358,6 +363,7 @@ impl Drop for Shared {
         // Otherwise, these IO workers might still be writing to the files while another process
         // acquired the flock.
         self.io_pool.shutdown();
+        self.ht_io_pool.shutdown();
         drop(self.flock.take());
     }
 }

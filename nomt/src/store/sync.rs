@@ -111,7 +111,7 @@ impl Sync {
             }
 
             // Write out the hash-table pages while the beatree update completes.
-            let ht_writeout = s.spawn(|| bitbox_sync.post_meta(shared.io_pool.make_handle()));
+            let ht_writeout = s.spawn(|| bitbox_sync.post_meta(shared.ht_io_pool.make_handle()));
 
             let beatree_result = beatree_sync.wait_pre_meta();
             if let Some(PanicOnSyncMode::PostMeta) = self.panic_on_sync {
