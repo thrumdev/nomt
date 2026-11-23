@@ -69,7 +69,7 @@ pub(crate) fn finish_pending_rehash(path: &Path, page_pool: &PagePool) -> anyhow
         .write(true)
         .open(&meta_path)
         .with_context(|| format!("failed to open {}", meta_path.display()))?;
-    let mut meta = Meta::read(page_pool, &meta_fd)
+    let (mut meta, pending_value_log) = Meta::read_with_pending(page_pool, &meta_fd)
         .with_context(|| format!("failed to read {}", meta_path.display()))?;
     meta.validate()?;
 
@@ -93,7 +93,7 @@ pub(crate) fn finish_pending_rehash(path: &Path, page_pool: &PagePool) -> anyhow
         }
         n if n == marker.old_num_pages && ht_len == new_len => {
             meta.bitbox_num_pages = marker.new_num_pages;
-            Meta::write(page_pool, &meta_fd, &meta)
+            Meta::write_with_pending(page_pool, &meta_fd, &meta, pending_value_log)
                 .context("failed to finish pending rehash metadata update")?;
         }
         n if n == marker.old_num_pages && ht_len == old_len => {
@@ -135,7 +135,7 @@ pub(crate) fn grow_hashtable(
         .write(true)
         .open(&meta_path)
         .with_context(|| format!("failed to open {}", meta_path.display()))?;
-    let mut meta = Meta::read(page_pool, &meta_fd)
+    let (mut meta, pending_value_log) = Meta::read_with_pending(page_pool, &meta_fd)
         .with_context(|| format!("failed to read {}", meta_path.display()))?;
     meta.validate()?;
 
@@ -166,7 +166,7 @@ pub(crate) fn grow_hashtable(
     sync_dir(path)?;
 
     meta.bitbox_num_pages = new_num_pages;
-    Meta::write(page_pool, &meta_fd, &meta).context("failed to update NOMT metadata")?;
+    Meta::write_with_pending(page_pool, &meta_fd, &meta, pending_value_log).context("failed to update NOMT metadata")?;
 
     remove_file_if_exists(&path.join(MARKER_FILE))?;
     sync_dir(path)?;

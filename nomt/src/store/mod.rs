@@ -30,6 +30,7 @@ mod flock;
 pub(crate) mod meta;
 mod page_loader;
 mod sync;
+mod value_log;
 
 /// This is a lightweight handle and can be cloned cheaply.
 #[derive(Clone)]
@@ -44,6 +45,7 @@ struct Shared {
     rollback: Option<Rollback>,
     io_pool: IoPool,
     meta_fd: File,
+    value_log_fd: File,
     flock: Option<flock::Flock>,
     poisoned: AtomicBool,
 
@@ -146,7 +148,15 @@ impl Store {
             }
         }
 
-        let meta = meta::Meta::read(&page_pool, &meta_fd)?;
+        let value_log_fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&o.path.join("value_log"))?;
+        // A manifest may reference the log, so its directory entry must be durable.
+        db_dir_fd.sync_all()?;
+
+        let (mut meta, pending_value_log) = meta::Meta::read_with_pending(&page_pool, &meta_fd)?;
         meta.validate()?;
         let values = beatree::Tree::open(
             page_pool.clone(),
@@ -180,12 +190,42 @@ impl Store {
                 )
             })
             .transpose()?;
+
+        // The last sync wrote its manifest but maybe not its beatree pages: apply its changeset
+        // to the beatree state the manifest records.
+        if pending_value_log != 0 {
+            if pending_value_log != meta.sync_seqn {
+                anyhow::bail!(
+                    "pending value log {} does not match sync {}",
+                    pending_value_log,
+                    meta.sync_seqn
+                );
+            }
+            let changeset = value_log::read(&value_log_fd, pending_value_log)?;
+            let mut beatree_sync = values.sync();
+            beatree_sync.begin_sync(changeset);
+            let beatree_meta = beatree_sync.wait_pre_meta()?;
+            meta.version = meta::VERSION;
+            meta.ln_freelist_pn = beatree_meta.ln_freelist_pn;
+            meta.ln_bump = beatree_meta.ln_bump;
+            meta.bbn_freelist_pn = beatree_meta.bbn_freelist_pn;
+            meta.bbn_bump = beatree_meta.bbn_bump;
+            Meta::write(&page_pool, &meta_fd, &meta)?;
+            crate::task::join_task(&beatree_sync.post_meta());
+        }
+
         Ok(Self {
             sync: Arc::new(Mutex::new(sync::Sync::new(
                 meta.sync_seqn,
                 meta.bitbox_num_pages,
                 meta.bitbox_seed,
                 o.panic_on_sync,
+                beatree::SyncData {
+                    ln_freelist_pn: meta.ln_freelist_pn,
+                    ln_bump: meta.ln_bump,
+                    bbn_freelist_pn: meta.bbn_freelist_pn,
+                    bbn_bump: meta.bbn_bump,
+                },
             ))),
             shared: Arc::new(Shared {
                 rollback,
@@ -194,6 +234,7 @@ impl Store {
                 io_pool,
                 _db_dir_fd: db_dir_fd,
                 meta_fd,
+                value_log_fd,
                 flock: Some(flock),
                 poisoned: false.into(),
             }),
