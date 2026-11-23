@@ -80,6 +80,13 @@ impl Overlay {
         (pages, values, rollback_delta)
     }
 
+    /// Whether the database, whose root is at the given version, is still in the state this
+    /// overlay was built on. An overlay with a parent is tied to that parent instead, see
+    /// [`Self::parent_matches_marker`].
+    pub(super) fn is_base_current(&self, root_version: u64) -> bool {
+        self.inner.data.parent_status.is_some() || self.inner.base_version == root_version
+    }
+
     /// Mark the overlay as committed and return a marker.
     pub(super) fn mark_committed(&self) -> OverlayMarker {
         let status = self.inner.data.status.clone();
@@ -94,6 +101,8 @@ struct OverlayInner {
     index: Index,
     data: Arc<Data>,
     seqn: u64,
+    /// See [`LiveOverlay::base_version`].
+    base_version: u64,
     // ordered by recency.
     ancestor_data: Vec<Weak<Data>>,
     rollback_delta: Option<crate::rollback::Delta>,
@@ -249,6 +258,8 @@ pub(super) struct LiveOverlay {
     parent: Option<Arc<OverlayInner>>,
     ancestor_data: Vec<Arc<Data>>,
     min_seqn: u64,
+    /// The version of the database root when the session using this overlay began.
+    base_version: u64,
 }
 
 impl LiveOverlay {
@@ -262,6 +273,7 @@ impl LiveOverlay {
                 parent: None,
                 ancestor_data: Vec::new(),
                 min_seqn: 0,
+                base_version: 0,
             });
         };
 
@@ -297,6 +309,7 @@ impl LiveOverlay {
             parent: Some(parent),
             ancestor_data,
             min_seqn,
+            base_version: 0,
         })
     }
 
@@ -418,9 +431,34 @@ impl LiveOverlay {
                     parent_status,
                 }),
                 seqn: new_seqn,
+                base_version: self.base_version,
                 ancestor_data,
                 rollback_delta,
             }),
+        }
+    }
+
+    /// Record the version of the database root at the time the session begins.
+    pub(super) fn set_base_version(&mut self, root_version: u64) {
+        self.base_version = root_version;
+    }
+
+    /// Whether a session built on this overlay can be committed to the database directly, given
+    /// the version of the database root and the marker of the overlay committed last.
+    ///
+    /// Either the root has not changed since the session began, or the last commit was that of
+    /// the parent overlay.
+    pub(super) fn is_base_current(
+        &self,
+        root_version: u64,
+        marker: Option<&OverlayMarker>,
+    ) -> bool {
+        if self.base_version == root_version {
+            return true;
+        }
+        match (self.parent.as_ref(), marker) {
+            (Some(parent), Some(marker)) => parent.data.status.ptr_eq(&marker.0),
+            _ => false,
         }
     }
 

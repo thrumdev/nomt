@@ -68,8 +68,23 @@ pub type Value = Vec<u8>;
 struct Shared {
     /// The current root of the trie.
     root: Root,
+    /// Incremented whenever a commit changes `root`.
+    ///
+    /// A changeset is built on the pages of the database as they were when its session began.
+    /// The root does not identify them: after a commit and its rollback, or a delete and a
+    /// re-insert, the root is the same again while pages have moved, appeared or gone.
+    root_version: u64,
     /// The marker of the last committed overlay. `None` if the last commit was not an overlay.
     last_commit_marker: Option<OverlayMarker>,
+}
+
+impl Shared {
+    fn set_root(&mut self, root: Root) {
+        if self.root != root {
+            self.root_version += 1;
+        }
+        self.root = root;
+    }
 }
 
 /// Whether a key was read, written, or both, along with old and new values.
@@ -252,6 +267,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             store,
             shared: Arc::new(Mutex::new(Shared {
                 root: Root(root),
+                root_version: 0,
                 last_commit_marker: None,
             })),
             access_lock: Arc::new(RwLock::new(())),
@@ -319,7 +335,7 @@ impl<T: HashAlgorithm> Nomt<T> {
     /// and permit a changeset to be committed either directly to the database or into an
     /// in-memory [`Overlay`].
     pub fn begin_session(&self, params: SessionParams) -> Session<T> {
-        let live_overlay = params.overlay;
+        let mut live_overlay = params.overlay;
 
         // We must take the access guard before instantiating the rollback delta,
         // because it creates a read transaction and any commits or rollbacks will block
@@ -337,9 +353,14 @@ impl<T: HashAlgorithm> Nomt<T> {
             None
         };
 
+        let (db_root, root_version) = {
+            let shared = self.shared.lock();
+            (shared.root, shared.root_version)
+        };
+        live_overlay.set_base_version(root_version);
         let prev_root = live_overlay
             .parent_root()
-            .unwrap_or_else(|| self.root().into_inner());
+            .unwrap_or_else(|| db_root.into_inner());
 
         Session {
             store,
@@ -824,7 +845,16 @@ impl FinishedSession {
                     shared.root
                 );
             }
-            shared.root = Root(self.merkle_output.root);
+            if !self
+                .parent_overlay
+                .is_base_current(shared.root_version, shared.last_commit_marker.as_ref())
+            {
+                anyhow::bail!(
+                    "Changeset no longer valid (the database left root {:?} and returned to it)",
+                    self.prev_root,
+                );
+            }
+            shared.set_root(Root(self.merkle_output.root));
             shared.last_commit_marker = None;
         }
 
@@ -866,7 +896,16 @@ impl FinishedSession {
                     shared.root
                 );
             }
-            shared.root = Root(self.merkle_output.root);
+            if !self
+                .parent_overlay
+                .is_base_current(shared.root_version, shared.last_commit_marker.as_ref())
+            {
+                anyhow::bail!(
+                    "Changeset no longer valid (the database left root {:?} and returned to it)",
+                    self.prev_root,
+                );
+            }
+            shared.set_root(Root(self.merkle_output.root));
             shared.last_commit_marker = None;
         }
 
@@ -906,7 +945,13 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = self.root();
+            if !self.is_base_current(shared.root_version) {
+                anyhow::bail!(
+                    "Changeset no longer valid (the database left root {:?} and returned to it)",
+                    self.prev_root(),
+                );
+            }
+            shared.set_root(self.root());
             shared.last_commit_marker = Some(self.mark_committed());
         }
 
@@ -948,7 +993,13 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = self.root();
+            if !self.is_base_current(shared.root_version) {
+                anyhow::bail!(
+                    "Changeset no longer valid (the database left root {:?} and returned to it)",
+                    self.prev_root(),
+                );
+            }
+            shared.set_root(self.root());
             shared.last_commit_marker = Some(self.mark_committed());
         }
 
