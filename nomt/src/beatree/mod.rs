@@ -2,7 +2,6 @@ use allocator::{Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
 use crossbeam_channel::{Receiver, Sender};
-use imbl::OrdMap;
 
 use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
@@ -67,12 +66,6 @@ struct Shared {
     leaf_store: Store,
     bbn_store: Store,
     leaf_store_rd: StoreReader,
-    /// Primary staging collects changes that are committed but not synced yet. Upon sync, changes
-    /// from here are moved to secondary staging.
-    primary_staging: OrdMap<Key, ValueChange>,
-    /// Secondary staging collects committed changes that are currently being synced. This is None
-    /// if there is no sync in progress.
-    secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_cache: leaf_cache::LeafCache,
 }
 
@@ -125,8 +118,6 @@ impl Tree {
             leaf_store_rd: StoreReader::new(leaf_store.clone(), io_pool.page_pool().clone()),
             leaf_store,
             bbn_store,
-            primary_staging: OrdMap::new(),
-            secondary_staging: None,
             leaf_cache: leaf_cache::LeafCache::new(32, leaf_cache_size),
         };
 
@@ -145,21 +136,11 @@ impl Tree {
         })
     }
 
-    /// Lookup a key in the btree. This blocks the current thread.
+    /// Lookup a key in the btree as of the last finished sync. This blocks the current thread.
+    ///
+    /// Changes passed to a sync are not visible until that sync finishes.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let shared = self.shared.read();
-
-        // First look up in the primary staging which contains the most recent changes.
-        if let Some(val) = shared.primary_staging.get(&key) {
-            return val.as_option().map(|v| v.to_vec());
-        }
-
-        // Then check the secondary staging which is a bit older, but fresher still than the btree.
-        if let Some(val) = shared.secondary_staging.as_ref().and_then(|x| x.get(&key)) {
-            return val.as_option().map(|v| v.to_vec());
-        }
-
-        // Finally, look up in the btree.
         ops::lookup_blocking(
             key,
             &shared.bbn_index,
@@ -191,7 +172,7 @@ impl Tree {
         }
     }
 
-    /// Initiate a new read transaction, as-of the current state of the last commit.
+    /// Initiate a new read transaction, as of the last finished sync.
     /// This blocks new sync operations from starting until it is dropped.
     pub fn read_transaction(&self) -> ReadTransaction {
         // Increment the count. This will block any sync from starting between now and the point
@@ -200,8 +181,6 @@ impl Tree {
         let shared = self.shared.read();
         let inner = Arc::new(ReadTransactionInner {
             bbn_index: shared.bbn_index.clone(),
-            primary_staging: shared.primary_staging.clone(),
-            secondary_staging: shared.secondary_staging.clone(),
             leaf_store: StoreReader::new(shared.leaf_store.clone(), shared.page_pool.clone()),
             leaf_cache: shared.leaf_cache.clone(),
             read_counter: self.read_transaction_counter.clone(),
@@ -210,7 +189,8 @@ impl Tree {
         ReadTransaction { inner }
     }
 
-    /// Dump all changes performed by commits to the underlying storage medium.
+    /// Write `changeset` to the underlying storage medium. The changeset must be sorted by key with
+    /// no key repeated.
     /// The returned received indicates that all eviction has completed and it is safe to swap the
     /// index. This receiver must be blocked on before finishing sync.
     ///
@@ -265,6 +245,11 @@ impl Tree {
             // It is safe for a read transaction to be created here, since it follows the conclusion
             // of the most recent sync and therefore references no logically free pages.
 
+            // Nothing is mutated here, so a read lock would return the same values: these fields
+            // are only written by `Tree::open` and `finish_sync`, and `finish_sync` runs from
+            // `post_meta` of this same controller, which holds the sync lock. Kept as a write lock
+            // because switching gains nothing: `Nomt` holds `access_lock` for writing across the
+            // commit, so there are no concurrent readers to let through.
             let shared = shared.write();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
@@ -309,7 +294,6 @@ impl Tree {
     fn finish_sync(shared: &Arc<RwLock<Shared>>, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
         let mut shared = shared.write();
-        shared.secondary_staging = None;
         shared.bbn_index = bbn_index;
     }
 }
@@ -418,7 +402,8 @@ impl SyncController {
     /// Begins the sync process.
     ///
     /// Accepts a list of changes to be committed to the btree. A key must not appear more than
-    /// once; otherwise the sync fails.
+    /// once; otherwise the sync fails. The changes are not visible to lookups or read transactions
+    /// until the sync finishes.
     ///
     /// Non-blocking.
     pub fn begin_sync(
@@ -427,8 +412,6 @@ impl SyncController {
     ) {
         let inner = self.inner.clone();
         let begin_sync_task = move || {
-            // Readers are excluded while a commit runs, so the changes go straight to the update
-            // without being staged for reads.
             let mut changeset: Vec<_> = changeset.into_iter().collect();
             changeset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
             if changeset.windows(2).any(|w| w[0].0 == w[1].0) {
@@ -502,8 +485,8 @@ impl SyncController {
     }
 }
 
-/// A read-transaction freezes a read-only state of the beatree as-of the last commit and enables
-/// lookups while it is alive.
+/// A read-transaction freezes a read-only state of the beatree as of the last finished sync and
+/// enables lookups while it is alive.
 ///
 /// The existence of a read transaction blocks new `Sync`s from starting, but may start when
 /// a sync is already ongoing and does not block an ongoing sync from completing.
@@ -511,8 +494,7 @@ impl SyncController {
 /// This is because sync may perform destructive changes to leaves, invalidating the read
 /// transaction.
 ///
-/// Further commits may be performed while the read transaction is live, but they won't be reflected
-/// within the transaction.
+/// A read transaction started during a sync does not reflect that sync's changes.
 ///
 /// This is cheap to clone.
 #[derive(Clone)]
@@ -522,8 +504,6 @@ pub struct ReadTransaction {
 
 struct ReadTransactionInner {
     bbn_index: Index,
-    primary_staging: OrdMap<Key, ValueChange>,
-    secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_store: StoreReader,
     leaf_cache: LeafCache,
     read_counter: ReadTransactionCounter,
@@ -532,13 +512,7 @@ struct ReadTransactionInner {
 impl ReadTransaction {
     /// Create a new iterator with the given half-open start and end range.
     pub fn iterator(&self, start: Key, end: Option<Key>) -> BeatreeIterator {
-        BeatreeIterator::new(
-            self.inner.primary_staging.clone(),
-            self.inner.secondary_staging.clone(),
-            self.inner.bbn_index.clone(),
-            start,
-            end,
-        )
+        BeatreeIterator::new(self.inner.bbn_index.clone(), start, end)
     }
 
     /// Initiate an asynchronous leaf page fetch. This may return immediately if the leaf is cached.
@@ -580,21 +554,6 @@ impl ReadTransaction {
         io_handle: &IoHandle,
         user_data: u64,
     ) -> Result<Option<Vec<u8>>, AsyncLookup> {
-        // First look up in the primary staging which contains the most recent changes.
-        if let Some(val) = self.inner.primary_staging.get(&key) {
-            return Ok(val.as_option().map(|v| v.to_vec()));
-        }
-
-        // Then check the secondary staging which is a bit older, but fresher still than the btree.
-        if let Some(val) = self
-            .inner
-            .secondary_staging
-            .as_ref()
-            .and_then(|x| x.get(&key))
-        {
-            return Ok(val.as_option().map(|v| v.to_vec()));
-        }
-
         let leaf_pn = match ops::partial_lookup(key, &self.inner.bbn_index) {
             None => return Ok(None),
             Some(pn) => pn,
