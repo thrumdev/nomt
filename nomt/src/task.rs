@@ -44,9 +44,32 @@ where
     R: Send + 'static,
 {
     // UNWRAP: The sender is not expected to be dropped by the spawned task.
-    let res = receiver.recv().unwrap();
-    match res {
+    unwrap_task_result(receiver.recv().unwrap())
+}
+
+/// Propagate a completed task's panic after all required sibling tasks are joined.
+pub(crate) fn unwrap_task_result<R>(result: TaskResult<R>) -> R {
+    match result {
         Ok(res) => res,
         Err(err_payload) => std::panic::resume_unwind(err_payload),
+    }
+}
+
+/// Join one fallible task, draining the remaining sibling results before
+/// returning an error or resuming a panic. Successful results remain streaming.
+pub(crate) fn join_task_result<R, E>(
+    receiver: &crossbeam_channel::Receiver<TaskResult<Result<R, E>>>,
+    remaining: usize,
+) -> Result<R, E> {
+    let result = receiver.recv().unwrap();
+    if !matches!(&result, Ok(Ok(_))) {
+        for _ in 0..remaining {
+            // All siblings must stop producing I/O before the failure escapes.
+            let _ = receiver.recv().unwrap();
+        }
+    }
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }

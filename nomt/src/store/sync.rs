@@ -96,15 +96,16 @@ impl Sync {
             rollback.post_meta();
         }
 
-        // Finish the beatree sync while the hash-table pages are written out.
+        // Finish the beatree sync while the hash-table pages are written out, and finish every
+        // cleanup before propagating an error.
         let beatree_post_meta = beatree_sync.post_meta();
         let bitbox_result = bitbox_sync.post_meta(shared.io_pool.make_handle());
+        let rollback_result = rollback_sync
+            .as_ref()
+            .map_or(Ok(()), |rollback| rollback.wait_post_meta());
         join_task(&beatree_post_meta);
         bitbox_result?;
-
-        if let Some(ref rollback) = rollback_sync {
-            rollback.wait_post_meta()?;
-        }
+        rollback_result?;
         Ok(())
     }
 }

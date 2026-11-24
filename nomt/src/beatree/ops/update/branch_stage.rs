@@ -10,7 +10,7 @@ use crate::{
         index::Index,
         Key,
     },
-    task::{join_task, spawn_task},
+    task::{join_task_result, spawn_task},
 };
 
 use super::branch_updater::{BaseBranch, BranchUpdater, DigestResult as BranchDigestResult};
@@ -22,12 +22,6 @@ use super::extend_range_protocol::{
 /// Tracker of all changes that happen to branch nodes during an update
 pub type BranchesTracker = super::NodesTracker<BranchNode>;
 
-/// Data, including buffers, which may be dropped only once I/O has certainly concluded.
-#[derive(Default)]
-pub struct PostIoDrop {
-    deferred_drop_pages: Vec<Vec<Arc<BranchNode>>>,
-}
-
 /// Outputs of the branch stage.
 #[derive(Default)]
 pub struct BranchStageOutput {
@@ -35,8 +29,6 @@ pub struct BranchStageOutput {
     pub freed_pages: Vec<PageNumber>,
     /// The number of submitted I/Os.
     pub submitted_io: usize,
-    /// Data which should be dropped after all submitted I/Os have concluded.
-    pub post_io_drop: PostIoDrop,
 }
 
 /// Change the btree's branch nodes in the specified way.
@@ -96,8 +88,8 @@ pub fn run(
     let mut output = BranchStageOutput::default();
     let mut branch_changeset: Vec<(Key, Option<Arc<BranchNode>>)> = vec![];
 
-    for _ in 0..num_workers {
-        let worker_output = join_task(&worker_result_rx)?;
+    for completed in 0..num_workers {
+        let worker_output = join_task_result(&worker_result_rx, num_workers - completed - 1)?;
         apply_bbn_changes(&mut output, &mut branch_changeset, worker_output);
     }
 
@@ -135,9 +127,6 @@ fn apply_bbn_changes(
     output
         .freed_pages
         .extend(worker_output.branches_tracker.extra_freed.drain(..));
-    output.post_io_drop.deferred_drop_pages.push(std::mem::take(
-        &mut worker_output.branches_tracker.deferred_drop_pages,
-    ));
 }
 
 // Branch changeset is created by aggregating the outcomes of multiple workers,
@@ -485,10 +474,9 @@ impl super::branch_updater::HandleNewBranch for NewBranchHandler {
         bbn.set_bbn_pn(page_number.0);
         let bbn = Arc::new(bbn);
 
-        let page = bbn.page();
         self.io_handle
             .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
+                kind: IoKind::WriteShared(fd, page_number.0 as u64, bbn.clone()),
                 user_data: 0,
             })
             .expect("I/O Pool Down");

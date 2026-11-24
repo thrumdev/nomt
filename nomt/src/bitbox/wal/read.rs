@@ -38,6 +38,17 @@ pub struct WalBlobReader {
 }
 
 impl WalBlobReader {
+    /// Read the sequence even when an uncommitted WAL has an incomplete body.
+    pub(crate) fn read_sync_seqn(page_pool: &PagePool, wal_fd: &File) -> anyhow::Result<u32> {
+        // The caller only recovers from a non-empty WAL, and the WAL is written in whole pages.
+        debug_assert!(wal_fd.metadata()?.len() > 0, "WAL must not be empty");
+        let page = io::read_page(page_pool, wal_fd, 0)?;
+        if page[0] != WAL_ENTRY_TAG_START {
+            bail!("unexpected WAL entry tag at start: {}", page[0]);
+        }
+        Ok(u32::from_le_bytes(page[1..5].try_into().unwrap()))
+    }
+
     /// Creates a new WAL blob reader.
     ///
     /// The `wal_fd` is expected to be positioned at the start of the WAL file. The file must be
