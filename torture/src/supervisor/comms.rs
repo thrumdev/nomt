@@ -107,6 +107,17 @@ impl RequestResponse {
         }
     }
 
+    /// Requests the current root from the agent.
+    pub async fn send_query_root(&self) -> anyhow::Result<[u8; 32]> {
+        match self
+            .send_request(crate::message::ToAgent::QueryRoot)
+            .await?
+        {
+            crate::message::ToSupervisor::Root(root) => Ok(root),
+            resp => bail!("unexpected response: {:?}", resp),
+        }
+    }
+
     /// Requests the current hash table utilization from the agent.
     pub async fn send_query_hash_table_utilization(
         &self,

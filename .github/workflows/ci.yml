@@ -24,6 +24,33 @@ jobs:
       - run: cargo test --verbose --workspace
       # No workspace member enables these features, so `--workspace` doesn't build the decoders.
       - run: cargo test --verbose -p nomt-core --features borsh,serde
+  torture:
+    name: NOMT - torture
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/install-fuse
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked -p torture
+      # Each workload commits, rolls back and grows the hash table, crashing the database in
+      # between, and checks every value and the root against a model.
+      #
+      # A seed fixes the configuration of a workload, but not the moment a crash lands. These
+      # seeds were picked for the features they turn on; none of them uses trickfs.
+      #   6: updates, commit crashes, hash table growth with crashes
+      #   7: deletions, commit crashes, rollbacks with crashes
+      #   8: reads, updates, deletions, overflow values, commit crashes, rollbacks, growth
+      - name: Run torture workloads
+        run: |
+          for seed in 6 7 8; do
+            ./target/release/torture run "$seed" \
+              --assigned-disk $((4 << 30)) --assigned-memory $((2 << 30)) \
+              --max-iterations 20 --ensure_snapshot --workdir "$RUNNER_TEMP"
+          done
+      - name: Print the log of the failed workload
+        if: failure()
+        run: tail -n 300 "$RUNNER_TEMP"/torture-*/log.txt
   benchtop_check:
     name: NOMT - check benchtop
     runs-on: ubuntu-26.04

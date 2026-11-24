@@ -35,6 +35,7 @@ use crate::{
 pub async fn run(input: UnixStream) -> Result<()> {
     let pid = std::process::id();
     trace!(pid, "Child process started");
+    disable_core_dumps();
 
     let mut stream = Stream::new(input);
     let workdir = initialize(&mut stream).await?;
@@ -186,6 +187,15 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     })
                     .await?;
             }
+            ToAgent::QueryRoot => {
+                let root = agent.query_root();
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Root(root),
+                    })
+                    .await?;
+            }
             ToAgent::QueryHashTableUtilization => {
                 let utilization = agent.hash_table_utilization()?;
                 stream
@@ -221,6 +231,25 @@ pub async fn run(input: UnixStream) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Make this process die without a core dump.
+///
+/// The agent crashes on purpose, with `abort`. Where core dumps are collected (for example by
+/// systemd-coredump), dumping an agent takes longer than the supervisor waits for it to die,
+/// and the workload fails with "agent did not die".
+fn disable_core_dumps() {
+    let no_core = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // A failure only brings back the slow crash, so it is not worth stopping the agent for.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &no_core) } != 0 {
+        tracing::warn!(
+            "failed to disable core dumps: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 /// Execute the provided `task` and make it crash after the specified `crash_delay`.
@@ -339,6 +368,8 @@ impl Agent {
         o.path(workdir.join("nomt_db"));
         o.bitbox_seed(open_params.bitbox_seed);
         o.hashtable_buckets(open_params.hashtable_buckets);
+        o.commit_concurrency(open_params.commit_concurrency);
+        o.io_workers(open_params.io_workers);
         o.warm_up(open_params.warm_up);
         o.preallocate_ht(open_params.preallocate_ht);
         o.page_cache_size(open_params.page_cache_size);
@@ -499,6 +530,12 @@ impl Agent {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
         nomt.sync_seqn()
+    }
+
+    fn query_root(&mut self) -> [u8; 32] {
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        nomt.root().into_inner()
     }
 
     fn hash_table_utilization(&mut self) -> Result<message::HashTableUtilization> {

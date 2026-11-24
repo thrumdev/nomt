@@ -1,5 +1,7 @@
 use anyhow::Result;
 use imbl::OrdMap;
+use nomt::hasher::Blake3Hasher;
+use nomt_core::hasher::ValueHasher as _;
 use rand::{distr::weighted::WeightedIndex, prelude::*};
 use std::{
     collections::HashSet,
@@ -35,6 +37,8 @@ struct Snapshot {
     sync_seqn: u32,
     /// The state of the database at this snapshot.
     state: OrdMap<[u8; 32], Option<Vec<u8>>>,
+    /// The hash of every value present in `state`, kept to compute the expected root.
+    value_hashes: OrdMap<[u8; 32], [u8; 32]>,
 }
 
 impl Snapshot {
@@ -42,7 +46,35 @@ impl Snapshot {
         Self {
             sync_seqn: 0,
             state: OrdMap::new(),
+            value_hashes: OrdMap::new(),
         }
+    }
+
+    /// Record a change of a key, `None` being a deletion.
+    fn set(&mut self, key: [u8; 32], value: Option<Vec<u8>>) {
+        match value {
+            Some(ref value) => {
+                self.value_hashes
+                    .insert(key, Blake3Hasher::hash_value(value));
+            }
+            None => {
+                self.value_hashes.remove(&key);
+            }
+        }
+        self.state.insert(key, value);
+    }
+
+    /// The root of a trie that holds exactly the values of this snapshot.
+    ///
+    /// It is built from scratch, independently of how the database reached this state.
+    fn root(&self) -> [u8; 32] {
+        nomt_core::update::build_trie::<Blake3Hasher>(
+            0,
+            self.value_hashes
+                .iter()
+                .map(|(key, value_hash)| (*key, *value_hash)),
+            |_| {},
+        )
     }
 }
 
@@ -182,6 +214,7 @@ impl Workload {
         workload_dir: TempDir,
         workload_id: u64,
         ensure_snapshot: bool,
+        max_iterations: Option<usize>,
         assigned_disk: u64,
         assigned_memory: u64,
     ) -> Self {
@@ -191,6 +224,9 @@ impl Workload {
             WorkloadConfiguration::new_with_resources(&mut rng, assigned_disk, assigned_memory);
         if ensure_snapshot {
             config.enable_ensure_snapshot();
+        }
+        if let Some(max_iterations) = max_iterations {
+            config.limit_iterations(max_iterations);
         }
 
         Self::new_inner(
@@ -444,6 +480,7 @@ impl Workload {
         } else {
             self.ensure_changeset_reverted(&changeset).await?;
         }
+        self.ensure_root().await?;
 
         Ok(())
     }
@@ -625,6 +662,7 @@ impl Workload {
             }
         }
 
+        self.ensure_root().await?;
         self.ensure_snapshot_validity().await?;
         Ok(())
     }
@@ -686,6 +724,7 @@ impl Workload {
 
         self.reconcile_hashtable_growth(old_hashtable_buckets, new_hashtable_buckets)
             .await?;
+        self.ensure_root().await?;
         self.ensure_snapshot_validity().await?;
         Ok(())
     }
@@ -843,6 +882,28 @@ impl Workload {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Ensure that the root of the database is the root of a trie built from scratch out of the
+    /// committed state.
+    ///
+    /// The values are read from the beatree and the root is computed from the merkle pages,
+    /// which are written and recovered separately. No other check looks at the merkle pages.
+    /// Right after opening, the root is read from the root page alone; the pages below it show
+    /// in the root of a later commit that goes through them.
+    async fn ensure_root(&self) -> anyhow::Result<()> {
+        let root = self.rr().send_query_root().await?;
+        let expected_root = self.committed.root();
+        if root != expected_root {
+            return Err(anyhow::anyhow!(
+                "Unexpected root at sync_seqn {} with {} keys,\n expected: {},\n found: {}",
+                self.committed.sync_seqn,
+                self.committed.value_hashes.len(),
+                hex::encode(expected_root),
+                hex::encode(root),
+            ));
         }
         Ok(())
     }
@@ -1008,6 +1069,11 @@ impl Workload {
         self.workload_dir
     }
 
+    /// Return the configuration of the workload.
+    pub fn config(&self) -> &WorkloadConfiguration {
+        &self.config
+    }
+
     /// Return the workload directory path.
     pub fn workload_dir_path(&self) -> PathBuf {
         self.workload_dir.path().to_path_buf()
@@ -1052,7 +1118,7 @@ impl Workload {
                 break;
             }
 
-            snapshot.state.insert(*change.key(), change.value());
+            snapshot.set(*change.key(), change.value());
             changes.push(change);
 
             if used_keys.len() + new_keys.len() >= changeset_size {
@@ -1213,6 +1279,7 @@ impl Workload {
         // The application of a rollback counts as increased sync_seq.
         self.committed.sync_seqn += 1;
         self.committed.state = snapshot.state;
+        self.committed.value_hashes = snapshot.value_hashes;
     }
 
     fn commit(&mut self, snapshot: Snapshot) {

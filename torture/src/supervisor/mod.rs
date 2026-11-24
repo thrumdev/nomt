@@ -350,13 +350,22 @@ async fn run_single_workload(
         workload_dir,
         0, /* workload_id */
         run_params.ensure_snapshot,
+        run_params.max_iterations,
         run_params.assigned_disk,
         run_params.assigned_memory,
+    );
+    info!(
+        "Running workload, seed={}: {:#?}",
+        run_params.seed,
+        workload.config()
     );
 
     let maybe_flag = run_workload(cancel_token.clone(), run_params.seed, 0, workload).await?;
     if let Some(flag) = maybe_flag {
         print_flag(&flag);
+        // A scripted run, such as the one in CI, must see the failure in the exit code.
+        anyhow::bail!("workload failed, seed={}", run_params.seed);
     }
+    info!("Workload finished, seed={}", run_params.seed);
     Ok(())
 }

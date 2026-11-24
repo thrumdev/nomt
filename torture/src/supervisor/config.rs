@@ -295,6 +295,11 @@ impl WorkloadConfiguration {
         Self::new_inner(rng, avail_bytes).unwrap()
     }
 
+    /// Limit the number of iterations of the workload.
+    pub fn limit_iterations(&mut self, max_iterations: usize) {
+        self.iterations = self.iterations.min(max_iterations);
+    }
+
     pub fn enable_ensure_snapshot(&mut self) {
         self.ensure_snapshot = true;
     }

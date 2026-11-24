@@ -62,4 +62,10 @@ pub struct RunParams {
     /// This applies after every rollback.
     #[arg(long = "ensure_snapshot", default_value = "false")]
     pub ensure_snapshot: bool,
+
+    /// Stop the workload after this many iterations.
+    ///
+    /// The number of iterations is otherwise derived from the assigned disk space alone.
+    #[arg(long)]
+    pub max_iterations: Option<usize>,
 }
