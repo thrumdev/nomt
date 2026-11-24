@@ -6,7 +6,8 @@ use std::os::unix::fs::FileExt as _;
 use crate::io::{self, PagePool};
 
 pub(crate) const MAGIC: [u8; 4] = *b"NOMT";
-pub(crate) const VERSION: u32 = 1;
+/// Version 2 adds the pending value log marker after the encoded [`Meta`].
+pub(crate) const VERSION: u32 = 2;
 pub(crate) const META_SIZE: usize = 64;
 
 /// This data structure describes the state of the btree.
@@ -138,16 +139,39 @@ impl Meta {
     }
 
     pub fn read(page_pool: &PagePool, fd: &File) -> std::io::Result<Self> {
+        Ok(Self::read_with_pending(page_pool, fd)?.0)
+    }
+
+    /// Reads the meta and the sync seqn of the pending value log, 0 if none.
+    pub fn read_with_pending(page_pool: &PagePool, fd: &File) -> std::io::Result<(Self, u32)> {
         let page = io::read_page(page_pool, fd, 0)?;
         let meta = Meta::decode(&page[..META_SIZE]);
-        Ok(meta)
+        let pending = if meta.version >= 2 {
+            u32::from_le_bytes(page[META_SIZE..META_SIZE + 4].try_into().unwrap())
+        } else {
+            0
+        };
+        Ok((meta, pending))
     }
 
     pub fn write(page_pool: &PagePool, fd: &File, meta: &Meta) -> std::io::Result<()> {
+        Self::write_with_pending(page_pool, fd, meta, 0)
+    }
+
+    /// Writes the meta, marking the value log of sync `pending` as not yet applied to the
+    /// beatree pages. 0 means none.
+    pub fn write_with_pending(
+        page_pool: &PagePool,
+        fd: &File,
+        meta: &Meta,
+        pending: u32,
+    ) -> std::io::Result<()> {
         let mut page = page_pool.alloc_fat_page();
+        page.fill(0);
         meta.encode_to(&mut page.as_mut()[..META_SIZE]);
+        page[META_SIZE..META_SIZE + 4].copy_from_slice(&pending.to_le_bytes());
         fd.write_all_at(&page[..], 0)?;
-        fd.sync_all()?;
+        fd.sync_data()?;
         Ok(())
     }
 }
