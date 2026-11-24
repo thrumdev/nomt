@@ -42,7 +42,8 @@ const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 
 /// Change the btree in the specified way. Updates the branch index in-place.
 ///
-/// The changeset is a list of key value pairs to be added or removed from the btree.
+/// The changeset is a list of key value pairs to be added or removed from the btree, sorted by key
+/// with no key repeated.
 pub fn update(
     changeset: Vec<(Key, ValueChange)>,
     mut bbn_index: Index,

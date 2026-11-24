@@ -417,7 +417,8 @@ struct SharedSyncController {
 impl SyncController {
     /// Begins the sync process.
     ///
-    /// Accepts a list of changes to be committed to the btree.
+    /// Accepts a list of changes to be committed to the btree. A key must not appear more than
+    /// once; otherwise the sync fails.
     ///
     /// Non-blocking.
     pub fn begin_sync(
@@ -430,6 +431,12 @@ impl SyncController {
             // without being staged for reads.
             let mut changeset: Vec<_> = changeset.into_iter().collect();
             changeset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            if changeset.windows(2).any(|w| w[0].0 == w[1].0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "beatree changeset contains a repeated key",
+                ));
+            }
 
             let (out_meta, out_bbn_index, out_pre_swap_rx) = Tree::prepare_sync(
                 &inner.sync,
@@ -782,4 +789,49 @@ impl ReadTransactionCounter {
 struct ReadTransactionCounterInner {
     read_transactions: Mutex<usize>,
     cvar: Condvar,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_rejects_repeated_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = |name| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(dir.path().join(name))
+                .unwrap();
+            file.set_len(BRANCH_NODE_SIZE as u64).unwrap();
+            Arc::new(file)
+        };
+        let page_pool = PagePool::new();
+        let io_pool = crate::io::start_test_io_pool(1, page_pool.clone());
+        let tree = Tree::open(
+            page_pool,
+            &io_pool,
+            0,
+            0,
+            1,
+            1,
+            open("bbn"),
+            open("ln"),
+            1,
+            16,
+        )
+        .unwrap();
+
+        let mut sync = tree.sync();
+        sync.begin_sync(vec![
+            ([1; 32], ValueChange::Insert(vec![1])),
+            ([1; 32], ValueChange::Delete),
+        ]);
+        let Err(err) = sync.wait_pre_meta() else {
+            panic!("sync accepted a repeated key");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }
