@@ -5,7 +5,6 @@ use nomt::{hasher::Blake3Hasher, Nomt, SessionParams};
 use std::future::Future;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::task::JoinSet;
 use tokio::{
     io::{BufReader, BufWriter},
     net::{
@@ -63,9 +62,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
 
                 let task = async move {
                     let start = std::time::Instant::now();
-                    agent.begin_session();
-                    agent.read(reads, read_concurrency).await;
-                    let _ = agent.commit(changeset).await;
+                    let _ = agent.commit(reads, read_concurrency, changeset).await;
                     let elapsed = start.elapsed();
                     tracing::info!("commit took {}ms", elapsed.as_millis());
                 };
@@ -80,9 +77,7 @@ pub async fn run(input: UnixStream) -> Result<()> {
                 should_crash: None,
             }) => {
                 let start = std::time::Instant::now();
-                agent.begin_session();
-                agent.read(reads, read_concurrency).await;
-                let outcome = agent.commit(changeset).await;
+                let outcome = agent.commit(reads, read_concurrency, changeset).await;
                 let elapsed = start.elapsed();
                 tracing::info!("commit took {}ms", elapsed.as_millis());
                 stream
@@ -313,24 +308,18 @@ async fn initialize(stream: &mut Stream) -> Result<PathBuf> {
 
 struct Agent {
     nomt: Option<Nomt<Blake3Hasher>>,
-    session: Option<Session<Blake3Hasher>>,
 }
 
 impl Agent {
     fn new() -> Self {
-        Self {
-            nomt: None,
-            session: None,
-        }
+        Self { nomt: None }
     }
 
     /// Open a NOMT instance at the specified path with the specified open parameters.
     ///
-    /// Drops any pending session and instance.
+    /// Drops any existing instance.
     async fn perform_open(&mut self, workdir: &Path, open_params: OpenPayload) -> OpenOutcome {
         if let Some(nomt) = self.nomt.take() {
-            // Drop any pending session.
-            let _ = self.session.take();
             tracing::trace!("dropping the existing NOMT instance");
             drop(nomt);
         }
@@ -360,58 +349,19 @@ impl Agent {
         OpenOutcome::Success
     }
 
-    /// Begin a session, this must be called before `read` and `commit`,
-    /// which require an opened session.
+    /// Run one session: read the specified keys on `read_concurrency` threads, then commit the
+    /// specified changeset.
     ///
-    /// Panics if a session was already opened.
-    fn begin_session(&mut self) {
+    /// The session is opened, used and finished inside one blocking call, because a session
+    /// must stay on the thread that created it.
+    async fn commit(
+        &mut self,
+        reads: Vec<Key>,
+        read_concurrency: usize,
+        changeset: Vec<KeyValueChange>,
+    ) -> Outcome {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
-        assert!(self.session.is_none());
-        self.session
-            .replace(nomt.begin_session(SessionParams::default()));
-    }
-
-    /// Read the specified keys from an already opened session, it requires
-    /// `begin_session` to have been called.
-    async fn read(&mut self, reads: Vec<Key>, read_concurrency: usize) {
-        // UNWRAP: `read` is expected to be called after `begin_session`.
-        let session = Arc::new(self.session.take().unwrap());
-        let reads = Arc::new(reads);
-
-        let mut reads_task = JoinSet::<()>::new();
-        let reads_per_thread = reads.len() / read_concurrency;
-        for i in 0..read_concurrency {
-            let start = i * reads_per_thread;
-            let end = if i == read_concurrency - 1 {
-                reads.len()
-            } else {
-                (i + 1) * reads_per_thread
-            };
-            reads_task.spawn_blocking({
-                let reads = reads.clone();
-                let session = session.clone();
-                move || {
-                    for key in &reads[start..end] {
-                        let _res = session.read(*key).expect("read failed");
-                    }
-                }
-            });
-        }
-        reads_task.join_all().await;
-
-        self.session.replace(Arc::into_inner(session).unwrap());
-    }
-
-    /// Commit the specified changeset to an already opened session, it requires
-    /// `begin_session` to have been called.
-    ///
-    /// It consumes the session, thus after the call the session is expected to be reopened .
-    async fn commit(&mut self, changeset: Vec<KeyValueChange>) -> Outcome {
-        // UNWRAP: `nomt` is always `Some` except recreation.
-        let nomt = self.nomt.as_ref().unwrap();
-        // UNWRAP: `commit` is expected to be called after `begin_session`.
-        let session = self.session.take().unwrap();
 
         let mut actuals = Vec::with_capacity(changeset.len());
         for change in changeset {
@@ -426,8 +376,14 @@ impl Agent {
         }
 
         // Perform the commit.
-        let commit_result =
-            block_in_place(|| session.finish(actuals)?.commit(&nomt), "Panic in commit");
+        let commit_result = block_in_place(
+            || {
+                let session = nomt.begin_session(SessionParams::default());
+                read_concurrently(&session, &reads, read_concurrency);
+                session.finish(actuals)?.commit(&nomt)
+            },
+            "Panic in commit",
+        );
         let commit_outcome = classify_result(commit_result);
 
         // Log the outcome if it was not successful.
@@ -463,7 +419,6 @@ impl Agent {
         hashtable_buckets: u32,
         preallocate_ht: bool,
     ) -> Outcome {
-        self.session.take();
         self.nomt.take();
 
         let mut options = nomt::Options::new();
@@ -510,6 +465,27 @@ impl Agent {
             occupied: utilization.occupied,
         })
     }
+}
+
+/// Read the specified keys from the session on `read_concurrency` threads.
+fn read_concurrently(session: &Session<Blake3Hasher>, reads: &[Key], read_concurrency: usize) {
+    let reads_per_thread = reads.len() / read_concurrency;
+    std::thread::scope(|scope| {
+        for i in 0..read_concurrency {
+            let start = i * reads_per_thread;
+            let end = if i == read_concurrency - 1 {
+                reads.len()
+            } else {
+                (i + 1) * reads_per_thread
+            };
+            let reads = &reads[start..end];
+            scope.spawn(move || {
+                for key in reads {
+                    let _res = session.read(*key).expect("read failed");
+                }
+            });
+        }
+    });
 }
 
 /// Runs the provided blocking function on the current thread without

@@ -85,3 +85,44 @@ fn extend_range_protocol_remove_cutoff() {
         vec![7, 8, 10, 11, 13, 15, 16, 17, 18, 19, 20],
     );
 }
+
+// The second worker merges leaves 2 and 3 and hands the result to the first worker, which splits
+// it at the old boundary between those leaves. When the first worker then extends its range
+// again, it receives the second worker's note that the old leaf 3 is gone. That note must not
+// replace the leaf the first worker has just placed under the same separator.
+#[test]
+fn extend_range_protocol_keeps_leaf_placed_under_deleted_separator() {
+    #[rustfmt::skip]
+    const KEYS_AND_VALUE_SIZES: [(u8, usize); 14] = [
+        // leaf 1
+        (1, 950), (2, 950), (3, 1200),
+        // leaf 2
+        (4, 1100), (5, 1100), (6, 440), (7, 440),
+        // leaf 3
+        (8, 1332), (9, 1200), (10, 430), (11, 32),
+        // leaf 4
+        (12, 1000), (13, 1000), (14, 1000),
+    ];
+    const TO_DELETE: [u8; 3] = [3, 4, 5];
+
+    let mut t = Test::new_with_params(
+        "extend_range_deleted_separator",
+        2,      // commit_concurrency
+        64_000, // hashtable_buckets
+        None,   // panic_on_sync
+        true,   // cleanup_dir
+    );
+    for (k, value_size) in KEYS_AND_VALUE_SIZES {
+        t.write(key(k), Some(vec![k; value_size]));
+    }
+    t.commit();
+    for k in TO_DELETE {
+        t.write(key(k), None);
+    }
+    t.commit();
+
+    for (k, value_size) in KEYS_AND_VALUE_SIZES {
+        let expected = (!TO_DELETE.contains(&k)).then(|| vec![k; value_size]);
+        assert!(t.read(key(k)) == expected, "key {k}");
+    }
+}

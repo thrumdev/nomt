@@ -95,14 +95,9 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
                     completion_sender,
                 } = pending.remove(completion_event.user_data() as usize);
 
-                // io_uring never uses errno to pass back error information.
-                // Instead, completion_event.result() will contain what the equivalent
-                // system call would have returned in case of success,
-                // and in case of error completion_event.result() will contain -errno
                 let io_uring_res = completion_event.result();
-                let syscall_result = if io_uring_res >= 0 { io_uring_res } else { -1 };
 
-                let result = match command.kind.get_result(syscall_result as isize) {
+                let result = match completion_result(&command.kind, io_uring_res) {
                     IoKindResult::Ok => Ok(()),
                     IoKindResult::Err => Err(std::io::Error::from_raw_os_error(io_uring_res.abs())),
                     IoKindResult::Retry => {
@@ -213,5 +208,50 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
+    }
+}
+
+/// Classifies the result of a completion.
+///
+/// io_uring never uses errno to pass back error information. Instead, the result is what the
+/// equivalent system call would have returned in case of success, and `-errno` in case of error.
+fn completion_result(kind: &IoKind, io_uring_res: i32) -> IoKindResult {
+    if io_uring_res >= 0 {
+        kind.get_result(io_uring_res as isize)
+    } else if io_uring_res == -libc::EINTR {
+        IoKindResult::Retry
+    } else {
+        IoKindResult::Err
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{completion_result, IoKind, IoKindResult, PagePool, PAGE_SIZE};
+
+    fn set_errno(errno: i32) {
+        unsafe { *libc::__errno_location() = errno };
+    }
+
+    #[test]
+    fn completion_error_does_not_depend_on_errno() {
+        let kind = IoKind::Read(0, 0, PagePool::new().alloc_fat_page());
+
+        set_errno(libc::EINTR);
+        assert!(matches!(
+            completion_result(&kind, -libc::EIO),
+            IoKindResult::Err
+        ));
+
+        set_errno(libc::EIO);
+        assert!(matches!(
+            completion_result(&kind, -libc::EINTR),
+            IoKindResult::Retry
+        ));
+
+        assert!(matches!(
+            completion_result(&kind, PAGE_SIZE as i32),
+            IoKindResult::Ok
+        ));
     }
 }

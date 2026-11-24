@@ -604,13 +604,14 @@ impl<H: NodeHasher> PageWalker<H> {
         let stack_top = self.stack.last_mut().unwrap();
         stack_top.page.set_node(node_index, node);
 
+        // Record the node even when the page becomes empty: a later write to this page erases
+        // the clear bit, and the diff must then still say that this node changed.
+        stack_top.diff.set_changed(node_index);
         if self.position.is_first_layer_in_page()
             && node == TERMINATOR
             && sibling_node == TERMINATOR
         {
             stack_top.diff.set_cleared();
-        } else {
-            stack_top.diff.set_changed(node_index);
         }
     }
 

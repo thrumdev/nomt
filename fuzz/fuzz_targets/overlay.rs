@@ -21,6 +21,8 @@ struct Slot {
     parent: Option<usize>,
     committed: bool,
     prev_root: Node,
+    /// For an overlay without a live parent: the DB's root version when its session began.
+    db_root_version: Option<u64>,
     /// The full state as of this overlay.
     model: Model,
 }
@@ -30,6 +32,9 @@ struct State {
     committed: Model,
     /// The overlay committed most recently, unless a session was committed directly after it.
     last_committed_overlay: Option<usize>,
+    /// Counts the commits that changed the DB's root. An overlay built directly on the DB is
+    /// stale once the root has changed, even if it has since returned to the same value.
+    root_version: u64,
     slots: Vec<Slot>,
     keys: Vec<KeyPath>,
 }
@@ -49,6 +54,7 @@ fn run(u: &mut Unstructured, path: &std::path::Path) -> Result<()> {
         db: Nomt::open(options).unwrap(),
         committed: Model::new(),
         last_committed_overlay: None,
+        root_version: 0,
         slots: Vec::new(),
         keys: Vec::new(),
     };
@@ -200,6 +206,7 @@ fn session(u: &mut Unstructured, state: &mut State) -> Result<()> {
                 parent: base,
                 committed: false,
                 prev_root: base_root,
+                db_root_version: chain.is_empty().then_some(state.root_version),
                 model,
             });
         }
@@ -208,6 +215,9 @@ fn session(u: &mut Unstructured, state: &mut State) -> Result<()> {
             // Equal roots mean the DB holds the same state the session was based on.
             if db_root == base_root {
                 result.unwrap();
+                if state.db.root().into_inner() != db_root {
+                    state.root_version += 1;
+                }
                 state.committed = model;
                 state.last_committed_overlay = None;
             } else {
@@ -227,7 +237,12 @@ fn commit_overlay(u: &mut Unstructured, state: &mut State) -> Result<()> {
     let parent_ok = slot
         .parent
         .map_or(true, |p| state.last_committed_overlay == Some(p));
-    let expect_ok = parent_ok && slot.prev_root == state.db.root().into_inner();
+    let db_root = state.db.root().into_inner();
+    let expect_ok = parent_ok
+        && slot.prev_root == db_root
+        && slot
+            .db_root_version
+            .map_or(true, |version| version == state.root_version);
 
     // A commit attempt consumes the overlay, whether or not it succeeds.
     let overlay = slot.overlay.take().unwrap();
@@ -240,6 +255,9 @@ fn commit_overlay(u: &mut Unstructured, state: &mut State) -> Result<()> {
     };
     if expect_ok {
         result.unwrap();
+        if state.db.root().into_inner() != db_root {
+            state.root_version += 1;
+        }
         slot.committed = true;
         state.committed = slot.model.clone();
         state.last_committed_overlay = Some(i);

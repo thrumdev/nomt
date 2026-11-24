@@ -1,6 +1,7 @@
 use crate::beatree::Key;
 use core::ops::Range;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use std::collections::btree_map::Entry;
 
 use super::{ChangedNodeEntry, NodesTracker};
 
@@ -191,7 +192,20 @@ pub fn request_range_extension<Node>(
         }
     }
 
-    nodes_tracker.inner.extend(response.changed);
+    for (key, entry) in response.changed {
+        match nodes_tracker.inner.entry(key) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(entry);
+            }
+            Entry::Occupied(mut occupied) => {
+                // We already placed a node under a separator from which the right worker had
+                // only deleted one. Keep our node and take over the deletion.
+                let ours = occupied.get_mut();
+                assert!(ours.deleted.is_none() && entry.inserted.is_none());
+                ours.deleted = entry.deleted;
+            }
+        }
+    }
 
     if let Some(new_right_neighbor) = response.new_right_neighbor {
         worker_params.right_neighbor = new_right_neighbor;
