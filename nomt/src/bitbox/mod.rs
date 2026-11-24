@@ -17,7 +17,7 @@ use crate::{
     io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
     page_cache::{Page, PageCache},
     store::{BucketInfo, DirtyPage},
-    task::{join_task, spawn_task, TaskResult},
+    task::{spawn_task, unwrap_task_result, TaskResult},
 };
 
 use self::{ht_file::HTOffsets, meta_map::MetaMap};
@@ -391,8 +391,12 @@ impl SyncController {
     ///
     /// Must be invoked by the sync thread. Blocking.
     pub fn wait_pre_meta(&self) -> anyhow::Result<()> {
-        join_task(&self.begin_sync_result_rx)?;
-        join_task(&self.pre_meta_result_rx)?;
+        let preparation = self.begin_sync_result_rx.recv().unwrap();
+        // If preparation stopped before spawning the WAL writeout, its sender was dropped and
+        // this returns immediately.
+        let wal = self.pre_meta_result_rx.recv();
+        unwrap_task_result(preparation)?;
+        unwrap_task_result(wal.expect("successful preparation must report WAL readiness"))?;
         Ok(())
     }
 
@@ -438,16 +442,19 @@ fn recover(
 
     wal_fd.seek(SeekFrom::Start(0))?;
 
-    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
-
     // This condition triggers either if:
     //   1. the WAL holds data for a sync that never concluded. Safe to discard.
     //   2. the WAL holds data for a sync that fully concluded. (somehow). Safe to discard.
-    if wal_reader.sync_seqn() != sync_seqn {
+    //
+    // Only the header is read here: the WAL of a sync that never concluded may be incomplete.
+    if WalBlobReader::read_sync_seqn(page_pool, wal_fd)? != sync_seqn {
         // fsync generously here since it's a one-time operation.
         writeout::truncate_wal(wal_fd, true)?;
         return Ok(());
     }
+
+    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
+    debug_assert_eq!(wal_reader.sync_seqn(), sync_seqn);
 
     // The indices of pages (in the metabits page space) that were changed and require updates.
     // Note those are not ht page numbers yet and still require additional conversion.

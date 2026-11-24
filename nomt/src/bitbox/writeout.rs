@@ -52,10 +52,14 @@ pub(super) fn write_ht(
         sent += 1;
     }
 
+    // Drain every submitted write and keep the first error. The WAL must not be truncated if any
+    // page failed to reach the hash table.
+    let mut write_result = Ok(());
     while sent > 0 {
-        io_handle.recv().unwrap();
+        write_result = write_result.and(io_handle.recv().unwrap().result);
         sent -= 1;
     }
+    write_result?;
 
     ht_fd.sync_all()?;
 

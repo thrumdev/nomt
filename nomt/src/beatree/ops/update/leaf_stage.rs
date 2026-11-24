@@ -23,7 +23,7 @@ use crate::beatree::{
     Key, ValueChange,
 };
 use crate::io::{IoCommand, IoHandle, IoKind};
-use crate::task::{join_task, spawn_task};
+use crate::task::{join_task_result, spawn_task};
 
 /// Tracker of all changes that happen to leaves during an update
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
@@ -174,8 +174,8 @@ pub fn run(
     let mut output = LeafStageOutput::default();
     output.submitted_io += overflow_io;
 
-    for _ in 0..num_workers {
-        let worker_output = join_task(&worker_result_rx)?;
+    for completed in 0..num_workers {
+        let worker_output = join_task_result(&worker_result_rx, num_workers - completed - 1)?;
         apply_worker_changes(&leaf_reader, &mut output, worker_output);
     }
 
@@ -717,10 +717,9 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
 
         let page_number = self.leaf_writer.allocate()?;
 
-        let page = leaf.inner.page();
         self.io_handle
             .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
+                kind: IoKind::WriteShared(fd, page_number.0 as u64, leaf.clone()),
                 user_data: 0,
             })
             .expect("I/O Pool Down");
