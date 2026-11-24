@@ -245,11 +245,10 @@ impl Tree {
             // It is safe for a read transaction to be created here, since it follows the conclusion
             // of the most recent sync and therefore references no logically free pages.
 
-            // Nothing is mutated here, so a read lock would return the same values: these fields
-            // are only written by `Tree::open` and `finish_sync`, and `finish_sync` runs from
-            // `post_meta` of this same controller, which holds the sync lock. Kept as a write lock
-            // because switching gains nothing: `Nomt` holds `access_lock` for writing across the
-            // commit, so there are no concurrent readers to let through.
+            // Keep the write lock. A read lock appears safe because the sync mutex serializes
+            // index updates; snapshot and concurrent-lookup checks passed with both modes.
+            // `Nomt` already holds `access_lock` for writing throughout the commit, so there
+            // is no demonstrated benefit. Revisit only if the concurrency model changes.
             let shared = shared.write();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
