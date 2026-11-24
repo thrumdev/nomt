@@ -339,6 +339,8 @@ impl Agent {
         o.path(workdir.join("nomt_db"));
         o.bitbox_seed(open_params.bitbox_seed);
         o.hashtable_buckets(open_params.hashtable_buckets);
+        o.commit_concurrency(open_params.commit_concurrency);
+        o.io_workers(open_params.io_workers);
         o.warm_up(open_params.warm_up);
         o.preallocate_ht(open_params.preallocate_ht);
         o.page_cache_size(open_params.page_cache_size);
