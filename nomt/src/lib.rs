@@ -768,13 +768,15 @@ impl FinishedSession {
             .collect();
         let values = self.value_transaction.into_iter().collect();
 
-        self.parent_overlay.finish(
+        let mut overlay = self.parent_overlay.finish(
             self.prev_root.into_inner(),
             self.merkle_output.root,
             updated_pages,
             values,
             self.rollback_delta,
-        )
+        );
+        overlay.set_elided_pages(self.merkle_output.elided_pages);
+        overlay
     }
 
     /// Commit this session to disk directly.
@@ -800,6 +802,7 @@ impl FinishedSession {
             shared.last_commit_marker = None;
         }
 
+        let elided_pages = self.merkle_output.elided_pages;
         nomt.store.commit(
             self.value_transaction.into_iter(),
             nomt.page_cache.clone(),
@@ -807,7 +810,9 @@ impl FinishedSession {
                 .updated_pages
                 .into_frozen_iter(/* into_overlay */ false),
             self.rollback_delta,
-        )
+        )?;
+        nomt.page_cache.update_elided(elided_pages);
+        Ok(())
     }
 
     /// Commit this session to disk directly without blocking.
@@ -842,6 +847,7 @@ impl FinishedSession {
             shared.last_commit_marker = None;
         }
 
+        let elided_pages = self.merkle_output.elided_pages;
         nomt.store.commit(
             self.value_transaction.into_iter(),
             nomt.page_cache.clone(),
@@ -850,6 +856,7 @@ impl FinishedSession {
                 .into_frozen_iter(/* into_overlay */ false),
             self.rollback_delta,
         )?;
+        nomt.page_cache.update_elided(elided_pages);
 
         Ok(None)
     }
@@ -882,6 +889,7 @@ impl Overlay {
             shared.last_commit_marker = Some(self.mark_committed());
         }
 
+        let elided_pages = self.elided_pages();
         let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
         nomt.store.commit(
@@ -889,7 +897,9 @@ impl Overlay {
             nomt.page_cache.clone(),
             page_changes,
             rollback_delta,
-        )
+        )?;
+        nomt.page_cache.update_elided(elided_pages);
+        Ok(())
     }
 
     /// Commit the changes from this overlay to the underlying database without blocking.
@@ -924,6 +934,7 @@ impl Overlay {
             shared.last_commit_marker = Some(self.mark_committed());
         }
 
+        let elided_pages = self.elided_pages();
         let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
         nomt.store.commit(
@@ -932,6 +943,7 @@ impl Overlay {
             page_changes,
             rollback_delta,
         )?;
+        nomt.page_cache.update_elided(elided_pages);
 
         Ok(None)
     }

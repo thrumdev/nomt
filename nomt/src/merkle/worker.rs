@@ -259,8 +259,10 @@ fn update<H: HashAlgorithm>(
         }
     }
 
+    let (root_output, elided_pages) = root_page_updater.conclude_with_elided_pages();
+    output.elided_pages.extend(elided_pages);
     // PANIC: output is always root when no parent page is specified.
-    match root_page_updater.conclude() {
+    match root_output {
         Output::Root(new_root, updates) => {
             output.updated_pages.extend(updates);
             output.root = Some(new_root);
@@ -530,8 +532,10 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
         }
 
         // 2. conclude.
+        let (walker_output, elided_pages) = self.page_walker.conclude_with_elided_pages();
+        output.elided_pages = elided_pages;
         // PANIC: walker was configured with a parent page.
-        let (new_nodes, updates) = match self.page_walker.conclude() {
+        let (new_nodes, updates) = match walker_output {
             Output::ChildPageRoots(new_nodes, output_pages) => (new_nodes, output_pages),
             Output::Root(_, _) => unreachable!(),
         };

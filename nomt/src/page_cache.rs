@@ -3,6 +3,7 @@ use crate::{
     io::{page_pool::FatPage, PagePool, PAGE_SIZE},
     merkle::ElidedChildren,
     metrics::{Metric, Metrics},
+    page_diff::PageDiff,
     page_region::PageRegion,
     rw_pass_cell::{Region, RegionContains, RwPassDomain, WritePass},
     Options,
@@ -56,6 +57,13 @@ impl PageMut {
     pub fn freeze(self) -> Page {
         Page {
             inner: Arc::new(self.inner),
+        }
+    }
+
+    /// A frozen copy of the page.
+    pub fn snapshot(&self) -> Page {
+        Page {
+            inner: Arc::new(self.inner.clone()),
         }
     }
 
@@ -229,8 +237,29 @@ impl CacheShardLocked {
     }
 }
 
+/// An elided page, which is not stored in the hash-table, kept in memory as of the last commit
+/// because it is costly to reconstruct from its leaves.
+#[derive(Clone)]
+pub struct ElidedPage {
+    pub page: Page,
+    /// All nodes written in the page.
+    pub diff: PageDiff,
+    /// The number of leaves in the page.
+    pub leaves: u64,
+    /// The number of leaves in its child pages.
+    pub children_leaves: u64,
+}
+
+/// Elided pages with at least this many leaves in and below them are kept in memory. Smaller ones
+/// are cheap to reconstruct.
+pub const ELIDED_CACHE_MIN_LEAVES: u64 = 20;
+
+type ElidedShard = RwLock<HashMap<PageId, ElidedPage, FxBuildHasher>>;
+
 struct Shared {
     shards: Vec<CacheShard>,
+    /// Elided pages, sharded by the child of the root page they descend from.
+    elided: Vec<ElidedShard>,
     root_page: RwLock<Option<CacheEntry>>,
     page_rw_pass_domain: RwPassDomain,
     fixed_levels: usize,
@@ -332,6 +361,9 @@ impl PageCache {
                 // One shard per child of the root page. Each shard is a separate merkle update
                 // task on the `commit_concurrency` workers, so they balance the load dynamically.
                 shards: make_shards(NUM_CHILDREN, o.page_cache_size),
+                elided: (0..NUM_CHILDREN)
+                    .map(|_| RwLock::new(HashMap::with_hasher(FxBuildHasher::default())))
+                    .collect(),
                 root_page: RwLock::new(root_page_entry),
                 page_rw_pass_domain: domain,
                 metrics: metrics.into().unwrap_or(Metrics::new(false)),
@@ -350,6 +382,37 @@ impl PageCache {
                 .region
                 .contains_exclusive(page_id));
             Some(shard_index)
+        }
+    }
+
+    fn elided_shard(&self, page_id: &PageId) -> &ElidedShard {
+        // The root page and its children are never elided.
+        &self.shared.elided[page_id.child_index_at_level(0).to_u8() as usize]
+    }
+
+    /// Get an elided page as of the last commit.
+    pub fn get_elided(&self, page_id: &PageId) -> Option<ElidedPage> {
+        self.elided_shard(page_id).read().get(page_id).cloned()
+    }
+
+    /// Keep a page reconstructed from the committed leaves, if it is costly to reconstruct.
+    pub fn insert_elided(&self, page_id: PageId, elided: ElidedPage) {
+        if elided.leaves + elided.children_leaves >= ELIDED_CACHE_MIN_LEAVES {
+            self.elided_shard(&page_id).write().insert(page_id, elided);
+        }
+    }
+
+    /// Apply the elided pages changed by a commit: `None` means the page is no longer elided.
+    pub fn update_elided(&self, updates: Vec<(PageId, Option<ElidedPage>)>) {
+        for (page_id, elided) in updates {
+            match elided {
+                Some(elided) if elided.leaves + elided.children_leaves >= ELIDED_CACHE_MIN_LEAVES => {
+                    self.elided_shard(&page_id).write().insert(page_id, elided);
+                }
+                _ => {
+                    self.elided_shard(&page_id).write().remove(&page_id);
+                }
+            }
         }
     }
 

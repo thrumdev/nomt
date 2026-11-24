@@ -17,7 +17,7 @@
 //! Creating a new overlay is an O(n) operation in the amount of changes relative to the parent,
 //! both in terms of new changes and outdated ancestors.
 
-use crate::{beatree::ValueChange, store::DirtyPage, Root};
+use crate::{beatree::ValueChange, page_cache::ElidedPage, store::DirtyPage, Root};
 use nomt_core::{
     page_id::PageId,
     trie::{KeyPath, Node},
@@ -59,6 +59,17 @@ impl Overlay {
     ///
     /// Must be called after marking the overlay committed so dropping the extracted `Data`
     /// does not mark the overlay as dropped.
+    /// Record the elided pages changed by this overlay. Only for a newly finished overlay.
+    pub(super) fn set_elided_pages(&mut self, elided_pages: Vec<(PageId, Option<ElidedPage>)>) {
+        // UNWRAP: a newly finished overlay is not shared yet.
+        Arc::get_mut(&mut self.inner).unwrap().elided_pages = elided_pages;
+    }
+
+    /// The elided pages changed by this overlay.
+    pub(super) fn elided_pages(&self) -> Vec<(PageId, Option<ElidedPage>)> {
+        self.inner.elided_pages.clone()
+    }
+
     pub(super) fn into_committed_changes(
         self,
     ) -> (
@@ -97,6 +108,8 @@ struct OverlayInner {
     // ordered by recency.
     ancestor_data: Vec<Weak<Data>>,
     rollback_delta: Option<crate::rollback::Delta>,
+    // Elided pages changed by this overlay, for the page cache once it is committed.
+    elided_pages: Vec<(PageId, Option<ElidedPage>)>,
 }
 
 /// A marker indicating the overlay uniquely, until dropped. Used to enforce commit order.
@@ -252,6 +265,11 @@ pub(super) struct LiveOverlay {
 }
 
 impl LiveOverlay {
+    /// Whether any uncommitted overlay lies below this one.
+    pub(super) fn has_ancestors(&self) -> bool {
+        self.parent.is_some()
+    }
+
     /// Create a new live overlay based on this iterator of ancestors.
     pub(super) fn new<'a>(
         live_ancestors: impl IntoIterator<Item = &'a Overlay>,
@@ -420,6 +438,7 @@ impl LiveOverlay {
                 seqn: new_seqn,
                 ancestor_data,
                 rollback_delta,
+                elided_pages: Vec::new(),
             }),
         }
     }
