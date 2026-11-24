@@ -186,6 +186,15 @@ pub async fn run(input: UnixStream) -> Result<()> {
                     })
                     .await?;
             }
+            ToAgent::QueryRoot => {
+                let root = agent.query_root();
+                stream
+                    .send(Envelope {
+                        reqno,
+                        message: ToSupervisor::Root(root),
+                    })
+                    .await?;
+            }
             ToAgent::QueryHashTableUtilization => {
                 let utilization = agent.hash_table_utilization()?;
                 stream
@@ -501,6 +510,12 @@ impl Agent {
         // UNWRAP: `nomt` is always `Some` except recreation.
         let nomt = self.nomt.as_ref().unwrap();
         nomt.sync_seqn()
+    }
+
+    fn query_root(&mut self) -> [u8; 32] {
+        // UNWRAP: `nomt` is always `Some` except recreation.
+        let nomt = self.nomt.as_ref().unwrap();
+        nomt.root().into_inner()
     }
 
     fn hash_table_utilization(&mut self) -> Result<message::HashTableUtilization> {

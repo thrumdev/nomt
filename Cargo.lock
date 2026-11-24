@@ -1801,6 +1801,7 @@ dependencies = [
  "libc",
  "nix 0.29.0",
  "nomt",
+ "nomt-core",
  "rand",
  "rand_distr",
  "rand_pcg",

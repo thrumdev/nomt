@@ -167,6 +167,9 @@ pub enum ToAgent {
     /// The supervisor sends this message to the child process to query the current sequence number
     /// of the database.
     QuerySyncSeqn,
+    /// The supervisor sends this message to the child process to query the current root of the
+    /// database.
+    QueryRoot,
     /// The supervisor sends this message to the child process to query hash table utilization.
     QueryHashTableUtilization,
     /// The supervisor sends this message to the child process to indicate that the child should
@@ -237,6 +240,8 @@ pub enum ToSupervisor {
     QueryValue(Option<Value>),
     /// The response to a query for the current sequence number of the database.
     SyncSeqn(u32),
+    /// The response to a query for the current root of the database.
+    Root([u8; 32]),
     /// The response to a query for hash table utilization.
     HashTableUtilizationResponse(HashTableUtilization),
 }
