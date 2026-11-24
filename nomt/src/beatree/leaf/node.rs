@@ -55,6 +55,7 @@ pub struct LeafNode {
 
 impl AsRef<[u8; PAGE_SIZE]> for LeafNode {
     fn as_ref(&self) -> &[u8; PAGE_SIZE] {
+        // UNWRAP: a `FatPage` always derefs to a slice of exactly `PAGE_SIZE` bytes.
         (&*self.inner).try_into().unwrap()
     }
 }

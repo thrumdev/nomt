@@ -46,6 +46,7 @@ pub struct BranchNode {
 
 impl AsRef<[u8; PAGE_SIZE]> for BranchNode {
     fn as_ref(&self) -> &[u8; PAGE_SIZE] {
+        // UNWRAP: a `FatPage` always derefs to a slice of exactly `PAGE_SIZE` bytes.
         self.as_slice().try_into().unwrap()
     }
 }
