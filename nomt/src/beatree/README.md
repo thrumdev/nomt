@@ -9,7 +9,7 @@
 - UBN — upper branch nodes, everything that is not a LN or BBN.
 - PN — a page number in a storage file.
 - commit — an operation where a batch of changes applied to the database atomically.
-- sync — an operation where one or more commits are flushed to the persistent storage.
+- sync — an operation that persists a changeset and publishes the updated Beatree index after the manifest is updated.
 
 ## Preliminaries
 
@@ -114,26 +114,20 @@ Next, due to shadow paging we do not overwrite any live data and thus we will on
 
 ## Code Design
 
-There is a `Tree` structure, 
+`Tree` owns the following state:
 
-Logically the `Tree` owns the following pieces of data (logically, non-exhausive):
+- the in-memory index of bottom-level branch nodes;
+- the leaf cache and the leaf and branch page stores;
+- the I/O handles, sync workers, and read-transaction counter.
 
-- sequence number. Incremented by each `commit`.
-- branch node pool
-- staging map (btreemap or hashmap that store the key value pairs):
-    - primary staging map
-    - secondary staging map
+It provides these operations:
 
-and offers the following logical operations:
+- `open(...)` opens the stores and reconstructs the index from the branch pages.
+- `lookup(key)` reads through the current index, using cached leaves or loading pages from disk.
+- `read_transaction()` captures the index as of the last finished sync. The transaction keeps that view until it is dropped.
+- `sync()` acquires the sync mutex and returns a `SyncController`. The controller accepts the changeset and coordinates persistence and publication.
 
-- `open() → Tree`, open or recover the database from the given wal instance.
-- `commit([KV])`. Change the btree in the specified way. After this returns the get method below will return the new data.
-- `lookup(K)`,
-- `sync()`, dump the current changes to the underlying storage medium. Doesn't block commits. Blocks on sync. 
-    > NOTE: in practice this could take different forms, e.g. it could be split into several methods (one for writing WAL, second for syncing, etc).
-
-`commit` stores write are stored in the primary staging map. Commit does not alter the index.
-`lookup` first checks the primary staging and if not found checks the secondary staging and if not found checks the index and hits the disk.
+There are no staging maps. Each sync receives its changeset directly, and lookups see the new values only after the updated index is published.
 
 ### Branch Node Pool
 
@@ -173,19 +167,15 @@ node_pointers: [LNPN or BNID]   // n * 32
 
 ### `sync` op
 
-`sync` works as follows:
+The sync protocol is:
 
-- assert that the secondary staging is empty.
-- move the primary staging to secondary staging.
-    (from this point on, the commits will be editing the primary staging.)
-- a new version of the index is built from the secondary staging.
-    - the untouched nodes from the previous index are reused as is via references.
-- then atomically
-    - the secondary staging is discarded.
-    - the new index replaces the old one.
-    - the nodes of the old index are freed up.
-    - the new BBNs and LNs are dumped into io engine and other sync-stuff is performed like metadata fsync.
+1. `Tree::sync()` acquires the sync mutex, which the controller holds throughout the operation.
+2. `begin_sync(changeset)` starts an asynchronous task that collects the changes into a vector, sorts them by key, and rejects repeated keys.
+3. `prepare_sync` waits for outstanding read transactions to finish, then clones the current index and storage handles. The update builds a new index using copy-on-write and writes the changed leaf, branch, overflow, and freelist pages.
+4. `wait_pre_meta()` waits for preparation and both store fsyncs, then returns the metadata needed to update the manifest. The caller writes the manifest before proceeding.
+5. `post_meta()` starts a task that waits for the cache updates and eviction to finish, then calls `finish_sync` to replace the shared index under a write lock. The caller must join this task before completing the commit.
 
+At the Beatree level, a read transaction created after the preparation's reader wait and before the index swap retains the previous view even after the sync finishes. The next sync waits for it to be dropped before reusing freed pages. At the NOMT level, `access_lock` excludes readers throughout a commit.
 
 ### BBN Dumper
 
@@ -221,18 +211,9 @@ There are 3 essential btree handling operations:
 
 #### Update
 
-The btree update algorithm accepts:
+`ops::update` consumes a vector of `(Key, ValueChange)` pairs sorted by key with no repeated keys, along with the current index, caches, stores, and worker and I/O handles. `begin_sync` establishes the ordering and uniqueness requirements before calling it.
 
-1. a list of key value pairs,
-2. a handle to the Branch Node Pool. 
-3. the commit sequence number
-
-The algorithm is expected to build a new tree that reflects changes after adding or removing the specified key pairs. The algorithm returns:
-
-- the BNID of the root of the new tree.
-- the list of BNIDs of the new BBNs.
-- the list of BNIDs of nodes obsoleted by the new tree.
-- the list of LNPNs of newly created leaves, the list of LNPNs of obsoleted leaves.
+The leaf stage applies the value changes and produces changes to leaf page references. The branch stage applies those changes to a copy of the index. After writing the pages and updated freelists, the algorithm returns the new store metadata, the new index, and a receiver for completion of cache updates, eviction, and deferred drops. The caller waits for that work before publishing the index.
 
 #### Reconstruct
 

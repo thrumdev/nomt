@@ -2,13 +2,12 @@ use allocator::{Store, StoreReader, FREELIST_EMPTY};
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
 use crossbeam_channel::{Receiver, Sender};
-use imbl::OrdMap;
 
 use leaf::node::MAX_LEAF_VALUE_SIZE;
 use nomt_core::trie::ValueHash;
 use ops::overflow;
 use parking_lot::{ArcMutexGuard, Condvar, Mutex, RwLock};
-use std::{fs::File, mem, path::Path, sync::Arc};
+use std::{fs::File, path::Path, sync::Arc};
 use threadpool::ThreadPool;
 
 use crate::{
@@ -67,12 +66,6 @@ struct Shared {
     leaf_store: Store,
     bbn_store: Store,
     leaf_store_rd: StoreReader,
-    /// Primary staging collects changes that are committed but not synced yet. Upon sync, changes
-    /// from here are moved to secondary staging.
-    primary_staging: OrdMap<Key, ValueChange>,
-    /// Secondary staging collects committed changes that are currently being synced. This is None
-    /// if there is no sync in progress.
-    secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_cache: leaf_cache::LeafCache,
 }
 
@@ -81,15 +74,6 @@ struct Sync {
     commit_concurrency: usize,
     bbn_fsync: Arc<Fsyncer>,
     ln_fsync: Arc<Fsyncer>,
-}
-
-impl Shared {
-    fn take_staged_changeset(&mut self) -> OrdMap<Key, ValueChange> {
-        assert!(self.secondary_staging.is_none());
-        let staged = mem::take(&mut self.primary_staging);
-        self.secondary_staging = Some(staged.clone());
-        staged
-    }
 }
 
 impl Tree {
@@ -134,8 +118,6 @@ impl Tree {
             leaf_store_rd: StoreReader::new(leaf_store.clone(), io_pool.page_pool().clone()),
             leaf_store,
             bbn_store,
-            primary_staging: OrdMap::new(),
-            secondary_staging: None,
             leaf_cache: leaf_cache::LeafCache::new(32, leaf_cache_size),
         };
 
@@ -154,21 +136,11 @@ impl Tree {
         })
     }
 
-    /// Lookup a key in the btree. This blocks the current thread.
+    /// Lookup a key in the btree as of the last finished sync. This blocks the current thread.
+    ///
+    /// Changes passed to a sync are not visible until that sync finishes.
     pub fn lookup(&self, key: Key) -> Option<Vec<u8>> {
         let shared = self.shared.read();
-
-        // First look up in the primary staging which contains the most recent changes.
-        if let Some(val) = shared.primary_staging.get(&key) {
-            return val.as_option().map(|v| v.to_vec());
-        }
-
-        // Then check the secondary staging which is a bit older, but fresher still than the btree.
-        if let Some(val) = shared.secondary_staging.as_ref().and_then(|x| x.get(&key)) {
-            return val.as_option().map(|v| v.to_vec());
-        }
-
-        // Finally, look up in the btree.
         ops::lookup_blocking(
             key,
             &shared.bbn_index,
@@ -200,7 +172,7 @@ impl Tree {
         }
     }
 
-    /// Initiate a new read transaction, as-of the current state of the last commit.
+    /// Initiate a new read transaction, as of the last finished sync.
     /// This blocks new sync operations from starting until it is dropped.
     pub fn read_transaction(&self) -> ReadTransaction {
         // Increment the count. This will block any sync from starting between now and the point
@@ -209,8 +181,6 @@ impl Tree {
         let shared = self.shared.read();
         let inner = Arc::new(ReadTransactionInner {
             bbn_index: shared.bbn_index.clone(),
-            primary_staging: shared.primary_staging.clone(),
-            secondary_staging: shared.secondary_staging.clone(),
             leaf_store: StoreReader::new(shared.leaf_store.clone(), shared.page_pool.clone()),
             leaf_cache: shared.leaf_cache.clone(),
             read_counter: self.read_transaction_counter.clone(),
@@ -219,24 +189,8 @@ impl Tree {
         ReadTransaction { inner }
     }
 
-    /// Commit a set of changes to the btree.
-    ///
-    /// The changeset is a list of key value pairs to be added or removed from the btree.
-    /// The changeset is applied atomically. If the changeset is empty, the btree is not modified.
-    // There might be some temptation to unify this with prepare_sync, but this should not be done
-    // because in the future sync and commit will be called on different threads at different times.
-    fn commit(
-        shared: &Arc<RwLock<Shared>>,
-        changeset: impl IntoIterator<Item = (Key, ValueChange)>,
-    ) {
-        let mut inner = shared.write();
-        let staging = &mut inner.primary_staging;
-        for (key, value) in changeset {
-            staging.insert(key, value);
-        }
-    }
-
-    /// Dump all changes performed by commits to the underlying storage medium.
+    /// Write `changeset` to the underlying storage medium. The changeset must be sorted by key with
+    /// no key repeated.
     /// The returned received indicates that all eviction has completed and it is safe to swap the
     /// index. This receiver must be blocked on before finishing sync.
     ///
@@ -246,9 +200,9 @@ impl Tree {
         sync: &Sync,
         shared: &Arc<RwLock<Shared>>,
         read_transaction_counter: &ReadTransactionCounter,
+        changeset: Vec<(Key, ValueChange)>,
     ) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
         // Take the shared lock. Briefly.
-        let staged_changeset;
         let bbn_index;
         let page_pool;
         let leaf_cache;
@@ -291,8 +245,11 @@ impl Tree {
             // It is safe for a read transaction to be created here, since it follows the conclusion
             // of the most recent sync and therefore references no logically free pages.
 
-            let mut shared = shared.write();
-            staged_changeset = shared.take_staged_changeset();
+            // Keep the write lock. A read lock appears safe because the sync mutex serializes
+            // index updates; snapshot and concurrent-lookup checks passed with both modes.
+            // `Nomt` already holds `access_lock` for writing throughout the commit, so there
+            // is no demonstrated benefit. Revisit only if the concurrency model changes.
+            let shared = shared.write();
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
             leaf_cache = shared.leaf_cache.clone();
@@ -320,7 +277,7 @@ impl Tree {
             // + All necessary page writes will be issued to the store and their completion waited
             //   upon. However, these changes are not reflected until `finish_sync`.
             ops::update(
-                staged_changeset.clone(),
+                changeset,
                 bbn_index,
                 leaf_cache,
                 leaf_store,
@@ -336,7 +293,6 @@ impl Tree {
     fn finish_sync(shared: &Arc<RwLock<Shared>>, bbn_index: Index) {
         // Take the shared lock again to complete the update to the new shared state
         let mut shared = shared.write();
-        shared.secondary_staging = None;
         shared.bbn_index = bbn_index;
     }
 }
@@ -444,7 +400,9 @@ struct SharedSyncController {
 impl SyncController {
     /// Begins the sync process.
     ///
-    /// Accepts a list of changes to be committed to the btree.
+    /// Accepts a list of changes to be committed to the btree. A key must not appear more than
+    /// once; otherwise the sync fails. The changes are not visible to lookups or read transactions
+    /// until the sync finishes.
     ///
     /// Non-blocking.
     pub fn begin_sync(
@@ -453,10 +411,21 @@ impl SyncController {
     ) {
         let inner = self.inner.clone();
         let begin_sync_task = move || {
-            Tree::commit(&inner.shared, changeset);
+            let mut changeset: Vec<_> = changeset.into_iter().collect();
+            changeset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            if changeset.windows(2).any(|w| w[0].0 == w[1].0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "beatree changeset contains a repeated key",
+                ));
+            }
 
-            let (out_meta, out_bbn_index, out_pre_swap_rx) =
-                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_counter)?;
+            let (out_meta, out_bbn_index, out_pre_swap_rx) = Tree::prepare_sync(
+                &inner.sync,
+                &inner.shared,
+                &inner.read_transaction_counter,
+                changeset,
+            )?;
 
             let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
@@ -515,8 +484,8 @@ impl SyncController {
     }
 }
 
-/// A read-transaction freezes a read-only state of the beatree as-of the last commit and enables
-/// lookups while it is alive.
+/// A read-transaction freezes a read-only state of the beatree as of the last finished sync and
+/// enables lookups while it is alive.
 ///
 /// The existence of a read transaction blocks new `Sync`s from starting, but may start when
 /// a sync is already ongoing and does not block an ongoing sync from completing.
@@ -524,8 +493,7 @@ impl SyncController {
 /// This is because sync may perform destructive changes to leaves, invalidating the read
 /// transaction.
 ///
-/// Further commits may be performed while the read transaction is live, but they won't be reflected
-/// within the transaction.
+/// A read transaction started during a sync does not reflect that sync's changes.
 ///
 /// This is cheap to clone.
 #[derive(Clone)]
@@ -535,8 +503,6 @@ pub struct ReadTransaction {
 
 struct ReadTransactionInner {
     bbn_index: Index,
-    primary_staging: OrdMap<Key, ValueChange>,
-    secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_store: StoreReader,
     leaf_cache: LeafCache,
     read_counter: ReadTransactionCounter,
@@ -545,13 +511,7 @@ struct ReadTransactionInner {
 impl ReadTransaction {
     /// Create a new iterator with the given half-open start and end range.
     pub fn iterator(&self, start: Key, end: Option<Key>) -> BeatreeIterator {
-        BeatreeIterator::new(
-            self.inner.primary_staging.clone(),
-            self.inner.secondary_staging.clone(),
-            self.inner.bbn_index.clone(),
-            start,
-            end,
-        )
+        BeatreeIterator::new(self.inner.bbn_index.clone(), start, end)
     }
 
     /// Initiate an asynchronous leaf page fetch. This may return immediately if the leaf is cached.
@@ -593,21 +553,6 @@ impl ReadTransaction {
         io_handle: &IoHandle,
         user_data: u64,
     ) -> Result<Option<Vec<u8>>, AsyncLookup> {
-        // First look up in the primary staging which contains the most recent changes.
-        if let Some(val) = self.inner.primary_staging.get(&key) {
-            return Ok(val.as_option().map(|v| v.to_vec()));
-        }
-
-        // Then check the secondary staging which is a bit older, but fresher still than the btree.
-        if let Some(val) = self
-            .inner
-            .secondary_staging
-            .as_ref()
-            .and_then(|x| x.get(&key))
-        {
-            return Ok(val.as_option().map(|v| v.to_vec()));
-        }
-
         let leaf_pn = match ops::partial_lookup(key, &self.inner.bbn_index) {
             None => return Ok(None),
             Some(pn) => pn,
@@ -802,4 +747,49 @@ impl ReadTransactionCounter {
 struct ReadTransactionCounterInner {
     read_transactions: Mutex<usize>,
     cvar: Condvar,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_rejects_repeated_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = |name| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(dir.path().join(name))
+                .unwrap();
+            file.set_len(BRANCH_NODE_SIZE as u64).unwrap();
+            Arc::new(file)
+        };
+        let page_pool = PagePool::new();
+        let io_pool = crate::io::start_test_io_pool(1, page_pool.clone());
+        let tree = Tree::open(
+            page_pool,
+            &io_pool,
+            0,
+            0,
+            1,
+            1,
+            open("bbn"),
+            open("ln"),
+            1,
+            16,
+        )
+        .unwrap();
+
+        let mut sync = tree.sync();
+        sync.begin_sync(vec![
+            ([1; 32], ValueChange::Insert(vec![1])),
+            ([1; 32], ValueChange::Delete),
+        ]);
+        let Err(err) = sync.wait_pre_meta() else {
+            panic!("sync accepted a repeated key");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }

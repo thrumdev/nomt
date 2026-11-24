@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use imbl::OrdMap;
 use threadpool::ThreadPool;
 
 use crate::beatree::{
@@ -88,7 +87,7 @@ pub fn run(
     leaf_reader: StoreReader,
     leaf_writer: SyncAllocator,
     io_handle: IoHandle,
-    changeset: OrdMap<Key, ValueChange>,
+    changeset: Vec<(Key, ValueChange)>,
     thread_pool: ThreadPool,
     num_workers: usize,
 ) -> std::io::Result<LeafStageOutput> {
@@ -100,18 +99,18 @@ pub fn run(
     let page_pool = leaf_reader.page_pool().clone();
 
     let changeset = changeset
-        .iter()
+        .into_iter()
         .map(|(k, v)| match v {
-            ValueChange::Insert(v) => Ok((*k, Some((v.clone(), false)))),
+            ValueChange::Insert(v) => Ok((k, Some((v, false)))),
             ValueChange::InsertOverflow(large_value, value_hash) => {
                 let (pages, num_writes) =
                     overflow::chunk(&large_value, &leaf_writer, &page_pool, &io_handle)?;
                 overflow_io += num_writes;
 
-                let cell = overflow::encode_cell(large_value.len(), value_hash.clone(), &pages);
-                Ok((*k, Some((cell, true))))
+                let cell = overflow::encode_cell(large_value.len(), value_hash, &pages);
+                Ok((k, Some((cell, true))))
             }
-            ValueChange::Delete => Ok((*k, None)),
+            ValueChange::Delete => Ok((k, None)),
         })
         .collect::<std::io::Result<Vec<_>>>()?;
 
