@@ -622,23 +622,18 @@ impl<T: HashAlgorithm> Session<T> {
         Ok(self.merkle_updater.prove::<T>(path)?)
     }
 
-    /// Finish the session. Provide the actual reads and writes (in sorted order) that are to be
-    /// considered within the finished session.
+    /// Finish the session. Provide the actual reads and writes, sorted by key path with no key
+    /// repeated, that are to be considered within the finished session.
     ///
     /// This function blocks until the merkle root and changeset are computed.
+    ///
+    /// Fails if the actuals are not strictly sorted by key path.
     pub fn finish(
         mut self,
         actuals: Vec<(KeyPath, KeyReadWrite)>,
     ) -> anyhow::Result<FinishedSession> {
-        if cfg!(debug_assertions) {
-            // Check that the actuals are sorted by key path.
-            for i in 1..actuals.len() {
-                assert!(
-                    actuals[i].0 > actuals[i - 1].0,
-                    "actuals are not sorted at index {}",
-                    i
-                );
-            }
+        if let Some(i) = (1..actuals.len()).find(|&i| actuals[i].0 <= actuals[i - 1].0) {
+            anyhow::bail!("actuals are not strictly sorted at index {}", i);
         }
         let merkle_update_handle = self.merkle_updater.update_and_prove::<T>(
             compact_actuals::<T>(&actuals, self.actuals_concurrency),
