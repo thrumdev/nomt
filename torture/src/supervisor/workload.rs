@@ -214,6 +214,7 @@ impl Workload {
         workload_dir: TempDir,
         workload_id: u64,
         ensure_snapshot: bool,
+        max_iterations: Option<usize>,
         assigned_disk: u64,
         assigned_memory: u64,
     ) -> Self {
@@ -223,6 +224,9 @@ impl Workload {
             WorkloadConfiguration::new_with_resources(&mut rng, assigned_disk, assigned_memory);
         if ensure_snapshot {
             config.enable_ensure_snapshot();
+        }
+        if let Some(max_iterations) = max_iterations {
+            config.limit_iterations(max_iterations);
         }
 
         Self::new_inner(
@@ -1063,6 +1067,11 @@ impl Workload {
     /// Return the workload directory.
     pub fn into_workload_dir(self) -> TempDir {
         self.workload_dir
+    }
+
+    /// Return the configuration of the workload.
+    pub fn config(&self) -> &WorkloadConfiguration {
+        &self.config
     }
 
     /// Return the workload directory path.
