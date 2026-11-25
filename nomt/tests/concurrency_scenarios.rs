@@ -1,9 +1,9 @@
 //! Small concurrency scenarios meant to be run one at a time under a schedule explorer:
 //! - FFS: `ffs explore -- <test-binary> --ignored --exact <name> --test-threads=1`. All are
 //!   `#[ignore]`d so that plain `cargo test` is unaffected.
-//! - shuttle: built with `--cfg shuttle` and the shims from `nomt-shuttle-shims`, each scenario
-//!   runs under `shuttle::check_pct` (or `check_random` with `SHUTTLE_SCHED=random`) for
-//!   `SHUTTLE_ITERS` iterations.
+//! - shuttle: `shuttle-shims/run.sh` builds with `--cfg shuttle` and the shims in `shuttle-shims/`;
+//!   each scenario runs under shuttle's PCT scheduler (or the random one with
+//!   `SHUTTLE_SCHED=random`) for `SHUTTLE_ITERS` iterations.
 
 mod common;
 
@@ -81,10 +81,13 @@ fn keys(n: u64) -> Vec<KeyPath> {
     (0..n).map(account_path).collect()
 }
 
-/// Positive control: witness operations must refer to the path proof covering their key when
-/// several commit workers finish in arbitrary order (fixed by b6ff34d, not on master).
+/// Witness operations must refer to the path proof covering their key when several commit
+/// workers finish in arbitrary order (regression test for e07687d).
 fn scenario_witness_concurrent_workers() {
-    let mut t = Test::new_with_params(common::fresh_test_name("cs_witness"), 4, 4096, None, true);
+    // `Test` keeps its database under `test/<name>` unless the name is absolute, so pass a temp dir
+    // that is removed when the scenario ends: shuttle runs it once per iteration.
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = Test::new_with_params(dir.path(), 4, 4096, None, true);
     for i in 0..200 {
         common::set_balance(&mut t, i, 1000);
     }
@@ -254,7 +257,7 @@ fn scenario_commit_vs_readers() {
                     value_hash: *blake3::hash(seen.as_ref().unwrap()).as_bytes(),
                 };
                 assert!(verified.confirm_value(&leaf).unwrap());
-                assert_eq!(db.read(ks[5]).unwrap().is_some(), true);
+                assert!(db.read(ks[5]).unwrap().is_some());
             }
         }
     });
