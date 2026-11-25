@@ -22,7 +22,7 @@ use crate::beatree::{
     },
     Key, ValueChange,
 };
-use crate::io::{page_pool::Page, IoCommand, IoHandle, IoKind, IoVecs};
+use crate::io::{IoCommand, IoHandle, IoKind, IoVecs};
 use crate::task::{join_task, spawn_task};
 
 /// Tracker of all changes that happen to leaves during an update
@@ -575,8 +575,7 @@ fn run_worker(
         leaves_tracker: LeavesTracker::new(),
         io_handle,
         reserved: Vec::new(),
-        run_start: 0,
-        run: Vec::new(),
+        run: WriteRun::default(),
         submitted: 0,
     };
 
@@ -670,6 +669,9 @@ fn run_worker(
         );
     }
 
+    // No more leaves are produced, so don't hold the last write while waiting on the left worker.
+    new_leaf_state.flush_run();
+
     // Now we are safe to send over our right neighbor to the left one
     // because we're sure to have finished interacting with it
     has_finished_workload = true;
@@ -698,7 +700,6 @@ fn run_worker(
         }
     }
 
-    new_leaf_state.flush_run();
     new_leaf_state
         .leaves_tracker
         .extra_freed
@@ -720,9 +721,7 @@ struct NewLeafHandler {
     io_handle: IoHandle,
     // Allocated but not yet used page numbers, in reverse allocation order.
     reserved: Vec<PageNumber>,
-    // Leaves on consecutive pages starting at `run_start`, not yet submitted.
-    run_start: u64,
-    run: Vec<Page>,
+    run: WriteRun,
     // The number of writes sent.
     submitted: usize,
 }
@@ -730,15 +729,36 @@ struct NewLeafHandler {
 /// The most pages merged into one write: 128 KiB.
 const MAX_WRITE_RUN: usize = 32;
 
+/// Leaves on consecutive pages starting at `start`, not yet submitted.
+#[derive(Default)]
+struct WriteRun {
+    start: u64,
+    // Owned so the pages stay alive until the write is sent, whatever happens to the tracker.
+    leaves: Vec<Arc<LeafNode>>,
+}
+
+impl WriteRun {
+    fn continues_at(&self, pn: u64) -> bool {
+        !self.leaves.is_empty()
+            && self.leaves.len() < MAX_WRITE_RUN
+            && pn == self.start + self.leaves.len() as u64
+    }
+}
+
 impl NewLeafHandler {
     fn flush_run(&mut self) {
         let fd = self.leaf_writer.store_fd();
-        let kind = match self.run.len() {
-            0 => return,
-            1 => IoKind::WriteRaw(fd, self.run_start, self.run[0].clone()),
-            _ => IoKind::WriteRawV(fd, self.run_start, IoVecs::new(&self.run)),
+        let start = self.run.start;
+        let leaves = std::mem::take(&mut self.run.leaves);
+        let kind = match &leaves[..] {
+            [] => return,
+            [leaf] => IoKind::WriteRaw(fd, start, leaf.inner.page()),
+            _ => IoKind::WriteRawV(
+                fd,
+                start,
+                IoVecs::new(leaves.iter().map(|l| l.inner.page())),
+            ),
         };
-        self.run.clear();
         self.submitted += 1;
         self.io_handle
             .send(IoCommand { kind, user_data: 0 })
@@ -763,13 +783,11 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
         let page_number = self.reserved.pop().unwrap();
 
         let pn = page_number.0 as u64;
-        if self.run.len() == MAX_WRITE_RUN || pn != self.run_start + self.run.len() as u64 {
+        if !self.run.continues_at(pn) {
             self.flush_run();
+            self.run.start = pn;
         }
-        if self.run.is_empty() {
-            self.run_start = pn;
-        }
-        self.run.push(leaf.inner.page());
+        self.run.leaves.push(leaf.clone());
 
         self.leaves_tracker.insert(key, leaf, cutoff, page_number);
         Ok(())

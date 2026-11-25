@@ -209,8 +209,7 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .build()
         }
         IoKind::WriteRawV(fd, page_index, ref iovs) => {
-            let iovs = iovs.as_slice();
-            opcode::Writev::new(types::Fd(fd), iovs.as_ptr(), iovs.len() as u32)
+            opcode::Writev::new(types::Fd(fd), iovs.0.as_ptr(), iovs.0.len() as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }

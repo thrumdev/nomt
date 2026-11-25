@@ -65,20 +65,15 @@ pub struct IoVecs(Vec<libc::iovec>);
 unsafe impl Send for IoVecs {}
 
 impl IoVecs {
-    pub fn new(pages: &[Page]) -> Self {
+    pub fn new(pages: impl Iterator<Item = Page>) -> Self {
         IoVecs(
             pages
-                .iter()
                 .map(|page| libc::iovec {
                     iov_base: page.as_ptr() as *mut libc::c_void,
                     iov_len: PAGE_SIZE,
                 })
                 .collect(),
         )
-    }
-
-    fn as_slice(&self) -> &[libc::iovec] {
-        &self.0
     }
 }
 
