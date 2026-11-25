@@ -52,6 +52,7 @@ mod page_cache;
 mod page_diff;
 mod page_region;
 mod rollback;
+mod rt;
 mod rw_pass_cell;
 mod seglog;
 mod store;
@@ -484,11 +485,7 @@ impl SessionParams {
     }
 }
 
-// Under shuttle all threads share one OS thread, so the counter must be per shuttle thread.
-#[cfg(shuttle)]
-use shuttle::thread_local;
-
-thread_local! {
+rt::thread_local! {
     /// Live sessions created on this thread. Shared with each session, which may be dropped on
     /// another thread.
     static THREAD_SESSIONS: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));

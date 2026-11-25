@@ -15,4 +15,5 @@ cargo \
   --config "patch.crates-io.crossbeam-channel.path=\"$SHIMS/crossbeam-channel\"" \
   --config "patch.crates-io.parking_lot.path=\"$SHIMS/parking_lot\"" \
   --config "patch.crates-io.threadpool.path=\"$SHIMS/threadpool\"" \
+  --config "patch.crates-io.thread_local.path=\"$SHIMS/thread_local\"" \
   test -p nomt --release --test concurrency_scenarios "$@"

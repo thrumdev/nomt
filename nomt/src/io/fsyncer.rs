@@ -43,7 +43,7 @@ impl Fsyncer {
             cv: Condvar::new(),
             s: Mutex::new(State::Idle),
         });
-        let _thread = crate::task::ThreadBuilder::new()
+        let _thread = crate::rt::ThreadBuilder::new()
             .name(name)
             .spawn({
                 let shared = shared.clone();

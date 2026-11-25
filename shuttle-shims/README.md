@@ -1,6 +1,6 @@
 # shuttle-shims
 
-Shuttle-backed stand-ins for `crossbeam-channel`, `parking_lot` and `threadpool`. `run.sh` injects them into a NOMT build with `cargo --config 'patch.crates-io.<crate>.path=...'`, so NOMT runs under the [shuttle](https://github.com/awslabs/shuttle) scheduler without changing its dependency list. Only the API surface NOMT uses is implemented. The directory is excluded from the workspace.
+Shuttle-backed stand-ins for `crossbeam-channel`, `parking_lot`, `threadpool` and `thread_local`. `run.sh` injects them into a NOMT build with `cargo --config 'patch.crates-io.<crate>.path=...'`, so NOMT runs under the [shuttle](https://github.com/awslabs/shuttle) scheduler without changing its dependency list. What can't be patched (std's thread builder and `thread_local!`, and the io_uring backend) is switched by `--cfg shuttle` in `nomt/src/rt.rs` and `nomt/src/io/mod.rs`. Only the API surface NOMT uses is implemented. The directory is excluded from the workspace.
 
 Run the scenarios in `nomt/tests/concurrency_scenarios.rs` under shuttle:
 
