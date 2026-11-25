@@ -11,7 +11,7 @@ SHUTTLE_SCHED=random shuttle-shims/run.sh
 SHUTTLE_CAPTURE_BACKTRACE=1 shuttle-shims/run.sh <name>   # per-task backtraces on deadlock
 ```
 
-The build uses `--cfg shuttle --cfg nomt_sync_io`: `nomt_sync_io` swaps io_uring for the blocking pread/pwrite backend, whose completions shuttle can schedule. `Cargo.lock` is restored after the run, since the patches rewrite it.
+The build uses `--cfg shuttle`, which also swaps io_uring for the blocking pread/pwrite backend, whose completions shuttle can schedule. `Cargo.lock` is restored after the run, since the patches rewrite it.
 
 The same scenarios run natively (`cargo test -p nomt --release --test concurrency_scenarios -- --ignored`) and under [FFS](https://github.com/aoli-al/ffs):
 

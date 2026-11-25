@@ -22,10 +22,6 @@ struct Inner {
 pub struct ThreadPool(Arc<Inner>);
 
 impl ThreadPool {
-    pub fn new(num_threads: usize) -> Self {
-        Builder::new().num_threads(num_threads).build()
-    }
-
     pub fn with_name(name: String, num_threads: usize) -> Self {
         Builder::new()
             .num_threads(num_threads)
@@ -47,14 +43,6 @@ impl ThreadPool {
 
     pub fn max_count(&self) -> usize {
         self.0.max
-    }
-
-    pub fn queued_count(&self) -> usize {
-        self.0.state.lock().unwrap().queue.len()
-    }
-
-    pub fn active_count(&self) -> usize {
-        self.0.state.lock().unwrap().active
     }
 }
 
@@ -112,10 +100,6 @@ impl Builder {
 
     pub fn thread_name(mut self, name: String) -> Self {
         self.name = Some(name);
-        self
-    }
-
-    pub fn thread_stack_size(self, _: usize) -> Self {
         self
     }
 

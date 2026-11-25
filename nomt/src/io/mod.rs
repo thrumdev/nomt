@@ -11,11 +11,11 @@ use std::{
 };
 use threadpool::ThreadPool;
 
-#[cfg(all(target_os = "linux", not(nomt_sync_io)))]
+#[cfg(all(target_os = "linux", not(shuttle)))]
 #[path = "linux.rs"]
 mod platform;
 
-#[cfg(any(not(target_os = "linux"), nomt_sync_io))]
+#[cfg(any(not(target_os = "linux"), shuttle))]
 #[path = "unix.rs"]
 mod platform;
 

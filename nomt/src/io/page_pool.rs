@@ -165,16 +165,15 @@ impl PagePool {
     /// The contents of the page are undefined.
     pub fn alloc(&self) -> Page {
         // Under shuttle every thread shares one OS thread, so the thread-local freelist would be
-        // borrowed across the freelist lock, which is a scheduling point.
-        #[cfg(shuttle)]
-        {
+        // borrowed across the freelist lock, which is a scheduling point. Use only the global one.
+        if cfg!(shuttle) {
             let mut freelist = self.inner.freelist.write();
             if freelist.is_empty() {
                 self.grow(&mut freelist);
             }
             return freelist.pop().unwrap();
         }
-        #[allow(unreachable_code)]
+
         // fast path: try to serve request from the thread-local freelist.
         let mut tls_freelist = self.tls_freelist();
         if let Some(page) = tls_freelist.pop() {
@@ -198,12 +197,11 @@ impl PagePool {
 
     /// Deallocates a [`Page`].
     pub fn dealloc(&self, page: Page) {
-        #[cfg(shuttle)]
-        {
+        if cfg!(shuttle) {
             self.inner.freelist.write().push(page);
             return;
         }
-        #[allow(unreachable_code)]
+
         // fast path: try to place page in thread-local freelist.
         let mut tls_freelist = self.tls_freelist();
         tls_freelist.push(page);

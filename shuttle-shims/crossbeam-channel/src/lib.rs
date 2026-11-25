@@ -1,5 +1,7 @@
 //! Shuttle-backed subset of `crossbeam-channel` 0.5: `bounded`/`unbounded` MPMC channels,
-//! `Select::{recv, ready}` and a `select!` limited to `recv(..) -> .. => ..` arms.
+//! `Select::{recv, ready}` and a `select!` limited to `recv(..) -> .. => ..` arms. Zero-capacity
+//! (rendezvous) channels can be created but not sent on while a receiver is alive: NOMT only uses
+//! `bounded(0)` for a placeholder sender whose receiver is dropped at once.
 
 use shuttle::sync::{Condvar, Mutex};
 use std::{collections::VecDeque, fmt, sync::Arc};
@@ -20,8 +22,6 @@ struct State<T> {
     queue: VecDeque<T>,
     senders: usize,
     receivers: usize,
-    pushed: u64,
-    popped: u64,
     selectors: Vec<Arc<Waker>>,
 }
 
@@ -32,7 +32,8 @@ struct Chan<T> {
 }
 
 impl<T> Chan<T> {
-    fn notify(&self, state: &State<T>) {
+    /// Wakes blocked receivers and selectors: a message was pushed or the last sender left.
+    fn notify_ready(&self, state: &State<T>) {
         self.cv.notify_all();
         for w in &state.selectors {
             w.fire();
@@ -73,8 +74,6 @@ fn channel<T>(cap: Option<usize>) -> (Sender<T>, Receiver<T>) {
             queue: VecDeque::new(),
             senders: 1,
             receivers: 1,
-            pushed: 0,
-            popped: 0,
             selectors: Vec::new(),
         }),
         cv: Condvar::new(),
@@ -94,26 +93,18 @@ impl<T> Sender<T> {
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         let chan = &*self.0;
         let mut s = chan.state.lock().unwrap();
-        let limit = chan.cap.map(|c| c.max(1));
         loop {
             if s.receivers == 0 {
                 return Err(SendError(msg));
             }
-            match limit {
-                Some(l) if s.queue.len() >= l => s = chan.cv.wait(s).unwrap(),
+            assert_ne!(chan.cap, Some(0), "rendezvous channels are not supported");
+            match chan.cap {
+                Some(cap) if s.queue.len() >= cap => s = chan.cv.wait(s).unwrap(),
                 _ => break,
             }
         }
         s.queue.push_back(msg);
-        s.pushed += 1;
-        let seq = s.pushed;
-        chan.notify(&s);
-        if chan.cap == Some(0) {
-            // Rendezvous: wait until a receiver has taken this message.
-            while s.popped < seq && s.receivers > 0 {
-                s = chan.cv.wait(s).unwrap();
-            }
-        }
+        chan.notify_ready(&s);
         Ok(())
     }
 }
@@ -130,7 +121,7 @@ impl<T> Drop for Sender<T> {
         let mut s = self.0.state.lock().unwrap();
         s.senders -= 1;
         if s.senders == 0 {
-            self.0.notify(&s);
+            self.0.notify_ready(&s);
         }
     }
 }
@@ -138,8 +129,7 @@ impl<T> Drop for Sender<T> {
 impl<T> Receiver<T> {
     fn pop(&self, s: &mut State<T>) -> Option<T> {
         let msg = s.queue.pop_front()?;
-        s.popped += 1;
-        self.0.notify(s);
+        self.0.cv.notify_all();
         Some(msg)
     }
 
@@ -164,18 +154,6 @@ impl<T> Receiver<T> {
             None => Err(TryRecvError::Empty),
         }
     }
-
-    pub fn len(&self) -> usize {
-        self.0.state.lock().unwrap().queue.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn iter(&self) -> Iter<'_, T> {
-        Iter(self)
-    }
 }
 
 impl<T> Clone for Receiver<T> {
@@ -190,17 +168,8 @@ impl<T> Drop for Receiver<T> {
         let mut s = self.0.state.lock().unwrap();
         s.receivers -= 1;
         if s.receivers == 0 {
-            self.0.notify(&s);
+            self.0.cv.notify_all();
         }
-    }
-}
-
-pub struct Iter<'a, T>(&'a Receiver<T>);
-
-impl<T> Iterator for Iter<'_, T> {
-    type Item = T;
-    fn next(&mut self) -> Option<T> {
-        self.0.recv().ok()
     }
 }
 
@@ -218,26 +187,6 @@ impl<T> IntoIterator for Receiver<T> {
     type IntoIter = IntoIter<T>;
     fn into_iter(self) -> IntoIter<T> {
         IntoIter(self)
-    }
-}
-
-impl<'a, T> IntoIterator for &'a Receiver<T> {
-    type Item = T;
-    type IntoIter = Iter<'a, T>;
-    fn into_iter(self) -> Iter<'a, T> {
-        self.iter()
-    }
-}
-
-impl<T> fmt::Debug for Sender<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Sender { .. }")
-    }
-}
-
-impl<T> fmt::Debug for Receiver<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Receiver { .. }")
     }
 }
 
@@ -286,12 +235,6 @@ impl<'a> Select<'a> {
     }
 }
 
-impl Default for Select<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Only `recv(rx) -> pat => body` arms. Assumes the selected receiver isn't drained by another
 /// consumer between `ready` and `recv`, which holds for NOMT's single-consumer uses.
 #[macro_export]
@@ -309,7 +252,6 @@ macro_rules! select {
         let mut __sel = $crate::Select::new();
         $( __sel.recv(&$rx); )+
         let __index = __sel.ready();
-        drop(__sel);
         $crate::select!(@arms __index, 0usize; $(recv($rx) -> $res => $body),+)
     }};
 }

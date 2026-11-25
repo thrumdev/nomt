@@ -1,5 +1,11 @@
 pub type TaskResult<R> = std::thread::Result<R>;
 
+/// Under shuttle, NOMT's own threads must be shuttle threads so the scheduler controls them.
+#[cfg(shuttle)]
+pub(crate) use shuttle::thread::Builder as ThreadBuilder;
+#[cfg(not(shuttle))]
+pub(crate) use std::thread::Builder as ThreadBuilder;
+
 /// Spawn the given task within the given ThreadPool.
 /// Use the provided Sender to send the result of the task execution.
 ///
@@ -26,11 +32,7 @@ where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
-    #[cfg(shuttle)]
-    use shuttle::thread::Builder;
-    #[cfg(not(shuttle))]
-    use std::thread::Builder;
-    Builder::new()
+    ThreadBuilder::new()
         .name(name.to_string())
         .spawn(move || {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
