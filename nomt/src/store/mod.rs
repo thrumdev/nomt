@@ -243,6 +243,11 @@ impl Store {
         }
     }
 
+    /// Fill the beatree leaf cache on `threads` threads, up to its capacity.
+    pub fn prepopulate_leaf_cache(&self, threads: usize) {
+        self.shared.values.prepopulate_leaf_cache(threads);
+    }
+
     /// Creates a new [`beatree::ReadTransaction`]. `sync` will be blocked until this is dropped.
     pub fn read_transaction(&self) -> beatree::ReadTransaction {
         self.shared.values.read_transaction()
