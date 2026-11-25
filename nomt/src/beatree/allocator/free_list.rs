@@ -155,10 +155,7 @@ impl FreeList {
             list_pages.push(*bump);
             bump.0 += 1;
         }
-        let cursor = remaining[..taken]
-            .last()
-            .or(order[..used].last())
-            .copied();
+        let cursor = remaining[..taken].last().or(order[..used].last()).copied();
         entries.extend_from_slice(&remaining[taken..]);
 
         entries.sort_unstable();

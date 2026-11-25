@@ -296,7 +296,11 @@ fn grow(file: &File, page: PageNumber) -> std::io::Result<PageNumber> {
     let len = next_bump as u64 * PAGE_SIZE as u64;
     // Allocate the blocks up front: direct writes into holes allocate them one write at a time.
     // SAFETY: plain syscall on a valid fd.
-    if unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as libc::off_t) } != 0 {
+    #[cfg(target_os = "linux")]
+    let allocated = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as libc::off_t) } == 0;
+    #[cfg(not(target_os = "linux"))]
+    let allocated = false;
+    if !allocated {
         file.set_len(len)?;
     }
     Ok(PageNumber(next_bump))
@@ -342,7 +346,9 @@ impl SyncFinisher {
 
         // remaining allocations all logically incremented bump.
         let mut next_bump = PageNumber(sync.bump.0 + (allocations - used) as u32);
-        let freelist_pages = sync.free_list.rewrite(page_pool, used, freed, &mut next_bump);
+        let freelist_pages = sync
+            .free_list
+            .rewrite(page_pool, used, freed, &mut next_bump);
 
         // writing the free-list pages might require more bumps, which may require growing the file
         // further.
