@@ -169,15 +169,11 @@ impl CurrentLeaf {
     }
 
     fn is_in_range(&self, end: Option<&Key>) -> bool {
-        end.is_none_or(|end| {
-            super::key_cmp(&self.leaf.key(self.index), end).is_lt()
-        })
+        end.is_none_or(|end| super::key_cmp(&self.leaf.key(self.index), end).is_lt())
     }
 
     fn is_last_output_in_range(&self, end: Option<&Key>) -> bool {
-        end.is_none_or(|end| {
-            super::key_cmp(&self.leaf.key(self.index - 1), end).is_lt()
-        })
+        end.is_none_or(|end| super::key_cmp(&self.leaf.key(self.index - 1), end).is_lt())
     }
 
     fn last_output(&self) -> IterOutput<'_> {
@@ -245,9 +241,10 @@ impl LeafIterator {
             LeafIteratorState::Proceeding { current, .. } => {
                 let next = current.index + 1;
                 next < current.leaf.n()
-                    && self.end.as_ref().is_none_or(|end| {
-                        super::key_cmp(&current.leaf.key(next), end).is_lt()
-                    })
+                    && self
+                        .end
+                        .as_ref()
+                        .is_none_or(|end| super::key_cmp(&current.leaf.key(next), end).is_lt())
             }
             _ => false,
         };

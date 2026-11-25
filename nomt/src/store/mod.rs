@@ -73,15 +73,8 @@ impl Store {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
                 // O_DIRECT is not supported on tmpfs.
-                let o_direct: bool;
-                match crate::sys::linux::fs_check(&db_dir_fd) {
-                    Ok(fsck) => {
-                        o_direct = !fsck.is_tmpfs();
-                    },
-                    Err(_) => {
-                        o_direct = false;
-                    },
-                }
+                let o_direct = crate::sys::linux::fs_check(&db_dir_fd)
+                    .is_ok_and(|fsck| !fsck.is_tmpfs());
             }
         }
 

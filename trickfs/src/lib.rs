@@ -693,28 +693,24 @@ impl TrickState {
             .get(&ino)
             .unwrap_or_else(|| panic!("{ino:?} is not in tree"));
         let standard = &[(DOT.as_os_str(), ino), (DOTDOT.as_os_str(), parent)];
-        let mut iter = standard
+        let iter = standard
             .iter()
             .copied()
             .chain(container.iter())
             .enumerate()
             .skip(offset as usize);
-        loop {
-            if let Some((offset, (name, ino))) = iter.next() {
-                let inode = self
-                    .lookup_inode(ino)
-                    .unwrap_or_else(|| panic!("{ino:?} cannot be found"));
-                let offset = offset + 1;
-                let buf_is_filled = reply.add(
-                    INodeNo(ino.0),
-                    offset.try_into().unwrap(),
-                    inode.kind(),
-                    name,
-                );
-                if buf_is_filled {
-                    break;
-                }
-            } else {
+        for (offset, (name, ino)) in iter {
+            let inode = self
+                .lookup_inode(ino)
+                .unwrap_or_else(|| panic!("{ino:?} cannot be found"));
+            let offset = offset + 1;
+            let buf_is_filled = reply.add(
+                INodeNo(ino.0),
+                offset.try_into().unwrap(),
+                inode.kind(),
+                name,
+            );
+            if buf_is_filled {
                 break;
             }
         }

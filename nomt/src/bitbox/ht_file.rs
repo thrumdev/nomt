@@ -118,13 +118,13 @@ pub(super) fn resize_and_prealloc(
             // To preallocate on Linux systems, try using fallocate with ZERO_RANGE first as it's more
             // efficient. fallocate sets the file size as well, so ftruncate (aka file.set_len()) is
             // not needed.
-            if crate::sys::linux::fs_check(ht_file).map_or(false, |fsck| fsck.is_tmpfs()) {
+            if crate::sys::linux::fs_check(ht_file).is_ok_and(|fsck| fsck.is_tmpfs()) {
                 // Skip preallocation for tmpfs. It doesn't support fallocate and it's
                 // memory-backed anyway. ftruncate and bail.
                 ht_file.set_len(len)?;
                 return Ok(());
             }
-            if let Err(_) = crate::sys::linux::falloc_zero_file(ht_file, len) {
+            if crate::sys::linux::falloc_zero_file(ht_file, len).is_err() {
                 // If fallocate fails, fall back to zeroing the file with write.
                 resize_and_zero_file(ht_file, len)?;
             }

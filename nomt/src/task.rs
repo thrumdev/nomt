@@ -29,7 +29,7 @@ where
     std::thread::Builder::new()
         .name(name.to_string())
         .spawn(move || {
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
             let _ = tx.send(res);
         })
         .expect("failed to spawn thread");

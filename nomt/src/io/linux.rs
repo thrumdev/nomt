@@ -86,7 +86,7 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
         // 1. process completions.
         if !pending.is_empty() {
             complete_queue.sync();
-            while let Some(completion_event) = complete_queue.next() {
+            for completion_event in complete_queue.by_ref() {
                 if pending.get(completion_event.user_data() as usize).is_none() {
                     continue;
                 }
@@ -203,7 +203,7 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .build()
         }
         IoKind::WriteArc(fd, page_index, ref page) => {
-            let page: &[u8] = &*page;
+            let page: &[u8] = page;
             opcode::Write::new(types::Fd(fd), page.as_ptr(), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()

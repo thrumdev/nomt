@@ -812,7 +812,7 @@ pub fn verify_update<H: NodeHasher>(
             }
 
             // ingest the currently updated terminal.
-            let ops = std::mem::take(&mut working_ops);
+            let ops = core::mem::take(&mut working_ops);
             working_ops.push((key, op));
 
             let terminal = &proof.inner[updated_index];

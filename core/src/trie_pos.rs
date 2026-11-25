@@ -10,7 +10,7 @@ use bitvec::prelude::*;
 ///
 /// Deserialization rejects positions that no constructor could produce: a depth beyond 256, or a
 /// node index that does not match the path and depth.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TriePosition {

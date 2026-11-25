@@ -841,6 +841,7 @@ fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
 /// otherwise, for each reconstructed page: its page_id, the page, the PageDiff of all nodes
 /// written, the number of leaves in the page and the number in its child pages.
 /// Every reconstructed page records its child pages as elided.
+#[allow(clippy::type_complexity)]
 pub fn reconstruct_pages<H: NodeHasher>(
     page: &Page,
     page_id: PageId,
