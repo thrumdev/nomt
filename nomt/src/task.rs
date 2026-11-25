@@ -26,7 +26,7 @@ where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
-    std::thread::Builder::new()
+    crate::rt::ThreadBuilder::new()
         .name(name.to_string())
         .spawn(move || {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
