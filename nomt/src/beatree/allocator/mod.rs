@@ -101,7 +101,7 @@ impl Store {
         let sync = Mutex::lock_arc(&self.sync);
         // Reuse free pages only once there are enough of them that the free pages at the cursor
         // form long runs. Until then, append.
-        let free = sync.free_list.as_clean().len();
+        let free = sync.free_list.len();
         let live = (sync.bump.0 as usize).saturating_sub(free);
         let free_len = if free >= FREE_SLACK * live { free } else { 0 };
         let (sync_tx, sync_rx) = crossbeam_channel::bounded(1);
@@ -218,7 +218,7 @@ impl SyncAllocator {
     fn page_at(&self, allocation_index: usize) -> std::io::Result<PageNumber> {
         let sync = self.inner.sync();
 
-        let free_list = sync.free_list.as_clean();
+        let free_list = &sync.free_list;
         let free_len = self.inner.free_len;
         if allocation_index >= free_len {
             let pn = PageNumber(sync.bump.0 + (allocation_index - free_len) as u32);
@@ -373,4 +373,91 @@ pub struct StoreMeta {
     pub freelist_pn: u32,
     /// The next free page number.
     pub bump: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PageNumber, Store, FREELIST_EMPTY};
+    use crate::io::{PagePool, PAGE_SIZE};
+    use std::{collections::BTreeSet, os::unix::fs::FileExt, sync::Arc};
+
+    // Drives many syncs with page churn and checks that no page referenced by the committed state
+    // is handed out or overwritten, that free pages get reused, and that the free list reloads.
+    #[test]
+    fn allocate_many_and_reuse() {
+        let page_pool = PagePool::new();
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        let store = Store::open(&page_pool, file.clone(), PageNumber(1), None).unwrap();
+
+        let mut live: Vec<PageNumber> = Vec::new();
+        let mut committed_list: BTreeSet<PageNumber> = BTreeSet::new();
+        let mut reused = false;
+        let mut last = None;
+
+        for sync_i in 0..40 {
+            let bump_before = store.sync.lock().bump;
+            let (allocator, finisher) = store.start_sync();
+            let referenced: BTreeSet<PageNumber> = live
+                .iter()
+                .copied()
+                .chain(committed_list.iter().copied())
+                .collect();
+
+            let mut allocated = allocator.allocate_many(48).unwrap();
+            allocated.push(allocator.allocate().unwrap());
+            allocated.extend(allocator.allocate_many(16).unwrap());
+            assert_eq!(
+                allocated.iter().collect::<BTreeSet<_>>().len(),
+                allocated.len()
+            );
+            for pn in &allocated {
+                assert!(!pn.is_nil());
+                assert!(
+                    !referenced.contains(pn),
+                    "sync {sync_i}: {pn:?} is still referenced"
+                );
+                reused |= *pn < bump_before;
+            }
+            if allocated.iter().all(|pn| *pn >= bump_before) {
+                // appending: consecutive allocations are consecutive pages.
+                assert!(allocated.windows(2).all(|w| w[1].0 == w[0].0 + 1));
+            }
+            drop(allocator);
+
+            // Return the last few allocations unused and free the oldest live pages.
+            let unused = allocated.split_off(allocated.len() - 5);
+            let n_free = if live.len() > 300 { 60 } else { 0 };
+            let mut freed: Vec<PageNumber> = live.drain(..n_free).collect();
+            freed.extend(&unused);
+            live.extend(&allocated);
+
+            let (list_pages, meta) = finisher.finish(&page_pool, freed).unwrap();
+            let new_list: BTreeSet<PageNumber> = list_pages.iter().map(|(pn, _)| *pn).collect();
+            for pn in &new_list {
+                assert!(
+                    !referenced.contains(pn),
+                    "sync {sync_i}: list page {pn:?} overwrites"
+                );
+                assert!(!allocated.contains(pn) && !unused.contains(pn));
+            }
+            committed_list = new_list;
+            last = Some((list_pages, meta));
+        }
+        assert!(reused, "free pages were never reused");
+
+        // Write out the last free list and reopen the store from it.
+        let (list_pages, meta) = last.unwrap();
+        for (pn, page) in &list_pages {
+            file.write_all_at(&page[..], pn.0 as u64 * PAGE_SIZE as u64)
+                .unwrap();
+        }
+        let head = (meta.freelist_pn != FREELIST_EMPTY.0).then_some(PageNumber(meta.freelist_pn));
+        let reopened = Store::open(&page_pool, file, PageNumber(meta.bump), head).unwrap();
+        assert_eq!(
+            reopened.all_tracked_freelist_pages(),
+            store.all_tracked_freelist_pages()
+        );
+        let live: BTreeSet<PageNumber> = live.into_iter().collect();
+        assert!(live.is_disjoint(&store.all_tracked_freelist_pages()));
+    }
 }
