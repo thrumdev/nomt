@@ -63,6 +63,7 @@ pub(super) enum DeltaBuilderCommand {
 /// finalized or dropped.
 ///
 /// The worker's result is the priors gathered since the last `Join`.
+#[allow(clippy::type_complexity)]
 pub(super) fn start(
     store: impl LoadValueAsync,
 ) -> (

@@ -20,7 +20,7 @@ use std::{collections::HashMap, fmt, num::NonZeroUsize, sync::Arc};
 // Total number of nodes stored in one Page. It depends on the `DEPTH`
 // of the rootless sub-binary tree stored in a page following this formula:
 // (2^(DEPTH + 1)) - 2
-pub const NODES_PER_PAGE: usize = (1 << DEPTH + 1) - 2;
+pub const NODES_PER_PAGE: usize = (1 << (DEPTH + 1)) - 2;
 
 #[inline]
 fn read_node(data: &FatPage, index: usize) -> Node {

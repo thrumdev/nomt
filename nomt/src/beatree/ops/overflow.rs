@@ -174,7 +174,7 @@ fn total_needed_pages(value_size: usize) -> usize {
 }
 
 fn needed_pages(size: usize) -> usize {
-    (size + BODY_SIZE - 1) / BODY_SIZE
+    size.div_ceil(BODY_SIZE)
 }
 
 /// Read a large value from pages referenced by an overflow cell using blocking I/O.
@@ -315,7 +315,7 @@ pub fn delete(cell: &[u8], leaf_reader: &StoreReader, freed: &mut Vec<PageNumber
 
         // stop at the first page containing value data. no more pages will have more
         // page numbers to release.
-        if bytes.len() > 0 {
+        if !bytes.is_empty() {
             break;
         }
     }

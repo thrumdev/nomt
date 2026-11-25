@@ -10,7 +10,7 @@ use bitvec::prelude::*;
 ///
 /// Deserialization rejects positions that no constructor could produce: a depth beyond 256, or a
 /// node index that does not match the path and depth.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TriePosition {
@@ -101,7 +101,7 @@ impl TriePosition {
         TriePosition {
             path,
             depth,
-            node_index: node_index(&page_path),
+            node_index: node_index(page_path),
         }
     }
 
@@ -116,6 +116,7 @@ impl TriePosition {
 
     /// Parse a `TriePosition` from a bit string.
     #[cfg(test)]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let mut bitvec = BitVec::<u8, Msb0>::new();
         if s.len() > 256 {
@@ -170,7 +171,7 @@ impl TriePosition {
     #[inline]
     pub fn down(&mut self, bit: bool) {
         assert_ne!(self.depth, 256, "can't descend past 256 bits");
-        if self.depth as usize % DEPTH == 0 {
+        if (self.depth as usize).is_multiple_of(DEPTH) {
             self.node_index = bit as usize;
         } else {
             let children = self.child_node_indices();
@@ -201,8 +202,8 @@ impl TriePosition {
         }
 
         self.depth = new_depth;
-        let prev_page_depth = (prev_depth as usize + DEPTH - 1) / DEPTH;
-        let new_page_depth = (self.depth as usize + DEPTH - 1) / DEPTH;
+        let prev_page_depth = (prev_depth as usize).div_ceil(DEPTH);
+        let new_page_depth = (self.depth as usize).div_ceil(DEPTH);
         if prev_page_depth == new_page_depth {
             for _ in 0..d {
                 self.node_index = parent_node_index(self.node_index);
@@ -364,7 +365,7 @@ fn bottom_node_index(node_index: usize) -> u8 {
 
 /// Given a node index, get the index of the sibling.
 fn sibling_index(node_index: usize) -> usize {
-    if node_index % 2 == 0 {
+    if node_index.is_multiple_of(2) {
         node_index + 1
     } else {
         node_index - 1

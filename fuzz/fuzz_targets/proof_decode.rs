@@ -211,7 +211,7 @@ fn honest_witness(run: &Run) -> Witness {
         let position = position(*key, proof.siblings.len() as u16);
         if paths
             .last()
-            .map_or(true, |(_, p)| p.path() != position.path())
+            .is_none_or(|(_, p)| p.path() != position.path())
         {
             paths.push((proof, position));
         }

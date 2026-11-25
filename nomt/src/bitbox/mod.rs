@@ -176,6 +176,7 @@ impl DB {
         SyncController::new(self.clone())
     }
 
+    #[allow(clippy::type_complexity)]
     fn prepare_sync(
         &self,
         sync_seqn: u32,
@@ -285,7 +286,7 @@ impl DB {
         if occupied_buckets_delta < 0 {
             self.shared
                 .occupied_buckets
-                .fetch_sub(occupied_buckets_delta.abs() as usize, Ordering::Relaxed);
+                .fetch_sub(occupied_buckets_delta.unsigned_abs(), Ordering::Relaxed);
         } else if occupied_buckets_delta > 0 {
             self.shared
                 .occupied_buckets
@@ -309,6 +310,7 @@ pub struct SyncController {
     /// The channel to receive the result of the the begin_sync task.
     begin_sync_result_rx: Receiver<TaskResult<Result<(), BucketExhaustion>>>,
     /// The pages along with their page numbers to write out to the HT file.
+    #[allow(clippy::type_complexity)]
     ht_to_write: Arc<Mutex<Option<Vec<(u64, Arc<FatPage>)>>>>,
 }
 
@@ -346,12 +348,8 @@ impl SyncController {
 
             // if fails The sync coordinator will poison the database and all further commits will
             // be rejected. Therefore, there is no need to perform cleanup.
-            let (ht_pages, cache_updates) = bitbox.prepare_sync(
-                sync_seqn,
-                &page_pool,
-                updated_pages,
-                &mut *wal_blob_builder,
-            )?;
+            let (ht_pages, cache_updates) =
+                bitbox.prepare_sync(sync_seqn, &page_pool, updated_pages, &mut wal_blob_builder)?;
             drop(wal_blob_builder);
 
             // Set the hash-table pages before spawning WAL writeout so they don't race with it.
@@ -664,7 +662,7 @@ fn allocate_bucket_raw(
     meta_map: &mut MetaMap,
     seed: &[u8; 16],
 ) -> Option<BucketIndex> {
-    let mut probe_seq = ProbeSequence::new_raw(page_id, &meta_map, seed);
+    let mut probe_seq = ProbeSequence::new_raw(page_id, meta_map, seed);
 
     let mut i = 0;
     loop {
@@ -673,7 +671,7 @@ fn allocate_bucket_raw(
             // Give up.
             return None;
         }
-        match probe_seq.next(&meta_map) {
+        match probe_seq.next(meta_map) {
             ProbeResult::PossibleHit(_) => continue,
             ProbeResult::Tombstone(bucket) | ProbeResult::Empty(bucket) => {
                 meta_map.set_full(bucket as usize, probe_seq.hash);

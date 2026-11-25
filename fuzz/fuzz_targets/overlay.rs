@@ -226,7 +226,7 @@ fn commit_overlay(u: &mut Unstructured, state: &mut State) -> Result<()> {
     let slot = &mut state.slots[i];
     let parent_ok = slot
         .parent
-        .map_or(true, |p| state.last_committed_overlay == Some(p));
+        .is_none_or(|p| state.last_committed_overlay == Some(p));
     let expect_ok = parent_ok && slot.prev_root == state.db.root().into_inner();
 
     // A commit attempt consumes the overlay, whether or not it succeeds.

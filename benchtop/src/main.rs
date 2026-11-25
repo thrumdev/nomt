@@ -29,7 +29,7 @@ pub fn main() -> Result<()> {
 
 pub fn init(params: InitParams) -> Result<()> {
     let workload_params = params.workload;
-    let (mut init, _) = workload::parse(&workload_params, u64::max_value(), 0)?;
+    let (mut init, _) = workload::parse(&workload_params, u64::MAX, 0)?;
 
     let mut db = params.backend.instantiate(
         true,
@@ -57,7 +57,7 @@ pub fn run(params: RunParams) -> Result<()> {
     );
     let (mut init, mut workloads) = workload::parse(
         &workload_params,
-        params.limits.ops.unwrap_or(u64::max_value()),
+        params.limits.ops.unwrap_or(u64::MAX),
         seeder.random(),
     )?;
 

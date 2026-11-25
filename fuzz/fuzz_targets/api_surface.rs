@@ -249,7 +249,7 @@ impl Context {
             };
             let mut buf = vec![0; size];
             input.fill_buffer(&mut buf)?;
-            Ok(Some(buf.into()))
+            Ok(Some(buf))
         } else {
             Ok(None)
         }
@@ -399,7 +399,7 @@ impl<'a> Arbitrary<'a> for NomtCalls {
                 }
             }
 
-            session.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+            session.sort_unstable_by_key(|(a, _)| *a);
 
             // Now having an idea what the session would look like we should create the calls to the
             // api.

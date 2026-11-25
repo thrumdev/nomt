@@ -2,9 +2,9 @@
 //!
 //! Algorithm sketch:
 //!   1. Read in all BBNs from the file. Order them in an in-memory std BTree by the first separator.
-//!     Skip future BBNs according to the commit sequence number.
+//!      Skip future BBNs according to the commit sequence number.
 //!   2. Iterate over BBNs in order, building next level of branches with targeted 75% fullness.
-//!     Create a sorted list of this next layer of BNs as we go.
+//!      Create a sorted list of this next layer of BNs as we go.
 //!   3. Repeat step 2 until the root node is created.
 
 use anyhow::{bail, ensure, Ok, Result};
@@ -48,7 +48,7 @@ pub fn reconstruct(
             pn
         );
 
-        let mut branch = BranchNode::new_in(&page_pool);
+        let mut branch = BranchNode::new_in(page_pool);
         branch.as_mut_slice().copy_from_slice(node);
 
         let mut separator = [0u8; 32];
@@ -60,7 +60,7 @@ pub fn reconstruct(
             separator[prefix.len()..prefix.len() + first.len()].copy_from_bitslice(first);
         }
 
-        if let Some(_) = index.insert(separator, Arc::new(branch)) {
+        if index.insert(separator, Arc::new(branch)).is_some() {
             bail!(
                 "2 branch nodes with same separator, separator={:?}",
                 separator
@@ -136,14 +136,14 @@ impl SeqFileReader {
         })
     }
 
-    pub fn next<'a>(&'a mut self) -> Result<Option<(u32, &'a [u8])>> {
+    pub fn next(&mut self) -> Result<Option<(u32, &[u8])>> {
         if self.pn >= self.bump {
             return Ok(None);
         }
 
         let node = unsafe {
             let offset = self.pn as usize * BRANCH_NODE_SIZE;
-            let ptr = self.ptr.offset(offset as isize);
+            let ptr = self.ptr.add(offset);
             std::slice::from_raw_parts(ptr, BRANCH_NODE_SIZE)
         };
 

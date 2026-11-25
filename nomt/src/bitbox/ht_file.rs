@@ -39,7 +39,7 @@ pub(super) fn expected_file_len(num_pages: u32) -> u64 {
 }
 
 pub(super) fn num_meta_byte_pages(num_pages: u32) -> u32 {
-    ((num_pages as u64 + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64) as u32
+    (num_pages as u64).div_ceil(PAGE_SIZE as u64) as u32
 }
 
 /// Opens the HT file, checks its length and reads the meta map.
@@ -56,7 +56,7 @@ pub fn open(
     let mut meta_bytes = Vec::with_capacity(meta_byte_pages as usize * PAGE_SIZE);
     for pn in 0..meta_byte_pages {
         let extra_meta_page = io::read_page(page_pool, ht_fd, pn as u64)?;
-        meta_bytes.extend_from_slice(&*extra_meta_page);
+        meta_bytes.extend_from_slice(&extra_meta_page);
     }
 
     Ok((
@@ -70,7 +70,11 @@ pub fn open(
 /// Lays out the meta page. If `preallocate` is true, preallocates the blocks for the file.
 pub fn create(path: PathBuf, num_pages: u32, preallocate: bool) -> std::io::Result<()> {
     let ht_path = path.join("ht");
-    let ht_file = OpenOptions::new().write(true).create(true).open(ht_path)?;
+    let ht_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(ht_path)?;
 
     // number of pages + pages required for meta bits.
     let page_count = num_pages + num_meta_byte_pages(num_pages);
@@ -82,7 +86,11 @@ pub fn create(path: PathBuf, num_pages: u32, preallocate: bool) -> std::io::Resu
     drop(ht_file);
 
     let wal_path = path.join("wal");
-    let wal_file = OpenOptions::new().write(true).create(true).open(wal_path)?;
+    let wal_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(wal_path)?;
     wal_file.sync_all()?;
     drop(wal_file);
     Ok(())
@@ -110,13 +118,13 @@ pub(super) fn resize_and_prealloc(
             // To preallocate on Linux systems, try using fallocate with ZERO_RANGE first as it's more
             // efficient. fallocate sets the file size as well, so ftruncate (aka file.set_len()) is
             // not needed.
-            if crate::sys::linux::fs_check(ht_file).map_or(false, |fsck| fsck.is_tmpfs()) {
+            if crate::sys::linux::fs_check(ht_file).is_ok_and(|fsck| fsck.is_tmpfs()) {
                 // Skip preallocation for tmpfs. It doesn't support fallocate and it's
                 // memory-backed anyway. ftruncate and bail.
                 ht_file.set_len(len)?;
                 return Ok(());
             }
-            if let Err(_) = crate::sys::linux::falloc_zero_file(ht_file, len) {
+            if crate::sys::linux::falloc_zero_file(ht_file, len).is_err() {
                 // If fallocate fails, fall back to zeroing the file with write.
                 resize_and_zero_file(ht_file, len)?;
             }

@@ -51,8 +51,8 @@ impl<'a> Arbitrary<'a> for Run {
     fn arbitrary(input: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let raw_separator = RawSeparator::arbitrary(input)?;
 
-        let raw_prefix_bit_len = input.int_in_range(0..=(256 - raw_separator.bit_len))?;
-        let raw_prefix_min_byte_len = (raw_prefix_bit_len + 7) / 8;
+        let raw_prefix_bit_len: usize = input.int_in_range(0..=(256 - raw_separator.bit_len))?;
+        let raw_prefix_min_byte_len = raw_prefix_bit_len.div_ceil(8);
         let raw_prefix_byte_len = input.int_in_range(raw_prefix_min_byte_len..=(1 << 12))?;
         let mut raw_prefix_bytes = vec![0; raw_prefix_byte_len];
         input.fill_buffer(&mut raw_prefix_bytes)?;
@@ -71,11 +71,11 @@ impl<'a> Arbitrary<'a> for Run {
 
 impl<'a> Arbitrary<'a> for RawSeparator {
     fn arbitrary(input: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let bit_start = input.int_in_range(0..=7)?;
+        let bit_start: usize = input.int_in_range(0..=7)?;
 
         let bit_len = input.int_in_range(0..=(256 - bit_start))?;
 
-        let bytes_len = (((bit_start + bit_len + 7) / 8) as usize).next_multiple_of(8);
+        let bytes_len = (bit_start + bit_len).div_ceil(8).next_multiple_of(8);
         let mut bytes: Vec<u8> = vec![0; bytes_len];
         input.fill_buffer(&mut bytes)?;
 

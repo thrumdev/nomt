@@ -33,7 +33,7 @@ fn insert_delete_and_read(name: impl AsRef<Path>, to_delete: Vec<u8>) {
     let mut t = Test::new_with_params(name, 2, 64_000, None, true);
 
     // insert values
-    for (k, value_size) in KEYS_AND_VALUE_SIZES.clone() {
+    for (k, value_size) in KEYS_AND_VALUE_SIZES {
         t.write(key(k), Some(vec![k; value_size]));
     }
     t.commit();
@@ -45,7 +45,7 @@ fn insert_delete_and_read(name: impl AsRef<Path>, to_delete: Vec<u8>) {
     t.commit();
 
     // read values
-    for (k, value_size) in KEYS_AND_VALUE_SIZES.clone() {
+    for (k, value_size) in KEYS_AND_VALUE_SIZES {
         if to_delete.contains(&k) {
             let res = t.read(key(k));
             assert_eq!(None, res);
