@@ -23,7 +23,7 @@ license = "MIT/Apache-2.0"
 borsh = { version = "1.5.7", default-features = false, features = ["derive"] }
 bitvec = { version = "1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
-ruint = { version = "1.21", default-features = false }
+ruint = { version = "1.17.1", default-features = false }
 arrayvec = { version = "0.7", default-features = false }
 blake3 = { version = "1.5.1", default-features = false }
 sha2 = { version = "0.10.6", default-features = false }
