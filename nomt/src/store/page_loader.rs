@@ -13,6 +13,12 @@ impl PageLoader {
         self.inner.start_load(page_id)
     }
 
+    /// Create a new page load whose duration is recorded as a page fetch in the metrics.
+    /// Use this for loads following a page cache miss.
+    pub fn start_timed_load(&self, page_id: PageId) -> PageLoad {
+        self.inner.start_timed_load(page_id)
+    }
+
     /// Advance the state of the given page load, blocking the current thread.
     ///
     /// Panics if the page load needs a completion or if the I/O pool is down.

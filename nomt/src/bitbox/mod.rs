@@ -556,7 +556,19 @@ impl PageLoader {
             probe_sequence: ProbeSequence::new(&page_id, &self.meta_map, &self.shared.seed),
             page_id,
             state: PageLoadState::Pending,
+            record_fetch_time: false,
             fetch_timer: None,
+        }
+    }
+
+    /// Create a new page load whose duration is recorded as [`Metric::PageFetchTime`].
+    ///
+    /// This is meant for loads following a page cache miss. Bulk loads at startup are not timed:
+    /// they are all queued at once and would dominate the mean.
+    pub fn start_timed_load(&self, page_id: PageId) -> PageLoad {
+        PageLoad {
+            record_fetch_time: self.shared.metrics.is_active(),
+            ..self.start_load(page_id)
         }
     }
 
@@ -591,7 +603,7 @@ impl PageLoader {
         };
 
         self.shared.metrics.count(Metric::HtReads);
-        if load.fetch_timer.is_none() && self.shared.metrics.is_active() {
+        if load.record_fetch_time && load.fetch_timer.is_none() {
             load.fetch_timer = Some((Instant::now(), self.shared.metrics.clone()));
         }
         // UNWRAP: I/O pool is not expected to hangup.
@@ -605,7 +617,9 @@ pub struct PageLoad {
     page_id: PageId,
     probe_sequence: ProbeSequence,
     state: PageLoadState,
-    /// Set when the first read is submitted, if metrics are active. Used to record
+    /// Whether to record [`Metric::PageFetchTime`]. Only set if metrics are active.
+    record_fetch_time: bool,
+    /// Set when the first read is submitted, if `record_fetch_time`. Used to record
     /// [`Metric::PageFetchTime`] once the page is found.
     fetch_timer: Option<(Instant, Metrics)>,
 }

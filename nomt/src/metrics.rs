@@ -30,8 +30,9 @@ pub enum Metric {
     /// are counted by [`Metric::HtReads`].
     PageCacheMisses,
     /// Timer used to record average page fetch time: from the first read of a merkle page load
-    /// from the hash-table until the page is found, including all probes. Loads of pages which
-    /// turn out not to exist are not recorded.
+    /// from the hash-table, after a page cache miss, until the page is found, including all
+    /// probes. Loads of pages which turn out not to exist are not recorded, nor are the loads
+    /// made when opening the database (the root page and page cache prepopulation).
     PageFetchTime,
     /// Timer used to record average value fetch time during reads
     ValueFetchTime,
@@ -43,7 +44,8 @@ pub enum Metric {
     /// file, counted by [`Metric::LnReads`].
     LeafCacheMisses,
     /// Counter of page reads issued to the hash-table (`ht`) file, which stores merkle pages.
-    /// A single page load may take several reads when probing the hash-table.
+    /// A single page load may take several reads when probing the hash-table. This includes the
+    /// reads made when opening the database, notably page cache prepopulation.
     HtReads,
     /// Counter of page reads issued to the beatree leaf (`ln`) file, which stores leaves and
     /// overflow value pages.
@@ -229,8 +231,8 @@ impl Metrics {
             .expect(METRICS_NOT_ENABLED)
     }
 
-    /// Average page fetch time: the time to load a merkle page from the hash-table, including all
-    /// probes. See [`Metric::PageFetchTime`].
+    /// Average page fetch time: the time to load a merkle page from the hash-table after a page
+    /// cache miss, including all probes. See [`Metric::PageFetchTime`].
     /// Returns None if there were no requests.
     /// Panics if metrics are not enabled.
     pub fn get_page_fetch_time(&self) -> Option<u64> {

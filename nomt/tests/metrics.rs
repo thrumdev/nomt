@@ -9,7 +9,7 @@ const OVERFLOW_ID: u64 = ACCOUNTS;
 // Larger than the maximum value stored inline in a leaf, so it spans several overflow pages.
 const OVERFLOW_VALUE_LEN: usize = 64 * 1024;
 
-fn open(path: &Path) -> Nomt<Blake3Hasher> {
+fn open(path: &Path, prepopulate_page_cache: bool) -> Nomt<Blake3Hasher> {
     let mut o = Options::new();
     o.path(path);
     o.metrics(true);
@@ -20,6 +20,7 @@ fn open(path: &Path) -> Nomt<Blake3Hasher> {
     // Small caches so that a cold reopen has to go to disk.
     o.page_cache_size(1);
     o.leaf_cache_size(1);
+    o.prepopulate_page_cache(prepopulate_page_cache);
     Nomt::open(o).unwrap()
 }
 
@@ -41,7 +42,7 @@ fn metrics_count_disk_reads() {
     let _ = std::fs::remove_dir_all(&path);
 
     {
-        let nomt = open(&path);
+        let nomt = open(&path, false);
         let mut actuals: Vec<_> = (0..ACCOUNTS)
             .map(|id| {
                 (
@@ -57,8 +58,16 @@ fn metrics_count_disk_reads() {
         commit(&nomt, actuals);
     }
 
+    // Page cache prepopulation reads the hash-table, but is not a page fetch after a cache miss.
+    {
+        let nomt = open(&path, true);
+        let metrics = nomt.metrics();
+        assert!(metrics.get_ht_reads() > 1);
+        assert_eq!(metrics.get_page_fetch_time(), None);
+    }
+
     // Reopen with cold caches.
-    let nomt = open(&path);
+    let nomt = open(&path, false);
     let metrics = nomt.metrics();
     let ln_reads_at_open = metrics.get_ln_reads();
 
