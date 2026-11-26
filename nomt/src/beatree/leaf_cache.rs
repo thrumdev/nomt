@@ -3,6 +3,7 @@
 use crate::{
     beatree::{allocator::PageNumber, leaf::node::LeafNode},
     io::PAGE_SIZE,
+    metrics::{Metric, Metrics},
 };
 use lru::LruCache;
 use parking_lot::{Mutex, MutexGuard};
@@ -19,7 +20,7 @@ pub struct LeafCache {
 impl LeafCache {
     /// Create a new cache with the given number of shards and the maximum number of items
     /// to hold. `shards` must be non-zero.
-    pub fn new(shards: usize, leaf_cache_size: usize) -> Self {
+    pub fn new(shards: usize, leaf_cache_size: usize, metrics: Metrics) -> Self {
         let max_items = (leaf_cache_size * 1024 * 1024) / PAGE_SIZE;
         let items_per_shard = max_items / shards;
         LeafCache {
@@ -32,15 +33,25 @@ impl LeafCache {
                     .map(Mutex::new)
                     .collect::<Vec<_>>(),
                 shard_assigner: RandomState::new(),
+                metrics,
             }),
         }
     }
 
     /// Get a cache entry, updating the LRU state.
     pub fn get(&self, page_number: PageNumber) -> Option<Arc<LeafNode>> {
-        let mut shard = self.inner.shard_for(page_number);
+        let leaf = self
+            .inner
+            .shard_for(page_number)
+            .cache
+            .get(&page_number)
+            .cloned();
 
-        shard.cache.get(&page_number).map(|x| x.clone())
+        self.inner.metrics.count(Metric::LeafCacheRequests);
+        if leaf.is_none() {
+            self.inner.metrics.count(Metric::LeafCacheMisses);
+        }
+        leaf
     }
 
     /// Insert a cache entry. This does not evict anything.
@@ -69,6 +80,7 @@ impl LeafCache {
 struct Shared {
     shards: Vec<Mutex<Shard>>,
     shard_assigner: RandomState,
+    metrics: Metrics,
 }
 
 impl Shared {

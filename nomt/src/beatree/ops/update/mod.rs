@@ -14,6 +14,7 @@ use crate::beatree::{
     Key, SyncData, ValueChange,
 };
 use crate::io::{IoHandle, PagePool};
+use crate::metrics::Metrics;
 use crate::task::{spawn_task, TaskResult};
 
 mod branch_ops;
@@ -54,8 +55,9 @@ pub fn update(
     io_handle: IoHandle,
     thread_pool: ThreadPool,
     workers: usize,
+    metrics: Metrics,
 ) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
-    let leaf_reader = StoreReader::new(leaf_store.clone(), page_pool.clone());
+    let leaf_reader = StoreReader::new(leaf_store.clone(), page_pool.clone(), metrics);
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
 

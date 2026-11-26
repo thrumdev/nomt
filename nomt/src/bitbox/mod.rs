@@ -10,11 +10,13 @@ use std::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
+    time::Instant,
 };
 use threadpool::ThreadPool;
 
 use crate::{
     io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
+    metrics::{Metric, Metrics},
     page_cache::{Page, PageCache},
     store::{BucketInfo, DirtyPage},
     task::{join_task, spawn_task, TaskResult},
@@ -113,6 +115,7 @@ pub struct Shared {
     ht_fd: File,
     sync_tp: ThreadPool,
     capacity: usize,
+    metrics: Metrics,
 }
 
 impl DB {
@@ -124,6 +127,7 @@ impl DB {
         page_pool: PagePool,
         ht_fd: File,
         wal_fd: File,
+        metrics: Metrics,
     ) -> anyhow::Result<Self> {
         let (store, mut meta_map) = match ht_file::open(num_pages, &page_pool, &ht_fd) {
             Ok(x) => x,
@@ -160,6 +164,7 @@ impl DB {
                 ht_fd,
                 sync_tp: ThreadPool::with_name("bitbox-sync".into(), 2),
                 capacity,
+                metrics,
             }),
         })
     }
@@ -551,6 +556,19 @@ impl PageLoader {
             probe_sequence: ProbeSequence::new(&page_id, &self.meta_map, &self.shared.seed),
             page_id,
             state: PageLoadState::Pending,
+            record_fetch_time: false,
+            fetch_timer: None,
+        }
+    }
+
+    /// Create a new page load whose duration is recorded as [`Metric::PageFetchTime`].
+    ///
+    /// This is meant for loads following a page cache miss. Bulk loads at startup are not timed:
+    /// they are all queued at once and would dominate the mean.
+    pub fn start_timed_load(&self, page_id: PageId) -> PageLoad {
+        PageLoad {
+            record_fetch_time: self.shared.metrics.is_active(),
+            ..self.start_load(page_id)
         }
     }
 
@@ -584,6 +602,10 @@ impl PageLoader {
             user_data,
         };
 
+        self.shared.metrics.count(Metric::HtReads);
+        if load.record_fetch_time && load.fetch_timer.is_none() {
+            load.fetch_timer = Some((Instant::now(), self.shared.metrics.clone()));
+        }
         // UNWRAP: I/O pool is not expected to hangup.
         io_handle.send(command).unwrap();
         load.state = PageLoadState::Submitted;
@@ -595,6 +617,11 @@ pub struct PageLoad {
     page_id: PageId,
     probe_sequence: ProbeSequence,
     state: PageLoadState,
+    /// Whether to record [`Metric::PageFetchTime`]. Only set if metrics are active.
+    record_fetch_time: bool,
+    /// Set when the first read is submitted, if `record_fetch_time`. Used to record
+    /// [`Metric::PageFetchTime`] once the page is found.
+    fetch_timer: Option<(Instant, Metrics)>,
 }
 
 impl PageLoad {
@@ -613,6 +640,9 @@ impl PageLoad {
     pub fn try_complete(&mut self, page: FatPage) -> Option<(FatPage, BucketIndex)> {
         assert!(self.needs_completion());
         if page[PAGE_SIZE - 32..] == self.page_id.encode() {
+            if let Some((start, metrics)) = self.fetch_timer.take() {
+                metrics.record_duration(Metric::PageFetchTime, start.elapsed());
+            }
             Some((page, BucketIndex(self.probe_sequence.bucket())))
         } else {
             self.state = PageLoadState::Pending;

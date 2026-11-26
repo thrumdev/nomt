@@ -13,6 +13,7 @@ use threadpool::ThreadPool;
 
 use crate::{
     io::{fsyncer::Fsyncer, FatPage, IoHandle, IoPool, PagePool},
+    metrics::Metrics,
     task::{join_task, spawn_task, TaskResult},
 };
 
@@ -74,6 +75,7 @@ struct Shared {
     /// if there is no sync in progress.
     secondary_staging: Option<OrdMap<Key, ValueChange>>,
     leaf_cache: leaf_cache::LeafCache,
+    metrics: Metrics,
 }
 
 struct Sync {
@@ -104,6 +106,7 @@ impl Tree {
         ln_file: Arc<File>,
         commit_concurrency: usize,
         leaf_cache_size: usize,
+        metrics: Metrics,
     ) -> Result<Tree> {
         let ln_freelist_pn = Some(ln_freelist_pn)
             .map(PageNumber)
@@ -131,12 +134,17 @@ impl Tree {
             io_handle: io_pool.make_handle(),
             page_pool: io_pool.page_pool().clone(),
             bbn_index: index,
-            leaf_store_rd: StoreReader::new(leaf_store.clone(), io_pool.page_pool().clone()),
+            leaf_store_rd: StoreReader::new(
+                leaf_store.clone(),
+                io_pool.page_pool().clone(),
+                metrics.clone(),
+            ),
             leaf_store,
             bbn_store,
             primary_staging: OrdMap::new(),
             secondary_staging: None,
-            leaf_cache: leaf_cache::LeafCache::new(32, leaf_cache_size),
+            leaf_cache: leaf_cache::LeafCache::new(32, leaf_cache_size, metrics.clone()),
+            metrics,
         };
 
         let sync = Sync {
@@ -211,7 +219,11 @@ impl Tree {
             bbn_index: shared.bbn_index.clone(),
             primary_staging: shared.primary_staging.clone(),
             secondary_staging: shared.secondary_staging.clone(),
-            leaf_store: StoreReader::new(shared.leaf_store.clone(), shared.page_pool.clone()),
+            leaf_store: StoreReader::new(
+                shared.leaf_store.clone(),
+                shared.page_pool.clone(),
+                shared.metrics.clone(),
+            ),
             leaf_cache: shared.leaf_cache.clone(),
             read_counter: self.read_transaction_counter.clone(),
         });
@@ -255,6 +267,7 @@ impl Tree {
         let leaf_store;
         let bbn_store;
         let io_handle;
+        let metrics;
         {
             // Wait for all outstanding read transactions to conclude. This ensures they won't
             // be invalidated by any destructive changes.
@@ -299,6 +312,7 @@ impl Tree {
             leaf_store = shared.leaf_store.clone();
             bbn_store = shared.bbn_store.clone();
             io_handle = shared.io_handle.clone();
+            metrics = shared.metrics.clone();
         }
 
         {
@@ -329,6 +343,7 @@ impl Tree {
                 io_handle,
                 sync.tp.clone(),
                 sync.commit_concurrency,
+                metrics,
             )
         }
     }

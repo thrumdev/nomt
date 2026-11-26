@@ -781,7 +781,7 @@ impl<H: HashAlgorithm> Seeker<H> {
 
                     request.note_io();
 
-                    let load = self.page_loader.start_load(page_id.clone());
+                    let load = self.page_loader.start_timed_load(page_id.clone());
                     vacant_entry.insert(vec![request_index]);
                     let slab_index = self.io_slab.insert(IoRequest::Merkle(load));
                     self.submit_idle_page_load(slab_index);
