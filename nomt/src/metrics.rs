@@ -1,14 +1,28 @@
+//! Metrics collection.
+//!
+//! Counters and timers are striped: every thread adds to its own cache-line-aligned stripe and
+//! readers sum the stripes. Threads updating one shared atomic would make its cache line bounce
+//! between cores on every update, which costs on the order of a hundred nanoseconds per update
+//! under contention, comparable to an in-memory value read.
+//!
+//! What remains is an uncontended atomic add per counter update, and two clock reads per timed
+//! operation (tens of nanoseconds in total). This is negligible next to I/O, but not next to a
+//! value read served from memory: with metrics enabled, such reads are a few percent slower.
+
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const METRICS_NOT_ENABLED: &str = "Metrics are not enabled";
 
-/// Metrics collector, if active, it provides Counters and Timers
+/// Metrics collector, if active, it provides Counters and Timers.
+///
+/// Collection costs an atomic add per counted event, and two clock reads per timed operation.
+/// See the module documentation.
 #[derive(Clone)]
 pub struct Metrics {
     metrics: Option<Arc<ActiveMetrics>>,
@@ -34,7 +48,10 @@ pub enum Metric {
     /// probes. Loads of pages which turn out not to exist are not recorded, nor are the loads
     /// made when opening the database (the root page and page cache prepopulation).
     PageFetchTime,
-    /// Timer used to record average value fetch time during reads
+    /// Timer used to record average value fetch time during reads.
+    ///
+    /// Recorded by `Session::read`. The two clock reads around each read add tens of nanoseconds,
+    /// which is a few percent of a value read served from memory.
     ValueFetchTime,
     /// Counter of beatree leaf cache lookups. Leaves are looked up when reading values, when
     /// seeking leaf nodes or reconstructing elided merkle pages, during the beatree update of a
@@ -52,35 +69,116 @@ pub enum Metric {
     LnReads,
 }
 
+/// Number of stripes. Threads are assigned to stripes round-robin, so up to this many threads
+/// never share a stripe.
+const STRIPES: usize = 32;
+
+/// The slots of a stripe: one per counter, and a count and a sum per timer.
+#[derive(Clone, Copy)]
+enum Slot {
+    PageRequests,
+    PageCacheMisses,
+    LeafCacheRequests,
+    LeafCacheMisses,
+    HtReads,
+    LnReads,
+    PageFetchCount,
+    PageFetchSum,
+    ValueFetchCount,
+    ValueFetchSum,
+}
+
+const NUM_SLOTS: usize = Slot::ValueFetchSum as usize + 1;
+
+/// The slots updated by one group of threads, on cache lines of their own.
+#[repr(align(128))]
+struct Stripe([AtomicU64; NUM_SLOTS]);
+
 struct ActiveMetrics {
-    page_requests: AtomicU64,
-    page_cache_misses: AtomicU64,
-    page_fetch_time: Timer,
-    value_fetch_time: Timer,
-    leaf_cache_requests: AtomicU64,
-    leaf_cache_misses: AtomicU64,
-    ht_reads: AtomicU64,
-    ln_reads: AtomicU64,
+    stripes: Box<[Stripe]>,
+}
+
+impl Metric {
+    fn counter_slot(&self) -> Slot {
+        match self {
+            Metric::PageRequests => Slot::PageRequests,
+            Metric::PageCacheMisses => Slot::PageCacheMisses,
+            Metric::LeafCacheRequests => Slot::LeafCacheRequests,
+            Metric::LeafCacheMisses => Slot::LeafCacheMisses,
+            Metric::HtReads => Slot::HtReads,
+            Metric::LnReads => Slot::LnReads,
+            _ => panic!("Specified metric is not a Counter"),
+        }
+    }
+
+    /// The count and sum slots of a timer.
+    fn timer_slots(&self) -> (Slot, Slot) {
+        match self {
+            Metric::PageFetchTime => (Slot::PageFetchCount, Slot::PageFetchSum),
+            Metric::ValueFetchTime => (Slot::ValueFetchCount, Slot::ValueFetchSum),
+            _ => panic!("Specified metric is not a Timer"),
+        }
+    }
+}
+
+impl ActiveMetrics {
+    fn new() -> Self {
+        ActiveMetrics {
+            stripes: (0..STRIPES)
+                .map(|_| Stripe(std::array::from_fn(|_| AtomicU64::new(0))))
+                .collect(),
+        }
+    }
+
+    /// The stripe of the current thread.
+    fn stripe(&self) -> &Stripe {
+        static NEXT_STRIPE: AtomicUsize = AtomicUsize::new(0);
+        thread_local! {
+            static STRIPE: usize = NEXT_STRIPE.fetch_add(1, Ordering::Relaxed) % STRIPES;
+        }
+        &self.stripes[STRIPE.with(|i| *i)]
+    }
+
+    fn add(&self, slot: Slot) {
+        self.stripe().0[slot as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_duration(&self, (count, sum): (Slot, Slot), duration: Duration) {
+        let stripe = self.stripe();
+        stripe.0[count as usize].fetch_add(1, Ordering::Relaxed);
+        stripe.0[sum as usize].fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn load(&self, slot: Slot) -> u64 {
+        self.stripes
+            .iter()
+            .map(|stripe| stripe.0[slot as usize].load(Ordering::Relaxed))
+            .sum()
+    }
+
+    fn mean(&self, (count, sum): (Slot, Slot)) -> Option<u64> {
+        self.load(sum).checked_div(self.load(count))
+    }
+}
+
+/// Records the time passed since its creation when dropped.
+struct TimerGuard<'a> {
+    metrics: &'a ActiveMetrics,
+    slots: (Slot, Slot),
+    start: Instant,
+}
+
+impl Drop for TimerGuard<'_> {
+    fn drop(&mut self) {
+        self.metrics.add_duration(self.slots, self.start.elapsed());
+    }
 }
 
 impl Metrics {
     /// Returns the Metrics object, active or not based on the specified input
     pub fn new(active: bool) -> Self {
         Self {
-            metrics: if active {
-                Some(Arc::new(ActiveMetrics {
-                    page_requests: AtomicU64::new(0),
-                    page_cache_misses: AtomicU64::new(0),
-                    page_fetch_time: Timer::new(),
-                    value_fetch_time: Timer::new(),
-                    leaf_cache_requests: AtomicU64::new(0),
-                    leaf_cache_misses: AtomicU64::new(0),
-                    ht_reads: AtomicU64::new(0),
-                    ln_reads: AtomicU64::new(0),
-                }))
-            } else {
-                None
-            },
+            metrics: active.then(|| Arc::new(ActiveMetrics::new())),
         }
     }
 
@@ -89,17 +187,7 @@ impl Metrics {
     /// panics if the specified [`Metric`] is not a Counter
     pub fn count(&self, metric: Metric) {
         if let Some(ref metrics) = self.metrics {
-            let counter = match metric {
-                Metric::PageRequests => &metrics.page_requests,
-                Metric::PageCacheMisses => &metrics.page_cache_misses,
-                Metric::LeafCacheRequests => &metrics.leaf_cache_requests,
-                Metric::LeafCacheMisses => &metrics.leaf_cache_misses,
-                Metric::HtReads => &metrics.ht_reads,
-                Metric::LnReads => &metrics.ln_reads,
-                _ => panic!("Specified metric is not a Counter"),
-            };
-
-            counter.fetch_add(1, Ordering::Relaxed);
+            metrics.add(metric.counter_slot());
         }
     }
 
@@ -107,9 +195,11 @@ impl Metrics {
     ///
     /// panics if the specified [`Metric`] is not a Timer
     pub fn record<'a>(&'a self, metric: Metric) -> Option<impl Drop + 'a> {
-        self.metrics
-            .as_ref()
-            .map(|metrics| metrics.timer(metric).record())
+        self.metrics.as_ref().map(|metrics| TimerGuard {
+            metrics,
+            slots: metric.timer_slots(),
+            start: Instant::now(),
+        })
     }
 
     /// Record a duration measured by the caller, for operations which do not fit a scope guard,
@@ -118,7 +208,7 @@ impl Metrics {
     /// panics if the specified [`Metric`] is not a Timer
     pub fn record_duration(&self, metric: Metric, duration: Duration) {
         if let Some(ref metrics) = self.metrics {
-            metrics.timer(metric).add(duration);
+            metrics.add_duration(metric.timer_slots(), duration);
         }
     }
 
@@ -132,11 +222,11 @@ impl Metrics {
         if let Some(ref metrics) = self.metrics {
             println!("metrics");
 
-            let tot_page_requests = metrics.page_requests.load(Ordering::Relaxed);
+            let tot_page_requests = metrics.load(Slot::PageRequests);
             println!("  page requests         {}", tot_page_requests);
 
             if tot_page_requests != 0 {
-                let cache_misses = metrics.page_cache_misses.load(Ordering::Relaxed);
+                let cache_misses = metrics.load(Slot::PageCacheMisses);
                 let percentage_cache_misses =
                     (cache_misses as f64 / tot_page_requests as f64) * 100.0;
 
@@ -146,11 +236,11 @@ impl Metrics {
                 );
             }
 
-            let leaf_cache_requests = metrics.leaf_cache_requests.load(Ordering::Relaxed);
+            let leaf_cache_requests = metrics.load(Slot::LeafCacheRequests);
             println!("  leaf cache requests   {}", leaf_cache_requests);
 
             if leaf_cache_requests != 0 {
-                let leaf_cache_misses = metrics.leaf_cache_misses.load(Ordering::Relaxed);
+                let leaf_cache_misses = metrics.load(Slot::LeafCacheMisses);
                 let percentage_cache_misses =
                     (leaf_cache_misses as f64 / leaf_cache_requests as f64) * 100.0;
 
@@ -160,20 +250,14 @@ impl Metrics {
                 );
             }
 
-            println!(
-                "  ht page reads         {}",
-                metrics.ht_reads.load(Ordering::Relaxed)
-            );
-            println!(
-                "  ln page reads         {}",
-                metrics.ln_reads.load(Ordering::Relaxed)
-            );
+            println!("  ht page reads         {}", metrics.load(Slot::HtReads));
+            println!("  ln page reads         {}", metrics.load(Slot::LnReads));
 
-            if let Some(mean) = metrics.page_fetch_time.mean() {
+            if let Some(mean) = metrics.mean(Metric::PageFetchTime.timer_slots()) {
                 println!("  page fetch mean       {}", pretty_display_ns(mean));
             }
 
-            if let Some(mean) = metrics.value_fetch_time.mean() {
+            if let Some(mean) = metrics.mean(Metric::ValueFetchTime.timer_slots()) {
                 println!("  value fetch mean      {}", pretty_display_ns(mean));
             }
         } else {
@@ -181,54 +265,45 @@ impl Metrics {
         }
     }
 
+    fn active(&self) -> &ActiveMetrics {
+        self.metrics.as_deref().expect(METRICS_NOT_ENABLED)
+    }
+
     /// Counter of total page requests.
     /// Panics if metrics are not enabled.
     pub fn get_page_requests(&self) -> u64 {
-        self.metrics
-            .as_ref()
-            .map(|metrics| metrics.page_requests.load(Ordering::Relaxed))
-            .expect(METRICS_NOT_ENABLED)
+        self.active().load(Slot::PageRequests)
     }
 
     /// Counter of page requests cache misses over all page requests.
     /// Panics if metrics are not enabled.
     pub fn get_page_cache_misses(&self) -> u64 {
-        self.metrics
-            .as_ref()
-            .map(|metrics| metrics.page_cache_misses.load(Ordering::Relaxed))
-            .expect(METRICS_NOT_ENABLED)
+        self.active().load(Slot::PageCacheMisses)
     }
 
     /// Counter of beatree leaf cache lookups.
     /// Panics if metrics are not enabled.
     pub fn get_leaf_cache_requests(&self) -> u64 {
-        self.load_counter(|m| &m.leaf_cache_requests)
+        self.active().load(Slot::LeafCacheRequests)
     }
 
     /// Counter of beatree leaf cache lookups which missed and had to read the `ln` file.
     /// Panics if metrics are not enabled.
     pub fn get_leaf_cache_misses(&self) -> u64 {
-        self.load_counter(|m| &m.leaf_cache_misses)
+        self.active().load(Slot::LeafCacheMisses)
     }
 
     /// Counter of page reads issued to the hash-table (`ht`) file, which stores merkle pages.
     /// Panics if metrics are not enabled.
     pub fn get_ht_reads(&self) -> u64 {
-        self.load_counter(|m| &m.ht_reads)
+        self.active().load(Slot::HtReads)
     }
 
     /// Counter of page reads issued to the beatree leaf (`ln`) file, which stores leaves and
     /// overflow value pages.
     /// Panics if metrics are not enabled.
     pub fn get_ln_reads(&self) -> u64 {
-        self.load_counter(|m| &m.ln_reads)
-    }
-
-    fn load_counter(&self, counter: impl FnOnce(&ActiveMetrics) -> &AtomicU64) -> u64 {
-        self.metrics
-            .as_ref()
-            .map(|metrics| counter(metrics).load(Ordering::Relaxed))
-            .expect(METRICS_NOT_ENABLED)
+        self.active().load(Slot::LnReads)
     }
 
     /// Average page fetch time: the time to load a merkle page from the hash-table after a page
@@ -236,30 +311,14 @@ impl Metrics {
     /// Returns None if there were no requests.
     /// Panics if metrics are not enabled.
     pub fn get_page_fetch_time(&self) -> Option<u64> {
-        self.metrics
-            .as_ref()
-            .map(|metrics| metrics.page_fetch_time.mean())
-            .expect(METRICS_NOT_ENABLED)
+        self.active().mean(Metric::PageFetchTime.timer_slots())
     }
 
     /// Average value fetch time during reads.
     /// Returns None if there were no requests.
     /// Panics if metrics are not enabled.
     pub fn get_value_fetch_time(&self) -> Option<u64> {
-        self.metrics
-            .as_ref()
-            .map(|metrics| metrics.value_fetch_time.mean())
-            .expect(METRICS_NOT_ENABLED)
-    }
-}
-
-impl ActiveMetrics {
-    fn timer(&self, metric: Metric) -> &Timer {
-        match metric {
-            Metric::PageFetchTime => &self.page_fetch_time,
-            Metric::ValueFetchTime => &self.value_fetch_time,
-            _ => panic!("Specified metric is not a Timer"),
-        }
+        self.active().mean(Metric::ValueFetchTime.timer_slots())
     }
 }
 
@@ -278,50 +337,31 @@ fn pretty_display_ns(ns: u64) -> String {
     format!("{val} {unit}")
 }
 
-struct Timer {
-    number_of_records: AtomicU64,
-    sum: AtomicU64,
-}
+#[cfg(test)]
+mod tests {
+    use super::{Metric, Metrics, STRIPES};
+    use std::time::Duration;
 
-impl Timer {
-    fn new() -> Self {
-        Timer {
-            number_of_records: AtomicU64::new(0),
-            sum: AtomicU64::new(0),
-        }
-    }
-
-    fn mean(&self) -> Option<u64> {
-        let n = self.number_of_records.load(Ordering::Relaxed);
-        let sum = self.sum.load(Ordering::Relaxed);
-        sum.checked_div(n)
-    }
-
-    fn add(&self, duration: Duration) {
-        self.number_of_records.fetch_add(1, Ordering::Relaxed);
-        self.sum
-            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    fn record<'a>(&'a self) -> impl Drop + 'a {
-        struct TimerGuard<'a> {
-            start: std::time::Instant,
-            n: &'a AtomicU64,
-            sum: &'a AtomicU64,
-        }
-
-        impl Drop for TimerGuard<'_> {
-            fn drop(&mut self) {
-                let elapsed = self.start.elapsed().as_nanos() as u64;
-                self.n.fetch_add(1, Ordering::Relaxed);
-                self.sum.fetch_add(elapsed, Ordering::Relaxed);
+    #[test]
+    fn stripes_sum_across_threads() {
+        let metrics = Metrics::new(true);
+        let threads = STRIPES + 3;
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| {
+                    for _ in 0..1000 {
+                        metrics.count(Metric::LeafCacheRequests);
+                    }
+                    metrics.count(Metric::LnReads);
+                    metrics.record_duration(Metric::PageFetchTime, Duration::from_nanos(10));
+                    metrics.record_duration(Metric::PageFetchTime, Duration::from_nanos(30));
+                });
             }
-        }
-
-        TimerGuard {
-            start: std::time::Instant::now(),
-            n: &self.number_of_records,
-            sum: &self.sum,
-        }
+        });
+        assert_eq!(metrics.get_leaf_cache_requests(), 1000 * threads as u64);
+        assert_eq!(metrics.get_ln_reads(), threads as u64);
+        assert_eq!(metrics.get_leaf_cache_misses(), 0);
+        assert_eq!(metrics.get_page_fetch_time(), Some(20));
+        assert_eq!(metrics.get_value_fetch_time(), None);
     }
 }
