@@ -21,6 +21,7 @@ use crate::{
         Index, ValueChange,
     },
     io::{start_test_io_pool, IoPool, PagePool},
+    metrics::Metrics,
 };
 use lazy_static::lazy_static;
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
@@ -133,13 +134,14 @@ fn init_beatree() -> TreeData {
             .map(|(k, v)| (k, ValueChange::Insert(v)))
             .collect(),
         Index::default(),
-        LeafCache::new(1, 1024),
+        LeafCache::new(1, 1024, Metrics::new(false)),
         leaf_store,
         bbn_store,
         PAGE_POOL.clone(),
         IO_POOL.make_handle(),
         THREAD_POOL.clone(),
         1,
+        Metrics::new(false),
     )
     .unwrap();
 
@@ -235,11 +237,11 @@ fn exec_leaf_stage(
     changeset: BTreeMap<[u8; 32], ValueChange>,
 ) -> (LeafStageOutput, BTreeSet<PageNumber>) {
     let leaf_store = TREE_DATA.leaf_store();
-    let leaf_reader = StoreReader::new(leaf_store.clone(), PAGE_POOL.clone());
+    let leaf_reader = StoreReader::new(leaf_store.clone(), PAGE_POOL.clone(), Metrics::new(false));
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
 
     let bbn_index = &TREE_DATA.bbn_index;
-    let leaf_cache = LeafCache::new(commit_concurrency, 1024);
+    let leaf_cache = LeafCache::new(commit_concurrency, 1024, Metrics::new(false));
     let leaf_page_numbers = leaf_page_numbers(&bbn_index, changeset.keys().cloned());
 
     let io_handle = IO_POOL.make_handle();
@@ -278,7 +280,7 @@ fn is_valid_leaf_stage_output(
     }
 
     let leaf_store = TREE_DATA.leaf_store();
-    let leaf_reader = StoreReader::new(leaf_store.clone(), PAGE_POOL.clone());
+    let leaf_reader = StoreReader::new(leaf_store.clone(), PAGE_POOL.clone(), Metrics::new(false));
 
     for page_number in output.freed_pages {
         used_page_numbers.remove(&page_number);

@@ -234,7 +234,7 @@ impl<T: HashAlgorithm> Nomt<T> {
         let metrics = Metrics::new(o.metrics);
 
         let page_pool = PagePool::new();
-        let store = Store::open(&o, page_pool.clone())?;
+        let store = Store::open(&o, page_pool.clone(), metrics.clone())?;
         let root_page = store.load_page(ROOT_PAGE_ID)?;
         let page_cache = PageCache::new(root_page, &o, metrics.clone());
         let root = compute_root_node::<T>(&page_cache, &store);

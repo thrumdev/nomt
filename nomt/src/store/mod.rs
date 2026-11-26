@@ -6,6 +6,7 @@
 use crate::{
     beatree, bitbox,
     io::{self, page_pool::FatPage, IoPool, PagePool},
+    metrics::Metrics,
     page_cache::{Page, PageCache},
     page_diff::PageDiff,
     rollback::Rollback,
@@ -53,7 +54,7 @@ struct Shared {
 
 impl Store {
     /// Open the store with the provided `Options`.
-    pub fn open(o: &crate::Options, page_pool: PagePool) -> anyhow::Result<Self> {
+    pub fn open(o: &crate::Options, page_pool: PagePool, metrics: Metrics) -> anyhow::Result<Self> {
         let db_dir_fd;
         let flock;
 
@@ -159,6 +160,7 @@ impl Store {
             ln_fd,
             o.commit_concurrency,
             o.leaf_cache_size,
+            metrics.clone(),
         )?;
         let pages = bitbox::DB::open(
             meta.sync_seqn,
@@ -167,6 +169,7 @@ impl Store {
             page_pool.clone(),
             ht_fd,
             wal_fd,
+            metrics,
         )?;
         let rollback = o
             .rollback
@@ -453,7 +456,7 @@ fn is_directory_empty(path: &std::path::Path) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PagePool, Store};
+    use super::{Metrics, PagePool, Store};
 
     #[test]
     fn can_crate_in_empty_dir() {
@@ -463,7 +466,7 @@ mod tests {
         options.path(tempdir.path());
 
         let page_pool = PagePool::new();
-        let store = Store::open(&options, page_pool.clone()).unwrap();
+        let store = Store::open(&options, page_pool.clone(), Metrics::new(false)).unwrap();
         assert!(!store.is_poisoned());
     }
 }

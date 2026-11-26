@@ -1,4 +1,7 @@
-use crate::io::{self, page_pool::FatPage, IoCommand, IoKind, PagePool, PAGE_SIZE};
+use crate::{
+    io::{self, page_pool::FatPage, IoCommand, IoKind, PagePool, PAGE_SIZE},
+    metrics::{Metric, Metrics},
+};
 
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{ArcMutexGuard, Mutex};
@@ -128,16 +131,23 @@ impl Store {
 
 /// A convenience wrapper around a [`Store`]. This wraps the page pool, along with
 /// the store.
+///
+/// This is only used for the leaf store: every read counts towards [`Metric::LnReads`].
 #[derive(Clone)]
 pub struct StoreReader {
     store: Store,
     page_pool: PagePool,
+    metrics: Metrics,
 }
 
 impl StoreReader {
     /// Create a new [`StoreReader`].
-    pub fn new(store: Store, page_pool: PagePool) -> Self {
-        StoreReader { store, page_pool }
+    pub fn new(store: Store, page_pool: PagePool, metrics: Metrics) -> Self {
+        StoreReader {
+            store,
+            page_pool,
+            metrics,
+        }
     }
 
     /// Get a reference to the page pool.
@@ -147,11 +157,13 @@ impl StoreReader {
 
     /// Reads the page with the specified page number. Blocks the current thread.
     pub fn query(&self, pn: PageNumber) -> FatPage {
+        self.metrics.count(Metric::LnReads);
         self.store.query(&self.page_pool, pn)
     }
 
     /// Create an I/O command for querying a page by number.
     pub fn io_command(&self, pn: PageNumber, user_data: u64) -> IoCommand {
+        self.metrics.count(Metric::LnReads);
         self.store.io_command(&self.page_pool, pn, user_data)
     }
 }
