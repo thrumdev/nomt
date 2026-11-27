@@ -22,35 +22,27 @@ pub fn separate(a: &Key, b: &Key) -> Key {
 }
 
 pub fn prefix_len(key_a: &Key, key_b: &Key) -> usize {
-    let mut bit_len = 0;
-    'byte_loop: for byte in 0..32 {
-        for bit in 0..8 {
-            let mask = 1 << (7 - bit);
-            if (key_a[byte] & mask) != (key_b[byte] & mask) {
-                break 'byte_loop;
-            }
-            bit_len += 1;
+    // Big-endian words preserve the keys' MSB-first bit order.
+    for start in (0..32).step_by(8) {
+        let a = u64::from_be_bytes(key_a[start..start + 8].try_into().unwrap());
+        let b = u64::from_be_bytes(key_b[start..start + 8].try_into().unwrap());
+        let diff = a ^ b;
+        if diff != 0 {
+            return start * 8 + diff.leading_zeros() as usize;
         }
     }
-    bit_len
+    256
 }
 
 pub fn separator_len(key: &Key) -> usize {
-    if key == &[0u8; 32] {
-        return 1;
-    }
-    let mut trailing_zeros = 0;
-    'byte_offset: for byte in (0..32).rev() {
-        for bit in (0..8).rev() {
-            let mask = 1 << (7 - bit);
-            if (key[byte] & mask) == mask {
-                break 'byte_offset;
-            }
-            trailing_zeros += 1;
+    for start in (0..32).step_by(8).rev() {
+        let word = u64::from_be_bytes(key[start..start + 8].try_into().unwrap());
+        if word != 0 {
+            return (start + 8) * 8 - word.trailing_zeros() as usize;
         }
     }
-
-    256 - trailing_zeros
+    // The all-zero separator is encoded with one bit, not zero bits.
+    1
 }
 
 // Reconstruct a key starting from a prefix and a misaligned separator.
@@ -71,14 +63,30 @@ pub fn reconstruct_key(maybe_prefix: Option<RawPrefix>, separator: RawSeparators
         len => len - 1,
     };
 
-    // shift the separator and store it in the key
-    bitwise_memcpy(
-        &mut key[start_destination..],
-        prefix_end_bit_offset,
-        separator_bytes,
-        separator_bit_start,
-        separator_bit_len,
-    );
+    if separator_bit_len != 0 {
+        if separator_bit_start + separator_bit_len <= 64 {
+            // Raw separators provide whole eight-byte chunks, even for short suffixes.
+            // Discard neighboring separators before placing this suffix in the zeroed key.
+            let word = u64::from_be_bytes(separator_bytes[..8].try_into().unwrap());
+            let suffix = (word << separator_bit_start) & (u64::MAX << (64 - separator_bit_len));
+            let shifted = (suffix >> prefix_end_bit_offset).to_be_bytes();
+            let n = (32 - start_destination).min(8);
+            key[start_destination..start_destination + n].copy_from_slice(&shifted[..n]);
+
+            // A single source word can straddle nine destination bytes.
+            if prefix_end_bit_offset + separator_bit_len > 64 {
+                key[start_destination + 8] = (suffix << (8 - prefix_end_bit_offset)) as u8;
+            }
+        } else {
+            bitwise_memcpy(
+                &mut key[start_destination..],
+                prefix_end_bit_offset,
+                separator_bytes,
+                separator_bit_start,
+                separator_bit_len,
+            );
+        }
+    }
 
     if prefix_byte_len != 0 {
         // UNWRAP: prefix_byte_len can be different than 0 only if maybe_prefix is Some
@@ -492,6 +500,49 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_key_one_word_boundaries() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(0xdec0_de64);
+        for prefix_len in 0..=256 {
+            let mut prefix = [0; 32];
+            rng.fill_bytes(&mut prefix);
+            for source_start in 0..8 {
+                // Includes the one-load boundary and the first fallback lengths,
+                // every destination alignment, and keys ending at byte 32.
+                for len in 0..=65.min(256 - prefix_len) {
+                    let mut source = [0; 16];
+                    rng.fill_bytes(&mut source);
+                    let source_bytes = if len == 0 {
+                        &source[..0]
+                    } else if source_start + len <= 64 {
+                        &source[..8]
+                    } else {
+                        &source[..]
+                    };
+                    let mut expected = [0; 32];
+                    for bit in 0..prefix_len + len {
+                        let (bytes, source_bit) = if bit < prefix_len {
+                            (&prefix[..], bit)
+                        } else {
+                            (&source[..], source_start + bit - prefix_len)
+                        };
+                        let value = (bytes[source_bit / 8] >> (7 - source_bit % 8)) & 1;
+                        expected[bit / 8] |= value << (7 - bit % 8);
+                    }
+                    let maybe_prefix =
+                        (prefix_len != 0).then_some((&prefix[..(prefix_len + 7) / 8], prefix_len));
+                    assert_eq!(
+                        super::reconstruct_key(maybe_prefix, (source_bytes, source_start, len)),
+                        expected,
+                        "prefix={prefix_len}, source_start={source_start}, len={len}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn reconstruct_key_no_prefix() {
         // with no prefix the only possibilities are:
         // one iteration without shifts and then all the subsequent are left shifts
@@ -661,7 +712,7 @@ mod tests {
 
     #[test]
     fn prefix_len() {
-        for prefix_bit_len in 0..256 {
+        for prefix_bit_len in 0..=256 {
             let mut a = [255; 32];
             a.view_bits_mut::<Msb0>()[prefix_bit_len..].fill(false);
             let b = [255; 32];
@@ -670,6 +721,38 @@ mod tests {
             let res = super::prefix_len(&a, &b);
 
             assert_eq!(expected_res, res);
+        }
+    }
+
+    #[test]
+    fn seeded_length_scans_match_reference() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(0xb175_ca11);
+        for i in 0..1024 {
+            let mut a = [0; 32];
+            let mut b = [0; 32];
+            rng.fill_bytes(&mut a);
+            rng.fill_bytes(&mut b);
+            let shared = i % 257;
+            for bit in 0..shared {
+                b.view_bits_mut::<Msb0>()
+                    .set(bit, a.view_bits::<Msb0>()[bit]);
+            }
+            assert_eq!(super::prefix_len(&a, &b), reference_prefix_len(&a, &b));
+            a.view_bits_mut::<Msb0>()[shared..].fill(false);
+            let expected = a
+                .view_bits::<Msb0>()
+                .iter()
+                .rposition(|bit| *bit)
+                .map_or(1, |bit| bit + 1);
+            assert_eq!(super::separator_len(&a), expected);
+        }
+        for bit in 0..256 {
+            let mut key = [0; 32];
+            key[bit / 8] = 1 << (7 - bit % 8);
+            assert_eq!(super::prefix_len(&[0; 32], &key), bit);
+            assert_eq!(super::separator_len(&key), bit + 1);
         }
     }
 
